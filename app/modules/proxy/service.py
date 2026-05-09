@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from ipaddress import ip_address
-from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -60,7 +59,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
@@ -171,7 +170,7 @@ logger = logging.getLogger(__name__)
 
 _UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
-_OVERSIZED_RESPONSE_CREATE_DUMP_DIR = Path("/var/lib/codex-lb/debug/response-create-dumps")
+_OVERSIZED_RESPONSE_CREATE_DUMP_DIR = DEFAULT_HOME_DIR / "debug" / "response-create-dumps"
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
     "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
@@ -9115,13 +9114,108 @@ def _slim_response_create_payload_for_upstream(
     candidate_payload = dict(payload)
     candidate_payload["input"] = slimmed_historical + recent
 
-    if tool_outputs_slimmed == 0 and images_slimmed == 0:
+    items_omitted = 0
+    if _serialized_json_size(candidate_payload) > max_bytes:
+        candidate_payload, items_omitted = _omit_historical_response_input_items_to_fit(
+            candidate_payload,
+            slimmed_historical=slimmed_historical,
+            recent=recent,
+            max_bytes=max_bytes,
+        )
+
+    if tool_outputs_slimmed == 0 and images_slimmed == 0 and items_omitted == 0:
         return payload, None
 
     return candidate_payload, {
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
+        "historical_items_omitted": items_omitted,
     }
+
+
+def _omit_historical_response_input_items_to_fit(
+    payload: dict[str, JsonValue],
+    *,
+    slimmed_historical: list[JsonValue],
+    recent: list[JsonValue],
+    max_bytes: int,
+) -> tuple[dict[str, JsonValue], int]:
+    if not slimmed_historical:
+        return payload, 0
+
+    def candidate_with_omitted_count(prefix_omitted_count: int) -> tuple[dict[str, JsonValue], int]:
+        remaining_historical, orphaned_outputs = _drop_orphaned_function_call_outputs(
+            slimmed_historical[prefix_omitted_count:],
+            recent,
+        )
+        omitted_count = prefix_omitted_count + orphaned_outputs
+        candidate_payload = dict(payload)
+        candidate_payload["input"] = [
+            _response_create_history_omission_notice_item(omitted_count),
+            *remaining_historical,
+            *recent,
+        ]
+        return candidate_payload, omitted_count
+
+    low = 1
+    high = len(slimmed_historical)
+    best: tuple[dict[str, JsonValue], int] | None = None
+    while low <= high:
+        prefix_omitted_count = (low + high) // 2
+        candidate_payload, omitted_count = candidate_with_omitted_count(prefix_omitted_count)
+        if _serialized_json_size(candidate_payload) <= max_bytes:
+            best = (candidate_payload, omitted_count)
+            high = prefix_omitted_count - 1
+        else:
+            low = prefix_omitted_count + 1
+
+    if best is not None:
+        return best
+
+    recent_only_payload = dict(payload)
+    recent_only_payload["input"] = list(recent)
+    if _serialized_json_size(recent_only_payload) <= max_bytes:
+        return recent_only_payload, len(slimmed_historical)
+
+    return candidate_with_omitted_count(len(slimmed_historical))
+
+
+def _drop_orphaned_function_call_outputs(
+    historical: list[JsonValue],
+    recent: list[JsonValue],
+) -> tuple[list[JsonValue], int]:
+    kept_call_ids = {
+        item.get("call_id")
+        for item in [*historical, *recent]
+        if is_json_mapping(item) and item.get("type") == "function_call" and isinstance(item.get("call_id"), str)
+    }
+    if not kept_call_ids:
+        filtered = [
+            item
+            for item in historical
+            if not (
+                is_json_mapping(item)
+                and item.get("type") == "function_call_output"
+                and isinstance(item.get("call_id"), str)
+            )
+        ]
+        return filtered, len(historical) - len(filtered)
+
+    filtered = [
+        item
+        for item in historical
+        if not (
+            is_json_mapping(item)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+            and item.get("call_id") not in kept_call_ids
+        )
+    ]
+    return filtered, len(historical) - len(filtered)
+
+
+def _serialized_json_size(payload: dict[str, JsonValue]) -> int:
+    return len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
 
 
 def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:

@@ -302,6 +302,29 @@ def test_select_account_ignores_standard_quota_exceeded_after_live_cooldown_for_
     assert result.account.account_id == "standard-quota"
 
 
+def test_select_account_ignores_standard_quota_cooldown_for_additional_pool():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "standard-quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        secondary_used_percent=100.0,
+        reset_at=now + 3600,
+        blocked_at=now - 5,
+        cooldown_until=now + 120,
+    )
+
+    result = select_account(
+        [state],
+        now=now,
+        routing_strategy="usage_weighted",
+        ignore_standard_quota=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "standard-quota"
+
+
 def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
     states = [
         AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
@@ -390,6 +413,38 @@ def test_budget_safe_opportunistic_selection_keeps_burn_first_with_foreground_re
     assert result.account.account_id == "temp"
 
 
+def test_budget_safe_opportunistic_usage_fallback_keeps_burn_window_closed():
+    states = [
+        AccountState(
+            "normal-empty",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=99.0,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "preserve-stale",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            secondary_used_percent=1.0,
+            routing_policy="preserve",
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class="opportunistic",
+    )
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
+    )
+
+
 def test_opportunistic_burn_first_can_reach_zero_when_another_account_remains():
     now = 1_700_000_000.0
     states = [
@@ -432,6 +487,8 @@ def test_opportunistic_normal_can_reach_zero_when_preserve_has_foreground_reserv
             reset_at=now + 3 * 3600,
             secondary_used_percent=20.0,
             secondary_reset_at=int(now + 3 * 24 * 3600),
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
             routing_policy="preserve",
         ),
     ]
@@ -488,8 +545,10 @@ def test_opportunistic_zero_burn_counts_preserve_foreground_reserve_at_opportuni
             AccountStatus.ACTIVE,
             used_percent=74.0,
             reset_at=now + 3 * 3600,
-            secondary_used_percent=85.0,
+            secondary_used_percent=84.0,
             secondary_reset_at=int(now + 3 * 24 * 3600),
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
             routing_policy="preserve",
         ),
     ]
@@ -512,6 +571,29 @@ def test_opportunistic_recent_selection_does_not_raise_preserve_floor_without_fo
             secondary_reset_at=int(now + 3 * 24 * 3600),
             last_selected_at=now - 60,
             last_foreground_selected_at=None,
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
+            routing_policy="preserve",
+        )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is not None
+    assert result.account.account_id == "review"
+
+
+def test_opportunistic_preserve_uses_primary_usage_reset_when_runtime_reset_is_empty():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "review",
+            AccountStatus.ACTIVE,
+            used_percent=74.0,
+            reset_at=None,
+            primary_reset_at=now + 3 * 3600,
+            secondary_used_percent=80.0,
+            secondary_reset_at=int(now + 3 * 24 * 3600),
             primary_usage_fresh=True,
             secondary_usage_fresh=True,
             routing_policy="preserve",
@@ -614,6 +696,66 @@ def test_opportunistic_other_normal_must_have_foreground_reserve():
     assert result.account is None
     assert result.error_message == (
         "opportunistic burn window closed: no expendable account has emergency foreground reserve"
+    )
+
+
+def test_opportunistic_normal_cannot_use_stale_preserve_as_last_reserve():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "last-normal",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=96.0,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "stale-preserve",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            reset_at=now + 3 * 3600,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 3 * 24 * 3600),
+            routing_policy="preserve",
+        ),
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
+    )
+
+
+def test_opportunistic_normal_cannot_use_under_floor_preserve_as_last_reserve():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "last-normal",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=96.0,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "under-floor-preserve",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            reset_at=now + 3 * 3600,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3 * 24 * 3600),
+            primary_usage_fresh=True,
+            secondary_usage_fresh=True,
+            routing_policy="preserve",
+        ),
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
     )
 
 

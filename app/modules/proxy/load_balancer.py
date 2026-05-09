@@ -1331,6 +1331,7 @@ def _state_from_account(
         status=status,
         used_percent=used_percent,
         reset_at=reset_at,
+        primary_reset_at=primary_reset,
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=secondary_used,

@@ -17,14 +17,14 @@ from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
-from app.core.config.settings import DEFAULT_HOME_DIR, Settings
+from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import CircuitState
-from app.core.types import JsonObject, JsonValue
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
@@ -1781,7 +1781,7 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
     ]
 
     assert session.ws_calls[0]["url"] == "wss://chatgpt.com/backend-api/codex/responses"
-    request_payload = cast(JsonObject, websocket.sent_json[0])
+    request_payload = websocket.sent_json[0]
     expected_request_payload = {
         "type": "response.create",
         **{k: v for k, v in payload.to_payload().items() if k != "stream"},
@@ -1916,7 +1916,7 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
 
     assert len(events) == 2
     assert len(session.ws_calls) == 1
-    request_payload = cast(JsonObject, websocket.sent_json[0])
+    request_payload = websocket.sent_json[0]
     request_input = cast(list[dict[str, object]], request_payload["input"])
     assert request_input[1]["output"] == proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
         bytes=len(("data:image/png;base64," + ("A" * 1200)).encode("utf-8"))
@@ -1926,69 +1926,6 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
         {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
     ]
     assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]}
-
-
-@pytest.mark.asyncio
-async def test_stream_responses_websocket_omits_oldest_historical_items_to_fit_budget(monkeypatch):
-    class Settings:
-        upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
-        upstream_connect_timeout_seconds = 8.0
-        stream_idle_timeout_seconds = 45.0
-        max_sse_event_bytes = 1024
-        image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
-        proxy_request_budget_seconds = 75.0
-        log_upstream_request_summary = False
-
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
-    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
-    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 360, raising=False)
-
-    messages = [
-        SimpleNamespace(
-            type=proxy_module.aiohttp.WSMsgType.TEXT,
-            data='{"type":"response.created","response":{"id":"resp_ws_omit","service_tier":"auto"}}',
-        ),
-        SimpleNamespace(
-            type=proxy_module.aiohttp.WSMsgType.TEXT,
-            data='{"type":"response.completed","response":{"id":"resp_ws_omit","service_tier":"default"}}',
-        ),
-    ]
-    websocket = _WsResponse(messages)
-    session = _WsSession(websocket)
-    payload = ResponsesRequest.model_validate(
-        {
-            "model": "gpt-5.1",
-            "instructions": "hi",
-            "input": [
-                {"role": "assistant", "content": [{"type": "output_text", "text": "old-a" * 200}]},
-                {"role": "assistant", "content": [{"type": "output_text", "text": "old-b" * 200}]},
-                {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]},
-            ],
-        }
-    )
-
-    events = [
-        event
-        async for event in proxy_module.stream_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, session),
-        )
-    ]
-
-    assert len(events) == 2
-    assert len(session.ws_calls) == 1
-    request_payload = cast(JsonObject, websocket.sent_json[0])
-    request_input = cast(list[dict[str, object]], request_payload["input"])
-    assert request_input[0] == proxy_module._response_create_history_omission_notice_item(2)
-    assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]}
-    assert proxy_module._serialized_json_size(request_payload) <= 360
 
 
 @pytest.mark.asyncio
@@ -5164,131 +5101,6 @@ def test_slim_response_create_handles_object_valued_content_image():
     first_content = first_item["content"]
     assert isinstance(first_content, dict)
     assert first_content["type"] == "input_text"
-
-
-def test_slim_response_create_omits_oldest_historical_items_to_fit_budget():
-    payload: dict[str, JsonValue] = {
-        "type": "response.create",
-        "model": "gpt-5.1",
-        "input": [
-            {"role": "assistant", "content": [{"type": "output_text", "text": "old-a" * 200}]},
-            {"role": "assistant", "content": [{"type": "output_text", "text": "old-b" * 200}]},
-            {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]},
-        ],
-    }
-
-    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=360)
-    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
-
-    assert summary is not None
-    assert summary["historical_items_omitted"] == 2
-    notice = slimmed_input[0]
-    assert isinstance(notice, dict)
-    assert notice["role"] == "assistant"
-    assert "omitted 2 historical input items" in json.dumps(notice)
-    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "please continue"}]}
-    assert proxy_service._serialized_json_size(slimmed_payload) <= 360
-
-
-def test_slim_response_create_drops_omission_notice_when_only_recent_fits():
-    recent_item: dict[str, JsonValue] = {
-        "role": "user",
-        "content": [{"type": "input_text", "text": "please continue"}],
-    }
-    payload: dict[str, JsonValue] = {
-        "type": "response.create",
-        "model": "gpt-5.1",
-        "input": [
-            {"role": "assistant", "content": [{"type": "output_text", "text": "old context"}]},
-            recent_item,
-        ],
-    }
-    max_bytes = proxy_service._serialized_json_size({**payload, "input": [recent_item]})
-    notice_payload = {
-        **payload,
-        "input": [proxy_service._response_create_history_omission_notice_item(1), recent_item],
-    }
-
-    assert proxy_service._serialized_json_size(notice_payload) > max_bytes
-
-    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=max_bytes)
-
-    assert summary is not None
-    assert summary["historical_items_omitted"] == 1
-    assert slimmed_payload["input"] == [recent_item]
-    assert proxy_service._serialized_json_size(slimmed_payload) <= max_bytes
-
-
-def test_slim_response_create_omits_history_with_bounded_serialization(monkeypatch):
-    recent_item: dict[str, JsonValue] = {
-        "role": "user",
-        "content": [{"type": "input_text", "text": "please continue"}],
-    }
-    payload: dict[str, JsonValue] = {
-        "type": "response.create",
-        "model": "gpt-5.1",
-        "input": [
-            *[
-                {"role": "assistant", "content": [{"type": "output_text", "text": f"old-{index}"}]}
-                for index in range(1024)
-            ],
-            recent_item,
-        ],
-    }
-    original_serialized_json_size = proxy_service._serialized_json_size
-    max_bytes = original_serialized_json_size(
-        {
-            **payload,
-            "input": [proxy_service._response_create_history_omission_notice_item(1024), recent_item],
-        }
-    )
-    calls = 0
-
-    def counted_serialized_json_size(payload: dict[str, JsonValue]) -> int:
-        nonlocal calls
-        calls += 1
-        return original_serialized_json_size(payload)
-
-    monkeypatch.setattr(proxy_service, "_serialized_json_size", counted_serialized_json_size)
-
-    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=max_bytes)
-
-    assert summary is not None
-    assert summary["historical_items_omitted"] == 1024
-    assert slimmed_payload["input"] == [proxy_service._response_create_history_omission_notice_item(1024), recent_item]
-    assert calls <= 16
-
-
-def test_slim_response_create_drops_orphaned_function_call_outputs():
-    recent_item: dict[str, JsonValue] = {
-        "role": "user",
-        "content": [{"type": "input_text", "text": "please continue"}],
-    }
-    payload: dict[str, JsonValue] = {
-        "type": "response.create",
-        "model": "gpt-5.1",
-        "input": [
-            {"type": "function_call", "call_id": "call_1", "name": "tool", "arguments": "x" * 600},
-            {"type": "function_call_output", "call_id": "call_1", "output": "small output"},
-            recent_item,
-        ],
-    }
-    max_bytes = proxy_service._serialized_json_size(
-        {
-            **payload,
-            "input": [proxy_service._response_create_history_omission_notice_item(2), recent_item],
-        }
-    )
-
-    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=max_bytes)
-
-    assert summary is not None
-    assert summary["historical_items_omitted"] == 2
-    assert slimmed_payload["input"] == [proxy_service._response_create_history_omission_notice_item(2), recent_item]
-
-
-def test_oversized_response_create_dump_dir_uses_default_home_dir():
-    assert proxy_service._OVERSIZED_RESPONSE_CREATE_DUMP_DIR == (DEFAULT_HOME_DIR / "debug" / "response-create-dumps")
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

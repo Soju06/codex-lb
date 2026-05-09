@@ -421,7 +421,8 @@
       "profile": "http://maumap.com/",
       "contributions": [
         "code",
-        "doc"
+        "doc",
+        "test"
       ]
     }
   ],

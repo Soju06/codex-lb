@@ -289,7 +289,8 @@ def test_deployment_prestop_starts_and_polls_local_drain() -> None:
     assert "http://127.0.0.1:3456" in rendered
     assert "/internal/drain/start" in rendered
     assert "/internal/drain/status" in rendered
-    assert "in_flight" in rendered
+    assert "deadline = time.monotonic() + 15" in rendered
+    assert "break" not in rendered
 
 
 def test_deployment_uses_service_port_for_container_and_probes() -> None:

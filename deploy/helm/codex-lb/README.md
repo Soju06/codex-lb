@@ -389,14 +389,14 @@ helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
 Graceful shutdown coordinates three timeout parameters to drain in-flight requests and session bridge connections:
 
 ```
-preStopSleepSeconds (15s max) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
+preStopSleepSeconds (15s minimum) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
 ```
 
 **Timeline:**
 
-1. **preStopSleepSeconds (15s max)**: Pod enters preStop
+1. **preStopSleepSeconds (15s minimum)**: Pod enters preStop
    - Calls `/internal/drain/start` so readiness fails and new app requests are rejected
-   - Polls `/internal/drain/status` until finite HTTP in-flight requests reach zero, or until the max wait expires
+   - Polls `/internal/drain/status` during the wait so in-flight state is visible while draining
    - Gives Kubernetes/load balancers time to remove the pod from rotation before SIGTERM
    
 2. **shutdownDrainTimeoutSeconds (30s)**: Drain in-flight requests

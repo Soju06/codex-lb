@@ -1,0 +1,5 @@
+- [x] 1. Add OpenSpec deltas for literal `ultrafast` support.
+- [x] 2. Accept `ultrafast` in API-key service-tier validation and UI schemas.
+- [x] 3. Preserve `ultrafast` in Responses, compact Responses, v1 Responses, and Chat Completions mapped payloads.
+- [x] 4. Price `ultrafast` using priority-tier cost accounting without aliasing the recorded tier.
+- [x] 5. Add focused backend/frontend tests and run validation.

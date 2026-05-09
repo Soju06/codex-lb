@@ -30,7 +30,7 @@ export const ApiKeyUsageSummarySchema = z.object({
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
-export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+export const SERVICE_TIERS = ["auto", "default", "priority", "flex", "ultrafast"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const ApiKeySchema = z.object({

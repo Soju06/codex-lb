@@ -328,7 +328,7 @@ def _uses_priority_tier(service_tier: str | None) -> bool:
     normalized = _normalize_service_tier(service_tier)
     if normalized is None:
         return False
-    return normalized in {"priority", "fast"}
+    return normalized in {"priority", "fast", "ultrafast"}
 
 
 def _uses_flex_tier(service_tier: str | None) -> bool:

@@ -192,6 +192,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="default">Default</SelectItem>
                   <SelectItem value="priority">Priority</SelectItem>
                   <SelectItem value="flex">Flex</SelectItem>
+                  <SelectItem value="ultrafast">Ultrafast</SelectItem>
                 </SelectContent>
               </Select>
             </div>

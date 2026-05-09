@@ -448,6 +448,20 @@ async def test_api_key_create_accepts_fast_service_tier_alias(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_accepts_ultrafast_service_tier_literal(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "ultrafast-tier-key",
+            "enforcedServiceTier": "ultrafast",
+        },
+    )
+
+    assert created.status_code == 200
+    assert created.json()["enforcedServiceTier"] == "ultrafast"
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_accepts_fast_service_tier_alias(async_client):
     created = await async_client.post(
         "/api/api-keys/",
@@ -467,6 +481,28 @@ async def test_api_key_update_accepts_fast_service_tier_alias(async_client):
 
     assert updated.status_code == 200
     assert updated.json()["enforcedServiceTier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_accepts_ultrafast_service_tier_literal(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "ultrafast-tier-update-key",
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "enforcedServiceTier": "ultrafast",
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["enforcedServiceTier"] == "ultrafast"
 
 
 @pytest.mark.asyncio
@@ -565,12 +601,12 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
             "name": "enforced-service-tier",
             "allowedModels": [forced_model],
             "enforcedModel": forced_model,
-            "enforcedServiceTier": "fast",
+            "enforcedServiceTier": "ultrafast",
         },
     )
     assert created.status_code == 200
     key = created.json()["key"]
-    assert created.json()["enforcedServiceTier"] == "priority"
+    assert created.json()["enforcedServiceTier"] == "ultrafast"
 
     await _import_account(async_client, "acc_enforced_service_tier", "enforced-service-tier@example.com")
 
@@ -599,7 +635,7 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]
 
-    assert seen["service_tier"] == "priority"
+    assert seen["service_tier"] == "ultrafast"
 
 
 @pytest.mark.asyncio
@@ -1324,7 +1360,7 @@ async def test_chat_completions_stream_finalizes_cost_limit(async_client, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
-@pytest.mark.parametrize("requested_service_tier", ["priority", "fast"])
+@pytest.mark.parametrize("requested_service_tier", ["priority", "fast", "ultrafast"])
 async def test_compact_cost_limit_uses_canonical_request_service_tier_when_response_omits_echo(
     async_client,
     monkeypatch,

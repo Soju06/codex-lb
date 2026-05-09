@@ -118,6 +118,15 @@ def test_calculate_cost_from_usage_priority_service_tier():
     assert cost == pytest.approx(35.0)
 
 
+def test_calculate_cost_from_usage_ultrafast_service_tier_uses_priority_pricing():
+    usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
+    price = DEFAULT_PRICING_MODELS["gpt-5.4"]
+
+    cost = calculate_cost_from_usage(usage, price, service_tier="ultrafast")
+
+    assert cost == pytest.approx(35.0)
+
+
 def test_calculate_cost_from_usage_flex_service_tier():
     usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
     price = DEFAULT_PRICING_MODELS["gpt-5.4-mini"]

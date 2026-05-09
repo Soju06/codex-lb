@@ -120,6 +120,20 @@ def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     assert dumped["service_tier"] == "priority"
 
 
+def test_responses_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "ultrafast",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
+
+
 def test_compact_known_unsupported_upstream_fields_are_stripped():
     payload = {
         "model": "gpt-5.1",
@@ -151,6 +165,20 @@ def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_compact_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "ultrafast",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
 
 
 def test_openai_prompt_cache_aliases_are_normalized():
@@ -310,6 +338,19 @@ def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_v1_responses_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "service_tier": "ultrafast",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
 
 
 def test_interleaved_reasoning_fields_are_sanitized_from_input():

@@ -268,6 +268,19 @@ def test_chat_service_tier_is_preserved_in_responses_payload():
     assert dumped["service_tier"] == "priority"
 
 
+def test_chat_ultrafast_service_tier_is_preserved_in_responses_payload():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "ultrafast",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert dumped["service_tier"] == "ultrafast"
+
+
 def test_chat_tools_are_normalized():
     payload = {
         "model": "gpt-5.2",

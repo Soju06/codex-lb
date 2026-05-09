@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define proxy observability contracts so runtime failures, routing decisions, and admission rejections remain diagnosable.
 
 ## Requirements
 ### Requirement: Proxy 4xx/5xx responses are logged with error detail

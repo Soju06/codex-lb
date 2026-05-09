@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define dashboard authentication behavior so login, bootstrap, TOTP, and session handling stay secure and predictable.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define migration, drift detection, and Alembic governance contracts so deployments fail closed on schema mismatch.
 
 ## Requirements
 

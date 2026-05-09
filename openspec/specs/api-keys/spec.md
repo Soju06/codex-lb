@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define API key lifecycle, enforcement, accounting, and dashboard management contracts for downstream clients.
 
 ## Requirements
 

@@ -464,7 +464,9 @@ class UsageUpdater:
         if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
             return
         windows = [window for window in (primary, secondary) if window is not None]
-        if not any(_window_has_available_quota(window) for window in windows):
+        if any(_window_is_exhausted(window) for window in windows) or not any(
+            _window_has_available_quota(window) for window in windows
+        ):
             return
 
         await self._auth_manager._repo.update_status(
@@ -514,6 +516,11 @@ def _usage_entry_written(entry: UsageHistory | None) -> bool:
 def _window_has_available_quota(window: UsageWindow) -> bool:
     used_percent = window.used_percent
     return used_percent is not None and float(used_percent) < 100.0
+
+
+def _window_is_exhausted(window: UsageWindow) -> bool:
+    used_percent = window.used_percent
+    return used_percent is not None and float(used_percent) >= 100.0
 
 
 def _prefer_merged_additional_window(

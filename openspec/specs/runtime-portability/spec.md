@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define runtime portability contracts so resilience features degrade safely across supported operating systems.
 
 ## Requirements
 

@@ -18,6 +18,11 @@ from app.db.sqlite_utils import IntegrityCheck, SqliteIntegrityCheckMode
 @dataclass(slots=True)
 class _FakeSettings:
     database_url: str
+    database_pool_size: int = 15
+    database_max_overflow: int = 10
+    database_background_pool_size: int | None = None
+    database_background_max_overflow: int | None = None
+    database_pool_timeout_seconds: float = 30.0
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = False
     database_sqlite_pre_migrate_backup_max_files: int = 5
@@ -78,6 +83,40 @@ def test_import_session_with_postgres_url_does_not_error() -> None:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_background_pool_defaults_to_main_pool_settings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            database_pool_size=15,
+            database_max_overflow=10,
+        ),
+    )
+
+    assert session_module._database_pool_size(background=True) == 15
+    assert session_module._database_max_overflow(background=True) == 10
+
+
+def test_background_pool_settings_can_override_main_pool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            database_pool_size=15,
+            database_max_overflow=10,
+            database_background_pool_size=4,
+            database_background_max_overflow=1,
+        ),
+    )
+
+    assert session_module._database_pool_size(background=True) == 4
+    assert session_module._database_max_overflow(background=True) == 1
+    assert session_module._database_pool_size(background=False) == 15
+    assert session_module._database_max_overflow(background=False) == 10
 
 
 @pytest.mark.asyncio
@@ -393,7 +432,7 @@ async def test_init_background_db_creates_separate_engine() -> None:
 
 
 @pytest.mark.asyncio
-async def test_init_background_db_uses_smaller_pool_for_postgres() -> None:
+async def test_init_background_db_uses_main_pool_size_for_postgres_by_default() -> None:
     session_module.init_background_db("postgresql+asyncpg://user:pass@localhost/db")
 
     assert session_module._background_engine is not None
@@ -403,7 +442,7 @@ async def test_init_background_db_uses_smaller_pool_for_postgres() -> None:
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
         assert isinstance(pool, NullPool)
     else:
-        assert cast(Any, pool).size() == 3
+        assert cast(Any, pool).size() == 15
 
     if session_module._background_engine is not None:
         await session_module._background_engine.dispose()

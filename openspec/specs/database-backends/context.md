@@ -17,6 +17,7 @@ For higher concurrency or infrastructure-managed deployments, PostgreSQL support
 - SQLite startup check mode: `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=quick|full|off` (default `quick`)
 - PostgreSQL example URL: `postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb`
 - Pool controls (`database_pool_size`, `database_max_overflow`, `database_pool_timeout_seconds`) apply to non-memory SQLite and PostgreSQL engine creation.
+- Background/request-adjacent DB pool controls (`database_background_pool_size`, `database_background_max_overflow`) default to the main pool settings, and can be lowered explicitly for deployments that want a smaller auxiliary pool.
 
 ## Example
 

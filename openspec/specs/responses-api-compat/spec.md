@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
 
 ## Requirements
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity

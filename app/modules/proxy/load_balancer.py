@@ -1327,11 +1327,7 @@ def _select_account_preferring_budget_safe(
         )
         if preferred.account is not None:
             return preferred
-    if (
-        routing_strategy == "usage_weighted"
-        and state_list
-        and all(_state_above_budget_threshold(state, budget_threshold_pct) for state in state_list)
-    ):
+    if routing_strategy == "usage_weighted" and state_list:
         return select_account(
             state_list,
             prefer_earlier_reset=prefer_earlier_reset,

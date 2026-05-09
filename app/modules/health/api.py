@@ -28,7 +28,7 @@ def _is_internal_client_host(client_host: str | None) -> bool:
         address = ip_address(client_host)
     except ValueError:
         return False
-    return address.is_loopback or address.is_private
+    return address.is_loopback
 
 
 @router.get("/health", response_model=HealthResponse)

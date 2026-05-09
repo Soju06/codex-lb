@@ -68,8 +68,9 @@ def read_archive_records(
     kind: str | None = None,
     transport: str | None = None,
     request_id: str | None = None,
+    requested_at: datetime | None = None,
 ) -> ConversationArchivePage:
-    paths = [_resolve_archive_file(filename)] if filename else list(_iter_archive_paths(_archive_dir()))
+    paths = _archive_paths_for_lookup(filename=filename, requested_at=requested_at)
     records: list[dict[str, Any]] = []
     total = 0
     end = offset + limit
@@ -93,6 +94,25 @@ def read_archive_records(
         total=total,
         has_more=end < total,
     )
+
+
+def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | None) -> list[Path]:
+    if filename:
+        return [_resolve_archive_file(filename)]
+    directory = _archive_dir()
+    if requested_at is None:
+        return list(_iter_archive_paths(directory))
+
+    requested_at_utc = requested_at.astimezone(UTC)
+    hourly_stem = requested_at_utc.strftime("%Y-%m-%dT%H")
+    daily_stem = requested_at_utc.strftime("%Y-%m-%d")
+    candidates = [
+        directory / f"{hourly_stem}{_GZIP_JSONL_SUFFIX}",
+        directory / f"{hourly_stem}{_JSONL_SUFFIX}",
+        directory / f"{daily_stem}{_GZIP_JSONL_SUFFIX}",
+        directory / f"{daily_stem}{_JSONL_SUFFIX}",
+    ]
+    return [path for path in candidates if path.exists() and path.is_file()]
 
 
 def _archive_dir() -> Path:

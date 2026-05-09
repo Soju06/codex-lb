@@ -301,7 +301,7 @@ export function RecentRequestsTable({
               </div>
             </div>
 
-            <RequestArchivePanel requestId={selectedRequest?.requestId} />
+            <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />
 
             <div className="space-y-2">
               <div className="flex items-center gap-2">

@@ -15,6 +15,7 @@ export type ConversationArchiveRecordParams = {
   kind?: string;
   transport?: string;
   requestId?: string;
+  requestedAt?: string;
 };
 
 export function listConversationArchiveFiles() {
@@ -43,6 +44,9 @@ export function listConversationArchiveRecords(params: ConversationArchiveRecord
   }
   if (params.requestId) {
     query.set("requestId", params.requestId);
+  }
+  if (params.requestedAt) {
+    query.set("requestedAt", params.requestedAt);
   }
   return get(`${CONVERSATION_ARCHIVE_PATH}/records?${query.toString()}`, ConversationArchiveRecordsResponseSchema);
 }

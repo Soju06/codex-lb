@@ -5,6 +5,7 @@ import errno
 import gzip
 import json
 import queue
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -59,6 +60,8 @@ def test_archive_json_writes_redacted_jsonl_record(monkeypatch, tmp_path):
             url="https://chatgpt.com/backend-api/codex/responses",
             headers={
                 "Authorization": "Bearer secret",
+                "api-key": "bare-secret",
+                "api_key": "underscore-secret",
                 "session_id": "sid_1",
                 "x-session-token": "tok_1",
             },
@@ -77,6 +80,8 @@ def test_archive_json_writes_redacted_jsonl_record(monkeypatch, tmp_path):
     assert record["payload"] == {"model": "gpt-5.4", "input": "привет без юникод-эскейпов"}
     assert record["headers"] == {
         "Authorization": "[redacted]",
+        "api-key": "[redacted]",
+        "api_key": "[redacted]",
         "session_id": "sid_1",
         "x-session-token": "[redacted]",
     }
@@ -370,6 +375,15 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
         request_id="req_gzip",
     )
     assert [record["request_id"] for record in all_files_page.records] == ["req_gzip"]
+
+    requested_at_page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="req_gzip",
+        requested_at=datetime.fromisoformat("2026-04-29T10:30:00+00:00"),
+    )
+    assert [record["request_id"] for record in requested_at_page.records] == ["req_gzip"]
 
 
 def test_archive_service_expands_user_home(monkeypatch, tmp_path):

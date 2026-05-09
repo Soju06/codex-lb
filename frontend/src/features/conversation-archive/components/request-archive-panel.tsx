@@ -8,12 +8,19 @@ import type { ConversationArchiveRecord } from "@/features/conversation-archive/
 
 const REQUEST_ARCHIVE_LIMIT = 200;
 
-export function RequestArchivePanel({ requestId }: { requestId: string | null | undefined }) {
+export function RequestArchivePanel({
+  requestId,
+  requestedAt,
+}: {
+  requestId: string | null | undefined;
+  requestedAt?: string | null | undefined;
+}) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(0);
   const recordsQuery = useConversationArchiveRecords(
     requestId
       ? {
           requestId,
+          requestedAt: requestedAt ?? undefined,
           limit: REQUEST_ARCHIVE_LIMIT,
           offset: 0,
         }

@@ -24,6 +24,8 @@ _REDACTED = "[redacted]"
 _SENSITIVE_HEADER_NAMES = frozenset(
     {
         "authorization",
+        "api-key",
+        "api_key",
         "cookie",
         "openai-api-key",
         "proxy-authorization",
@@ -329,7 +331,8 @@ def _stop_writer() -> None:
 
 def _redact_header_value(key: str, value: object) -> str:
     lowered = key.lower()
-    if lowered in _SENSITIVE_HEADER_NAMES or lowered.endswith("-api-key") or "token" in lowered:
+    normalized = lowered.replace("_", "-")
+    if normalized in _SENSITIVE_HEADER_NAMES or normalized.endswith("-api-key") or "token" in normalized:
         return _REDACTED
     return str(value)
 

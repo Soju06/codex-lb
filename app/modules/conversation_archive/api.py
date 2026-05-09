@@ -44,6 +44,7 @@ async def list_conversation_archive_records(
     kind: str | None = Query(default=None),
     transport: str | None = Query(default=None),
     request_id: str | None = Query(default=None, alias="requestId"),
+    requested_at: datetime | None = Query(default=None, alias="requestedAt"),
 ) -> ConversationArchiveRecordsResponse:
     if file is None and not request_id:
         raise HTTPException(
@@ -60,6 +61,7 @@ async def list_conversation_archive_records(
             kind=kind,
             transport=transport,
             request_id=request_id,
+            requested_at=requested_at,
         )
     except service.ConversationArchiveInvalidFileError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

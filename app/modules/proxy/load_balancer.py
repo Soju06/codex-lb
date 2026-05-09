@@ -681,7 +681,7 @@ class LoadBalancer:
                 budget_pressured = (
                     sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
                     and pinned.status != AccountStatus.RATE_LIMITED
-                    and _state_above_budget_threshold(pinned, budget_threshold_pct)
+                    and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
@@ -714,9 +714,14 @@ class LoadBalancer:
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
                         )
+                        pool_exhausted = (
+                            _state_above_budget_threshold
+                            if _state_above_budget_threshold(pinned, budget_threshold_pct)
+                            else _state_above_sticky_budget_threshold
+                        )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
-                            or _state_above_budget_threshold(pool_best.account, budget_threshold_pct)
+                            or pool_exhausted(pool_best.account, budget_threshold_pct)
                         )
                         if pool_also_exhausted:
                             pinned_result = select_account(
@@ -1306,6 +1311,16 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
     return state.used_percent is not None and state.used_percent > budget_threshold_pct
 
 
+def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+    return (
+        (state.used_percent is not None and state.used_percent > budget_threshold_pct)
+        or (
+            state.secondary_used_percent is not None
+            and state.secondary_used_percent > budget_threshold_pct
+        )
+    )
+
+
 def _select_account_preferring_budget_safe(
     states: Iterable[AccountState],
     *,
@@ -1317,15 +1332,18 @@ def _select_account_preferring_budget_safe(
 ) -> SelectionResult:
     state_list = list(states)
     preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
-    if preferred_states and len(preferred_states) != len(state_list):
+    if preferred_states:
+        selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
         preferred = select_account(
-            preferred_states,
+            selection_pool,
             prefer_earlier_reset=prefer_earlier_reset,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
         )
         if preferred.account is not None:
+            return preferred
+        if len(preferred_states) == len(state_list):
             return preferred
     if routing_strategy == "usage_weighted" and state_list:
         return select_account(

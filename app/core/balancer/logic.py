@@ -260,10 +260,7 @@ def select_account(
             selected = _select_capacity_weighted(candidate_pool)
     else:
         if primary_first_usage_weighted:
-            selected = min(
-                effective_pool,
-                key=_primary_reset_first_sort_key if prefer_earlier_reset else _primary_usage_sort_key,
-            )
+            selected = min(effective_pool, key=_primary_usage_sort_key)
         else:
             selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)

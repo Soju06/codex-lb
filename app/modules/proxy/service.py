@@ -249,10 +249,20 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
 )
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
+_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS = (
     "flagged for possible cybersecurity risk",
     "authorized for security work",
     "chatgpt.com/cyber",
+)
+_SECURITY_WORK_RETRY_MESSAGE = (
+    "Upstream flagged this request as possible cybersecurity work. "
+    "codex-lb is retrying on an account marked as authorized for security work."
+)
+_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
+    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
+    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
+    "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
 
 
@@ -1576,14 +1586,44 @@ class ProxyService:
                 )
                 account = selection.account
                 if not account:
-                    if last_exc is not None:
-                        raise last_exc
-                    log_error_code = selection.error_code or "no_accounts"
-                    log_error_message = selection.error_message or "No active accounts available"
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(log_error_code, log_error_message),
-                    )
+                    if (
+                        require_security_work_authorized
+                        and selection.error_code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                        and last_exc is not None
+                    ):
+                        logger.info(
+                            "No security-work-authorized account available for compact retry; "
+                            "continuing normal account failover request_id=%s",
+                            request_id,
+                        )
+                        require_security_work_authorized = False
+                        selection = await self._select_account_with_budget_compatible(
+                            deadline,
+                            request_id=request_id,
+                            kind="compact",
+                            api_key=api_key,
+                            sticky_key=affinity.key,
+                            sticky_kind=affinity.kind,
+                            reallocate_sticky=affinity.reallocate_sticky,
+                            sticky_max_age_seconds=affinity.max_age_seconds,
+                            prefer_earlier_reset_accounts=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=payload.model,
+                            exclude_account_ids=excluded_account_ids,
+                            preferred_account_id=file_preferred_account_id,
+                            require_security_work_authorized=False,
+                        )
+                        account = selection.account
+                    if not account:
+                        if last_exc is not None:
+                            raise last_exc
+                        log_error_code = selection.error_code or "no_accounts"
+                        log_error_message = selection.error_message or "No active accounts available"
+                        raise ProxyResponseError(
+                            503,
+                            openai_error(log_error_code, log_error_message),
+                        )
+                assert account is not None
                 account_id_value = account.id
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
@@ -5499,8 +5539,22 @@ class ProxyService:
             await session.upstream.send_text(retry_text)
             session.last_used_at = time.monotonic()
             return True
-        except Exception:
+        except Exception as exc:
             logger.warning("HTTP bridge security-work retry failed", exc_info=True)
+            if isinstance(exc, ProxyResponseError):
+                error = _parse_openai_error(exc.payload)
+                code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
+                    await request_state.event_queue.put(
+                        format_sse_event(
+                            _security_work_advisory_event(
+                                code=_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                                message=_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                                request_id=request_state.request_log_id or request_state.request_id,
+                                action="forward_original_security_work_error",
+                            )
+                        )
+                    )
             async with session.pending_lock:
                 if request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
@@ -5828,6 +5882,42 @@ class ProxyService:
             )
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                can_retry_security_work = (
+                    not session.account.security_work_authorized
+                    and terminal_request_state.response_id is None
+                    and terminal_request_state.replay_count < 1
+                    and bool(terminal_request_state.request_text)
+                    and (
+                        terminal_request_state.previous_response_id is None
+                        or (
+                            terminal_request_state.fresh_upstream_request_text is not None
+                            and terminal_request_state.fresh_upstream_request_is_retry_safe
+                        )
+                    )
+                )
+                if terminal_request_state.event_queue is not None:
+                    await terminal_request_state.event_queue.put(
+                        format_sse_event(
+                            _security_work_advisory_event(
+                                code=_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                message=(
+                                    _SECURITY_WORK_RETRY_MESSAGE
+                                    if can_retry_security_work
+                                    else "Upstream flagged this request as possible cybersecurity work. "
+                                    "codex-lb cannot safely switch accounts after this response has already started, "
+                                    "so the original upstream error is being forwarded."
+                                ),
+                                request_id=terminal_request_state.request_log_id
+                                or terminal_request_state.request_id,
+                                action=(
+                                    "retry_security_work_authorized"
+                                    if can_retry_security_work
+                                    else "forward_original_security_work_error"
+                                ),
+                                account_id=session.account.id,
+                            )
+                        )
+                    )
                 retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
                 if retried:
                     return
@@ -7234,6 +7324,25 @@ class ProxyService:
                     return
                 account = selection.account
                 if not account:
+                    if (
+                        require_security_work_authorized
+                        and selection.error_code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                    ):
+                        logger.info(
+                            "No security-work-authorized account available for stream retry; "
+                            "continuing normal account failover request_id=%s",
+                            request_id,
+                        )
+                        yield format_sse_event(
+                            _security_work_advisory_event(
+                                code=_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                                message=_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                                request_id=request_id,
+                                action="continue_normal_selection",
+                            )
+                        )
+                        require_security_work_authorized = False
+                        continue
                     if require_preferred_account and preferred_account_id is not None:
                         message = "Previous response owner account is unavailable; retry later."
                         _record_continuity_fail_closed(
@@ -7453,6 +7562,15 @@ class ProxyService:
                                         request_id,
                                         account.id,
                                     )
+                                    yield format_sse_event(
+                                        _security_work_advisory_event(
+                                            code=_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                            message=_SECURITY_WORK_RETRY_MESSAGE,
+                                            request_id=request_id,
+                                            action="retry_security_work_authorized",
+                                            account_id=account.id,
+                                        )
+                                    )
                                     excluded_account_ids.add(account.id)
                                     require_security_work_authorized = True
                                     last_transient_exc = tex
@@ -7565,6 +7683,15 @@ class ProxyService:
                             "Retrying on security-work-authorized account request_id=%s account_id=%s",
                             request_id,
                             account.id,
+                        )
+                        yield format_sse_event(
+                            _security_work_advisory_event(
+                                code=_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                message=_SECURITY_WORK_RETRY_MESSAGE,
+                                request_id=request_id,
+                                action="retry_security_work_authorized",
+                                account_id=account.id,
+                            )
                         )
                         excluded_account_ids.add(account.id)
                         require_security_work_authorized = True
@@ -7710,6 +7837,15 @@ class ProxyService:
                                 "Retrying on security-work-authorized account request_id=%s account_id=%s",
                                 request_id,
                                 account.id,
+                            )
+                            yield format_sse_event(
+                                _security_work_advisory_event(
+                                    code=_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                    message=_SECURITY_WORK_RETRY_MESSAGE,
+                                    request_id=request_id,
+                                    action="retry_security_work_authorized",
+                                    account_id=account.id,
+                                )
                             )
                             excluded_account_ids.add(account.id)
                             require_security_work_authorized = True
@@ -10000,6 +10136,30 @@ def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:
         "Proxy request budget exhausted",
         response_id=request_id,
     )
+
+
+def _security_work_advisory_event(
+    *,
+    code: str,
+    message: str,
+    request_id: str | None,
+    action: str,
+    account_id: str | None = None,
+) -> dict[str, JsonValue]:
+    warning: dict[str, JsonValue] = {
+        "code": code,
+        "message": message,
+        "category": "security_work_authorization",
+        "action": action,
+    }
+    if request_id:
+        warning["request_id"] = request_id
+    if account_id:
+        warning["account_id"] = account_id
+    return {
+        "type": "codex_lb.warning",
+        "warning": warning,
+    }
 
 
 def _should_retry_stream_error(code: str) -> bool:

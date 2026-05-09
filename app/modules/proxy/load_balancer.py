@@ -1312,12 +1312,8 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
 
 
 def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
-    return (
-        (state.used_percent is not None and state.used_percent > budget_threshold_pct)
-        or (
-            state.secondary_used_percent is not None
-            and state.secondary_used_percent > budget_threshold_pct
-        )
+    return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
+        state.secondary_used_percent is not None and state.secondary_used_percent > budget_threshold_pct
     )
 
 

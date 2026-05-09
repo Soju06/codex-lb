@@ -468,9 +468,7 @@ class UsageUpdater:
             secondary is None
             or not _window_has_available_quota(secondary)
             or any(_window_is_exhausted(window) for window in windows)
-            or not any(
-                _window_has_available_quota(window) for window in windows
-            )
+            or not any(_window_has_available_quota(window) for window in windows)
         ):
             return
 

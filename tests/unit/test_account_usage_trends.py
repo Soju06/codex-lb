@@ -131,6 +131,8 @@ class TestBuildAccountUsageTrends:
         ]
         result = build_account_usage_trends(buckets, SINCE_EPOCH, BUCKET_SECONDS, BUCKET_COUNT)
 
+        assert result["a1"].primary == []
+        assert [point.v for point in result["a1"].secondary] == [70.0, 70.0, 70.0, 70.0]
         scheduled = result["a1"].secondary_scheduled
         assert [point.v for point in scheduled] == [100.0, 96.43, 92.86, 89.29]
 

@@ -196,12 +196,14 @@ def _has_other_usable_foreground_capacity(
     candidate: AccountState,
     available: list[AccountState],
     current: float,
+    *,
+    ignore_standard_quota: bool = False,
 ) -> bool:
     preserve_count = sum(1 for state in available if _routing_policy(state) == ROUTING_POLICY_PRESERVE)
     for other in available:
         if other.account_id == candidate.account_id:
             continue
-        if other.status != AccountStatus.ACTIVE:
+        if other.status != AccountStatus.ACTIVE and not ignore_standard_quota:
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
             if _preserve_keeps_foreground_reserve(other) or _preserve_allows_opportunistic_burn(
@@ -233,6 +235,8 @@ def _above_emergency_floor(state: AccountState) -> bool:
 def _filter_opportunistic_candidates(
     available: list[AccountState],
     current: float,
+    *,
+    ignore_standard_quota: bool = False,
 ) -> tuple[list[AccountState], str | None]:
     burn_first: list[AccountState] = []
     normal: list[AccountState] = []
@@ -242,13 +246,23 @@ def _filter_opportunistic_candidates(
     for state in available:
         policy = _routing_policy(state)
         if policy == ROUTING_POLICY_BURN_FIRST:
-            if _has_other_usable_foreground_capacity(state, available, current) or _above_emergency_floor(state):
+            if _has_other_usable_foreground_capacity(
+                state,
+                available,
+                current,
+                ignore_standard_quota=ignore_standard_quota,
+            ) or _above_emergency_floor(state):
                 burn_first.append(state)
         elif policy == ROUTING_POLICY_PRESERVE:
             if _preserve_allows_opportunistic_burn(state, current, preserve_count=preserve_count):
                 preserve.append(state)
         else:
-            if _has_other_usable_foreground_capacity(state, available, current) or _above_emergency_floor(state):
+            if _has_other_usable_foreground_capacity(
+                state,
+                available,
+                current,
+                ignore_standard_quota=ignore_standard_quota,
+            ) or _above_emergency_floor(state):
                 normal.append(state)
 
     if burn_first or normal or preserve:
@@ -373,7 +387,11 @@ def select_account(
         available.append(state)
 
     if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
-        opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
+        opportunistic_available, reason = _filter_opportunistic_candidates(
+            available,
+            current,
+            ignore_standard_quota=ignore_standard_quota,
+        )
         if not opportunistic_available:
             return SelectionResult(None, f"opportunistic burn window closed: {reason}")
         available = opportunistic_available

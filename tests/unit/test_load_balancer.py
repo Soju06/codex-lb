@@ -1470,6 +1470,29 @@ def test_primary_pressured_fallback_ignores_unavailable_safe_accounts():
     assert result.account.account_id == "lower-primary"
 
 
+def test_primary_pressured_fallback_preserves_additional_quota_standard_ignore():
+    states = [
+        AccountState(
+            "additional-quota-available",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=96.0,
+            secondary_used_percent=97.0,
+            reset_at=int(time.time() + 3600),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        ignore_standard_quota=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "additional-quota-available"
+
+
 def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucket():
     now = time.time()
     states = [

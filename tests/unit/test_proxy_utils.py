@@ -1005,6 +1005,9 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
         proxy_admission_wait_timeout_seconds=10.0,
+        max_sse_event_bytes=16 * 1024 * 1024,
+        http_responses_session_bridge_instance_id="test-instance",
+        http_responses_session_bridge_instance_ring=[],
     )
 
 

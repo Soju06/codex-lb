@@ -967,14 +967,17 @@ def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> boo
     return False
 
 
-def _ws_transport_payload_budget_bytes(settings: Settings) -> int:
-    # Subtract 2 MiB headroom for control frames + envelope.
-    return max(1 * 1024 * 1024, settings.max_sse_event_bytes - _WEBSOCKET_TRANSPORT_HEADROOM_BYTES)
+def _ws_transport_payload_budget_bytes(settings: Settings | object) -> int:
+    # Subtract 2 MiB headroom for control frames + envelope. ``getattr`` fallback
+    # keeps unit tests that pass narrowed ``SimpleNamespace`` settings working
+    # without forcing every fake to redeclare ``max_sse_event_bytes``.
+    max_sse_event_bytes = getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024)
+    return max(1 * 1024 * 1024, max_sse_event_bytes - _WEBSOCKET_TRANSPORT_HEADROOM_BYTES)
 
 
 def _resolve_stream_transport(
     *,
-    settings: Settings,
+    settings: Settings | object,
     transport: str,
     transport_override: str | None,
     model: str | None,

@@ -63,6 +63,13 @@ The proxy MUST NOT trim, slim, or rewrite any conversation content other than th
 - **THEN** the proxy returns HTTP 400 with `error.code = "file_not_found"`
 - **AND** does not partially forward other images from the same request
 
+#### Scenario: large inline-rewritten payload routes via HTTP transport on auto
+
+- **GIVEN** `upstream_stream_transport` is `"auto"` and the rewritten payload size exceeds the WebSocket frame budget
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over HTTP `POST` instead of WebSocket
+- **AND** explicit `upstream_stream_transport = "websocket"` overrides MUST still take precedence
+
 ### Requirement: Clean upstream close before any response event fails fast
 
 When the HTTP responses bridge observes an upstream websocket close with `close_code = 1000` before any `response.*` event has been surfaced for the pending request, the proxy MUST classify the close as rejected input, surface HTTP 502 `upstream_rejected_input`, and MUST NOT trigger `retry_precreated` or `retry_fresh_upstream`.

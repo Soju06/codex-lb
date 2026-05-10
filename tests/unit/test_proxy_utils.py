@@ -473,6 +473,7 @@ def test_resolve_stream_transport_does_not_force_websocket_for_custom_codex_orig
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override=None,
         model="gpt-5.1",
@@ -490,6 +491,7 @@ def test_resolve_stream_transport_prefers_http_for_image_generation_even_with_na
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override=None,
         model="gpt-5.4",
@@ -508,6 +510,7 @@ def test_resolve_stream_transport_keeps_explicit_websocket_override_for_image_ge
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override="websocket",
         model="gpt-5.4",
@@ -516,6 +519,109 @@ def test_resolve_stream_transport_keeps_explicit_websocket_override_for_image_ge
     )
 
     assert transport == "websocket"
+
+
+def test_resolve_stream_transport_uses_http_for_large_auto_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="auto",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "http"
+
+
+def test_resolve_stream_transport_keeps_websocket_for_small_or_unknown_auto_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+
+    assert (
+        proxy_module._resolve_stream_transport(
+            settings=settings,
+            transport="auto",
+            transport_override=None,
+            model="gpt-5.4",
+            headers={},
+            payload_size_estimate_bytes=None,
+        )
+        == "websocket"
+    )
+    assert (
+        proxy_module._resolve_stream_transport(
+            settings=settings,
+            transport="auto",
+            transport_override=None,
+            model="gpt-5.4",
+            headers={},
+            payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings),
+        )
+        == "websocket"
+    )
+
+
+def test_resolve_stream_transport_keeps_explicit_websocket_for_large_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda _model: False),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="websocket",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "websocket"
+
+
+def test_resolve_stream_transport_keeps_explicit_http_for_large_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="http",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={"originator": "codex_chatgpt_desktop"},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "http"
+
+
+def test_ws_transport_payload_budget_uses_settings_limit() -> None:
+    assert (
+        proxy_module._ws_transport_payload_budget_bytes(SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024))
+        == 14 * 1024 * 1024
+    )
+    assert proxy_module._ws_transport_payload_budget_bytes(SimpleNamespace(max_sse_event_bytes=2 * 1024 * 1024)) == (
+        1 * 1024 * 1024
+    )
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():

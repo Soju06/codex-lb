@@ -10,3 +10,4 @@
 - [x] 10. Persist finalize `download_url` / `mime_type` / `file_name` in `_FilePinEntry`, clamping pin expiry to the shorter of `_FILE_ACCOUNT_PIN_TTL_SECONDS` and the SAS `se=` expiry when present.
 - [x] 11. Add a codex-faithful prompt image processor plus `fetch_file_bytes()` and inline-rewrite `input_image.file_id` / `input_image.image_url = "sediment://file_*"` to `data:` URLs for `/v1/responses`, `/backend-api/codex/responses`, `/responses/compact`, and websocket response.create payloads without mutating any other conversation content.
 - [x] 12. Add fail-fast clean-close classification for the HTTP responses bridge and cover the classifier / retry suppression paths with unit tests.
+- [x] 13. Route large inline-rewritten `/responses` payloads over HTTP when `upstream_stream_transport = "auto"` would otherwise exceed the upstream WebSocket frame budget, while preserving explicit transport overrides.

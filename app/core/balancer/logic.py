@@ -260,11 +260,6 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
-    def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current)
-        primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
-        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
-
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
@@ -291,10 +286,7 @@ def select_account(
             selected = _select_capacity_weighted(candidate_pool)
     else:
         if usage_weighted_order == "primary_first":
-            selected = min(
-                effective_pool,
-                key=_primary_reset_first_sort_key if prefer_earlier_reset else _primary_usage_sort_key,
-            )
+            selected = min(effective_pool, key=_primary_usage_sort_key)
         else:
             selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)

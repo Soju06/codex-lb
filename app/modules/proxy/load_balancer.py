@@ -1474,6 +1474,7 @@ def _select_account_preferring_budget_safe(
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             usage_weighted_order="primary_first",
+            ignore_standard_quota=ignore_standard_quota,
         )
     return select_account(
         state_list,

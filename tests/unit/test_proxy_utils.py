@@ -9961,7 +9961,7 @@ async def test_rewrite_input_image_file_references_rewrites_single_file_id(monke
     )
 
     content = rewritten.input[0]["content"]  # type: ignore[index]
-    image_part = content[1]  # type: ignore[index]
+    image_part = cast(dict[str, str], content[1])
     assert image_part["type"] == "input_image"
     assert image_part["image_url"].startswith("data:image/png;base64,")
     assert image_part["detail"] == "auto"
@@ -10015,8 +10015,8 @@ async def test_rewrite_input_image_file_references_rewrites_multiple_references(
         request_id="req_inline_multi",
     )
 
-    top_level = rewritten.input[0]  # type: ignore[index]
-    nested = rewritten.input[1]["content"][0]  # type: ignore[index]
+    top_level = cast(dict[str, str], rewritten.input[0])  # type: ignore[index]
+    nested = cast(dict[str, str], rewritten.input[1]["content"][0])  # type: ignore[index]
     assert top_level["image_url"].startswith("data:image/png;base64,")
     assert top_level["detail"] == "auto"
     assert nested["image_url"].startswith("data:image/png;base64,")

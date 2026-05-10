@@ -70,10 +70,14 @@ def normalize_rate_limit_plan_type(value: str | None) -> str | None:
 
 
 def account_plan_matches_allowed(value: str | None, allowed_plans: set[str] | frozenset[str]) -> bool:
-    normalized = normalize_account_plan_type(value)
-    if normalized is None:
+    cleaned = _clean_plan_type(value)
+    if cleaned is None:
         return False
     normalized_allowed = {plan.lower() for plan in allowed_plans}
-    if normalized in normalized_allowed:
+    normalized = normalize_account_plan_type(cleaned)
+    candidate = normalized or cleaned.lower()
+    if candidate in normalized_allowed:
         return True
+    if normalized is None:
+        return False
     return bool(ACCOUNT_PLAN_EQUIVALENTS.get(normalized, frozenset()) & normalized_allowed)

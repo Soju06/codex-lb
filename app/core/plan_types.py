@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import AbstractSet, Final
 
 ACCOUNT_PLAN_TYPES: Final[set[str]] = {
     "free",
@@ -69,7 +69,7 @@ def normalize_rate_limit_plan_type(value: str | None) -> str | None:
     return normalized if normalized in RATE_LIMIT_PLAN_TYPES else None
 
 
-def account_plan_matches_allowed(value: str | None, allowed_plans: set[str] | frozenset[str]) -> bool:
+def account_plan_matches_allowed(value: str | None, allowed_plans: AbstractSet[str]) -> bool:
     cleaned = _clean_plan_type(value)
     if cleaned is None:
         return False

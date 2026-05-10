@@ -16,5 +16,9 @@ def test_unknown_plan_passes_when_explicitly_allowed():
     assert account_plan_matches_allowed("future_plan", frozenset({"future_plan", "plus"})) is True
 
 
+def test_unknown_plan_matching_is_case_insensitive_and_trims_account_value():
+    assert account_plan_matches_allowed(" Future_Plan ", frozenset({"future_plan"})) is True
+
+
 def test_unknown_plan_blocked_when_not_explicitly_allowed():
     assert account_plan_matches_allowed("future_plan", frozenset({"plus"})) is False

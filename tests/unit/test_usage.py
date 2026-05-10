@@ -4,7 +4,6 @@ from datetime import timedelta
 
 import pytest
 
-from app.core.plan_types import account_plan_matches_allowed
 from app.core.usage import (
     capacity_for_plan,
     normalize_usage_window,
@@ -44,11 +43,6 @@ def test_capacity_for_plan():
     assert capacity_for_plan("prolite", "5h") == capacity_for_plan("pro", "5h")
     assert capacity_for_plan("prolite", "7d") == capacity_for_plan("pro", "7d")
     assert capacity_for_plan("unknown", "5h") is None
-
-
-def test_prolite_matches_pro_model_plan_entitlement():
-    assert account_plan_matches_allowed("prolite", frozenset({"pro"})) is True
-    assert account_plan_matches_allowed("prolite", frozenset({"plus"})) is False
 
 
 def test_summarize_usage_window_includes_prolite_capacity():

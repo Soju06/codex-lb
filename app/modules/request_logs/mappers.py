@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import cast as typing_cast
 
 from app.core.usage.logs import RequestLogLike, cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
@@ -47,4 +48,22 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         cost_usd=cost_from_log(log_like, precision=6),
         latency_ms=log.latency_ms,
         latency_first_token_ms=log.latency_first_token_ms,
+        slim_summary=_parse_slim_summary(log.slim_summary_json),
     )
+
+
+def _parse_slim_summary(value: str | None) -> dict[str, int] | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    summary: dict[str, int] = {}
+    for key in ("historical_tool_outputs_slimmed", "historical_images_slimmed"):
+        count = payload.get(key)
+        if isinstance(count, int) and count > 0:
+            summary[key] = count
+    return summary or None

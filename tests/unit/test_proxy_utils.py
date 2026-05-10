@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -1757,7 +1757,10 @@ async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
 
         async def json(self, *, content_type=None):
             del content_type
-            return {"error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}}
+            return {
+                "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+                "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
+            }
 
         async def text(self):
             return "slow down"
@@ -1791,8 +1794,79 @@ async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
     assert archived[-1]["direction"] == "server_to_codex"
     assert archived[-1]["status_code"] == 429
     assert archived[-1]["payload"] == {
-        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}
+        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+        "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
     }
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_archives_raw_http_error_body_without_raising(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    class ErrorPostResponse:
+        status = 429
+        reason = "Too Many Requests"
+        content = _DummyContent([])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            del content_type
+            return {
+                "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+                "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
+            }
+
+        async def text(self):
+            return "slow down"
+
+    archived_json: list[dict[str, object]] = []
+    archived_text: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_json", lambda **kwargs: archived_json.append(kwargs))
+    monkeypatch.setattr(proxy_module, "archive_text", lambda **kwargs: archived_text.append(kwargs))
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _SseSession(ErrorPostResponse())),
+            raise_for_status=False,
+        )
+    ]
+
+    assert events
+    assert "response.failed" in events[0]
+    assert archived_json[-1]["direction"] == "server_to_codex"
+    assert archived_json[-1]["status_code"] == 429
+    assert archived_json[-1]["payload"] == {
+        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+        "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
+    }
+    assert archived_text == []
 
 
 @pytest.mark.asyncio
@@ -2392,7 +2466,11 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
         idle_timeout_seconds: float,
         total_timeout_seconds: float | None,
         max_event_bytes: int,
+        archive_account_id: str | None = None,
+        archive_url: str | None = None,
+        archive_headers: Mapping[str, str] | None = None,
     ):
+        del archive_account_id, archive_url, archive_headers
         recorded["total_timeout_seconds"] = total_timeout_seconds
         if False:
             yield ""
@@ -2419,6 +2497,51 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
     assert events == []
     assert recorded["connect_timeout_seconds"] == pytest.approx(5.0)
     assert recorded["total_timeout_seconds"] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_stream_websocket_events_archives_raw_text_and_binary_frames(monkeypatch):
+    archived_text = []
+    archived_bytes = []
+    websocket = _WsResponse(
+        [
+            _WsMessage(proxy_module.aiohttp.WSMsgType.TEXT, "not json"),
+            _WsMessage(proxy_module.aiohttp.WSMsgType.BINARY, b"\x00not-json"),
+            _WsMessage(
+                proxy_module.aiohttp.WSMsgType.TEXT,
+                json.dumps({"type": "response.completed", "response": {"id": "resp_raw_frame"}}),
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_module, "archive_text", lambda **kwargs: archived_text.append(kwargs))
+    monkeypatch.setattr(proxy_module, "archive_bytes", lambda **kwargs: archived_bytes.append(kwargs))
+
+    events = [
+        event
+        async for event in proxy_module._stream_websocket_events(
+            cast(proxy_module.aiohttp.ClientWebSocketResponse, websocket),
+            idle_timeout_seconds=1.0,
+            total_timeout_seconds=None,
+            max_event_bytes=1024,
+            archive_account_id="acc_raw_frame",
+            archive_url="wss://chatgpt.com/backend-api/codex/responses",
+            archive_headers={"Authorization": "Bearer secret"},
+        )
+    ]
+
+    assert len(events) == 1
+    assert "resp_raw_frame" in events[0]
+    assert [call["text"] for call in archived_text] == [
+        "not json",
+        '{"type": "response.completed", "response": {"id": "resp_raw_frame"}}',
+    ]
+    assert archived_text[0]["extra"] == {"frame_type": "text"}
+    assert archived_text[0]["account_id"] == "acc_raw_frame"
+    assert archived_text[0]["headers"] == {"Authorization": "Bearer secret"}
+    assert archived_bytes[0]["data"] == b"\x00not-json"
+    assert archived_bytes[0]["extra"] == {"frame_type": "binary"}
+    assert archived_bytes[0]["account_id"] == "acc_raw_frame"
 
 
 @pytest.mark.asyncio
@@ -3645,6 +3768,55 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     assert dumped["object"] == "response.compaction"
     assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 205.5
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_archives_raw_http_error_body(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+
+    class ErrorCompactResponse(_JsonCompactResponse):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+                    "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
+                }
+            )
+            self.status = 429
+            self.reason = "Too Many Requests"
+
+    archived: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_json", lambda **kwargs: archived.append(kwargs))
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _CompactSession(ErrorCompactResponse())),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert archived[-1]["direction"] == "server_to_codex"
+    assert archived[-1]["kind"] == "compact"
+    assert archived[-1]["payload"] == {
+        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"},
+        "upstream_trace": {"bucket": "weekly", "resets_in_seconds": 12},
+    }
 
 
 @pytest.mark.asyncio
@@ -10204,6 +10376,305 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
     assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+
+
+def test_archive_upstream_websocket_text_uses_request_log_id(monkeypatch):
+    calls = []
+
+    def fake_archive_text(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_service, "archive_text", fake_archive_text)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_transport",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_log_id="req_log_1",
+        response_id="resp_upstream_1",
+    )
+    archive_metadata = proxy_service.UpstreamWebSocketArchiveMetadata(
+        url="wss://upstream.example/ws",
+        headers={"openai-beta": "responses_websockets=2026-02-06"},
+        account_id="acc_1",
+    )
+
+    proxy_service._archive_upstream_websocket_text(
+        request_state,
+        "data: {}\n\n",
+        archive_metadata=archive_metadata,
+    )
+
+    assert calls == [
+        {
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+            "text": "data: {}\n\n",
+            "account_id": "acc_1",
+            "url": "wss://upstream.example/ws",
+            "headers": {"openai-beta": "responses_websockets=2026-02-06"},
+            "extra": {"frame_type": "text", "response_id": "resp_upstream_1"},
+            "request_id": "req_log_1",
+        }
+    ]
+
+
+def test_archive_upstream_websocket_bytes_uses_request_log_id(monkeypatch):
+    calls = []
+
+    def fake_archive_bytes(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_service, "archive_bytes", fake_archive_bytes)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_transport",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_log_id="req_log_1",
+        response_id="resp_upstream_1",
+    )
+    archive_metadata = proxy_service.UpstreamWebSocketArchiveMetadata(
+        url="wss://upstream.example/ws",
+        headers={"openai-beta": "responses_websockets=2026-02-06"},
+        account_id="acc_1",
+    )
+
+    proxy_service._archive_upstream_websocket_bytes(
+        request_state,
+        b"\x00\x01",
+        archive_metadata=archive_metadata,
+    )
+
+    assert calls == [
+        {
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+            "data": b"\x00\x01",
+            "account_id": "acc_1",
+            "url": "wss://upstream.example/ws",
+            "headers": {"openai-beta": "responses_websockets=2026-02-06"},
+            "extra": {"frame_type": "binary", "response_id": "resp_upstream_1"},
+            "request_id": "req_log_1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_upstream_websocket_text_passes_archive_id_per_send():
+    calls = []
+
+    class ArchiveAwareUpstream:
+        async def send_text_with_archive_request_id(self, text: str, *, request_id: str | None) -> None:
+            calls.append((text, request_id))
+
+        async def send_text(self, text: str) -> None:
+            raise AssertionError(f"fallback send should not be used for {text}")
+
+        async def send_bytes(self, data: bytes) -> None:
+            del data
+
+        async def receive(self):
+            raise AssertionError("receive should not be used")
+
+        async def close(self) -> None:
+            pass
+
+        def response_header(self, name: str) -> str | None:
+            del name
+            return None
+
+        def set_archive_request_id(self, request_id: str | None) -> None:
+            raise AssertionError(f"mutable archive id should not be used for {request_id}")
+
+    upstream = cast(proxy_service.UpstreamResponsesWebSocket, ArchiveAwareUpstream())
+
+    await proxy_service._send_upstream_websocket_text(upstream, "first", "req_1")
+    await proxy_service._send_upstream_websocket_text(upstream, "second", "req_2")
+
+    assert calls == [("first", "req_1"), ("second", "req_2")]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_archives_non_terminal_event(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_archive")
+    archive_calls = []
+    finalize_request_state = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "archive_text", lambda **kwargs: archive_calls.append(kwargs))
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="req_ws_transport",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_log_id="req_ws_log",
+        awaiting_response_created=True,
+    )
+    payload = {"type": "response.created", "response": {"id": "resp_ws_archive"}}
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([pending_request]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == json.dumps(payload, separators=(",", ":"))
+    finalize_request_state.assert_not_awaited()
+    assert archive_calls[-1]["request_id"] == "req_ws_log"
+    assert archive_calls[-1]["extra"] == {"frame_type": "text", "response_id": "resp_ws_archive"}
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_archives_inbound_event(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    archive_calls = []
+
+    monkeypatch.setattr(proxy_service, "archive_text", lambda **kwargs: archive_calls.append(kwargs))
+
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_transport",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_log_id="req_bridge_log",
+        awaiting_response_created=True,
+        event_queue=event_queue,
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_archive"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    payload = {"type": "response.created", "response": {"id": "resp_bridge_archive"}}
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(payload, separators=(",", ":")),
+    )
+
+    assert await asyncio.wait_for(event_queue.get(), timeout=0.1) == (
+        'data: {"type":"response.created","response":{"id":"resp_bridge_archive"}}\n\n'
+    )
+    assert archive_calls[-1]["request_id"] == "req_bridge_log"
+    assert archive_calls[-1]["transport"] == "http"
+    assert archive_calls[-1]["extra"] == {"frame_type": "text", "response_id": "resp_bridge_archive"}
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_archives_grouped_previous_response_errors(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    archive_calls = []
+    finalize_request_state = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "archive_text", lambda **kwargs: archive_calls.append(kwargs))
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    request_a_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_b_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_a = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_grouped_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_log_id="req_bridge_grouped_log_a",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+        event_queue=request_a_queue,
+        transport="http",
+    )
+    request_b = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_grouped_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_log_id="req_bridge_grouped_log_b",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+        event_queue=request_b_queue,
+        transport="http",
+    )
+    account = _make_account("acc_bridge_grouped_archive")
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_a, request_b]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(2),
+        queued_request_count=2,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_anchor' not found.",
+            "param": "previous_response_id",
+        },
+    }
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(payload, separators=(",", ":")),
+    )
+
+    assert [call["request_id"] for call in archive_calls[-2:]] == [
+        "req_bridge_grouped_log_a",
+        "req_bridge_grouped_log_b",
+    ]
+    assert {call["transport"] for call in archive_calls[-2:]} == {"http"}
+    assert all(call["account_id"] == account.id for call in archive_calls[-2:])
+    assert await asyncio.wait_for(request_a_queue.get(), timeout=0.1) is not None
+    assert await asyncio.wait_for(request_a_queue.get(), timeout=0.1) is None
+    assert await asyncio.wait_for(request_b_queue.get(), timeout=0.1) is not None
+    assert await asyncio.wait_for(request_b_queue.get(), timeout=0.1) is None
+    assert finalize_request_state.await_count == 2
+    assert session.upstream_control.reconnect_requested is True
+    assert list(session.pending_requests) == []
 
 
 @pytest.mark.asyncio

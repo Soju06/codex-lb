@@ -299,6 +299,7 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Time" value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt) : "—"} />
                 <RequestDetailField label="Error Code" value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              <SlimSummaryBadges summary={selectedRequest?.slimSummary ?? null} />
             </div>
 
             <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />
@@ -320,6 +321,28 @@ export function RecentRequestsTable({
           <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function SlimSummaryBadges({ summary }: { summary: RequestLog["slimSummary"] | null }) {
+  const toolOutputs = summary?.historicalToolOutputsSlimmed ?? 0;
+  const images = summary?.historicalImagesSlimmed ?? 0;
+  if (toolOutputs <= 0 && images <= 0) {
+    return null;
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {toolOutputs > 0 ? (
+        <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">
+          {toolOutputs} historical tool outputs slimmed
+        </Badge>
+      ) : null}
+      {images > 0 ? (
+        <Badge variant="outline" className="bg-sky-500/10 text-sky-700 dark:text-sky-300">
+          {images} historical images slimmed
+        </Badge>
+      ) : null}
     </div>
   );
 }

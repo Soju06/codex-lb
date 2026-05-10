@@ -5,7 +5,7 @@ import json
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -70,12 +70,14 @@ def read_archive_records(
     request_id: str | None = None,
     requested_at: datetime | None = None,
 ) -> ConversationArchivePage:
-    paths = _archive_paths_for_lookup(filename=filename, requested_at=requested_at)
+    paths = _archive_paths_for_lookup(filename=filename, requested_at=requested_at, request_id=request_id)
+    sorted_paths = sorted(paths, key=lambda item: item.name, reverse=True)
+    correlated_request_ids = _correlated_archive_request_ids(sorted_paths, request_id)
     records: list[dict[str, Any]] = []
     total = 0
     end = offset + limit
 
-    for path in sorted(paths, key=lambda item: item.name, reverse=True):
+    for path in sorted_paths:
         for record in _iter_records(path):
             if not _record_matches(
                 record,
@@ -83,6 +85,7 @@ def read_archive_records(
                 kind=kind,
                 transport=transport,
                 request_id=request_id,
+                correlated_request_ids=correlated_request_ids,
             ):
                 continue
             if offset <= total < end:
@@ -96,7 +99,12 @@ def read_archive_records(
     )
 
 
-def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | None) -> list[Path]:
+def _archive_paths_for_lookup(
+    *,
+    filename: str | None,
+    requested_at: datetime | None,
+    request_id: str | None,
+) -> list[Path]:
     if filename:
         return [_resolve_archive_file(filename)]
     directory = _archive_dir()
@@ -104,15 +112,26 @@ def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | 
         return list(_iter_archive_paths(directory))
 
     requested_at_utc = requested_at.astimezone(UTC)
-    hourly_stem = requested_at_utc.strftime("%Y-%m-%dT%H")
-    daily_stem = requested_at_utc.strftime("%Y-%m-%d")
+    candidate_stems: list[str] = []
+    for hour_offset in (-1, 0, 1):
+        candidate = requested_at_utc + timedelta(hours=hour_offset)
+        hourly_stem = candidate.strftime("%Y-%m-%dT%H")
+        daily_stem = candidate.strftime("%Y-%m-%d")
+        if hourly_stem not in candidate_stems:
+            candidate_stems.append(hourly_stem)
+        if daily_stem not in candidate_stems:
+            candidate_stems.append(daily_stem)
+
     candidates = [
-        directory / f"{hourly_stem}{_GZIP_JSONL_SUFFIX}",
-        directory / f"{hourly_stem}{_JSONL_SUFFIX}",
-        directory / f"{daily_stem}{_GZIP_JSONL_SUFFIX}",
-        directory / f"{daily_stem}{_JSONL_SUFFIX}",
+        directory / f"{stem}{suffix}" for stem in candidate_stems for suffix in (_GZIP_JSONL_SUFFIX, _JSONL_SUFFIX)
     ]
-    return [path for path in candidates if path.exists() and path.is_file()]
+    existing_candidates = [path for path in candidates if path.exists() and path.is_file()]
+    if not request_id:
+        return existing_candidates
+
+    candidate_set = set(existing_candidates)
+    remaining_paths = [path for path in _iter_archive_paths(directory) if path not in candidate_set]
+    return existing_candidates + remaining_paths
 
 
 def _archive_dir() -> Path:
@@ -177,6 +196,7 @@ def _record_matches(
     kind: str | None,
     transport: str | None,
     request_id: str | None,
+    correlated_request_ids: set[str],
 ) -> bool:
     if direction and record.get("direction") != direction:
         return False
@@ -184,6 +204,70 @@ def _record_matches(
         return False
     if transport and record.get("transport") != transport:
         return False
-    if request_id and str(record.get("request_id") or "") != request_id:
+    if (
+        request_id
+        and request_id not in _record_lookup_ids(record)
+        and record.get("request_id") not in correlated_request_ids
+    ):
         return False
     return True
+
+
+def _correlated_archive_request_ids(
+    paths: list[Path],
+    request_id: str | None,
+) -> set[str]:
+    if not request_id:
+        return set()
+    correlated: set[str] = set()
+    for path in paths:
+        for record in _iter_records(path):
+            if request_id not in _record_lookup_ids(record):
+                continue
+            _add_lookup_id(correlated, record.get("request_id"))
+    return correlated
+
+
+def _record_lookup_ids(record: dict[str, Any]) -> set[str]:
+    lookup_ids: set[str] = set()
+    _add_lookup_id(lookup_ids, record.get("request_id"))
+    _add_payload_lookup_ids(lookup_ids, record.get("payload"))
+    return lookup_ids
+
+
+def _add_payload_lookup_ids(lookup_ids: set[str], payload: Any) -> None:
+    if isinstance(payload, dict):
+        _add_lookup_id(lookup_ids, payload.get("id"))
+        response = payload.get("response")
+        if isinstance(response, dict):
+            _add_lookup_id(lookup_ids, response.get("id"))
+        text = payload.get("text")
+        if isinstance(text, str):
+            _add_text_lookup_ids(lookup_ids, text)
+
+
+def _add_text_lookup_ids(lookup_ids: set[str], text: str) -> None:
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        _add_payload_lookup_ids(lookup_ids, _parse_json_object(stripped))
+
+    for line in stripped.splitlines():
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        _add_payload_lookup_ids(lookup_ids, _parse_json_object(data))
+
+
+def _parse_json_object(value: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _add_lookup_id(lookup_ids: set[str], value: Any) -> None:
+    if isinstance(value, str) and value:
+        lookup_ids.add(value)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast as typing_cast
@@ -183,6 +184,7 @@ class RequestLogsRepository:
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
+        slim_summary: dict[str, int] | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
         resolved_plan_type = plan_type
@@ -210,6 +212,7 @@ class RequestLogsRepository:
             status=status,
             error_code=error_code,
             error_message=error_message,
+            slim_summary_json=_serialize_slim_summary(slim_summary),
             requested_at=requested_at or utcnow(),
         )
         log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
@@ -506,3 +509,16 @@ async def _safe_rollback(session: AsyncSession) -> None:
             await session.rollback()
     except BaseException:
         return
+
+
+def _serialize_slim_summary(summary: dict[str, int] | None) -> str | None:
+    if not summary:
+        return None
+    allowed = {
+        key: value
+        for key, value in summary.items()
+        if key in {"historical_tool_outputs_slimmed", "historical_images_slimmed"} and value > 0
+    }
+    if not allowed:
+        return None
+    return json.dumps(allowed, sort_keys=True, separators=(",", ":"))

@@ -28,6 +28,7 @@ class RequestLogEntry(DashboardModel):
     cost_usd: float | None = None
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
+    slim_summary: dict[str, int] | None = None
 
 
 class RequestLogsResponse(DashboardModel):

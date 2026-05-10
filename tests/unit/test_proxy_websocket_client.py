@@ -53,6 +53,7 @@ class _FakeConnection:
 async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}
+    archived: list[dict[str, object]] = []
 
     async def fake_websocket_connect(url: str, **kwargs):
         seen["url"] = url
@@ -61,6 +62,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
 
     monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
     monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "archive_text", lambda **kwargs: archived.append(kwargs))
     monkeypatch.setattr(
         proxy_websocket_module,
         "get_settings",
@@ -84,9 +86,11 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
         "account-123",
     )
 
-    await websocket.send_text("hello")
+    await websocket.send_text_with_archive_request_id("hello", request_id="req_log_1")
+    await websocket.receive()
 
     assert fake_connection.sent == ["hello"]
+    assert [record["request_id"] for record in archived] == ["req_log_1"]
     assert seen["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["origin"] == "https://chatgpt.com"

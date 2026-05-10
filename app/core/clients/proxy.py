@@ -36,7 +36,7 @@ from multidict import CIMultiDict
 
 from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings, get_settings
-from app.core.conversation_archive import archive_json, archive_text
+from app.core.conversation_archive import archive_bytes, archive_json, archive_text
 from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
@@ -771,19 +771,35 @@ async def _iter_sse_events(
         yield bytes(buffer).decode("utf-8", errors="replace")
 
 
-async def _error_event_from_response(resp: ErrorResponse) -> ResponseFailedEvent:
+async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
+    try:
+        return await resp.json(content_type=None), None
+    except Exception:
+        return None, await resp.text()
+
+
+def _error_archive_payload(data: object | None, text: str | None) -> object:
+    if data is not None:
+        return data
+    return {"text": text or ""}
+
+
+def _error_event_from_response_body(
+    resp: ErrorResponse,
+    *,
+    data: object | None,
+    text: str | None,
+) -> ResponseFailedEvent:
     fallback_message = f"Upstream error: HTTP {resp.status}"
     if resp.reason:
         fallback_message += f" {resp.reason}"
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        message = text.strip() or fallback_message
+    if data is None:
+        message = (text or "").strip() or fallback_message
         return response_failed_event("upstream_error", message, response_id=get_request_id())
 
-    if isinstance(data, dict):
-        error = parse_error_payload(data)
+    if is_json_mapping(data):
+        payload_data = cast(dict[str, JsonValue], data)
+        error = parse_error_payload(payload_data)
         if error:
             payload = error.model_dump(exclude_none=True)
             event = response_failed_event(
@@ -797,31 +813,44 @@ async def _error_event_from_response(resp: ErrorResponse) -> ResponseFailedEvent
                 if key in payload:
                     event["response"]["error"][key] = payload[key]
             return event
-        message = _extract_upstream_message(data)
+        message = _extract_upstream_message(payload_data)
         if message:
             return response_failed_event("upstream_error", message, response_id=get_request_id())
     return response_failed_event("upstream_error", fallback_message, response_id=get_request_id())
 
 
-async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelope:
+async def _error_event_from_response(resp: ErrorResponse) -> ResponseFailedEvent:
+    data, text = await _error_response_body(resp)
+    return _error_event_from_response_body(resp, data=data, text=text)
+
+
+def _error_payload_from_response_body(
+    resp: ErrorResponse,
+    *,
+    data: object | None,
+    text: str | None,
+) -> OpenAIErrorEnvelope:
     fallback_message = f"Upstream error: HTTP {resp.status}"
     if resp.reason:
         fallback_message += f" {resp.reason}"
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        message = text.strip() or fallback_message
+    if data is None:
+        message = (text or "").strip() or fallback_message
         return openai_error("upstream_error", message)
 
-    if isinstance(data, dict):
-        error = parse_error_payload(data)
+    if is_json_mapping(data):
+        payload_data = cast(dict[str, JsonValue], data)
+        error = parse_error_payload(payload_data)
         if error:
             return {"error": _openai_error_detail(error)}
-        message = _extract_upstream_message(data)
+        message = _extract_upstream_message(payload_data)
         if message:
             return openai_error("upstream_error", message)
     return openai_error("upstream_error", fallback_message)
+
+
+async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelope:
+    data, text = await _error_response_body(resp)
+    return _error_payload_from_response_body(resp, data=data, text=text)
 
 
 def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
@@ -1168,6 +1197,9 @@ async def _stream_websocket_events(
     idle_timeout_seconds: float,
     total_timeout_seconds: float | None,
     max_event_bytes: int,
+    archive_account_id: str | None = None,
+    archive_url: str | None = None,
+    archive_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[str]:
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
@@ -1198,7 +1230,29 @@ async def _stream_websocket_events(
 
         if message.type == aiohttp.WSMsgType.TEXT:
             text = message.data
+            archive_text(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                text=text,
+                account_id=archive_account_id,
+                method="GET",
+                url=archive_url,
+                headers=archive_headers,
+                extra={"frame_type": "text"},
+            )
         else:
+            archive_bytes(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                data=message.data,
+                account_id=archive_account_id,
+                method="GET",
+                url=archive_url,
+                headers=archive_headers,
+                extra={"frame_type": "binary"},
+            )
             text = message.data.decode("utf-8", errors="replace")
         text_bytes = text.encode("utf-8")
         if len(text_bytes) > max_event_bytes:
@@ -1313,18 +1367,10 @@ async def _stream_responses_via_websocket(
             idle_timeout_seconds=effective_idle_timeout,
             total_timeout_seconds=remaining_total_timeout,
             max_event_bytes=max_event_bytes,
+            archive_account_id=account_id,
+            archive_url=websocket_url,
+            archive_headers=headers,
         ):
-            archive_text(
-                direction="server_to_codex",
-                kind="responses",
-                transport="websocket",
-                text=event,
-                account_id=account_id,
-                method="GET",
-                url=websocket_url,
-                headers=headers,
-                extra={"event_format": "sse"},
-            )
             parsed_event = parse_sse_event(event)
             if parsed_event and parsed_event.type in ("response.completed", "response.failed", "response.incomplete"):
                 seen_terminal = True
@@ -1890,36 +1936,25 @@ async def stream_responses(
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:
-                if raise_for_status:
-                    error_payload = await _error_payload_from_response(resp)
-                    error_code, error_message = _error_details_from_envelope(error_payload)
-                    archive_json(
-                        direction="server_to_codex",
-                        kind="responses",
-                        transport="http",
-                        payload=error_payload,
-                        account_id=account_id,
-                        method="POST",
-                        url=url,
-                        status_code=status_code,
-                        headers=current_headers,
-                    )
-                    raise ProxyResponseError(resp.status, error_payload)
-                event = await _error_event_from_response(resp)
-                error_code, error_message = _error_details_from_failed_event(event)
-                event_block = format_sse_event(event)
-                archive_text(
+                error_body, error_text = await _error_response_body(resp)
+                archive_json(
                     direction="server_to_codex",
                     kind="responses",
                     transport="http",
-                    text=event_block,
+                    payload=_error_archive_payload(error_body, error_text),
                     account_id=account_id,
                     method="POST",
                     url=url,
                     status_code=status_code,
                     headers=current_headers,
-                    extra={"event_format": "sse"},
                 )
+                if raise_for_status:
+                    error_payload = _error_payload_from_response_body(resp, data=error_body, text=error_text)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    raise ProxyResponseError(resp.status, error_payload)
+                event = _error_event_from_response_body(resp, data=error_body, text=error_text)
+                error_code, error_message = _error_details_from_failed_event(event)
+                event_block = format_sse_event(event)
                 yield event_block
                 return
 
@@ -2353,18 +2388,19 @@ class _CompactCommandTransport:
             ) as resp:
                 status_code = resp.status
                 if resp.status >= 400:
-                    error_payload = await _error_payload_from_response(resp)
+                    error_body, error_text = await _error_response_body(resp)
                     archive_json(
                         direction="server_to_codex",
                         kind="compact",
                         transport="http",
-                        payload=error_payload,
+                        payload=_error_archive_payload(error_body, error_text),
                         account_id=self.account_id,
                         method="POST",
                         url=url,
                         status_code=status_code,
                         headers=upstream_headers,
                     )
+                    error_payload = _error_payload_from_response_body(resp, data=error_body, text=error_text)
                     error_code, error_message = _error_details_from_envelope(error_payload)
                     failure_phase = "status"
                     failure_detail = error_message

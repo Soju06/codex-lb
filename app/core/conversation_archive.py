@@ -62,13 +62,14 @@ def archive_json(
     status_code: int | None = None,
     headers: Mapping[str, str] | None = None,
     extra: Mapping[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> None:
     if not archive_enabled():
         return
 
     record: dict[str, Any] = {
         "timestamp": datetime.now(UTC).isoformat(),
-        "request_id": get_request_id(),
+        "request_id": request_id or get_request_id(),
         "direction": direction,
         "kind": kind,
         "transport": transport,
@@ -96,6 +97,7 @@ def archive_text(
     status_code: int | None = None,
     headers: Mapping[str, str] | None = None,
     extra: Mapping[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> None:
     archive_json(
         direction=direction,
@@ -108,6 +110,7 @@ def archive_text(
         status_code=status_code,
         headers=headers,
         extra=extra,
+        request_id=request_id,
     )
 
 
@@ -123,6 +126,7 @@ def archive_bytes(
     status_code: int | None = None,
     headers: Mapping[str, str] | None = None,
     extra: Mapping[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> None:
     archive_json(
         direction=direction,
@@ -138,6 +142,7 @@ def archive_bytes(
         status_code=status_code,
         headers=headers,
         extra=extra,
+        request_id=request_id,
     )
 
 
@@ -216,6 +221,7 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
             _recover_corrupt_gzip_archive(path)
             _write_gzip_member(path, data)
     except Exception as exc:
+        _RECOVERY_CHECKED_PATHS.discard(path.resolve())
         if _is_disk_pressure_error(exc):
             _pause_archive_for_disk_pressure(path, exc)
             return
@@ -323,10 +329,27 @@ def _gzip_archive_is_readable(path: Path) -> bool:
 
 def _stop_writer() -> None:
     thread = _WRITER_THREAD
-    if thread is None:
+    if thread is None or not thread.is_alive():
+        _drain_queue_synchronously()
         return
+    _WRITE_QUEUE.join()
     _WRITE_QUEUE.put(None)
-    thread.join(timeout=1)
+    thread.join()
+
+
+def _drain_queue_synchronously() -> None:
+    while True:
+        try:
+            item = _WRITE_QUEUE.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            if item is None:
+                continue
+            path, record = item
+            _append_record(path, record)
+        finally:
+            _WRITE_QUEUE.task_done()
 
 
 def _redact_header_value(key: str, value: object) -> str:

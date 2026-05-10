@@ -99,6 +99,24 @@ export const DashboardOverviewSchema = z.object({
   depletionSecondary: DepletionSchema.nullable().optional(),
 });
 
+const RequestLogSlimSummarySchema = z.preprocess(
+  (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+    const summary = value as Record<string, unknown>;
+    return {
+      historicalToolOutputsSlimmed:
+        summary.historicalToolOutputsSlimmed ?? summary.historical_tool_outputs_slimmed,
+      historicalImagesSlimmed: summary.historicalImagesSlimmed ?? summary.historical_images_slimmed,
+    };
+  },
+  z.object({
+    historicalToolOutputsSlimmed: z.number().int().nonnegative().optional(),
+    historicalImagesSlimmed: z.number().int().nonnegative().optional(),
+  }),
+);
+
 export const RequestLogSchema = z.object({
   requestedAt: z.string().datetime({ offset: true }),
   accountId: z.string().nullable(),
@@ -119,6 +137,7 @@ export const RequestLogSchema = z.object({
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),
   latencyMs: z.number().nullable(),
+  slimSummary: RequestLogSlimSummarySchema.nullable().optional(),
 });
 
 export const RequestLogsResponseSchema = z.object({

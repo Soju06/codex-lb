@@ -113,6 +113,24 @@ def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_
     assert bounded_queue.qsize() == 1
 
 
+def test_stop_writer_drains_queued_records_without_thread(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+    pending_queue: queue.Queue[tuple[Path, dict[str, object]] | None] = queue.Queue()
+    pending_queue.put((tmp_path / "drained.jsonl.gz", {"payload": {"text": "queued before shutdown"}}))
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", pending_queue)
+    monkeypatch.setattr(conversation_archive, "_WRITER_THREAD", None)
+
+    conversation_archive._stop_writer()
+
+    [record] = _archive_records(tmp_path)
+    assert record["payload"] == {"text": "queued before shutdown"}
+    assert pending_queue.empty()
+
+
 def test_archive_appends_complete_gzip_members(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,
@@ -221,6 +239,7 @@ def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp
     conversation_archive._append_record(path, {"request_id": "req_full", "payload": "old"})
 
     assert not path.exists()
+    assert path.resolve() not in conversation_archive._RECOVERY_CHECKED_PATHS
     assert "Conversation archive disk pressure detected; pausing archive writes" in caplog.text
     assert "Traceback" not in caplog.text
     assert conversation_archive._archive_disk_pressure_active() is True
@@ -341,12 +360,87 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
             )
             + "\n"
         )
+    crossing_hour_path = tmp_path / "2026-04-29T09.jsonl.gz"
+    with gzip.open(crossing_hour_path, "wt", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-29T09:59:30+00:00",
+                    "request_id": "req_crossing_hour",
+                    "direction": "codex_to_server",
+                    "kind": "responses",
+                    "transport": "http",
+                    "payload": {"input": "started before completion hour"},
+                }
+            )
+            + "\n"
+        )
+    response_id_alias_path = tmp_path / "2026-04-29T11.jsonl.gz"
+    with gzip.open(response_id_alias_path, "wt", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-29T11:00:00+00:00",
+                    "request_id": "req_header_id",
+                    "direction": "codex_to_server",
+                    "kind": "responses",
+                    "transport": "http",
+                    "payload": {"model": "gpt-5.4", "input": "original request body"},
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-29T11:00:00+00:00",
+                    "request_id": "req_header_id",
+                    "direction": "server_to_codex",
+                    "kind": "responses",
+                    "transport": "http",
+                    "payload": {
+                        "text": (
+                            'event: response.completed\ndata: {"type":"response.completed",'
+                            '"response":{"id":"resp_logged_id"}}\n\n'
+                        )
+                    },
+                }
+            )
+            + "\n"
+        )
+    long_running_path = tmp_path / "2026-04-29T13.jsonl.gz"
+    with gzip.open(long_running_path, "wt", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-29T13:05:00+00:00",
+                    "request_id": "req_long_running",
+                    "direction": "server_to_codex",
+                    "kind": "responses",
+                    "transport": "http",
+                    "payload": {"text": "late event"},
+                }
+            )
+            + "\n"
+        )
 
     files = conversation_archive_service.list_archive_files()
-    assert [file.name for file in files] == ["2026-04-29T10.jsonl.gz", "2026-04-28.jsonl"]
-    assert [file.date for file in files] == ["2026-04-29T10", "2026-04-28"]
+    assert [file.name for file in files] == [
+        "2026-04-29T13.jsonl.gz",
+        "2026-04-29T11.jsonl.gz",
+        "2026-04-29T10.jsonl.gz",
+        "2026-04-29T09.jsonl.gz",
+        "2026-04-28.jsonl",
+    ]
+    assert [file.date for file in files] == [
+        "2026-04-29T13",
+        "2026-04-29T11",
+        "2026-04-29T10",
+        "2026-04-29T09",
+        "2026-04-28",
+    ]
     assert files[0].compressed is True
-    assert files[1].compressed is False
+    assert files[4].compressed is False
 
     page = conversation_archive_service.read_archive_records(
         filename="2026-04-29T10.jsonl.gz",
@@ -384,6 +478,36 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
         requested_at=datetime.fromisoformat("2026-04-29T10:30:00+00:00"),
     )
     assert [record["request_id"] for record in requested_at_page.records] == ["req_gzip"]
+
+    crossing_hour_page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="req_crossing_hour",
+        requested_at=datetime.fromisoformat("2026-04-29T10:01:00+00:00"),
+    )
+    assert [record["request_id"] for record in crossing_hour_page.records] == ["req_crossing_hour"]
+
+    long_running_page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="req_long_running",
+        requested_at=datetime.fromisoformat("2026-04-29T10:01:00+00:00"),
+    )
+    assert [record["request_id"] for record in long_running_page.records] == ["req_long_running"]
+
+    response_id_alias_page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="resp_logged_id",
+        requested_at=datetime.fromisoformat("2026-04-29T11:00:03+00:00"),
+    )
+    assert [record["direction"] for record in response_id_alias_page.records] == [
+        "codex_to_server",
+        "server_to_codex",
+    ]
 
 
 def test_archive_service_expands_user_home(monkeypatch, tmp_path):

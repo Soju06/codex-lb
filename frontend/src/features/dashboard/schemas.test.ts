@@ -149,6 +149,10 @@ describe("RequestLogsResponseSchema", () => {
           reasoningEffort: null,
           costUsd: 0.001,
           latencyMs: 42,
+          slimSummary: {
+            historical_tool_outputs_slimmed: 2,
+            historical_images_slimmed: 1,
+          },
         },
       ],
       total: 1,
@@ -159,6 +163,10 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.slimSummary).toEqual({
+      historicalToolOutputsSlimmed: 2,
+      historicalImagesSlimmed: 1,
+    });
   });
 
   it("parses request-log filter options including API keys", () => {

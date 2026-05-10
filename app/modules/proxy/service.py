@@ -53,12 +53,14 @@ from app.core.clients.proxy import stream_responses as core_stream_responses
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
+    UpstreamWebSocketArchiveMetadata,
     UpstreamWebSocketMessage,
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     OpenAIErrorDetail,
@@ -2758,10 +2760,21 @@ class ProxyService:
                     )
 
                 try:
+                    archive_request_id = (
+                        request_state.request_log_id or request_state.request_id if request_state is not None else None
+                    )
                     if text_data is not None:
-                        await upstream.send_text(text_data)
+                        await _send_upstream_websocket_text(
+                            upstream,
+                            text_data,
+                            archive_request_id,
+                        )
                     elif bytes_data is not None:
-                        await upstream.send_bytes(bytes_data)
+                        await _send_upstream_websocket_bytes(
+                            upstream,
+                            bytes_data,
+                            archive_request_id,
+                        )
                 except Exception:
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,
@@ -3000,6 +3013,7 @@ class ProxyService:
             )
             if slim_summary is not None:
                 upstream_payload = slimmed_payload
+                request_state.slim_summary = slim_summary
                 text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
                 logger.warning(
                     (
@@ -5001,7 +5015,11 @@ class ProxyService:
             async with session.pending_lock:
                 session.pending_requests.append(request_state)
             request_enqueued = True
-            await session.upstream.send_text(text_data)
+            await _send_upstream_websocket_text(
+                session.upstream,
+                text_data,
+                request_state.request_log_id or request_state.request_id,
+            )
             session.last_used_at = time.monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -5119,7 +5137,11 @@ class ProxyService:
                 async with session.pending_lock:
                     session.pending_requests.append(warmup_state)
                 request_enqueued = True
-                await session.upstream.send_text(warmup_text)
+                await _send_upstream_websocket_text(
+                    session.upstream,
+                    warmup_text,
+                    warmup_state.request_log_id or warmup_state.request_id,
+                )
                 while True:
                     event_block = await event_queue.get()
                     if event_block is None:
@@ -5332,7 +5354,11 @@ class ProxyService:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                await session.upstream.send_text(retry_text_data)
+                await _send_upstream_websocket_text(
+                    session.upstream,
+                    retry_text_data,
+                    request_state.request_log_id or request_state.request_id,
+                )
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -5384,7 +5410,11 @@ class ProxyService:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
-            await session.upstream.send_text(request_text)
+            await _send_upstream_websocket_text(
+                session.upstream,
+                request_text,
+                request_state.request_log_id or request_state.request_id,
+            )
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -5608,6 +5638,12 @@ class ProxyService:
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
             for grouped_request_state in grouped_previous_response_request_states:
+                _archive_upstream_websocket_text(
+                    grouped_request_state,
+                    text,
+                    archive_metadata=_http_bridge_archive_metadata(session),
+                    account_id=session.account.id,
+                )
                 grouped_request_state.error_http_status_override = 502
                 (
                     _grouped_downstream_text,
@@ -5642,6 +5678,13 @@ class ProxyService:
             _record_response_event(terminal_request_state, event_type)
 
         status_request_state = terminal_request_state or matched_request_state
+        if status_request_state is not None:
+            _archive_upstream_websocket_text(
+                status_request_state,
+                text,
+                archive_metadata=_http_bridge_archive_metadata(session),
+                account_id=session.account.id,
+            )
         if status_request_state is None and is_previous_response_not_found_event:
             session.upstream_control.reconnect_requested = True
             return
@@ -5983,6 +6026,7 @@ class ProxyService:
                         api_key=api_key,
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
+                        upstream_archive_metadata=_upstream_websocket_archive_metadata(upstream),
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
@@ -6017,6 +6061,30 @@ class ProxyService:
                     continue
                 if message.kind == "binary" and message.data is not None:
                     downstream_activity.mark()
+                    async with pending_lock:
+                        archive_request_state = _match_websocket_request_state_for_anonymous_event(
+                            pending_requests,
+                            prefer_previous_response_not_found=False,
+                        )
+                    if archive_request_state is not None:
+                        _archive_upstream_websocket_bytes(
+                            archive_request_state,
+                            message.data,
+                            archive_metadata=_upstream_websocket_archive_metadata(upstream),
+                            account_id=account_id_value,
+                        )
+                    else:
+                        archive_metadata = _upstream_websocket_archive_metadata(upstream)
+                        archive_bytes(
+                            direction="server_to_codex",
+                            kind="responses",
+                            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                            data=message.data,
+                            account_id=archive_metadata.account_id if archive_metadata else account_id_value,
+                            url=archive_metadata.url if archive_metadata else None,
+                            headers=archive_metadata.headers if archive_metadata else None,
+                            extra={"frame_type": "binary"},
+                        )
                     await self._send_downstream_websocket_bytes(
                         websocket,
                         client_send_lock=client_send_lock,
@@ -6094,6 +6162,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
+        upstream_archive_metadata: UpstreamWebSocketArchiveMetadata | None = None,
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -6113,6 +6182,7 @@ class ProxyService:
 
         async with pending_lock:
             request_state = None
+            archive_request_state = None
             created_request_state = None
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
@@ -6138,6 +6208,7 @@ class ProxyService:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+            archive_request_state = request_state
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -6176,6 +6247,12 @@ class ProxyService:
             upstream_control.reconnect_requested = True
             downstream_texts: list[str] = []
             for grouped_request_state in grouped_previous_response_request_states:
+                _archive_upstream_websocket_text(
+                    grouped_request_state,
+                    text,
+                    archive_metadata=upstream_archive_metadata,
+                    account_id=account_id_value,
+                )
                 (
                     grouped_downstream_text,
                     _grouped_event_block,
@@ -6205,9 +6282,22 @@ class ProxyService:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
+            if archive_request_state is not None:
+                _archive_upstream_websocket_text(
+                    archive_request_state,
+                    text,
+                    archive_metadata=upstream_archive_metadata,
+                    account_id=account_id_value,
+                )
             if is_previous_response_not_found_event:
                 upstream_control.suppress_downstream_event = True
             return text
+        _archive_upstream_websocket_text(
+            request_state,
+            text,
+            archive_metadata=upstream_archive_metadata,
+            account_id=account_id_value,
+        )
 
         retry_is_previous_response_not_found = is_previous_response_not_found_event
         retry_error_code = _websocket_precreated_retry_error_code(
@@ -6458,6 +6548,7 @@ class ProxyService:
                 actual_service_tier=request_state.actual_service_tier,
                 latency_first_token_ms=request_state.latency_first_token_ms,
                 session_id=request_state.session_id,
+                slim_summary=request_state.slim_summary,
             )
 
     async def _write_websocket_connect_failure(
@@ -6487,6 +6578,7 @@ class ProxyService:
             actual_service_tier=request_state.actual_service_tier,
             latency_first_token_ms=request_state.latency_first_token_ms,
             session_id=request_state.session_id,
+            slim_summary=request_state.slim_summary,
         )
 
     async def _emit_websocket_connect_failure(
@@ -6626,6 +6718,7 @@ class ProxyService:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 latency_first_token_ms=request_state.latency_first_token_ms,
+                slim_summary=request_state.slim_summary,
             )
 
     async def _emit_websocket_terminal_error(
@@ -7926,6 +8019,7 @@ class ProxyService:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         session_id: str | None = None,
+        slim_summary: dict[str, int] | None = None,
     ) -> None:
         with anyio.CancelScope(shield=True):
             try:
@@ -7950,6 +8044,7 @@ class ProxyService:
                         status=status,
                         error_code=error_code,
                         error_message=error_message,
+                        slim_summary=slim_summary,
                     )
             except Exception:
                 logger.warning(
@@ -8388,6 +8483,101 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
     request_state.response_event_count += 1
 
 
+def _set_upstream_archive_request_id(upstream: UpstreamResponsesWebSocket, request_id: str | None) -> None:
+    setter = getattr(upstream, "set_archive_request_id", None)
+    if callable(setter):
+        setter(request_id)
+
+
+def _upstream_websocket_archive_metadata(
+    upstream: UpstreamResponsesWebSocket,
+) -> UpstreamWebSocketArchiveMetadata | None:
+    getter = getattr(upstream, "archive_metadata", None)
+    if not callable(getter):
+        return None
+    metadata = getter()
+    if inspect.isawaitable(metadata):
+        close = getattr(metadata, "close", None)
+        if callable(close):
+            close()
+        return None
+    return metadata if isinstance(metadata, UpstreamWebSocketArchiveMetadata) else None
+
+
+def _http_bridge_archive_metadata(session: "_HTTPBridgeSession") -> UpstreamWebSocketArchiveMetadata:
+    return _upstream_websocket_archive_metadata(session.upstream) or UpstreamWebSocketArchiveMetadata(
+        url=None,
+        headers=session.headers,
+        account_id=session.account.id,
+    )
+
+
+async def _send_upstream_websocket_text(
+    upstream: UpstreamResponsesWebSocket,
+    text: str,
+    request_id: str | None,
+) -> None:
+    sender = getattr(upstream, "send_text_with_archive_request_id", None)
+    if callable(sender):
+        await sender(text, request_id=request_id)
+        return
+    _set_upstream_archive_request_id(upstream, request_id)
+    await upstream.send_text(text)
+
+
+async def _send_upstream_websocket_bytes(
+    upstream: UpstreamResponsesWebSocket,
+    data: bytes,
+    request_id: str | None,
+) -> None:
+    sender = getattr(upstream, "send_bytes_with_archive_request_id", None)
+    if callable(sender):
+        await sender(data, request_id=request_id)
+        return
+    _set_upstream_archive_request_id(upstream, request_id)
+    await upstream.send_bytes(data)
+
+
+def _archive_upstream_websocket_text(
+    request_state: _WebSocketRequestState,
+    text: str,
+    *,
+    archive_metadata: UpstreamWebSocketArchiveMetadata | None = None,
+    account_id: str | None = None,
+) -> None:
+    archive_text(
+        direction="server_to_codex",
+        kind="responses",
+        transport=request_state.transport,
+        text=text,
+        account_id=archive_metadata.account_id if archive_metadata else account_id,
+        url=archive_metadata.url if archive_metadata else None,
+        headers=archive_metadata.headers if archive_metadata else None,
+        extra={"frame_type": "text", "response_id": request_state.response_id},
+        request_id=request_state.request_log_id or request_state.request_id,
+    )
+
+
+def _archive_upstream_websocket_bytes(
+    request_state: _WebSocketRequestState,
+    data: bytes,
+    *,
+    archive_metadata: UpstreamWebSocketArchiveMetadata | None = None,
+    account_id: str | None = None,
+) -> None:
+    archive_bytes(
+        direction="server_to_codex",
+        kind="responses",
+        transport=request_state.transport,
+        data=data,
+        account_id=archive_metadata.account_id if archive_metadata else account_id,
+        url=archive_metadata.url if archive_metadata else None,
+        headers=archive_metadata.headers if archive_metadata else None,
+        extra={"frame_type": "binary", "response_id": request_state.response_id},
+        request_id=request_state.request_log_id or request_state.request_id,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _FilePinEntry:
     account_id: str
@@ -8442,6 +8632,7 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    slim_summary: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

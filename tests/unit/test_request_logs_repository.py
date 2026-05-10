@@ -7,11 +7,12 @@ import pytest
 from sqlalchemy.exc import ResourceClosedError
 
 from app.db.session import SessionLocal
+from app.modules.request_logs.mappers import to_request_log_entry
 from app.modules.request_logs.repository import RequestLogsRepository
 
 
 @pytest.mark.asyncio
-async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
+async def test_add_log_ignores_closed_transaction(monkeypatch, db_setup) -> None:
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
 
@@ -37,6 +38,35 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
 
         assert log.request_id == "req"
         assert log.cost_usd is not None
+
+
+@pytest.mark.asyncio
+async def test_add_log_persists_response_create_slim_summary(db_setup) -> None:
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        log = await repo.add_log(
+            account_id=None,
+            request_id="req_slim",
+            model="gpt-5.2",
+            input_tokens=1000,
+            output_tokens=500,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            slim_summary={
+                "historical_tool_outputs_slimmed": 2,
+                "historical_images_slimmed": 1,
+                "unrelated_counter": 99,
+            },
+        )
+
+        assert log.slim_summary_json == '{"historical_images_slimmed":1,"historical_tool_outputs_slimmed":2}'
+        entry = to_request_log_entry(log)
+        assert entry.slim_summary == {
+            "historical_tool_outputs_slimmed": 2,
+            "historical_images_slimmed": 1,
+        }
 
 
 @pytest.mark.asyncio

@@ -81,6 +81,10 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: "high",
             costUsd: 0.01,
             latencyMs: 1000,
+            slimSummary: {
+              historicalToolOutputsSlimmed: 2,
+              historicalImagesSlimmed: 1,
+            },
           },
         ]}
       />,
@@ -103,6 +107,8 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("req-1")).toBeInTheDocument();
     expect(screen.getByTestId("request-archive-panel")).toHaveTextContent("Archive for req-1");
     expect(screen.getAllByText("rate_limit_exceeded")[0]).toBeInTheDocument();
+    expect(screen.getByText("2 historical tool outputs slimmed")).toBeInTheDocument();
+    expect(screen.getByText("1 historical images slimmed")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
 
     await act(async () => {

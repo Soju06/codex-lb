@@ -49,16 +49,29 @@ class UpstreamWebSocketMessage:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class UpstreamWebSocketArchiveMetadata:
+    url: str | None
+    headers: dict[str, str] | None
+    account_id: str | None
+
+
 class UpstreamResponsesWebSocket(Protocol):
     async def send_text(self, text: str) -> None: ...
 
+    async def send_text_with_archive_request_id(self, text: str, *, request_id: str | None) -> None: ...
+
     async def send_bytes(self, data: bytes) -> None: ...
+
+    async def send_bytes_with_archive_request_id(self, data: bytes, *, request_id: str | None) -> None: ...
 
     async def receive(self) -> UpstreamWebSocketMessage: ...
 
     async def close(self) -> None: ...
 
     def response_header(self, name: str) -> str | None: ...
+
+    def archive_metadata(self) -> UpstreamWebSocketArchiveMetadata | None: ...
 
 
 class WebsocketsResponsesWebSocket:
@@ -68,8 +81,16 @@ class WebsocketsResponsesWebSocket:
     async def send_text(self, text: str) -> None:
         await self._connection.send(text)
 
+    async def send_text_with_archive_request_id(self, text: str, *, request_id: str | None) -> None:
+        del request_id
+        await self.send_text(text)
+
     async def send_bytes(self, data: bytes) -> None:
         await self._connection.send(data)
+
+    async def send_bytes_with_archive_request_id(self, data: bytes, *, request_id: str | None) -> None:
+        del request_id
+        await self.send_bytes(data)
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
@@ -102,6 +123,12 @@ class WebsocketsResponsesWebSocket:
             return None
         return str(value)
 
+    def set_archive_request_id(self, request_id: str | None) -> None:
+        del request_id
+
+    def archive_metadata(self) -> UpstreamWebSocketArchiveMetadata | None:
+        return None
+
 
 class ArchivingResponsesWebSocket:
     def __init__(
@@ -117,7 +144,13 @@ class ArchivingResponsesWebSocket:
         self._headers = headers
         self._account_id = account_id
 
+    def set_archive_request_id(self, request_id: str | None) -> None:
+        del request_id
+
     async def send_text(self, text: str) -> None:
+        await self.send_text_with_archive_request_id(text, request_id=None)
+
+    async def send_text_with_archive_request_id(self, text: str, *, request_id: str | None) -> None:
         archive_text(
             direction="codex_to_server",
             kind="responses",
@@ -128,10 +161,14 @@ class ArchivingResponsesWebSocket:
             url=self._url,
             headers=self._headers,
             extra={"frame_type": "text"},
+            request_id=request_id,
         )
         await self._wrapped.send_text(text)
 
     async def send_bytes(self, data: bytes) -> None:
+        await self.send_bytes_with_archive_request_id(data, request_id=None)
+
+    async def send_bytes_with_archive_request_id(self, data: bytes, *, request_id: str | None) -> None:
         archive_bytes(
             direction="codex_to_server",
             kind="responses",
@@ -142,54 +179,25 @@ class ArchivingResponsesWebSocket:
             url=self._url,
             headers=self._headers,
             extra={"frame_type": "binary"},
+            request_id=request_id,
         )
         await self._wrapped.send_bytes(data)
 
     async def receive(self) -> UpstreamWebSocketMessage:
-        message = await self._wrapped.receive()
-        if message.kind == "text" and message.text is not None:
-            archive_text(
-                direction="server_to_codex",
-                kind="responses",
-                transport="websocket",
-                text=message.text,
-                account_id=self._account_id,
-                method="GET",
-                url=self._url,
-                headers=self._headers,
-                extra={"frame_type": "text"},
-            )
-        elif message.kind == "binary" and message.data is not None:
-            archive_bytes(
-                direction="server_to_codex",
-                kind="responses",
-                transport="websocket",
-                data=message.data,
-                account_id=self._account_id,
-                method="GET",
-                url=self._url,
-                headers=self._headers,
-                extra={"frame_type": "binary"},
-            )
-        else:
-            archive_text(
-                direction="server_to_codex",
-                kind="responses",
-                transport="websocket",
-                text=message.error or "",
-                account_id=self._account_id,
-                method="GET",
-                url=self._url,
-                headers=self._headers,
-                extra={"frame_type": message.kind, "close_code": message.close_code},
-            )
-        return message
+        return await self._wrapped.receive()
 
     async def close(self) -> None:
         await self._wrapped.close()
 
     def response_header(self, name: str) -> str | None:
         return self._wrapped.response_header(name)
+
+    def archive_metadata(self) -> UpstreamWebSocketArchiveMetadata:
+        return UpstreamWebSocketArchiveMetadata(
+            url=self._url,
+            headers=self._headers,
+            account_id=self._account_id,
+        )
 
 
 def filter_inbound_websocket_headers(headers: dict[str, str]) -> dict[str, str]:

@@ -24,6 +24,8 @@ class SettingsRepository:
             upstream_stream_transport="default",
             prefer_earlier_reset_accounts=True,
             routing_strategy="capacity_weighted",
+            relative_availability_power=2.0,
+            relative_availability_top_k=5,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=43200,
             import_without_overwrite=True,
@@ -54,6 +56,8 @@ class SettingsRepository:
         upstream_stream_transport: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
+        relative_availability_power: float | None = None,
+        relative_availability_top_k: int | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
@@ -72,6 +76,10 @@ class SettingsRepository:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
+        if relative_availability_power is not None:
+            settings.relative_availability_power = relative_availability_power
+        if relative_availability_top_k is not None:
+            settings.relative_availability_top_k = relative_availability_top_k
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if dashboard_session_ttl_seconds is not None:

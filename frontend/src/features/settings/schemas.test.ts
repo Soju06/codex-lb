@@ -11,7 +11,9 @@ describe("DashboardSettingsSchema", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
-      routingStrategy: "round_robin",
+      routingStrategy: "relative_availability",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       importWithoutOverwrite: true,
@@ -22,7 +24,9 @@ describe("DashboardSettingsSchema", () => {
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("default");
-    expect(parsed.routingStrategy).toBe("round_robin");
+    expect(parsed.routingStrategy).toBe("relative_availability");
+    expect(parsed.relativeAvailabilityPower).toBe(2);
+    expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.importWithoutOverwrite).toBe(true);
@@ -36,7 +40,9 @@ describe("SettingsUpdateRequestSchema", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "websocket",
       preferEarlierResetAccounts: true,
-      routingStrategy: "usage_weighted",
+      routingStrategy: "relative_availability",
+      relativeAvailabilityPower: 1.5,
+      relativeAvailabilityTopK: 7,
       openaiCacheAffinityMaxAgeSeconds: 120,
       dashboardSessionTtlSeconds: 7200,
       importWithoutOverwrite: true,
@@ -48,7 +54,9 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.importWithoutOverwrite).toBe(true);
-    expect(parsed.routingStrategy).toBe("usage_weighted");
+    expect(parsed.routingStrategy).toBe("relative_availability");
+    expect(parsed.relativeAvailabilityPower).toBe(1.5);
+    expect(parsed.relativeAvailabilityTopK).toBe(7);
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
   });
@@ -73,6 +81,8 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.relativeAvailabilityPower).toBeUndefined();
+    expect(parsed.relativeAvailabilityTopK).toBeUndefined();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
     expect(parsed.dashboardSessionTtlSeconds).toBeUndefined();
   });

@@ -497,6 +497,16 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
                 ).scalar_one()
                 assert routing_strategy == "capacity_weighted"
+            assert "relative_availability_power" in dashboard_columns
+            relative_availability_power = (
+                await session.execute(text("SELECT relative_availability_power FROM dashboard_settings WHERE id=1"))
+            ).scalar_one()
+            assert relative_availability_power == 2.0
+            assert "relative_availability_top_k" in dashboard_columns
+            relative_availability_top_k = (
+                await session.execute(text("SELECT relative_availability_top_k FROM dashboard_settings WHERE id=1"))
+            ).scalar_one()
+            assert relative_availability_top_k == 5
             assert "openai_cache_affinity_max_age_seconds" in dashboard_columns
             affinity_ttl = (
                 await session.execute(

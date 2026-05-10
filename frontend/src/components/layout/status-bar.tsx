@@ -7,7 +7,11 @@ import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
-function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_weighted", sticky: boolean, preferEarlier: boolean): string {
+function getRoutingLabel(
+  strategy: "usage_weighted" | "round_robin" | "capacity_weighted" | "relative_availability",
+  sticky: boolean,
+  preferEarlier: boolean,
+): string {
   if (strategy === "round_robin") {
     return sticky ? "Round robin + Sticky threads" : "Round robin";
   }
@@ -16,6 +20,9 @@ function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_
     if (sticky) return "Capacity weighted + Sticky threads";
     if (preferEarlier) return "Capacity weighted + Early reset";
     return "Capacity weighted";
+  }
+  if (strategy === "relative_availability") {
+    return sticky ? "Relative availability + Sticky threads" : "Relative availability";
   }
   if (sticky && preferEarlier) return "Sticky + Early reset";
   if (sticky) return "Sticky threads";

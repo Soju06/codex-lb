@@ -60,6 +60,8 @@ async def _invoke_stickiness(
     sticky_max_age_seconds: int | None = 600,
     budget_threshold_pct: float = 95.0,
     routing_strategy: RoutingStrategy = "usage_weighted",
+    relative_availability_power: float = 2.0,
+    relative_availability_top_k: int = 5,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -84,6 +86,8 @@ async def _invoke_stickiness(
         budget_threshold_pct=budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
         routing_strategy=routing_strategy,
+        relative_availability_power=relative_availability_power,
+        relative_availability_top_k=relative_availability_top_k,
         sticky_repo=sticky_repo,
     )
 
@@ -398,6 +402,43 @@ async def test_first_request_creates_sticky_mapping():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_first_sticky_request_honors_relative_availability_tuning():
+    """When no sticky mapping exists yet, fallback selection must still use
+    configured relative-availability tuning instead of hard-coded defaults."""
+    now = time.time()
+    acc_a = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 10 * 60),
+        capacity_credits=1_000.0,
+    )
+    acc_b = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 11 * 60),
+        capacity_credits=900.0,
+    )
+    repo = _make_sticky_repo(existing_account_id=None)
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key-relative-availability",
+        repo,
+        routing_strategy="relative_availability",
+        relative_availability_power=10.0,
+        relative_availability_top_k=1,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.upsert.assert_called_once_with("key-relative-availability", "a", kind=StickySessionKind.PROMPT_CACHE)
 
 
 # ---------------------------------------------------------------------------

@@ -349,6 +349,8 @@ export function createDashboardSettings(
 		upstreamStreamTransport: "default",
 		preferEarlierResetAccounts: false,
 		routingStrategy: "usage_weighted",
+		relativeAvailabilityPower: 2,
+		relativeAvailabilityTopK: 5,
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
 		importWithoutOverwrite: false,

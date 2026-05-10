@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gzip
 import inspect
 import json
@@ -45,6 +46,7 @@ from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.image_processor import ImageProcessingError, PromptImageMode, process_for_prompt_bytes
 from app.core.clients.proxy import (
     ProxyResponseError,
+    _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
@@ -404,6 +406,24 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
+        request_id = ensure_request_id()
+        payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
+            payload,
+            headers,
+            request_id=request_id,
+        )
+        payload_size_estimate_bytes = len(
+            json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        )
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(get_settings())
+        if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+            logger.info(
+                "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
+                payload_size_estimate_bytes,
+                ws_payload_budget_bytes,
+                request_id,
+            )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if not runtime_config.enabled:
             async for line in self._stream_with_retry(
                 payload,
@@ -415,6 +435,7 @@ class ProxyService:
                 api_key_reservation=api_key_reservation,
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
             ):
                 yield line
             return
@@ -438,6 +459,7 @@ class ProxyService:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            rewritten_file_account_id=rewritten_file_account_id,
         ):
             yield line
 
@@ -462,14 +484,10 @@ class ProxyService:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        rewritten_file_account_id: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
-        payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-            payload,
-            headers,
-            request_id=request_id,
-        )
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
@@ -7038,6 +7056,7 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         request_transport: str,
+        rewritten_file_account_id: str | None = None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
@@ -7046,11 +7065,12 @@ class ProxyService:
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
-        payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-            payload,
-            headers,
-            request_id=request_id,
-        )
+        if rewritten_file_account_id is None:
+            payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
+                payload,
+                headers,
+                request_id=request_id,
+            )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,

@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Protocol, Self, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
@@ -622,6 +622,83 @@ def test_ws_transport_payload_budget_uses_settings_limit() -> None:
     assert proxy_module._ws_transport_payload_budget_bytes(SimpleNamespace(max_sse_event_bytes=2 * 1024 * 1024)) == (
         1 * 1024 * 1024
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_rewritten_payload(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.max_sse_event_bytes = 16 * 1024 * 1024
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+
+    oversized_payload = MagicMock()
+    oversized_payload.to_payload.return_value = {
+        "model": "gpt-5.4",
+        "input": "x" * (proxy_module._ws_transport_payload_budget_bytes(settings) + 1024),
+    }
+
+    rewrite = AsyncMock(return_value=(oversized_payload, "acc_rewritten", ["file_img"]))
+    monkeypatch.setattr(service, "_rewrite_input_image_file_references", rewrite)
+
+    calls: list[tuple[str, object, str | None]] = []
+
+    async def fake_stream_with_retry(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del headers, kwargs
+        calls.append(("retry", payload, rewritten_file_account_id))
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del payload, headers, rewritten_file_account_id, kwargs
+        calls.append(("bridge", None, None))
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=MagicMock(),
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    rewrite.assert_awaited_once()
+    assert calls == [("retry", oversized_payload, "acc_rewritten")]
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():

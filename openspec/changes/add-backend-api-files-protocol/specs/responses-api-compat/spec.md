@@ -70,6 +70,13 @@ The proxy MUST NOT trim, slim, or rewrite any conversation content other than th
 - **THEN** the request MUST be sent over HTTP `POST` instead of WebSocket
 - **AND** explicit `upstream_stream_transport = "websocket"` overrides MUST still take precedence
 
+#### Scenario: large inline-rewritten payload bypasses the HTTP responses bridge
+
+- **GIVEN** the HTTP responses bridge is enabled and the rewritten payload exceeds the WebSocket frame budget
+- **WHEN** the proxy receives a `/v1/responses`, `/backend-api/codex/responses`, or `/responses/compact` request
+- **THEN** the bridge MUST be bypassed for that request and the request MUST be sent over raw HTTP
+- **AND** subsequent smaller requests MUST continue to use the bridge normally
+
 ### Requirement: Clean upstream close before any response event fails fast
 
 When the HTTP responses bridge observes an upstream websocket close with `close_code = 1000` before any `response.*` event has been surfaced for the pending request, the proxy MUST classify the close as rejected input, surface HTTP 502 `upstream_rejected_input`, and MUST NOT trigger `retry_precreated` or `retry_fresh_upstream`.

@@ -66,6 +66,8 @@ This bug was a three-fault chain:
   - `/responses/compact`
 - Added `_classify_upstream_close()` and `response_event_count` tracking.
 - HTTP bridge `retry_precreated` now fails fast with `502 upstream_rejected_input` when upstream closes with `close_code=1000` before any `response.*` event.
+- `stream_http_responses()` now rewrites uploaded `input_image` references before branch selection, estimates the post-rewrite JSON payload size, and bypasses the HTTP responses bridge per request when that rewritten body exceeds the WebSocket frame budget.
+- The bypass uses a local `dataclasses.replace(runtime_config, enabled=False)` copy only, so bridge state stays unchanged globally and smaller follow-up requests still use the bridge normally.
 
 ### `tests/unit/test_image_processor.py`
 
@@ -91,6 +93,7 @@ This bug was a three-fault chain:
   - clean-close classifier
   - HTTP bridge precreated retry suppression on rejected input
   - large rewritten payloads forcing HTTP only in `auto`
+  - large rewritten payloads bypassing the HTTP responses bridge selector
   - smaller / unknown payload sizes preserving websocket preference
   - explicit transport overrides still winning
   - websocket budget calculation from `max_sse_event_bytes`
@@ -102,6 +105,7 @@ This bug was a three-fault chain:
   - `tasks.md`
   - `specs/responses-api-compat/spec.md`
 - Documented accepted `input_file` / uploaded `input_image` shapes, the inline rewrite contract, the 16 MiB cap, the “rewrite only the targeted `input_image` parts” rule, the auto HTTP fallback for oversized rewritten payloads, and the clean-close fail-fast behavior.
+- Added the bridge-bypass scenario so the OpenSpec now covers the default bridge-enabled `/responses` path as well as `_resolve_stream_transport()`.
 
 ### Dependency / lockfile
 

@@ -32,47 +32,36 @@ When multiple `file_id`s are referenced and several are pinned, the most-recentl
 - **WHEN** a `/v1/responses` request references `file_xyz` AND sets an explicit `prompt_cache_key`
 - **THEN** the proxy MUST follow the prompt-cache affinity for routing and MUST NOT use the file_id pin
 
-### Requirement: Responses requests inline-rewrite uploaded input_image references
+### Requirement: Responses requests reject uploaded input_image references
 
-The system SHALL accept the following attached-file shapes in `/v1/responses`, `/backend-api/codex/responses`, and `/responses/compact` request payloads:
+The system SHALL accept `{"type":"input_file","file_id":"file_*"}` attached-file items in `/v1/responses`, `/backend-api/codex/responses`, and `/responses/compact` request payloads and forward them verbatim.
 
-- `{"type":"input_file","file_id":"file_*"}` forwarded verbatim
-- `{"type":"input_image","file_id":"file_*"}` rewritten to an inline `data:` URL
-- `{"type":"input_image","image_url":"sediment://file_*"}` rewritten to an inline `data:` URL
+When an `input_image` part contains a `file_id` field or an `image_url` starting with `sediment://`, the proxy MUST return HTTP 400 with `error.code = "unsupported_input_image_format"` and an explanation that the upstream Responses API only accepts inline `data:` URLs for `input_image`. The proxy MUST NOT fetch the upload, MUST NOT inline-convert the image, and MUST NOT trim, slim, or rewrite any conversation content.
 
-For `input_image` upload references, the proxy MUST resolve the file pin to the upload's owning account, fetch bytes from the pinned finalize `download_url`, run a codex-faithful image processing pipeline, and replace only the referenced `input_image` part with an inline `data:{mime};base64,{b64}` URL before forwarding. The rewrite pipeline MUST whitelist `PNG`, `JPEG`, `GIF`, and `WebP`; preserve PNG/JPEG/WebP bytes verbatim when the image already fits within 2048x2048; re-encode GIF as PNG; resize oversized images to fit within 2048x2048; keep resized PNG/JPEG/WebP in their source format; use JPEG quality 85 for resized JPEG; and use lossless encoding for resized WebP. The proxy MUST cap each fetched attachment at 16 MiB and reject larger items with HTTP 400 `file_too_large`.
+`app/core/openai/requests.py::extract_input_image_file_references` MAY be used to detect the unsupported shape. `app/core/clients/image_processor.py` and `app/core/clients/files.py::fetch_file_bytes()` remain reusable utilities, but this request path MUST NOT use them to reshape inbound conversation payloads.
 
-The proxy MUST NOT trim, slim, or rewrite any conversation content other than the `input_image` parts that reference an upload.
+#### Scenario: input_image file_id is rejected before forwarding
 
-#### Scenario: input_image file_id is rewritten inline before forwarding
-
-- **GIVEN** a finalized upload pin for `file_img`
 - **WHEN** a `/v1/responses` request contains `{"type":"input_image","file_id":"file_img"}`
-- **THEN** the proxy fetches the upload bytes from the pinned `download_url`
-- **AND** forwards the request with that part rewritten to an inline `data:image/...;base64,...` URL
+- **THEN** the proxy returns HTTP 400 with `error.code = "unsupported_input_image_format"`
+- **AND** the response explains that inline `data:` URLs are the supported `input_image` contract
 
-#### Scenario: sediment upload URL is rewritten inline before forwarding
+#### Scenario: sediment upload URL is rejected before forwarding
 
-- **GIVEN** a finalized upload pin for `file_img`
 - **WHEN** a `/responses/compact` request contains `{"type":"input_image","image_url":"sediment://file_img"}`
-- **THEN** the proxy rewrites only that `input_image` part to an inline `data:` URL before forwarding
+- **THEN** the proxy returns HTTP 400 with `error.code = "unsupported_input_image_format"`
+- **AND** does not fetch or inline-convert the upload
 
-#### Scenario: missing image pin fails the whole request
+#### Scenario: large request payload routes via HTTP transport on auto
 
-- **WHEN** a `/v1/responses` request references `input_image.file_id = "file_missing"` and no live finalized pin exists
-- **THEN** the proxy returns HTTP 400 with `error.code = "file_not_found"`
-- **AND** does not partially forward other images from the same request
-
-#### Scenario: large inline-rewritten payload routes via HTTP transport on auto
-
-- **GIVEN** `upstream_stream_transport` is `"auto"` and the rewritten payload size exceeds the WebSocket frame budget
+- **GIVEN** `upstream_stream_transport` is `"auto"` and the request payload size exceeds the WebSocket frame budget
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over HTTP `POST` instead of WebSocket
 - **AND** explicit `upstream_stream_transport = "websocket"` overrides MUST still take precedence
 
-#### Scenario: large inline-rewritten payload bypasses the HTTP responses bridge
+#### Scenario: large request payload bypasses the HTTP responses bridge
 
-- **GIVEN** the HTTP responses bridge is enabled and the rewritten payload exceeds the WebSocket frame budget
+- **GIVEN** the HTTP responses bridge is enabled and the request payload exceeds the WebSocket frame budget
 - **WHEN** the proxy receives a `/v1/responses`, `/backend-api/codex/responses`, or `/responses/compact` request
 - **THEN** the bridge MUST be bypassed for that request and the request MUST be sent over raw HTTP
 - **AND** subsequent smaller requests MUST continue to use the bridge normally

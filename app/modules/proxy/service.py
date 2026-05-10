@@ -35,15 +35,9 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
-from app.core.clients.files import (
-    FileProxyError,
-    fetch_file_bytes,
-    pop_files_timeout_overrides,
-    push_files_timeout_overrides,
-)
+from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
-from app.core.clients.image_processor import ImageProcessingError, PromptImageMode, process_for_prompt_bytes
 from app.core.clients.proxy import (
     ProxyResponseError,
     _ws_transport_payload_budget_bytes,
@@ -219,29 +213,6 @@ _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
-# Inline image cap is computed against the *encoded* request size (post
-# base64 expansion + JSON envelope). Pillow ingests raw bytes, but those
-# bytes become a ``data:image/...;base64,...`` URL inside the upstream
-# JSON request, which inflates by 4/3 (~33%). To keep an attached
-# image small enough that a single-image request still fits the
-# upstream ``response.create`` budget, derive the per-attachment raw
-# limit from the configured upstream max (default 15 MiB) with a 1 MiB
-# headroom for non-image conversation content.
-_INLINE_IMAGE_BASE64_OVERHEAD_NUMERATOR = 3
-_INLINE_IMAGE_BASE64_OVERHEAD_DENOMINATOR = 4
-_INLINE_IMAGE_NON_IMAGE_HEADROOM_BYTES = 1 * 1024 * 1024
-
-
-def _inline_image_raw_byte_cap(upstream_max_bytes: int) -> int:
-    encoded_budget = max(0, upstream_max_bytes - _INLINE_IMAGE_NON_IMAGE_HEADROOM_BYTES)
-    raw_cap = (encoded_budget * _INLINE_IMAGE_BASE64_OVERHEAD_NUMERATOR) // _INLINE_IMAGE_BASE64_OVERHEAD_DENOMINATOR
-    # Always allow at least 256 KiB so configurations with small
-    # ``upstream_response_create_max_bytes`` (e.g. constrained tests)
-    # still accept a reasonable thumbnail.
-    return max(256 * 1024, raw_cap)
-
-
-_INLINE_IMAGE_MAX_BYTES = _inline_image_raw_byte_cap(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES)
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -429,14 +400,11 @@ class ProxyService:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
         request_id = ensure_request_id()
-        payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-            payload,
-            headers,
-            request_id=request_id,
-        )
+        self._raise_for_unsupported_input_image_references(payload)
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             logger.info(
@@ -1479,11 +1447,8 @@ class ProxyService:
         response: CompactResponsePayload | None = None
         request_service_tier: str | None = None
         actual_service_tier: str | None = None
-        payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-            payload,
-            headers,
-            request_id=request_id,
-        )
+        self._raise_for_unsupported_input_image_references(payload)
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -2138,127 +2103,22 @@ class ProxyService:
                     best_file_id = file_id
             return best_account
 
-    async def _rewrite_input_image_file_references(
-        self,
-        payload: _ResponsesPayloadT,
-        headers: Mapping[str, str],
-        *,
-        request_id: str,
-    ) -> tuple[_ResponsesPayloadT, str | None, list[str]]:
+    def _raise_for_unsupported_input_image_references(self, payload: _ResponsesPayloadT) -> None:
         references = extract_input_image_file_references(payload.input)
         if not references:
-            return payload, None, []
-
-        if not isinstance(payload.input, list):
-            # Resolve account affinity from whatever ``input_file`` /
-            # ``input_image`` references the original payload exposed --
-            # the rewriter only fires when ``input`` is a list, so this
-            # branch is purely a safety net for non-list inputs.
-            resolved_account_id = await self._resolve_file_account_for_responses(payload, headers)
-            return payload, resolved_account_id, []
-
-        rewritten_input = cast(list[JsonValue], deepcopy(payload.input))
-        rewritten_file_ids: list[str] = []
-        for reference in references:
-            pin = await self._lookup_file_pin(reference.file_id)
-            if pin is None or not pin.download_url:
-                raise ProxyResponseError(
-                    400,
-                    openai_error(
-                        "file_not_found",
-                        f"Upload reference {reference.file_id} was not found or is no longer available",
-                    ),
-                )
-            try:
-                file_bytes = await fetch_file_bytes(
-                    pin.download_url,
-                    pin.mime_type,
-                    _INLINE_IMAGE_MAX_BYTES,
-                )
-                encoded = process_for_prompt_bytes(file_bytes, PromptImageMode.RESIZE_TO_FIT)
-            except FileProxyError as exc:
-                raise ProxyResponseError(exc.status_code, exc.payload) from exc
-            except ImageProcessingError as exc:
-                raise ProxyResponseError(
-                    400,
-                    openai_error(
-                        "invalid_image",
-                        f"Upload reference {reference.file_id} could not be processed as a supported image",
-                    ),
-                ) from exc
-
-            item = rewritten_input[reference.item_index]
-            if not is_json_mapping(item):
-                continue
-            item_mapping = cast(dict[str, JsonValue], item)
-            if reference.content_index is None:
-                part_mapping = item_mapping
-            else:
-                content = item_mapping.get("content")
-                if isinstance(content, list):
-                    part = content[reference.content_index]
-                    if not is_json_mapping(part):
-                        continue
-                    part_mapping = cast(dict[str, JsonValue], part)
-                elif is_json_mapping(content) and reference.content_index == 0:
-                    part_mapping = cast(dict[str, JsonValue], content)
-                else:
-                    continue
-
-            detail_value = part_mapping.get("detail")
-            rewritten_part = dict(part_mapping)
-            rewritten_part.pop("file_id", None)
-            rewritten_part["type"] = "input_image"
-            rewritten_part["image_url"] = encoded.into_data_url()
-            if not isinstance(detail_value, str) or not detail_value.strip():
-                rewritten_part["detail"] = "auto"
-
-            if reference.content_index is None:
-                rewritten_input[reference.item_index] = rewritten_part
-            else:
-                content = item_mapping.get("content")
-                if isinstance(content, list):
-                    content_list = cast(list[JsonValue], content)
-                    content_list[reference.content_index] = rewritten_part
-                elif is_json_mapping(content):
-                    item_mapping["content"] = rewritten_part
-
-            rewritten_file_ids.append(reference.file_id)
-            await self._write_request_log(
-                account_id=pin.account_id,
-                api_key=None,
-                request_id=request_id,
-                model="image-inline-rewrite",
-                latency_ms=0,
-                status="success",
-                error_message=(
-                    "file_id="
-                    f"{reference.file_id} bytes_in={len(file_bytes)} bytes_out={len(encoded.bytes)} "
-                    f"format_in={pin.mime_type or 'unknown'} format_out={encoded.mime} "
-                    f"width={encoded.width} height={encoded.height}"
+            return
+        raise ProxyResponseError(
+            400,
+            openai_error(
+                "unsupported_input_image_format",
+                (
+                    "input_image references via file_id or sediment:// URIs are not supported on "
+                    "/v1/responses; the upstream API only accepts inline data: URLs. Send the "
+                    "image inline (codex-cli style) or use the upload protocol exclusively for "
+                    "MCP tool arguments."
                 ),
-                transport=_REQUEST_TRANSPORT_HTTP,
-            )
-
-        rewritten_payload = payload.model_copy(update={"input": rewritten_input})
-        # Resolve account affinity from the *rewritten* payload first so
-        # any surviving ``input_file.file_id`` reference (which is
-        # forwarded verbatim because upstream accepts that shape) drives
-        # routing. Resolving from the original payload would let an
-        # ``input_image.file_id`` pin (now inline data URL after rewrite)
-        # win even though the request no longer references it, which
-        # can misroute mixed-attachment requests onto the wrong upstream
-        # ``chatgpt-account-id``. Falls back to the rewritten image's
-        # own pin when the rewritten payload has no surviving file
-        # references -- a single-image request still benefits from
-        # account affinity to the upload owner so subsequent turns hit
-        # the same upstream prompt cache and tier.
-        resolved_account_id = await self._resolve_file_account_for_responses(rewritten_payload, headers)
-        if resolved_account_id is None and rewritten_file_ids:
-            first_pin = await self._lookup_file_pin(rewritten_file_ids[0])
-            if first_pin is not None:
-                resolved_account_id = first_pin.account_id
-        return rewritten_payload, resolved_account_id, rewritten_file_ids
+            ),
+        )
 
     async def create_file(
         self,
@@ -2998,11 +2858,8 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
-        responses_payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-            responses_payload,
-            headers,
-            request_id=get_request_id() or ensure_request_id(None),
-        )
+        self._raise_for_unsupported_input_image_references(responses_payload)
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -7110,11 +6967,8 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if rewritten_file_account_id is None:
-            payload, rewritten_file_account_id, _ = await self._rewrite_input_image_file_references(
-                payload,
-                headers,
-                request_id=request_id,
-            )
+            self._raise_for_unsupported_input_image_references(payload)
+            rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,

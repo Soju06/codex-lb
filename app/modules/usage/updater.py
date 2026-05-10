@@ -9,15 +9,15 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, cast
+from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import PERMANENT_FAILURE_CODES, QUOTA_EXCEEDED_COOLDOWN_SECONDS
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
+from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -101,22 +101,6 @@ class AdditionalUsageRepositoryPort(Protocol):
     ) -> list[str]: ...
 
     async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None: ...
-
-
-class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
-    async def update_status_if_current(
-        self,
-        account_id: str,
-        status: AccountStatus,
-        deactivation_reason: str | None = None,
-        reset_at: int | None = None,
-        blocked_at: int | None = None,
-        *,
-        expected_status: AccountStatus,
-        expected_deactivation_reason: str | None = None,
-        expected_reset_at: int | None = None,
-        expected_blocked_at: int | None = None,
-    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,8 +212,7 @@ class UsageUpdater:
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
             latest = latest_usage.get(account.id)
-            bypass_freshness = _quota_recovery_should_bypass_freshness(account, latest=latest)
-            if not bypass_freshness and _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
+            if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
                 continue
             # Additional-only accounts have no main UsageHistory entry.
             # Check DB-backed freshness (works across workers/restarts)
@@ -240,17 +223,13 @@ class UsageUpdater:
             # prevents redundant calls within the same worker.
             if latest is None:
                 last_ok = _last_successful_refresh.get(account.id)
-                if not bypass_freshness and last_ok and (now - last_ok).total_seconds() < interval:
+                if last_ok and (now - last_ok).total_seconds() < interval:
                     continue
                 if self._additional_usage_repo is not None:
                     additional_fresh_at = await self._additional_usage_repo.latest_recorded_at_for_account(
                         account.id,
                     )
-                    if (
-                        not bypass_freshness
-                        and additional_fresh_at
-                        and (now - additional_fresh_at).total_seconds() < interval
-                    ):
+                    if additional_fresh_at and (now - additional_fresh_at).total_seconds() < interval:
                         _last_successful_refresh[account.id] = additional_fresh_at
                         continue
             # NOTE: AsyncSession is not safe for concurrent use. Run sequentially
@@ -293,11 +272,7 @@ class UsageUpdater:
         interval_seconds: int,
     ) -> AccountRefreshResult:
         latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
-        if not _quota_recovery_should_bypass_freshness(account, latest=latest) and _latest_usage_is_fresh(
-            latest,
-            now=utcnow(),
-            interval_seconds=interval_seconds,
-        ):
+        if _latest_usage_is_fresh(latest, now=utcnow(), interval_seconds=interval_seconds):
             return AccountRefreshResult(usage_written=False)
         return await self._refresh_account(
             account,
@@ -441,7 +416,6 @@ class UsageUpdater:
                 window_minutes=_window_minutes(secondary.limit_window_seconds),
             )
             usage_written = usage_written or _usage_entry_written(entry)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary)
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
@@ -479,51 +453,6 @@ class UsageUpdater:
             chatgpt_account_id=account.chatgpt_account_id,
         )
 
-    async def _recover_quota_status_from_usage(
-        self,
-        account: Account,
-        *,
-        primary: UsageWindow | None,
-        secondary: UsageWindow | None,
-    ) -> None:
-        if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
-            return
-        if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
-            return
-        windows = [window for window in (primary, secondary) if window is not None]
-        if secondary is None or not _window_has_available_quota(secondary):
-            return
-        if primary is not None and _window_is_exhausted(primary):
-            target_status = AccountStatus.RATE_LIMITED
-            target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
-        else:
-            if any(_window_is_exhausted(window) for window in windows):
-                return
-            target_status = AccountStatus.ACTIVE
-            target_reset_at = None
-        if not any(_window_has_available_quota(window) for window in windows):
-            return
-
-        repo = cast(AccountsRepositoryWithStatusComparePort, self._auth_manager._repo)
-        updated = await repo.update_status_if_current(
-            account.id,
-            target_status,
-            None,
-            target_reset_at,
-            blocked_at=None,
-            expected_status=AccountStatus.QUOTA_EXCEEDED,
-            expected_deactivation_reason=account.deactivation_reason,
-            expected_reset_at=account.reset_at,
-            expected_blocked_at=account.blocked_at,
-        )
-        if not updated:
-            await self._sync_account_from_repo(account)
-            return
-        account.status = target_status
-        account.deactivation_reason = None
-        account.reset_at = target_reset_at
-        account.blocked_at = None
-
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:
             return
@@ -540,7 +469,6 @@ class UsageUpdater:
         account.status = stored.status
         account.deactivation_reason = stored.deactivation_reason
         account.reset_at = stored.reset_at
-        account.blocked_at = stored.blocked_at
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:
@@ -555,16 +483,6 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
-
-
-def _window_has_available_quota(window: UsageWindow) -> bool:
-    used_percent = window.used_percent
-    return used_percent is not None and float(used_percent) < 100.0
-
-
-def _window_is_exhausted(window: UsageWindow) -> bool:
-    used_percent = window.used_percent
-    return used_percent is not None and float(used_percent) >= 100.0
 
 
 def _prefer_merged_additional_window(
@@ -749,22 +667,6 @@ def _latest_usage_is_fresh(
     interval_seconds: int,
 ) -> bool:
     return latest is not None and (now - latest.recorded_at).total_seconds() < interval_seconds
-
-
-def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:
-    if account.status != AccountStatus.QUOTA_EXCEEDED:
-        return False
-    if account.blocked_at is None:
-        return latest is None
-    cooldown_expires_at = account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
-    if time.time() < cooldown_expires_at:
-        return False
-    if latest is None:
-        return True
-    recorded_at = latest.recorded_at
-    if recorded_at.tzinfo is None:
-        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-    return recorded_at.timestamp() < cooldown_expires_at
 
 
 def _parse_credits_balance(value: str | int | float | None) -> float | None:

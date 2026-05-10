@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.16.0](https://github.com/Soju06/codex-lb/compare/v1.15.0...v1.16.0) (2026-05-10)
+
+
+### Features
+
+* **accounts:** split compact quota row display ([#562](https://github.com/Soju06/codex-lb/issues/562)) ([9581fe7](https://github.com/Soju06/codex-lb/commit/9581fe7c65f025780943486757a0c8020d7b7917))
+* add API key filter for dashboard request logs ([#497](https://github.com/Soju06/codex-lb/issues/497)) ([43cbdac](https://github.com/Soju06/codex-lb/commit/43cbdac318c3b84944f010c1bc8421b81a4cf605))
+* **auth:** make dashboard session lifetime configurable ([#465](https://github.com/Soju06/codex-lb/issues/465)) ([386e0e9](https://github.com/Soju06/codex-lb/commit/386e0e93ca0bfb5d086e2a260c8e491c226f4f0a))
+* **proxy:** add /backend-api/files upload protocol ([#515](https://github.com/Soju06/codex-lb/issues/515)) ([7ecb77a](https://github.com/Soju06/codex-lb/commit/7ecb77ae854591e1e6c4e50e785573c74b7ca68e))
+* **proxy:** add OpenAI-compatible /v1/images API (gpt-image-2 via image_generation tool) ([#498](https://github.com/Soju06/codex-lb/issues/498)) ([359743d](https://github.com/Soju06/codex-lb/commit/359743d086e45b0b4ca14502d8d3fbfea628b939))
+* **proxy:** make upstream response.create max bytes configurable via env var ([#476](https://github.com/Soju06/codex-lb/issues/476)) ([753c040](https://github.com/Soju06/codex-lb/commit/753c040dbd77634f6b281cbe4e1f1f6992fee1cf))
+
+
+### Bug Fixes
+
+* **api-limit:** Add fallback for api limit reset ([#475](https://github.com/Soju06/codex-lb/issues/475)) ([61386dc](https://github.com/Soju06/codex-lb/commit/61386dcc5d24147a46f30201fdb7d2879c9e8b9d))
+* **auth:** preserve existing session expiry through TOTP and tighten hour input ([#511](https://github.com/Soju06/codex-lb/issues/511)) ([4b10807](https://github.com/Soju06/codex-lb/commit/4b1080730aa4bfd3ef9fd35b843ac0743bb6f8ae))
+* **chat-completions:** normalize provider thinking aliases ([#424](https://github.com/Soju06/codex-lb/issues/424)) ([4419771](https://github.com/Soju06/codex-lb/commit/4419771c0c7791b20a899c07a65c74879c56f978))
+* **db:** size background pool for burst traffic ([#563](https://github.com/Soju06/codex-lb/issues/563)) ([1e397e8](https://github.com/Soju06/codex-lb/commit/1e397e806de92a8eb7f8fbb9326ffdebdd75e6ea))
+* **oauth:** make manual callback idempotent ([#481](https://github.com/Soju06/codex-lb/issues/481)) ([c72b68a](https://github.com/Soju06/codex-lb/commit/c72b68a74c9010a34e9503557f7fe027d6cfb922))
+* **openspec:** satisfy strict purpose validation ([#552](https://github.com/Soju06/codex-lb/issues/552)) ([1d88236](https://github.com/Soju06/codex-lb/commit/1d882362bf9813488f1b2d9f40f32d67d491b453))
+* **proxy:** reject `input_image.file_id` / `sediment://` with 400 `unsupported_input_image_format`, plus HTTP responses bridge hardening (close-code 1000 fail-fast classifier, payload-size HTTP transport auto-fallback, per-request bridge bypass for oversized payloads). The original inline-rewrite from #571 was narrowed in [#574](https://github.com/Soju06/codex-lb/pull/574) after upstream verification showed `input_image.file_id` is not an accepted shape on the Responses API. ([#571](https://github.com/Soju06/codex-lb/pull/571), [#574](https://github.com/Soju06/codex-lb/pull/574))
+* **proxy:** load balancer filter ([#485](https://github.com/Soju06/codex-lb/issues/485)) ([b7b150d](https://github.com/Soju06/codex-lb/commit/b7b150d7bc91a375e65483dc896652d19d4595df))
+* **proxy:** map unsupported reasoning effort 'minimal' to a supported value ([#494](https://github.com/Soju06/codex-lb/issues/494)) ([5278f84](https://github.com/Soju06/codex-lb/commit/5278f847c2dce72d7118761e152dc17f213b9854))
+* **proxy:** pre-validate strict JSON schemas to surface invalid_json_schema ([#491](https://github.com/Soju06/codex-lb/issues/491)) ([#495](https://github.com/Soju06/codex-lb/issues/495)) ([ecc1bca](https://github.com/Soju06/codex-lb/commit/ecc1bcae17ad916684419a15ee440d475d21947d))
+* **proxy:** retry transient stream timeouts ([#551](https://github.com/Soju06/codex-lb/issues/551)) ([77944c9](https://github.com/Soju06/codex-lb/commit/77944c93b61c516f205681e1b09bbba38c46f88e))
+* **proxy:** return api-key limits from v1 usage ([#501](https://github.com/Soju06/codex-lb/issues/501)) ([694ec18](https://github.com/Soju06/codex-lb/commit/694ec180881cbd89c949e68d93e77fc4c9465a2d))
+* **proxy:** use `DEFAULT_HOME_DIR` for oversized `response.create` dumps so non-container deploys (notably macOS `uv tool` / LaunchAgent installs) can write the debug dump path. Resolves [#556](https://github.com/Soju06/codex-lb/issues/556). ([#575](https://github.com/Soju06/codex-lb/pull/575))
+* **proxy:** revert `slim oversized response.create history` from #560. The history-slimming approach conflicted with prompt-cache affinity, mis-trained the assistant on its own prior speech via the omission notice, and could break the WebSocket `previous_response_id` continuity. The portable dump-path slice from #560 was re-landed in #575; the broader design discussion is tracked in [#568](https://github.com/Soju06/codex-lb/issues/568). ([#569](https://github.com/Soju06/codex-lb/pull/569))
+* **types:** clear existing ty diagnostics ([#517](https://github.com/Soju06/codex-lb/issues/517)) ([0cd5d4e](https://github.com/Soju06/codex-lb/commit/0cd5d4ebe49e4507e4aaa937c940f198e77ce7b0))
+
+
+### Documentation
+
+* add Komzpa as a contributor for code ([#531](https://github.com/Soju06/codex-lb/issues/531)) ([5bf5d94](https://github.com/Soju06/codex-lb/commit/5bf5d944fc200833cec0f3b82391c3a3333396cb))
+* add mikabytes as a contributor for code, doc, and test ([#509](https://github.com/Soju06/codex-lb/issues/509)) ([22cc5f8](https://github.com/Soju06/codex-lb/commit/22cc5f8ef1e416ef6b374f484469edf4e5f24c0b))
+* add rio-jeong as a contributor for code, bug, and test ([#492](https://github.com/Soju06/codex-lb/issues/492)) ([f1e2d90](https://github.com/Soju06/codex-lb/commit/f1e2d906f270a402a2c881885c51ae84fdc06fee))
+* add stemirkhan as a contributor for bug ([#505](https://github.com/Soju06/codex-lb/issues/505)) ([7170b13](https://github.com/Soju06/codex-lb/commit/7170b1368070e0e9b5954d8a4da2c513f72f3442))
+* add stemirkhan as a contributor for code, doc, and test ([#503](https://github.com/Soju06/codex-lb/issues/503)) ([dbda5c7](https://github.com/Soju06/codex-lb/commit/dbda5c74a188399190272b1a9a4c108a57678930))
+* add tobwen as a contributor for code, test, and bug ([#489](https://github.com/Soju06/codex-lb/issues/489)) ([1ac1fe2](https://github.com/Soju06/codex-lb/commit/1ac1fe2f5771d6549e1e6c15a7add2ef38ac5912))
+
 ## [1.15.0](https://github.com/Soju06/codex-lb/compare/v1.14.1...v1.15.0) (2026-04-24)
 
 

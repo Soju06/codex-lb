@@ -5907,8 +5907,7 @@ class ProxyService:
                                     "codex-lb cannot safely switch accounts after this response has already started, "
                                     "so the original upstream error is being forwarded."
                                 ),
-                                request_id=terminal_request_state.request_log_id
-                                or terminal_request_state.request_id,
+                                request_id=terminal_request_state.request_log_id or terminal_request_state.request_id,
                                 action=(
                                     "retry_security_work_authorized"
                                     if can_retry_security_work

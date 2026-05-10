@@ -54,7 +54,6 @@ dependencies = [
     "sqlalchemy>=2.0.45",
     "websockets>=16.0",
     "zstandard>=0.25.0",
-    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

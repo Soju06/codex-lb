@@ -17,7 +17,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import aiohttp
@@ -1943,10 +1943,6 @@ class ProxyService:
         self,
         file_id: str,
         account_id: str,
-        *,
-        download_url: str = "",
-        mime_type: str | None = None,
-        file_name: str | None = None,
     ) -> None:
         """Remember that ``file_id`` was registered through ``account_id``.
 
@@ -1957,13 +1953,10 @@ class ProxyService:
         """
         if not file_id or not account_id:
             return
-        expires_at = self._pin_expiry_from_download_url(download_url)
+        expires_at = time.monotonic() + self._FILE_ACCOUNT_PIN_TTL_SECONDS
         async with self._file_account_pin_lock:
             self._file_account_pins[file_id] = _FilePinEntry(
                 account_id=account_id,
-                download_url=download_url,
-                mime_type=mime_type,
-                file_name=file_name,
                 expires_at=expires_at,
             )
             self._evict_expired_file_pins_locked()
@@ -1985,27 +1978,6 @@ class ProxyService:
                 self._file_account_pins.pop(file_id, None)
                 return None
             return entry
-
-    def _pin_expiry_from_download_url(self, download_url: str) -> float:
-        default_expiry = time.monotonic() + self._FILE_ACCOUNT_PIN_TTL_SECONDS
-        if not download_url:
-            return default_expiry
-        se_values = parse_qs(urlparse(download_url).query).get("se")
-        if not se_values:
-            return default_expiry
-        raw_expiry = se_values[0].strip()
-        if not raw_expiry:
-            return default_expiry
-        try:
-            parsed_expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
-        except ValueError:
-            return default_expiry
-        if parsed_expiry.tzinfo is None:
-            parsed_expiry = parsed_expiry.replace(tzinfo=timezone.utc)
-        seconds_until_expiry = (parsed_expiry.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
-        if seconds_until_expiry <= 0:
-            return time.monotonic()
-        return min(default_expiry, time.monotonic() + seconds_until_expiry)
 
     def _evict_expired_file_pins_locked(self) -> None:
         """Drop pins past their TTL. Called under ``_file_account_pin_lock``."""
@@ -2197,16 +2169,7 @@ class ProxyService:
         if isinstance(result, dict) and account_id:
             status = result.get("status")
             if status == "success":
-                download_url_value = result.get("download_url")
-                mime_type_value = result.get("mime_type")
-                file_name_value = result.get("file_name")
-                await self._pin_file_account(
-                    file_id,
-                    account_id,
-                    download_url=download_url_value if isinstance(download_url_value, str) else "",
-                    mime_type=mime_type_value if isinstance(mime_type_value, str) else None,
-                    file_name=file_name_value if isinstance(file_name_value, str) else None,
-                )
+                await self._pin_file_account(file_id, account_id)
         return result
 
     async def _proxy_files_call(
@@ -8400,9 +8363,6 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
 @dataclass(frozen=True, slots=True)
 class _FilePinEntry:
     account_id: str
-    download_url: str
-    mime_type: str | None
-    file_name: str | None
     expires_at: float
 
 

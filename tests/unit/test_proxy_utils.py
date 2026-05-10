@@ -9891,19 +9891,12 @@ async def test_lookup_file_pin_returns_live_entry_and_evicts_expired(monkeypatch
 
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: fake_now[0])
 
-    await service._pin_file_account(
-        "file_live",
-        "acc_live",
-        download_url="https://blob.example/file?se=2099-01-01T00:00:00Z",
-        mime_type="image/png",
-        file_name="a.png",
-    )
+    await service._pin_file_account("file_live", "acc_live")
 
     entry = await service._lookup_file_pin("file_live")
 
     assert entry is not None
     assert entry.account_id == "acc_live"
-    assert entry.mime_type == "image/png"
 
     fake_now[0] += service._FILE_ACCOUNT_PIN_TTL_SECONDS + 1
 
@@ -10023,13 +10016,7 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
             gateway_safe_mode=False,
         ),
     )
-    await service._pin_file_account(
-        "file_doc",
-        "acc_doc",
-        download_url="https://blob.example/doc.pdf",
-        mime_type="application/pdf",
-        file_name="doc.pdf",
-    )
+    await service._pin_file_account("file_doc", "acc_doc")
     payload = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",

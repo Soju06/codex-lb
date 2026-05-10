@@ -38,7 +38,7 @@ The system SHALL accept `{"type":"input_file","file_id":"file_*"}` attached-file
 
 When an `input_image` part contains a `file_id` field or an `image_url` starting with `sediment://`, the proxy MUST return HTTP 400 with `error.code = "unsupported_input_image_format"` and an explanation that the upstream Responses API only accepts inline `data:` URLs for `input_image`. The proxy MUST NOT fetch the upload, MUST NOT inline-convert the image, and MUST NOT trim, slim, or rewrite any conversation content.
 
-`app/core/openai/requests.py::extract_input_image_file_references` MAY be used to detect the unsupported shape. `app/core/clients/image_processor.py` and `app/core/clients/files.py::fetch_file_bytes()` remain reusable utilities, but this request path MUST NOT use them to reshape inbound conversation payloads.
+`app/core/openai/requests.py::extract_input_image_file_references` MAY be used to detect the unsupported shape. This request path MUST NOT fetch uploads, inline-convert images, or otherwise reshape inbound conversation payloads.
 
 #### Scenario: input_image file_id is rejected before forwarding
 

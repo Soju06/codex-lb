@@ -124,6 +124,21 @@ def test_process_for_prompt_bytes_rejects_garbage_bytes() -> None:
         process_for_prompt_bytes(b"not-an-image")
 
 
+def test_process_for_prompt_bytes_rejects_decompression_bomb() -> None:
+    # Pillow flags any image whose decoded pixel count would exceed the
+    # configured ``MAX_IMAGE_PIXELS`` (default ~178 MP) with
+    # ``DecompressionBombError``. Pin the limit very low so a small,
+    # validly encoded fixture trips the same code path as a hostile
+    # multi-gigapixel attachment.
+    original_limit = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = 16
+    try:
+        with pytest.raises(ImageProcessingError):
+            process_for_prompt_bytes(_image_bytes(image_format="PNG", size=(64, 64)))
+    finally:
+        Image.MAX_IMAGE_PIXELS = original_limit
+
+
 def test_process_for_prompt_bytes_cache_returns_same_instance() -> None:
     image_processor._CACHE.clear()
     raw = _image_bytes(image_format="PNG", size=(64, 64))

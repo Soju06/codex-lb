@@ -219,7 +219,29 @@ _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
-_INLINE_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+# Inline image cap is computed against the *encoded* request size (post
+# base64 expansion + JSON envelope). Pillow ingests raw bytes, but those
+# bytes become a ``data:image/...;base64,...`` URL inside the upstream
+# JSON request, which inflates by 4/3 (~33%). To keep an attached
+# image small enough that a single-image request still fits the
+# upstream ``response.create`` budget, derive the per-attachment raw
+# limit from the configured upstream max (default 15 MiB) with a 1 MiB
+# headroom for non-image conversation content.
+_INLINE_IMAGE_BASE64_OVERHEAD_NUMERATOR = 3
+_INLINE_IMAGE_BASE64_OVERHEAD_DENOMINATOR = 4
+_INLINE_IMAGE_NON_IMAGE_HEADROOM_BYTES = 1 * 1024 * 1024
+
+
+def _inline_image_raw_byte_cap(upstream_max_bytes: int) -> int:
+    encoded_budget = max(0, upstream_max_bytes - _INLINE_IMAGE_NON_IMAGE_HEADROOM_BYTES)
+    raw_cap = (encoded_budget * _INLINE_IMAGE_BASE64_OVERHEAD_NUMERATOR) // _INLINE_IMAGE_BASE64_OVERHEAD_DENOMINATOR
+    # Always allow at least 256 KiB so configurations with small
+    # ``upstream_response_create_max_bytes`` (e.g. constrained tests)
+    # still accept a reasonable thumbnail.
+    return max(256 * 1024, raw_cap)
+
+
+_INLINE_IMAGE_MAX_BYTES = _inline_image_raw_byte_cap(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES)
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -2127,8 +2149,12 @@ class ProxyService:
         if not references:
             return payload, None, []
 
-        resolved_account_id = await self._resolve_file_account_for_responses(payload, headers)
         if not isinstance(payload.input, list):
+            # Resolve account affinity from whatever ``input_file`` /
+            # ``input_image`` references the original payload exposed --
+            # the rewriter only fires when ``input`` is a list, so this
+            # branch is purely a safety net for non-list inputs.
+            resolved_account_id = await self._resolve_file_account_for_responses(payload, headers)
             return payload, resolved_account_id, []
 
         rewritten_input = cast(list[JsonValue], deepcopy(payload.input))
@@ -2214,7 +2240,25 @@ class ProxyService:
                 transport=_REQUEST_TRANSPORT_HTTP,
             )
 
-        return payload.model_copy(update={"input": rewritten_input}), resolved_account_id, rewritten_file_ids
+        rewritten_payload = payload.model_copy(update={"input": rewritten_input})
+        # Resolve account affinity from the *rewritten* payload first so
+        # any surviving ``input_file.file_id`` reference (which is
+        # forwarded verbatim because upstream accepts that shape) drives
+        # routing. Resolving from the original payload would let an
+        # ``input_image.file_id`` pin (now inline data URL after rewrite)
+        # win even though the request no longer references it, which
+        # can misroute mixed-attachment requests onto the wrong upstream
+        # ``chatgpt-account-id``. Falls back to the rewritten image's
+        # own pin when the rewritten payload has no surviving file
+        # references -- a single-image request still benefits from
+        # account affinity to the upload owner so subsequent turns hit
+        # the same upstream prompt cache and tier.
+        resolved_account_id = await self._resolve_file_account_for_responses(rewritten_payload, headers)
+        if resolved_account_id is None and rewritten_file_ids:
+            first_pin = await self._lookup_file_pin(rewritten_file_ids[0])
+            if first_pin is not None:
+                resolved_account_id = first_pin.account_id
+        return rewritten_payload, resolved_account_id, rewritten_file_ids
 
     async def create_file(
         self,

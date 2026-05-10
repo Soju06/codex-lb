@@ -9,6 +9,7 @@ from io import BytesIO
 from threading import RLock
 
 from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 
 MAX_DIMENSION = 2048
 _CACHE_CAPACITY = 32
@@ -106,7 +107,7 @@ def _process_for_prompt_bytes_uncached(file_bytes: bytes, mode: PromptImageMode)
                 resized.close()
     except ImageProcessingError:
         raise
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, DecompressionBombError, OSError) as exc:
         raise ImageProcessingError("ImageDecodeFailed") from exc
 
 

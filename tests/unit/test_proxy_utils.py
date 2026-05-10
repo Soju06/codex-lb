@@ -10146,6 +10146,77 @@ async def test_rewrite_input_image_file_references_returns_pin_account_id(monkey
     assert account_id == "acc_route"
 
 
+@pytest.mark.asyncio
+async def test_rewrite_input_image_file_references_resolves_account_from_surviving_input_file(monkeypatch):
+    """Mixed attachments: ``input_file.file_id`` survives the rewrite,
+    ``input_image.file_id`` becomes a data URL. Account routing must
+    follow the surviving ``input_file`` pin, not the (already-rewritten)
+    image pin -- otherwise upstream gets the wrong
+    ``chatgpt-account-id`` and rejects ``input_file`` with
+    ``file_not_found``.
+    """
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    await service._pin_file_account(
+        "file_doc",
+        "acc_doc",
+        download_url="https://blob.example/doc.pdf",
+        mime_type="application/pdf",
+        file_name="doc.pdf",
+    )
+    await service._pin_file_account(
+        "file_pic",
+        "acc_pic",
+        download_url="https://blob.example/pic.png",
+        mime_type="image/png",
+        file_name="pic.png",
+    )
+
+    async def fake_fetch_file_bytes(download_url, expected_mime, max_bytes, *, session=None):
+        del download_url, expected_mime, max_bytes, session
+        return _tiny_png_bytes()
+
+    monkeypatch.setattr(proxy_service, "fetch_file_bytes", fake_fetch_file_bytes)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"type": "input_file", "file_id": "file_doc"},
+                {"type": "input_image", "file_id": "file_pic"},
+            ],
+        }
+    )
+
+    _, account_id, rewritten_ids = await service._rewrite_input_image_file_references(
+        payload, {}, request_id="req_mixed"
+    )
+
+    # ``acc_doc`` (input_file) wins, NOT ``acc_pic`` (input_image rewrites away)
+    assert account_id == "acc_doc"
+    assert rewritten_ids == ["file_pic"]
+
+
+def test_inline_image_raw_byte_cap_keeps_full_payload_under_upstream_limit():
+    encoded_overhead_numerator = proxy_service._INLINE_IMAGE_BASE64_OVERHEAD_DENOMINATOR
+    encoded_overhead_denominator = proxy_service._INLINE_IMAGE_BASE64_OVERHEAD_NUMERATOR
+    headroom = proxy_service._INLINE_IMAGE_NON_IMAGE_HEADROOM_BYTES
+
+    upstream_max = 15 * 1024 * 1024
+    raw_cap = proxy_service._inline_image_raw_byte_cap(upstream_max)
+    encoded_cap = (raw_cap * encoded_overhead_numerator) // encoded_overhead_denominator
+    assert encoded_cap + headroom <= upstream_max
+
+    upstream_max = 32 * 1024 * 1024
+    raw_cap = proxy_service._inline_image_raw_byte_cap(upstream_max)
+    encoded_cap = (raw_cap * encoded_overhead_numerator) // encoded_overhead_denominator
+    assert encoded_cap + headroom <= upstream_max
+
+    # ``upstream_response_create_max_bytes`` smaller than headroom: still
+    # accept at least the documented 256 KiB minimum.
+    assert proxy_service._inline_image_raw_byte_cap(64 * 1024) == 256 * 1024
+
+
 def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
     assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"

@@ -9,16 +9,48 @@ from fastapi import APIRouter, Body, Depends, Request
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.config.settings_cache import get_settings_cache
-from app.core.exceptions import DashboardBadRequestError
+from app.core.exceptions import DashboardBadRequestError, DashboardValidationError
 from app.dependencies import SettingsContext, get_settings_context
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.settings.schemas import (
+    AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
 )
-from app.modules.settings.service import DashboardSettingsUpdateData
+from app.modules.settings.service import AdditionalQuotaRoutingPolicyValidationError, DashboardSettingsUpdateData
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _settings_response(settings) -> DashboardSettingsResponse:
+    return DashboardSettingsResponse(
+        sticky_threads_enabled=settings.sticky_threads_enabled,
+        upstream_stream_transport=settings.upstream_stream_transport,
+        prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+        routing_strategy=settings.routing_strategy,
+        openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
+        sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+        sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
+        sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
+        import_without_overwrite=settings.import_without_overwrite,
+        totp_required_on_login=settings.totp_required_on_login,
+        totp_configured=settings.totp_configured,
+        api_key_auth_enabled=settings.api_key_auth_enabled,
+        additional_quota_routing_policies=settings.additional_quota_routing_policies,
+        additional_quota_policies=[
+            AdditionalQuotaPolicy(
+                quota_key=policy.quota_key,
+                display_label=policy.display_label,
+                routing_policy=policy.routing_policy,
+                model_ids=policy.model_ids,
+            )
+            for policy in settings.additional_quota_policies
+        ],
+    )
 
 
 def _is_non_loopback_ipv4(value: str | None) -> bool:
@@ -75,21 +107,7 @@ async def get_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings()
-    return DashboardSettingsResponse(
-        sticky_threads_enabled=settings.sticky_threads_enabled,
-        upstream_stream_transport=settings.upstream_stream_transport,
-        prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-        routing_strategy=settings.routing_strategy,
-        openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
-        dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
-        http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
-        sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
-        import_without_overwrite=settings.import_without_overwrite,
-        totp_required_on_login=settings.totp_required_on_login,
-        totp_configured=settings.totp_configured,
-        api_key_auth_enabled=settings.api_key_auth_enabled,
-    )
+    return _settings_response(settings)
 
 
 @router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
@@ -136,6 +154,20 @@ async def update_settings(
                     if payload.sticky_reallocation_budget_threshold_pct is not None
                     else current.sticky_reallocation_budget_threshold_pct
                 ),
+                sticky_reallocation_primary_budget_threshold_pct=(
+                    payload.sticky_reallocation_primary_budget_threshold_pct
+                    if payload.sticky_reallocation_primary_budget_threshold_pct is not None
+                    else (
+                        payload.sticky_reallocation_budget_threshold_pct
+                        if payload.sticky_reallocation_budget_threshold_pct is not None
+                        else current.sticky_reallocation_primary_budget_threshold_pct
+                    )
+                ),
+                sticky_reallocation_secondary_budget_threshold_pct=(
+                    payload.sticky_reallocation_secondary_budget_threshold_pct
+                    if payload.sticky_reallocation_secondary_budget_threshold_pct is not None
+                    else current.sticky_reallocation_secondary_budget_threshold_pct
+                ),
                 import_without_overwrite=(
                     payload.import_without_overwrite
                     if payload.import_without_overwrite is not None
@@ -151,12 +183,20 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                additional_quota_routing_policies=(
+                    payload.additional_quota_routing_policies
+                    if payload.additional_quota_routing_policies is not None
+                    else current.additional_quota_routing_policies
+                ),
             )
         )
+    except AdditionalQuotaRoutingPolicyValidationError as exc:
+        raise DashboardValidationError(str(exc), code="invalid_additional_quota_routing_policies") from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
 
     await get_settings_cache().invalidate()
+    get_account_selection_cache().invalidate()
     changed_fields = [
         field_name
         for field_name in (
@@ -167,9 +207,12 @@ async def update_settings(
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
+            "sticky_reallocation_primary_budget_threshold_pct",
+            "sticky_reallocation_secondary_budget_threshold_pct",
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "additional_quota_routing_policies",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -178,18 +221,4 @@ async def update_settings(
         actor_ip=request.client.host if request.client else None,
         details={"changed_fields": changed_fields},
     )
-    return DashboardSettingsResponse(
-        sticky_threads_enabled=updated.sticky_threads_enabled,
-        upstream_stream_transport=updated.upstream_stream_transport,
-        prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
-        routing_strategy=updated.routing_strategy,
-        openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
-        dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
-        http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,
-        sticky_reallocation_budget_threshold_pct=updated.sticky_reallocation_budget_threshold_pct,
-        import_without_overwrite=updated.import_without_overwrite,
-        totp_required_on_login=updated.totp_required_on_login,
-        totp_configured=updated.totp_configured,
-        api_key_auth_enabled=updated.api_key_auth_enabled,
-    )
+    return _settings_response(updated)

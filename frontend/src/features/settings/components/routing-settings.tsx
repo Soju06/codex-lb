@@ -24,6 +24,12 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
   );
+  const [primaryThreshold, setPrimaryThreshold] = useState(
+    String(settings.stickyReallocationPrimaryBudgetThresholdPct),
+  );
+  const [secondaryThreshold, setSecondaryThreshold] = useState(
+    String(settings.stickyReallocationSecondaryBudgetThresholdPct),
+  );
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -32,6 +38,14 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const parsedPrimaryThreshold = Number.parseFloat(primaryThreshold);
+  const primaryThresholdValid = parsedPrimaryThreshold >= 0 && parsedPrimaryThreshold <= 100;
+  const primaryThresholdChanged =
+    primaryThresholdValid && parsedPrimaryThreshold !== settings.stickyReallocationPrimaryBudgetThresholdPct;
+  const parsedSecondaryThreshold = Number.parseFloat(secondaryThreshold);
+  const secondaryThresholdValid = parsedSecondaryThreshold >= 0 && parsedSecondaryThreshold <= 100;
+  const secondaryThresholdChanged =
+    secondaryThresholdValid && parsedSecondaryThreshold !== settings.stickyReallocationSecondaryBudgetThresholdPct;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -116,6 +130,76 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
             />
+          </div>
+
+          <div className="grid gap-3 p-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <div>
+                <p className="text-sm font-medium">Primary pressure threshold</p>
+                <p className="text-xs text-muted-foreground">Reallocate when the short quota window is this full.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  inputMode="decimal"
+                  value={primaryThreshold}
+                  disabled={busy}
+                  onChange={(event) => setPrimaryThreshold(event.target.value)}
+                  className="h-8 w-24 text-xs"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs"
+                  disabled={busy || !primaryThresholdChanged}
+                  onClick={() =>
+                    void save({
+                      stickyReallocationBudgetThresholdPct: parsedPrimaryThreshold,
+                      stickyReallocationPrimaryBudgetThresholdPct: parsedPrimaryThreshold,
+                    })
+                  }
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div>
+                <p className="text-sm font-medium">Secondary pressure threshold</p>
+                <p className="text-xs text-muted-foreground">Keep the weekly window as a separate, looser guard.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  inputMode="decimal"
+                  value={secondaryThreshold}
+                  disabled={busy}
+                  onChange={(event) => setSecondaryThreshold(event.target.value)}
+                  className="h-8 w-24 text-xs"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs"
+                  disabled={busy || !secondaryThresholdChanged}
+                  onClick={() =>
+                    void save({
+                      stickyReallocationSecondaryBudgetThresholdPct: parsedSecondaryThreshold,
+                    })
+                  }
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

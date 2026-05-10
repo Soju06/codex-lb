@@ -70,6 +70,7 @@ async def _invoke_stickiness(
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
     budget_threshold_pct: float = 95.0,
+    secondary_budget_threshold_pct: float = 100.0,
     routing_strategy: RoutingStrategy = "usage_weighted",
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
@@ -93,6 +94,7 @@ async def _invoke_stickiness(
         reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=sticky_max_age_seconds,
         budget_threshold_pct=budget_threshold_pct,
+        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
         routing_strategy=routing_strategy,
         sticky_repo=sticky_repo,
@@ -801,6 +803,7 @@ async def test_budget_threshold_reallocates_codex_session_affinity():
         reallocate_sticky=False,
         sticky_max_age_seconds=None,
         budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=95.0,
     )
 
     assert result.account is not None

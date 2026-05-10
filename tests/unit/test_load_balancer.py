@@ -302,6 +302,35 @@ def test_select_account_ignores_standard_quota_exceeded_after_live_cooldown_for_
     assert result.account.account_id == "standard-quota"
 
 
+def test_select_account_preserves_additional_usage_when_standard_quota_reset_elapsed():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "spark",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=99.0,
+        secondary_used_percent=99.0,
+        reset_at=now - 1,
+        routing_policy="preserve",
+        primary_usage_fresh=True,
+        secondary_usage_fresh=True,
+    )
+
+    result = select_account(
+        [state],
+        now=now,
+        routing_strategy="usage_weighted",
+        traffic_class="opportunistic",
+        ignore_standard_quota=True,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 99.0
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
+    )
+
+
 def test_select_account_ignores_standard_quota_cooldown_for_additional_pool():
     now = 1_700_000_000.0
     state = AccountState(
@@ -340,6 +369,35 @@ def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
 
     assert result.account is not None
     assert result.account.account_id == "temp"
+
+
+def test_budget_safe_selection_keeps_health_tier_ahead_of_burn_first():
+    states = [
+        AccountState(
+            "temp",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            health_tier=1,
+            routing_policy="burn_first",
+        ),
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            health_tier=0,
+            routing_policy="normal",
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
 
 
 def test_budget_safe_selection_falls_back_when_burn_first_unavailable():
@@ -1975,6 +2033,41 @@ def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe()
     assert result.account.account_id == "secondary-low"
 
 
+def test_budget_safe_selection_uses_separate_secondary_threshold():
+    states = [
+        AccountState("weekly-pressured", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+        AccountState("weekly-safe", AccountStatus.ACTIVE, used_percent=50.0, secondary_used_percent=20.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "weekly-safe"
+
+
+def test_budget_safe_selection_defaults_secondary_threshold_to_disabled():
+    states = [
+        AccountState("primary-lower-weekly-full", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+        AccountState("primary-higher-weekly-low", AccountStatus.ACTIVE, used_percent=50.0, secondary_used_percent=20.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "primary-higher-weekly-low"
+
+
 def test_all_primary_pressured_fallback_prefers_healthy_over_draining():
     states = [
         AccountState(
@@ -2098,7 +2191,8 @@ def test_sticky_budget_threshold_still_counts_secondary_pressure():
         secondary_used_percent=99.0,
     )
 
-    assert _state_above_sticky_budget_threshold(state, 95.0) is True
+    assert _state_above_sticky_budget_threshold(state, 95.0, 98.0) is True
+    assert _state_above_sticky_budget_threshold(state, 95.0) is False
 
 
 def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():

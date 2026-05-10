@@ -12,6 +12,9 @@ const BASE_SETTINGS: DashboardSettings = {
   routingStrategy: "usage_weighted",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
+  stickyReallocationBudgetThresholdPct: 95,
+  stickyReallocationPrimaryBudgetThresholdPct: 95,
+  stickyReallocationSecondaryBudgetThresholdPct: 100,
   importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
@@ -26,7 +29,7 @@ describe("RoutingSettings", () => {
       <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
     );
 
-    const ttlInput = screen.getByRole("spinbutton");
+    const ttlInput = screen.getByDisplayValue("300");
     await user.clear(ttlInput);
     await user.type(ttlInput, "180");
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
@@ -38,6 +41,9 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -51,8 +57,9 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByRole("spinbutton"));
-    await user.type(screen.getByRole("spinbutton"), "240{Enter}");
+    const updatedTtlInput = screen.getByDisplayValue("180");
+    await user.clear(updatedTtlInput);
+    await user.type(updatedTtlInput, "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
       stickyThreadsEnabled: false,
@@ -61,6 +68,9 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -72,7 +82,7 @@ describe("RoutingSettings", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
-    const ttlInput = screen.getByRole("spinbutton");
+    const ttlInput = screen.getByDisplayValue("300");
     const saveButton = screen.getByRole("button", { name: "Save TTL" });
     expect(saveButton).toBeDisabled();
 
@@ -89,6 +99,53 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+    });
+  });
+
+  it("saves split sticky budget pressure thresholds", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByDisplayValue("95"));
+    await user.type(screen.getByDisplayValue(""), "90");
+    await user.click(screen.getAllByRole("button", { name: "Save" })[0]!);
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 90,
+      stickyReallocationPrimaryBudgetThresholdPct: 90,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    await user.clear(screen.getByDisplayValue("100"));
+    await user.type(screen.getByDisplayValue(""), "98");
+    await user.click(screen.getAllByRole("button", { name: "Save" })[1]!);
+
+    expect(onSave).toHaveBeenLastCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 98,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,

@@ -8307,6 +8307,16 @@ class ProxyService:
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                primary_budget_threshold_pct = getattr(
+                    settings,
+                    "sticky_reallocation_primary_budget_threshold_pct",
+                    settings.sticky_reallocation_budget_threshold_pct,
+                )
+                secondary_budget_threshold_pct = getattr(
+                    settings,
+                    "sticky_reallocation_secondary_budget_threshold_pct",
+                    100.0,
+                )
                 if (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
@@ -8322,7 +8332,8 @@ class ProxyService:
                         model=model,
                         additional_limit_name=additional_limit_name,
                         account_ids={preferred_account_id},
-                        budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                        budget_threshold_pct=primary_budget_threshold_pct,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                         traffic_class=effective_traffic_class,
                     )
                     if preferred_selection.account is not None:
@@ -8345,7 +8356,8 @@ class ProxyService:
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     exclude_account_ids=excluded_account_ids_set,
-                    budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                    budget_threshold_pct=primary_budget_threshold_pct,
+                    secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                     traffic_class=effective_traffic_class,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
@@ -8389,7 +8401,16 @@ class ProxyService:
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
-            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_primary_budget_threshold_pct",
+                settings.sticky_reallocation_budget_threshold_pct,
+            ),
+            secondary_budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_secondary_budget_threshold_pct",
+                100.0,
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

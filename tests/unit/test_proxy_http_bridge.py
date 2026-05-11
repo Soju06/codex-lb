@@ -5608,6 +5608,55 @@ async def test_websocket_reader_unexpected_processing_error_fails_pending_reques
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_drops_precreated_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    request_text = '{"type":"response.create","model":"gpt-5.4","input":[]}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-http-precreated-retry-buffer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        pre_response_created_event_texts=['{"type":"response.in_progress"}'],
+        request_text=request_text,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is True
+    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    send_text.assert_awaited_once_with(request_text)
+    assert request_state.pre_response_created_event_texts == []
+    assert request_state.replay_count == 1
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_buffers_nonterminal_events_until_response_created() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()

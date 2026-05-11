@@ -5215,6 +5215,7 @@ class ProxyService:
             retry_text_data = request_state.fresh_upstream_request_text
         if request_state.replay_count >= 1:
             return False
+        request_state.pre_response_created_event_texts = []
         request_state.replay_count += 1
         _log_http_bridge_event(
             "retry_fresh_upstream",
@@ -5264,7 +5265,7 @@ class ProxyService:
                 return False
             request_text = request_state.request_text
             assert isinstance(request_text, str)
-            request_state.replay_count += 1
+            request_state.reset_for_replay()
         _log_http_bridge_event(
             "retry_precreated",
             session.key,
@@ -6155,15 +6156,11 @@ class ProxyService:
         if retry_error_code is not None:
             upstream_control.reconnect_requested = True
             if retry_is_previous_response_not_found:
-                request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
+                request_state.reset_for_replay()
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
             else:
-                request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
+                request_state.reset_for_replay()
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
                 await self._handle_stream_error(
@@ -8322,6 +8319,12 @@ class _WebSocketRequestState:
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
 
+    def reset_for_replay(self) -> None:
+        self.pre_response_created_event_texts = []
+        self.replay_count += 1
+        self.awaiting_response_created = True
+        self.response_id = None
+
 
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeSessionKey:
@@ -8724,9 +8727,7 @@ async def _pop_replayable_precreated_websocket_request_state(
         if request_state.replay_count >= 1:
             return None
         pending_requests.popleft()
-    request_state.replay_count += 1
-    request_state.awaiting_response_created = True
-    request_state.response_id = None
+    request_state.reset_for_replay()
     return request_state
 
 

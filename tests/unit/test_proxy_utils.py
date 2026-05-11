@@ -483,7 +483,7 @@ async def test_stream_responses_returns_before_first_upstream_event(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_streams_initial_proxy_error_as_sse(monkeypatch):
+async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypatch):
     async def skip_limits(*args, **kwargs):
         del args, kwargs
         return None
@@ -492,6 +492,7 @@ async def test_stream_responses_streams_initial_proxy_error_as_sse(monkeypatch):
 
     async def stream_responses(*args, **kwargs):
         del args, kwargs
+        await asyncio.sleep(0.1)
         raise proxy_module.ProxyResponseError(
             429,
             openai_error("rate_limit_exceeded", "opportunistic burn window closed"),

@@ -22,6 +22,12 @@ When a submitted API key limit rule does not match an existing rule by `limit_ty
 - **AND** admin submits `PATCH /api/api-keys/{id}` adding a daily `total_tokens` limit without `resetUsage`
 - **THEN** the new limit's `current_value` includes only the successful current-window token usage
 
+#### Scenario: Add cost limit after current-window usage exists
+
+- **WHEN** an API key has successful request-log costs in the active daily window
+- **AND** admin submits `PATCH /api/api-keys/{id}` adding a daily `cost_usd` limit without `resetUsage`
+- **THEN** the new limit's `current_value` is the sum of each successful request log's `cost_usd` converted to truncated integer microdollars
+
 #### Scenario: Reset usage when adding a limit
 
 - **WHEN** an API key has request-log usage in the active window

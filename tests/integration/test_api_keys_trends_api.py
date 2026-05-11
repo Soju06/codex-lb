@@ -187,6 +187,96 @@ async def test_adding_model_scoped_limit_backfills_only_matching_model(async_cli
 
 
 @pytest.mark.asyncio
+async def test_adding_cost_limit_uses_per_request_truncation(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    key_id = await _create_api_key(async_client, name="cost-truncation-zero-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        *[
+            RequestLog(
+                api_key_id=key_id,
+                request_id=f"req-cost-truncation-zero-{index}",
+                requested_at=now - timedelta(minutes=index),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=1,
+                output_tokens=1,
+                cached_input_tokens=0,
+                cost_usd=0.0000005,
+            )
+            for index in range(1, 101)
+        ]
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {
+                    "limitType": "cost_usd",
+                    "limitWindow": "daily",
+                    "maxValue": 1_000_000,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    limit = _only_limit(response.json())
+    assert limit["currentValue"] == 0
+    assert limit["maxValue"] == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_adding_cost_limit_backfills_truncated_microdollars(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    key_id = await _create_api_key(async_client, name="cost-truncation-total-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        *[
+            RequestLog(
+                api_key_id=key_id,
+                request_id=f"req-cost-truncation-total-{index}",
+                requested_at=now - timedelta(minutes=index),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=1,
+                output_tokens=1,
+                cached_input_tokens=0,
+                cost_usd=0.0000015,
+            )
+            for index in range(1, 101)
+        ]
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {
+                    "limitType": "cost_usd",
+                    "limitWindow": "daily",
+                    "maxValue": 1_000_000,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    limit = _only_limit(response.json())
+    assert limit["currentValue"] == 100
+    assert limit["maxValue"] == 1_000_000
+
+
+@pytest.mark.asyncio
 async def test_adding_limit_with_reset_usage_keeps_current_value_zero(async_client, monkeypatch: pytest.MonkeyPatch):
     key_id = await _create_api_key(async_client, name="limit-reset-backfill-key")
     now = datetime(2026, 4, 30, 12, 0, 0)

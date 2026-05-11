@@ -209,7 +209,7 @@ class ApiKeysRepository:
         elif limit_type == LimitType.OUTPUT_TOKENS:
             value_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
         elif limit_type == LimitType.COST_USD:
-            value_expr = func.coalesce(RequestLog.cost_usd, 0.0)
+            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), Integer)
         else:
             return 0
 
@@ -224,8 +224,6 @@ class ApiKeysRepository:
 
         result = await self._session.execute(stmt)
         value = result.scalar_one()
-        if limit_type == LimitType.COST_USD:
-            return int(round(float(value or 0.0) * 1_000_000))
         return int(value or 0)
 
     async def update(

@@ -5373,7 +5373,7 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_response_create_request_trims_client_previous_response_output(monkeypatch):
+async def test_prepare_websocket_response_create_request_preserves_client_previous_response_output(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     reserve_usage = AsyncMock(return_value=None)
     api_key = ApiKeyData(
@@ -5428,11 +5428,71 @@ async def test_prepare_websocket_response_create_request_trims_client_previous_r
 
     upstream_payload = json.loads(prepared.text_data)
     assert upstream_payload["previous_response_id"] == "resp_client_anchor"
-    assert upstream_payload["input"] == [tool_output]
+    assert upstream_payload["input"] == [assistant_output, tool_output]
     assert prepared.request_state.input_item_count == 2
     assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
         [assistant_output, tool_output]
     )
+    assert prepared.request_state.proxy_injected_previous_response_id is False
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_rejects_orphan_tool_output_fresh_retry(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_client_prev_tool_tail",
+        name="ws-client-prev-tool-tail",
+        key_prefix="sk-ws-client-prev-tool",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    tool_output: JsonValue = {"type": "function_call_output", "call_id": "call_prev", "output": "old output"}
+    user_tail: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "now continue"}]}
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_client_anchor",
+                "input": [tool_output, user_tail],
+            },
+        ),
+        headers={},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_client_anchor"
+    assert upstream_payload["input"] == [tool_output, user_tail]
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
 
 
 def test_websocket_continuity_state_reuses_codex_session_scope():
@@ -5524,7 +5584,7 @@ def test_prepare_http_bridge_request_state_preserves_client_previous_response_in
     assert request_state.input_item_count == 2
 
 
-def test_prepare_http_bridge_request_trims_replayed_tool_call_items_with_previous_response_id():
+def test_prepare_http_bridge_request_preserves_client_previous_response_leading_items():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     assistant_output: JsonValue = {
         "type": "message",
@@ -5550,7 +5610,7 @@ def test_prepare_http_bridge_request_trims_replayed_tool_call_items_with_previou
 
     upstream_payload = json.loads(text_data)
     assert upstream_payload["previous_response_id"] == "resp_client_supplied"
-    assert upstream_payload["input"] == [tool_output, user_input]
+    assert upstream_payload["input"] == [assistant_output, tool_output, user_input]
     assert request_state.input_item_count == 3
     assert request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
         [assistant_output, tool_output, user_input]

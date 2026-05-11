@@ -662,7 +662,11 @@ class ProxyService:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-        if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
+        if (
+            proxy_injected_previous_response_id
+            and effective_payload.previous_response_id is not None
+            and isinstance(effective_payload.input, list)
+        ):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
@@ -3048,6 +3052,19 @@ class ProxyService:
                     "input": original_input_items[session_anchor.stored_input_item_count :],
                 }
             )
+        elif (
+            responses_payload.previous_response_id is not None
+            and _websocket_client_previous_response_payload_has_safe_fresh_replay(
+                responses_payload,
+                continuity_state=continuity_state,
+            )
+        ):
+            unanchored_payload = responses_payload.model_copy(update={"previous_response_id": None})
+            original_full_resend_text = _response_create_text(
+                unanchored_payload,
+                include_type_field=True,
+                client_metadata=client_metadata,
+            )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -3066,7 +3083,7 @@ class ProxyService:
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 client_metadata=client_metadata,
                 session_id=session_id,
-                trim_previous_response_input_items=True,
+                trim_previous_response_input_items=session_anchor is not None,
             )
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
@@ -3088,6 +3105,11 @@ class ProxyService:
                 len(cast(list[JsonValue], responses_payload.input))
                 if isinstance(responses_payload.input, list)
                 else None,
+            )
+        elif original_full_resend_text is not None:
+            request_state.fresh_upstream_request_text = original_full_resend_text
+            request_state.fresh_upstream_request_is_retry_safe = (
+                len(original_full_resend_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
             )
         elif previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
@@ -3179,6 +3201,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        trim_previous_response_input_items: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         return self._prepare_response_bridge_request_state(
             payload,
@@ -3190,7 +3213,7 @@ class ProxyService:
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
-            trim_previous_response_input_items=True,
+            trim_previous_response_input_items=trim_previous_response_input_items,
         )
 
     def _prepare_response_bridge_request_state(
@@ -8694,15 +8717,11 @@ class _WebSocketRequestState:
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     fresh_upstream_request_text: str | None = None
-    # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
-    # injection form of this request that can be replayed as a fresh turn.
-    # Durable-anchor injection captures the original unanchored full-resend
-    # payload, so dropping the anchor and replaying is equivalent to the
-    # client's own retry. Session-level anchor injection does **not** set
-    # this: the original payload may have omitted history the conversation
-    # depended on (for example a single-item follow-up whose context came
-    # entirely from the injected anchor), and dropping the anchor there
-    # would silently turn a continuation into a context-free fresh turn.
+    # True only when ``fresh_upstream_request_text`` contains a safe fresh-turn
+    # form of this request. Proxy-injected full-replay anchors and client-
+    # supplied full-resend anchors can opt in; session-level short-follow-up
+    # injections do not because their payload may depend on the anchor for
+    # context preservation.
     fresh_upstream_request_is_retry_safe: bool = False
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
@@ -9279,11 +9298,7 @@ async def _pop_replayable_precreated_websocket_request_state(
 
 
 def _request_state_has_safe_fresh_replay(request_state: _WebSocketRequestState) -> bool:
-    return (
-        request_state.proxy_injected_previous_response_id
-        and request_state.fresh_upstream_request_is_retry_safe
-        and bool(request_state.fresh_upstream_request_text)
-    )
+    return request_state.fresh_upstream_request_is_retry_safe and bool(request_state.fresh_upstream_request_text)
 
 
 def _switch_request_state_to_fresh_replay(request_state: _WebSocketRequestState) -> None:
@@ -10486,6 +10501,59 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
             except TypeError:
                 return False
     return False
+
+
+def _websocket_client_previous_response_payload_has_safe_fresh_replay(
+    payload: ResponsesRequest,
+    *,
+    continuity_state: _WebSocketContinuityState | None,
+) -> bool:
+    if (
+        continuity_state is None
+        or payload.previous_response_id is None
+        or payload.previous_response_id != continuity_state.last_completed_response_id
+        or continuity_state.last_completed_input_count <= 0
+        or continuity_state.last_completed_input_prefix_fingerprint is None
+    ):
+        return False
+    input_value = payload.input
+    if not isinstance(input_value, Sequence) or isinstance(input_value, (str, bytes, bytearray)):
+        return False
+    stored_count = continuity_state.last_completed_input_count
+    if len(input_value) <= stored_count:
+        return False
+    incoming_prefix = cast(Sequence[JsonValue], input_value[:stored_count])
+    if _fingerprint_input_items(incoming_prefix) != continuity_state.last_completed_input_prefix_fingerprint:
+        return False
+
+    seen_function_calls: set[str] = set()
+    seen_tool_calls: set[str] = set()
+    for item in input_value:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                seen_function_calls.add(call_id)
+        elif item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or call_id not in seen_function_calls:
+                return False
+        elif item.get("role") == "assistant":
+            tool_calls = item.get("tool_calls")
+            if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes, bytearray)):
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, Mapping):
+                        continue
+                    call_id = tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id")
+                    if isinstance(call_id, str) and call_id:
+                        seen_tool_calls.add(call_id)
+        elif item.get("role") == "tool":
+            call_id = item.get("tool_call_id") or item.get("toolCallId") or item.get("call_id")
+            if not isinstance(call_id, str) or call_id not in seen_tool_calls:
+                return False
+    return True
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

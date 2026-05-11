@@ -983,7 +983,7 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
     ]
 
 
-def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previous_response_id(
+def test_backend_responses_websocket_preserves_client_previous_response_leading_items(
     app_instance,
     monkeypatch,
 ):
@@ -1083,11 +1083,23 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
     sent_payload = json.loads(fake_upstream.sent_text[0])
     assert sent_payload["previous_response_id"] == "resp_prev_tool_call"
     assert sent_payload["input"] == [
+        {"type": "reasoning", "summary": []},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "running command"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_repeat",
+            "name": "exec_command",
+            "arguments": '{"cmd":"date"}',
+        },
         {
             "type": "function_call_output",
             "call_id": "call_repeat",
             "output": "Wed May 6 16:00:00 UTC 2026",
-        }
+        },
     ]
 
 
@@ -1489,7 +1501,7 @@ def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
     assert connect_record[0]["fresh_upstream_request_text_set"] is True
 
 
-def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_retry(
+def test_v1_responses_websocket_retries_full_resend_previous_response_miss_without_anchor(
     app_instance,
     monkeypatch,
 ):
@@ -1538,6 +1550,33 @@ def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_
             ],
         ],
     )
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_full_replay_retry", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_full_replay_retry", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
     connect_count = 0
 
     class _FakeSettingsCache:
@@ -1583,7 +1622,9 @@ def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_
         )
         nonlocal connect_count
         connect_count += 1
-        return SimpleNamespace(id="acct_ws_prev_mask"), first_upstream
+        if connect_count == 1:
+            return SimpleNamespace(id="acct_ws_prev_mask"), first_upstream
+        return SimpleNamespace(id="acct_ws_prev_mask"), recovered_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -1603,7 +1644,7 @@ def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_
                     {
                         "type": "response.create",
                         "model": "gpt-5.4",
-                        "input": "hello",
+                        "input": full_resend_input[:1],
                         "stream": True,
                     }
                 )
@@ -1624,13 +1665,18 @@ def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_
                     }
                 )
             )
-            failed_2 = json.loads(websocket.receive_text())
+            created_2 = json.loads(websocket.receive_text())
+            completed_2 = json.loads(websocket.receive_text())
 
-    assert failed_2["type"] == "response.failed"
-    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
-    assert "previous_response_not_found" not in json.dumps(failed_2)
-    assert connect_count == 1
+    assert created_2["type"] == "response.created"
+    assert created_2["response"]["id"] == "resp_ws_full_replay_retry"
+    assert completed_2["type"] == "response.completed"
+    assert "previous_response_not_found" not in json.dumps([created_2, completed_2])
+    assert connect_count == 2
     assert json.loads(first_upstream.sent_text[-1])["previous_response_id"] == "resp_ws_prev_anchor"
+    replay_payload = json.loads(recovered_upstream.sent_text[-1])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == full_resend_input
 
 
 def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_unsafe_retry(

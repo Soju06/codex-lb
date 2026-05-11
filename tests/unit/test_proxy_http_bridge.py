@@ -572,7 +572,7 @@ def test_http_bridge_owner_check_required_enables_sticky_thread_in_gateway_safe_
     assert proxy_service._http_bridge_owner_check_required(key, gateway_safe_mode=True) is True
 
 
-def test_prepare_http_bridge_request_trims_replayed_tool_call_items_with_previous_response_id() -> None:
+def test_prepare_http_bridge_request_preserves_client_previous_response_leading_items() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
         {
@@ -597,7 +597,10 @@ def test_prepare_http_bridge_request_trims_replayed_tool_call_items_with_previou
     sent_payload = json.loads(text_data)
     assert request_state.previous_response_id == "resp_prev_tool_call"
     assert sent_payload["previous_response_id"] == "resp_prev_tool_call"
-    assert sent_payload["input"] == [{"type": "function_call_output", "call_id": "call_repeat", "output": "ok"}]
+    assert sent_payload["input"] == [
+        {"type": "function_call", "call_id": "call_repeat", "name": "exec_command", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_repeat", "output": "ok"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -879,7 +882,7 @@ async def test_stream_via_http_bridge_injects_durable_previous_response_anchor(
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previous_response_id(
+async def test_stream_via_http_bridge_preserves_client_previous_response_leading_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -1001,13 +1004,7 @@ async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previo
     ]
 
     assert chunks == []
-    assert captured_input == [
-        {
-            "type": "function_call_output",
-            "call_id": "call_repeat",
-            "output": "Wed May 6 16:00:00 UTC 2026",
-        }
-    ]
+    assert captured_input == cast(list[proxy_service.JsonValue], payload.input)
 
 
 @pytest.mark.asyncio

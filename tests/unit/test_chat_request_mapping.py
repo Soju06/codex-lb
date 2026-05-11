@@ -78,17 +78,19 @@ def test_chat_max_tokens_are_stripped():
     assert "max_completion_tokens" not in dumped
 
 
-def test_chat_temperature_is_stripped_for_upstream_compat():
+def test_temperature_and_top_p_are_stripped_for_upstream_compat():
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
         "temperature": 0.2,
+        "top_p": 0.9,
         "safety_identifier": "safe_123",
     }
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "temperature" not in dumped
+    assert "top_p" not in dumped
     assert "safety_identifier" not in dumped
 
 

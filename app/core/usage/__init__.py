@@ -16,7 +16,7 @@ from app.core.usage.types import (
 from app.db.models import Account
 
 PLAN_CAPACITY_CREDITS_PRIMARY = {
-    "free": 33.75,
+    "free": 0.0,
     "plus": 225.0,
     "business": 225.0,
     "team": 225.0,

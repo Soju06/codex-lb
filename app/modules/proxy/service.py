@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gzip
 import inspect
 import json
@@ -13,7 +14,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
-from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
 from uuid import uuid4
 
@@ -42,6 +42,7 @@ from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
+    _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
@@ -59,7 +60,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
@@ -90,7 +91,12 @@ from app.core.metrics.prometheus import (
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    extract_input_file_ids,
+    extract_input_image_file_references,
+)
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
@@ -170,7 +176,12 @@ logger = logging.getLogger(__name__)
 
 _UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
-_OVERSIZED_RESPONSE_CREATE_DUMP_DIR = Path("/var/lib/codex-lb/debug/response-create-dumps")
+# Use the deploy's resolved data directory so non-container installs
+# (notably macOS ``uv tool`` / LaunchAgent layouts that don't have
+# ``/var/lib/codex-lb`` writable) still get oversized-payload dumps.
+# The container image keeps writing to ``/var/lib/codex-lb`` because
+# ``DEFAULT_HOME_DIR`` resolves to that path inside the image.
+_OVERSIZED_RESPONSE_CREATE_DUMP_DIR = DEFAULT_HOME_DIR / "debug" / "response-create-dumps"
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
     "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
@@ -182,6 +193,7 @@ _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline im
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
+_ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 
@@ -292,7 +304,7 @@ class ProxyService:
         # different replica with no pin, we fall back to a fresh load-
         # balancer selection. The TTL is short enough (5 min) that we
         # never hold stale pins after the upstream upload window closes.
-        self._file_account_pins: dict[str, tuple[str, float]] = {}
+        self._file_account_pins: dict[str, _FilePinEntry] = {}
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
@@ -394,6 +406,21 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         dashboard_settings = await get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, get_settings())
+        request_id = ensure_request_id()
+        self._raise_for_unsupported_input_image_references(payload)
+        payload_size_estimate_bytes = len(
+            json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        )
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(get_settings())
+        if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+            logger.info(
+                "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
+                payload_size_estimate_bytes,
+                ws_payload_budget_bytes,
+                request_id,
+            )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if not runtime_config.enabled:
             async for line in self._stream_with_retry(
                 payload,
@@ -405,6 +432,7 @@ class ProxyService:
                 api_key_reservation=api_key_reservation,
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
             ):
                 yield line
             return
@@ -428,6 +456,7 @@ class ProxyService:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            rewritten_file_account_id=rewritten_file_account_id,
         ):
             yield line
 
@@ -452,6 +481,7 @@ class ProxyService:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        rewritten_file_account_id: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -601,6 +631,8 @@ class ProxyService:
             # that registered the upload (chatgpt-account-id-scoped).
             # The helper returns ``None`` when stronger affinity signals
             # are present, so this never overrides existing routing.
+            request_state.preferred_account_id = rewritten_file_account_id
+        if request_state.preferred_account_id is None:
             request_state.preferred_account_id = await self._resolve_file_account_for_responses(
                 effective_payload, headers
             )
@@ -1422,6 +1454,8 @@ class ProxyService:
         response: CompactResponsePayload | None = None
         request_service_tier: str | None = None
         actual_service_tier: str | None = None
+        self._raise_for_unsupported_input_image_references(payload)
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -1453,7 +1487,9 @@ class ProxyService:
         # returns ``None`` when stronger affinity signals are present
         # (prompt_cache_key / session header / turn_state header /
         # previous_response_id), so existing routing wins.
-        file_preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
+        file_preferred_account_id = rewritten_file_account_id
+        if file_preferred_account_id is None:
+            file_preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
         try:
 
             async def _call_compact(target: Account) -> CompactResponsePayload:
@@ -1910,7 +1946,11 @@ class ProxyService:
     # so this acts as an upper bound, not a fixed retention.
     _FILE_ACCOUNT_PIN_TTL_SECONDS: float = 30 * 60.0
 
-    async def _pin_file_account(self, file_id: str, account_id: str) -> None:
+    async def _pin_file_account(
+        self,
+        file_id: str,
+        account_id: str,
+    ) -> None:
         """Remember that ``file_id`` was registered through ``account_id``.
 
         Used so a subsequent ``finalize_file`` can be routed to the same
@@ -1922,27 +1962,34 @@ class ProxyService:
             return
         expires_at = time.monotonic() + self._FILE_ACCOUNT_PIN_TTL_SECONDS
         async with self._file_account_pin_lock:
-            self._file_account_pins[file_id] = (account_id, expires_at)
+            self._file_account_pins[file_id] = _FilePinEntry(
+                account_id=account_id,
+                expires_at=expires_at,
+            )
             self._evict_expired_file_pins_locked()
 
     async def _resolve_file_account(self, file_id: str) -> str | None:
         """Return the pinned account_id for ``file_id`` if still live."""
+        entry = await self._lookup_file_pin(file_id)
+        return entry.account_id if entry is not None else None
+
+    async def _lookup_file_pin(self, file_id: str) -> _FilePinEntry | None:
         if not file_id:
             return None
         async with self._file_account_pin_lock:
+            self._evict_expired_file_pins_locked()
             entry = self._file_account_pins.get(file_id)
             if entry is None:
                 return None
-            account_id, expires_at = entry
-            if expires_at <= time.monotonic():
+            if entry.expires_at <= time.monotonic():
                 self._file_account_pins.pop(file_id, None)
                 return None
-            return account_id
+            return entry
 
     def _evict_expired_file_pins_locked(self) -> None:
         """Drop pins past their TTL. Called under ``_file_account_pin_lock``."""
         now = time.monotonic()
-        expired = [file_id for file_id, (_, expires_at) in self._file_account_pins.items() if expires_at <= now]
+        expired = [file_id for file_id, entry in self._file_account_pins.items() if entry.expires_at <= now]
         for file_id in expired:
             self._file_account_pins.pop(file_id, None)
 
@@ -2027,14 +2074,30 @@ class ProxyService:
                 entry = self._file_account_pins.get(file_id)
                 if entry is None:
                     continue
-                account_id, expires_at = entry
-                if expires_at > best_expires_at or (
-                    expires_at == best_expires_at and (best_file_id is None or file_id < best_file_id)
+                if entry.expires_at > best_expires_at or (
+                    entry.expires_at == best_expires_at and (best_file_id is None or file_id < best_file_id)
                 ):
-                    best_account = account_id
-                    best_expires_at = expires_at
+                    best_account = entry.account_id
+                    best_expires_at = entry.expires_at
                     best_file_id = file_id
             return best_account
+
+    def _raise_for_unsupported_input_image_references(self, payload: _ResponsesPayloadT) -> None:
+        references = extract_input_image_file_references(payload.input)
+        if not references:
+            return
+        raise ProxyResponseError(
+            400,
+            openai_error(
+                "unsupported_input_image_format",
+                (
+                    "input_image references via file_id or sediment:// URIs are not supported on "
+                    "/v1/responses; the upstream API only accepts inline data: URLs. Send the "
+                    "image inline (codex-cli style) or use the upload protocol exclusively for "
+                    "MCP tool arguments."
+                ),
+            ),
+        )
 
     async def create_file(
         self,
@@ -2097,7 +2160,7 @@ class ProxyService:
         a replica boundary).
         """
         pinned_account_id = await self._resolve_file_account(file_id)
-        result, _ = await self._proxy_files_call(
+        result, account_id = await self._proxy_files_call(
             log_model="files-finalize",
             kind="files-finalize",
             api_key=api_key,
@@ -2110,6 +2173,10 @@ class ProxyService:
                 account_id=upstream_account_id,
             ),
         )
+        if isinstance(result, dict) and account_id:
+            status = result.get("status")
+            if status == "success":
+                await self._pin_file_account(file_id, account_id)
         return result
 
     async def _proxy_files_call(
@@ -2761,6 +2828,8 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
+        self._raise_for_unsupported_input_image_references(responses_payload)
+        rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -2818,6 +2887,8 @@ class ProxyService:
         # affinity signals (prompt_cache_key / session header /
         # turn_state header / previous_response_id) are present, so this
         # never overrides existing routing.
+        if request_state.preferred_account_id is None:
+            request_state.preferred_account_id = rewritten_file_account_id
         if request_state.preferred_account_id is None:
             request_state.preferred_account_id = await self._resolve_file_account_for_responses(
                 responses_payload, headers
@@ -5147,9 +5218,11 @@ class ProxyService:
                     break
 
                 if message.kind == "text" and message.text is not None:
+                    session.last_upstream_close_code = None
                     await self._process_http_bridge_upstream_text(session, message.text)
                     continue
 
+                session.last_upstream_close_code = message.close_code
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -5263,6 +5336,18 @@ class ProxyService:
                 # is unsafe without upstream idempotency guarantees.
                 return False
             if request_state.replay_count >= 1:
+                return False
+            close_classification = _classify_upstream_close(
+                session.last_upstream_close_code,
+                response_events_seen=request_state.response_event_count,
+            )
+            if close_classification == "rejected":
+                request_state.error_code_override = "upstream_rejected_input"
+                request_state.error_http_status_override = 502
+                request_state.error_message_override = (
+                    "Upstream rejected the request before response.created "
+                    f"(close_code={session.last_upstream_close_code})"
+                )
                 return False
             request_text = request_state.request_text
             assert isinstance(request_text, str)
@@ -5394,6 +5479,7 @@ class ProxyService:
         session.upstream = upstream
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
+        session.last_upstream_close_code = None
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -5527,6 +5613,12 @@ class ProxyService:
 
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
             terminal_request_state = grouped_previous_response_request_states[0]
+
+        if matched_request_state is terminal_request_state:
+            _record_response_event(matched_request_state, event_type)
+        else:
+            _record_response_event(matched_request_state, event_type)
+            _record_response_event(terminal_request_state, event_type)
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
@@ -6088,6 +6180,8 @@ class ProxyService:
 
         if len(grouped_previous_response_request_states) == 1 and request_state is None:
             request_state = grouped_previous_response_request_states[0]
+
+        _record_response_event(request_state, event_type)
 
         if request_state is None:
             if is_previous_response_not_found_event:
@@ -6833,6 +6927,7 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         request_transport: str,
+        rewritten_file_account_id: str | None = None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
@@ -6841,6 +6936,9 @@ class ProxyService:
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
+        if rewritten_file_account_id is None:
+            self._raise_for_unsupported_input_image_references(payload)
+            rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,
@@ -6889,6 +6987,8 @@ class ProxyService:
                 # priority -- it returns ``None`` when stronger affinity
                 # signals (prompt_cache_key / session header / turn_state
                 # header) are present, so this never overrides them.
+                preferred_account_id = rewritten_file_account_id
+            if preferred_account_id is None:
                 preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -8251,6 +8351,28 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
     return code in {"proxy_overloaded", "proxy_unavailable"}
 
 
+def _classify_upstream_close(
+    close_code: int | None,
+    *,
+    response_events_seen: int,
+) -> Literal["transient", "rejected"]:
+    if close_code == 1000 and response_events_seen == 0:
+        return "rejected"
+    return "transient"
+
+
+def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
+    if request_state is None or event_type is None or not event_type.startswith("response."):
+        return
+    request_state.response_event_count += 1
+
+
+@dataclass(frozen=True, slots=True)
+class _FilePinEntry:
+    account_id: str
+    expires_at: float
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -8292,6 +8414,7 @@ class _WebSocketRequestState:
     error_type_override: str | None = None
     error_param_override: str | None = None
     error_http_status_override: int | None = None
+    response_event_count: int = 0
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -8353,6 +8476,7 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
+    last_upstream_close_code: int | None = None
     closed: bool = False
 
 

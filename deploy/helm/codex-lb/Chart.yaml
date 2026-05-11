@@ -4,8 +4,8 @@ description: >-
   Production-grade Helm chart for codex-lb — OpenAI API load balancer with usage
   tracking, account pooling, and observability
 type: application
-version: 1.15.0
-appVersion: 1.15.0
+version: 1.16.0
+appVersion: 1.16.0
 kubeVersion: '>=1.32.0-0'
 home: https://github.com/soju06/codex-lb
 sources:

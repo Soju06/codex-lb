@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Protocol, Self, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
@@ -466,6 +466,7 @@ def test_resolve_stream_transport_does_not_force_websocket_for_custom_codex_orig
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override=None,
         model="gpt-5.1",
@@ -483,6 +484,7 @@ def test_resolve_stream_transport_prefers_http_for_image_generation_even_with_na
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override=None,
         model="gpt-5.4",
@@ -501,6 +503,7 @@ def test_resolve_stream_transport_keeps_explicit_websocket_override_for_image_ge
     )
 
     transport = proxy_module._resolve_stream_transport(
+        settings=SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024),
         transport="auto",
         transport_override="websocket",
         model="gpt-5.4",
@@ -509,6 +512,185 @@ def test_resolve_stream_transport_keeps_explicit_websocket_override_for_image_ge
     )
 
     assert transport == "websocket"
+
+
+def test_resolve_stream_transport_uses_http_for_large_auto_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="auto",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "http"
+
+
+def test_resolve_stream_transport_keeps_websocket_for_small_or_unknown_auto_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+
+    assert (
+        proxy_module._resolve_stream_transport(
+            settings=settings,
+            transport="auto",
+            transport_override=None,
+            model="gpt-5.4",
+            headers={},
+            payload_size_estimate_bytes=None,
+        )
+        == "websocket"
+    )
+    assert (
+        proxy_module._resolve_stream_transport(
+            settings=settings,
+            transport="auto",
+            transport_override=None,
+            model="gpt-5.4",
+            headers={},
+            payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings),
+        )
+        == "websocket"
+    )
+
+
+def test_resolve_stream_transport_keeps_explicit_websocket_for_large_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda _model: False),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="websocket",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "websocket"
+
+
+def test_resolve_stream_transport_keeps_explicit_http_for_large_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(prefers_websockets=lambda model: model == "gpt-5.4"),
+    )
+
+    settings = SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024)
+    transport = proxy_module._resolve_stream_transport(
+        settings=settings,
+        transport="http",
+        transport_override=None,
+        model="gpt-5.4",
+        headers={"originator": "codex_chatgpt_desktop"},
+        payload_size_estimate_bytes=proxy_module._ws_transport_payload_budget_bytes(settings) + 1,
+    )
+
+    assert transport == "http"
+
+
+def test_ws_transport_payload_budget_uses_settings_limit() -> None:
+    assert (
+        proxy_module._ws_transport_payload_budget_bytes(SimpleNamespace(max_sse_event_bytes=16 * 1024 * 1024))
+        == 14 * 1024 * 1024
+    )
+    assert proxy_module._ws_transport_payload_budget_bytes(SimpleNamespace(max_sse_event_bytes=2 * 1024 * 1024)) == (
+        1 * 1024 * 1024
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.max_sse_event_bytes = 16 * 1024 * 1024
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+
+    oversized_payload = MagicMock()
+    oversized_payload.to_payload.return_value = {
+        "model": "gpt-5.4",
+        "input": "x" * (proxy_module._ws_transport_payload_budget_bytes(settings) + 1024),
+    }
+    resolve_file_account = AsyncMock(return_value="acc_pinned")
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_file_account)
+
+    calls: list[tuple[str, object, str | None]] = []
+
+    async def fake_stream_with_retry(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del headers, kwargs
+        calls.append(("retry", payload, rewritten_file_account_id))
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del payload, headers, rewritten_file_account_id, kwargs
+        calls.append(("bridge", None, None))
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=oversized_payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    resolve_file_account.assert_awaited_once_with(oversized_payload, {})
+    assert calls == [("retry", oversized_payload, "acc_pinned")]
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():
@@ -815,6 +997,9 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
         proxy_admission_wait_timeout_seconds=10.0,
+        max_sse_event_bytes=16 * 1024 * 1024,
+        http_responses_session_bridge_instance_id="test-instance",
+        http_responses_session_bridge_instance_ring=[],
     )
 
 
@@ -9696,3 +9881,223 @@ async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatc
             pass  # pragma: no cover
 
     assert cm.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_lookup_file_pin_returns_live_entry_and_evicts_expired(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    fake_now = [100.0]
+
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: fake_now[0])
+
+    await service._pin_file_account("file_live", "acc_live")
+
+    entry = await service._lookup_file_pin("file_live")
+
+    assert entry is not None
+    assert entry.account_id == "acc_live"
+
+    fake_now[0] += service._FILE_ACCOUNT_PIN_TTL_SECONDS + 1
+
+    expired = await service._lookup_file_pin("file_live")
+
+    assert expired is None
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_rejects_input_image_file_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "file_id": "file_pic"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        async for _ in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        ):
+            pass
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "unsupported_input_image_format"
+    assert "data: URLs" in (_proxy_error_message(info.value) or "")
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_rejects_input_image_sediment_url(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "image_url": "sediment://file_pic"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        async for _ in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        ):
+            pass
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "unsupported_input_image_format"
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rejecting(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    await service._pin_file_account("file_doc", "acc_doc")
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_doc"}],
+        }
+    )
+
+    calls: list[tuple[object, str | None]] = []
+
+    async def fake_stream_with_retry(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del headers, kwargs
+        calls.append((payload, rewritten_file_account_id))
+        yield "data: retry\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    assert calls == [(payload, "acc_doc")]
+
+
+def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
+    assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1000,
+    )
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is False
+    assert request_state.error_code_override == "upstream_rejected_input"
+    assert request_state.error_http_status_override == 502
+    assert "close_code=1000" in (request_state.error_message_override or "")

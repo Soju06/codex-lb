@@ -1494,12 +1494,7 @@ async def v1_chat_completions(
     )
     stream, startup_error = await _probe_stream_startup_error(stream)
     if startup_error is not None:
-        return _logged_error_json_response(
-            request,
-            startup_error.status_code,
-            startup_error.payload,
-            headers=rate_limit_headers,
-        )
+        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
         include_usage = bool(stream_options and stream_options.include_usage)
@@ -1620,12 +1615,7 @@ async def _stream_responses(
     if startup_error is not None:
         if reservation is not None and owns_reservation:
             await _release_reservation(reservation)
-        return _logged_error_json_response(
-            request,
-            startup_error.status_code,
-            startup_error.payload,
-            headers=rate_limit_headers,
-        )
+        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream))
     return StreamingResponse(
         inject_sse_keepalives(
@@ -1882,7 +1872,7 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
 
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
-) -> tuple[AsyncIterator[str], ProxyResponseError | None]:
+) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     first_task = asyncio.create_task(anext(stream))
     try:
         first = await asyncio.wait_for(
@@ -1895,6 +1885,9 @@ async def _probe_stream_startup_error(
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
         return _prepend_first(None, stream), exc
+    first_error = _stream_event_error_envelope(first)
+    if first_error is not None:
+        return _prepend_first(None, stream), first_error
     return _prepend_first(first, stream), None
 
 
@@ -1923,6 +1916,47 @@ async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) ->
                 error_param=error.param if error else None,
             )
         )
+
+
+def _stream_startup_error_response(
+    request: Request,
+    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
+    *,
+    headers: Mapping[str, str],
+) -> JSONResponse:
+    if isinstance(error, ProxyResponseError):
+        return _logged_error_json_response(request, error.status_code, error.payload, headers=headers)
+    status_code, envelope = _mask_previous_response_not_found_error(error)
+    return _logged_error_json_response(
+        request,
+        status_code,
+        envelope.model_dump(mode="json", exclude_none=True),
+        headers=headers,
+    )
+
+
+def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel | None:
+    payload = _parse_sse_payload(event_block)
+    if payload is None:
+        return None
+    event_type = payload.get("type")
+    if event_type == "error":
+        return _parse_event_error_envelope(payload)
+    if event_type != "response.failed":
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return _default_error_envelope()
+    error_value = response.get("error")
+    if isinstance(error_value, dict):
+        try:
+            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
+        except ValidationError:
+            return _default_error_envelope()
+    parsed = parse_response_payload(response)
+    if parsed is not None and parsed.error is not None:
+        return _error_envelope_from_response(parsed.error)
+    return _default_error_envelope()
 
 
 def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
@@ -2619,6 +2653,18 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 502
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
+    if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
+        return 429
+    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication"}:
+        return 401
+    if error_value and error_value.code == "invalid_request_error":
+        return 400
+    if error_value and error_value.type == "authentication_error":
+        return 401
+    if error_value and error_value.type == "invalid_request_error":
+        return 400
+    if error_value and error_value.type in {"rate_limit_error", "usage_limit_reached", "insufficient_quota"}:
+        return 429
     return 502
 
 

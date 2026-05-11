@@ -90,6 +90,17 @@ function getLimitValue(apiKey: ApiKey): string {
   return formatLimitSummary(apiKey.limits);
 }
 
+function getPolicyValue(apiKey: ApiKey): string {
+  const policies: string[] = [];
+  if (apiKey.enforcedServiceTier) {
+    policies.push(`Tier: ${apiKey.enforcedServiceTier}`);
+  }
+  if (apiKey.omitPriorityRequest) {
+    policies.push("Omit priority");
+  }
+  return policies.length > 0 ? policies.join(" | ") : "-";
+}
+
 export type ApiKeyTableProps = {
   keys: ApiKey[];
   busy: boolean;
@@ -111,8 +122,9 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
           <TableHead className="w-[20%] min-w-[12rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
           <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
           <TableHead className="w-[9%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
-          <TableHead className="w-[26%] min-w-[17rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
-          <TableHead className="w-[14%] min-w-[12rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Limit</TableHead>
+          <TableHead className="w-[22%] min-w-[17rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
+          <TableHead className="w-[12%] min-w-[10rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Policy</TableHead>
+          <TableHead className="w-[12%] min-w-[12rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Limit</TableHead>
           <TableHead className="w-[8%] min-w-[7rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
           <TableHead className="w-[7%] min-w-[5.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
           <TableHead className="w-[6%] min-w-[4.5rem] pr-4 text-right text-[11px] uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
@@ -128,6 +140,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
               <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
               <TableCell className="truncate">{models}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getUsageValue(apiKey)}</TableCell>
+              <TableCell className="text-xs leading-tight whitespace-normal">{getPolicyValue(apiKey)}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getLimitValue(apiKey)}</TableCell>
               <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>
               <TableCell>

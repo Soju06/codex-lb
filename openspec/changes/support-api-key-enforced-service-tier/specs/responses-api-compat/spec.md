@@ -14,3 +14,10 @@ When an API key carries an enforced service tier, the proxy MUST override any in
 
 - **WHEN** an API key is configured with `enforcedServiceTier: "fast"`
 - **THEN** the forwarded upstream payload uses the canonical value `priority`
+
+#### Scenario: Omit priority request submits as normal
+
+- **WHEN** an API key is configured with `omitPriorityRequest: true`
+- **AND** an incoming Responses request asks for `service_tier: "priority"`
+- **THEN** the forwarded upstream payload omits `service_tier`
+- **AND** request-log list entries preserve `Requested priority but omitted`

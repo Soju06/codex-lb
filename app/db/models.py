@@ -135,6 +135,7 @@ class RequestLog(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    service_tier_omitted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -296,6 +297,7 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    omit_priority_request: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

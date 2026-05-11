@@ -42,6 +42,7 @@ export function ApiKeyInfo({
 	const models = apiKey.allowedModels?.join(", ") || "All models";
 	const enforcedModel = apiKey.enforcedModel || null;
 	const enforcedEffort = apiKey.enforcedReasoningEffort || null;
+	const enforcedServiceTier = apiKey.enforcedServiceTier || null;
 	const usage = allowUsageSummaryFallback
 		? (usageSummary ?? apiKey.usageSummary)
 		: (usageSummary ?? null);
@@ -71,6 +72,18 @@ export function ApiKeyInfo({
 					<div className="flex items-center justify-between gap-2">
 						<dt className="text-muted-foreground">Enforced Effort</dt>
 						<dd className="font-medium">{enforcedEffort}</dd>
+					</div>
+				) : null}
+				{enforcedServiceTier ? (
+					<div className="flex items-center justify-between gap-2">
+						<dt className="text-muted-foreground">Enforced Service Tier</dt>
+						<dd className="font-medium">{enforcedServiceTier}</dd>
+					</div>
+				) : null}
+				{apiKey.omitPriorityRequest ? (
+					<div className="flex items-center justify-between gap-2">
+						<dt className="text-muted-foreground">Omit Priority Request</dt>
+						<dd className="font-medium">Enabled</dd>
 					</div>
 				) : null}
 				<div className="flex items-center justify-between gap-2">

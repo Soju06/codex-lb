@@ -59,6 +59,13 @@ const PLAN_CLASS_MAP: Record<string, string> = {
   pro: "bg-violet-500/15 text-violet-700 border-violet-500/20 hover:bg-violet-500/20 dark:text-violet-300",
 };
 
+function isPriorityServiceTier(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  return ["priority", "fast"].includes(value.trim().toLowerCase());
+}
+
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -140,8 +147,11 @@ export function RecentRequestsTable({
               const errorPreview = request.errorMessage || request.errorCode || "-";
               const hasError = !!(request.errorCode || request.errorMessage);
               const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
+              const showPriorityOmitted =
+                request.serviceTierOmitted && isPriorityServiceTier(request.requestedServiceTier);
               const showRequestedTier =
-                !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
+                !!request.requestedServiceTier &&
+                (request.requestedServiceTier !== visibleServiceTier || showPriorityOmitted);
               const planType = request.planType?.trim().toLowerCase() || null;
               const planLabel = planType ? formatSlug(planType) : "--";
 
@@ -183,6 +193,7 @@ export function RecentRequestsTable({
                       {showRequestedTier ? (
                         <div className="text-[11px] text-muted-foreground">
                           Requested {request.requestedServiceTier}
+                          {showPriorityOmitted ? " but omitted" : ""}
                         </div>
                       ) : null}
                     </div>

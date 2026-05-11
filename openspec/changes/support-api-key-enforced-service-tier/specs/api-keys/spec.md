@@ -16,3 +16,20 @@ The dashboard API key CRUD surface MUST allow callers to persist an optional enf
 - **WHEN** a dashboard client updates an API key with `enforcedServiceTier: "flex"`
 - **THEN** the persisted API key stores `flex`
 - **AND** subsequent reads return `flex`
+
+### Requirement: API keys can omit priority service-tier submission
+
+The dashboard API key CRUD surface MUST allow callers to persist an `omitPriorityRequest` boolean. When enabled, downstream requests that resolve to `service_tier: "priority"` or the legacy alias `fast` MUST be submitted upstream without a `service_tier` field. Request logs MUST still preserve the requested priority tier and mark that the tier was omitted.
+
+#### Scenario: Create API key with priority omission
+
+- **WHEN** a dashboard client creates an API key with `omitPriorityRequest: true`
+- **THEN** the persisted API key stores `omit_priority_request = true`
+- **AND** subsequent reads return `omitPriorityRequest: true`
+
+#### Scenario: Priority omission request log annotation
+
+- **WHEN** a request through an API key with `omitPriorityRequest: true` asks for `service_tier: "priority"`
+- **THEN** the forwarded upstream payload omits `service_tier`
+- **AND** the request log records `requestedServiceTier: "priority"`
+- **AND** the request log records `serviceTierOmitted: true`

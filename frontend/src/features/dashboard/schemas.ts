@@ -111,6 +111,7 @@ export const RequestLogSchema = z.object({
   serviceTier: z.string().nullable().optional().default(null),
   requestedServiceTier: z.string().nullable().optional().default(null),
   actualServiceTier: z.string().nullable().optional().default(null),
+  serviceTierOmitted: z.boolean().optional().default(false),
   status: z.string(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),

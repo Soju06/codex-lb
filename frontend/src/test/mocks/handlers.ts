@@ -1,7 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
-import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+import { ApiKeyUpdateRequestSchema } from "@/features/api-keys/schemas";
 import {
 	type AccountSummary,
 	type ApiKey,
@@ -47,26 +47,6 @@ const ApiKeyCreatePayloadSchema = z
 const FirewallIpCreatePayloadSchema = z
 	.object({
 		ipAddress: z.string().optional(),
-	})
-	.passthrough();
-
-const ApiKeyUpdatePayloadSchema = z
-	.object({
-		name: z.string().optional(),
-		allowedModels: z.array(z.string()).nullable().optional(),
-		isActive: z.boolean().optional(),
-		assignedAccountIds: z.array(z.string()).optional(),
-		resetUsage: z.boolean().optional(),
-		limits: z
-			.array(
-				z.object({
-					limitType: z.enum(LIMIT_TYPES),
-					limitWindow: z.enum(LIMIT_WINDOWS),
-					maxValue: z.number(),
-					modelFilter: z.string().nullable().optional(),
-				}),
-			)
-			.optional(),
 	})
 	.passthrough();
 
@@ -771,7 +751,7 @@ export const handlers = [
 				{ status: 404 },
 			);
 		}
-		const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
+		const payload = await parseJsonBody(request, ApiKeyUpdateRequestSchema);
 		if (!payload) {
 			return HttpResponse.json(existing);
 		}
@@ -783,6 +763,16 @@ export const handlers = [
 				? { allowedModels: payload.allowedModels }
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+			...(payload.enforcedModel !== undefined ? { enforcedModel: payload.enforcedModel } : {}),
+			...(payload.enforcedReasoningEffort !== undefined
+				? { enforcedReasoningEffort: payload.enforcedReasoningEffort }
+				: {}),
+			...(payload.enforcedServiceTier !== undefined
+				? { enforcedServiceTier: payload.enforcedServiceTier }
+				: {}),
+			...(payload.omitPriorityRequest !== undefined
+				? { omitPriorityRequest: payload.omitPriorityRequest }
+				: {}),
 			...(payload.assignedAccountIds !== undefined
 				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
 				: {}),

@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # accept it as of 2026-04. See https://github.com/Soju06/codex-lb/issues/493
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
+_REQUESTED_SERVICE_TIER_ATTR = "_codex_lb_requested_service_tier"
+_SERVICE_TIER_OMITTED_ATTR = "_codex_lb_service_tier_omitted"
+_MISSING = object()
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
@@ -42,7 +45,19 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
+    *,
+    skip_priority_service_tier_omission: bool = False,
 ) -> None:
+    existing_requested_service_tier = getattr(payload, _REQUESTED_SERVICE_TIER_ATTR, _MISSING)
+    requested_service_tier = (
+        existing_requested_service_tier
+        if isinstance(existing_requested_service_tier, str) or existing_requested_service_tier is None
+        else getattr(payload, "service_tier", None)
+    )
+    service_tier_omitted = get_policy_service_tier_omitted(payload)
+    _set_policy_requested_service_tier(payload, requested_service_tier)
+    _set_policy_service_tier_omitted(payload, service_tier_omitted)
+
     if api_key is None:
         normalize_unsupported_reasoning_effort(payload)
         return
@@ -75,7 +90,6 @@ def apply_api_key_enforcement(
     normalize_unsupported_reasoning_effort(payload)
 
     if api_key.enforced_service_tier is not None:
-        requested_service_tier = getattr(payload, "service_tier", None)
         setattr(payload, "service_tier", api_key.enforced_service_tier)
         if requested_service_tier != api_key.enforced_service_tier:
             logger.info(
@@ -86,6 +100,62 @@ def apply_api_key_enforcement(
                 requested_service_tier,
                 api_key.enforced_service_tier,
             )
+
+    if (
+        not skip_priority_service_tier_omission
+        and api_key.omit_priority_request
+        and _is_priority_service_tier(getattr(payload, "service_tier", None))
+    ):
+        omitted_service_tier = getattr(payload, "service_tier", None)
+        setattr(payload, "service_tier", None)
+        _set_policy_requested_service_tier(payload, omitted_service_tier)
+        _set_policy_service_tier_omitted(payload, True)
+        logger.info(
+            "api_key_priority_service_tier_omitted request_id=%s key_id=%s requested_service_tier=%s",
+            get_request_id(),
+            api_key.id,
+            omitted_service_tier,
+        )
+
+
+def get_policy_requested_service_tier(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    value = getattr(payload, _REQUESTED_SERVICE_TIER_ATTR, _MISSING)
+    if value is _MISSING:
+        return getattr(payload, "service_tier", None)
+    if value is None or isinstance(value, str):
+        return value
+    return getattr(payload, "service_tier", None)
+
+
+def get_policy_service_tier_omitted(payload: ResponsesRequest | ResponsesCompactRequest) -> bool:
+    return bool(getattr(payload, _SERVICE_TIER_OMITTED_ATTR, False))
+
+
+def set_policy_service_tier_metadata(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    requested_service_tier: str | None,
+    service_tier_omitted: bool,
+) -> None:
+    _set_policy_requested_service_tier(payload, requested_service_tier)
+    _set_policy_service_tier_omitted(payload, service_tier_omitted)
+
+
+def _set_policy_requested_service_tier(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    value: str | None,
+) -> None:
+    object.__setattr__(payload, _REQUESTED_SERVICE_TIER_ATTR, value)
+
+
+def _set_policy_service_tier_omitted(payload: ResponsesRequest | ResponsesCompactRequest, value: bool) -> None:
+    object.__setattr__(payload, _SERVICE_TIER_OMITTED_ATTR, value)
+
+
+def _is_priority_service_tier(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"priority", "fast"}
 
 
 def normalize_unsupported_reasoning_effort(

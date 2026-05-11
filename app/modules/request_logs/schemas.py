@@ -19,6 +19,7 @@ class RequestLogEntry(DashboardModel):
     service_tier: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
+    service_tier_omitted: bool = False
     status: str
     error_code: str | None = None
     error_message: str | None = None

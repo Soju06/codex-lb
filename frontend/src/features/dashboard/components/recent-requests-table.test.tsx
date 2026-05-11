@@ -66,6 +66,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: "default",
             requestedServiceTier: "priority",
             actualServiceTier: "default",
+            serviceTierOmitted: true,
             transport: "websocket",
             status: "rate_limit",
             errorCode: "rate_limit_exceeded",
@@ -84,7 +85,7 @@ describe("RecentRequestsTable", () => {
     expect(screen.getAllByText("Plus")[0]).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
-    expect(screen.getByText("Requested priority")).toBeInTheDocument();
+    expect(screen.getByText("Requested priority but omitted")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
     expect(screen.getByText("rate_limit_exceeded")).toBeInTheDocument();
@@ -120,6 +121,112 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
+  it("only renders omitted text for requested priority rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: null,
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-2",
+            model: "gpt-5.1",
+            serviceTier: "default",
+            requestedServiceTier: "default",
+            actualServiceTier: "flex",
+            serviceTierOmitted: true,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 0,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Requested default")).toBeInTheDocument();
+    expect(screen.queryByText(/but omitted/)).not.toBeInTheDocument();
+  });
+
+  it("still renders omitted text when actual tier also resolves to priority", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: null,
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-3",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: "priority",
+            actualServiceTier: "priority",
+            serviceTierOmitted: true,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 0,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Requested priority but omitted")).toBeInTheDocument();
+  });
+
+  it("renders omitted text for requested fast rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: null,
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-fast",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: "fast",
+            actualServiceTier: "default",
+            serviceTierOmitted: true,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 0,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            latencyMs: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Requested fast but omitted")).toBeInTheDocument();
+  });
+
   it("renders placeholder transport for legacy rows", () => {
     render(
       <RecentRequestsTable
@@ -137,6 +244,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            serviceTierOmitted: false,
             transport: null,
             status: "ok",
             errorCode: null,
@@ -171,6 +279,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            serviceTierOmitted: false,
             transport: "http",
             status: "error",
             errorCode: "upstream_error",

@@ -1478,13 +1478,13 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
+    responses_payload.stream = True
+    apply_api_key_enforcement(responses_payload, api_key)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=effective_model,
         request_service_tier=responses_payload.service_tier,
     )
-    responses_payload.stream = True
-    apply_api_key_enforcement(responses_payload, api_key)
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -1559,7 +1559,11 @@ async def _stream_responses(
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key)
+    apply_api_key_enforcement(
+        payload,
+        api_key,
+        skip_priority_service_tier_omission=forwarded_request and api_key_reservation_override is not None,
+    )
     validate_model_access(api_key, payload.model)
     owns_reservation = api_key_reservation_override is None
     reservation = (

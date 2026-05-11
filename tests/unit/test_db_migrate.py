@@ -416,6 +416,22 @@ def test_api_key_enforced_service_tier_column_exists_after_head_upgrade(tmp_path
     assert "enforced_service_tier" in api_key_columns
 
 
+def test_api_key_omit_priority_columns_exist_after_head_upgrade(tmp_path: Path) -> None:
+    db_path = tmp_path / "api-key-omit-priority.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        inspector = inspect(connection)
+        api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
+        request_log_columns = {column["name"] for column in inspector.get_columns("request_logs")}
+
+    assert "omit_priority_request" in api_key_columns
+    assert "service_tier_omitted" in request_log_columns
+
+
 def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_registry(
     monkeypatch,
     tmp_path: Path,

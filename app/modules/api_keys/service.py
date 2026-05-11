@@ -54,6 +54,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
+        omit_priority_request: bool | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
@@ -203,6 +204,7 @@ class ApiKeyCreateData:
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
+    omit_priority_request: bool = False
     expires_at: datetime | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
@@ -219,6 +221,8 @@ class ApiKeyUpdateData:
     enforced_reasoning_effort_set: bool = False
     enforced_service_tier: str | None = None
     enforced_service_tier_set: bool = False
+    omit_priority_request: bool | None = None
+    omit_priority_request_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -247,6 +251,7 @@ class ApiKeyData:
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    omit_priority_request: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +296,7 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
+            omit_priority_request=payload.omit_priority_request,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -395,6 +401,11 @@ class ApiKeysService:
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
                 ),
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
+                omit_priority_request=(
+                    payload.omit_priority_request
+                    if payload.omit_priority_request_set and payload.omit_priority_request is not None
+                    else _UNSET
+                ),
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
@@ -423,6 +434,7 @@ class ApiKeysService:
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
+            or payload.omit_priority_request_set
             or payload.expires_at_set
             or payload.is_active_set
         ):
@@ -1099,6 +1111,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
+        omit_priority_request=data.omit_priority_request,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -1122,6 +1135,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
+        omit_priority_request=row.omit_priority_request,
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,

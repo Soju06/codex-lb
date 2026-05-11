@@ -16,6 +16,7 @@ import app.modules.proxy.api as proxy_api_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
+from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 
@@ -235,7 +236,7 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
     payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
     captured: dict[str, object] = {}
 
-    def fake_apply_api_key_enforcement(_payload, _api_key):
+    def fake_apply_api_key_enforcement(_payload, _api_key, **_kwargs):
         return None
 
     def fake_validate_model_access(_api_key, _model):
@@ -300,6 +301,73 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_reserves_limits_with_submitted_service_tier(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+    payload = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "service_tier": "priority",
+        }
+    )
+    api_key = ApiKeyData(
+        id="key_omit_priority",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+        captured["request_model"] = request_model
+        captured["request_service_tier"] = request_service_tier
+        return None
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    async def fake_stream_responses(stream_payload, _headers, **_kwargs):
+        captured["forwarded_service_tier"] = stream_payload.service_tier
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_responses=fake_stream_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module.v1_chat_completions(request, payload, context, api_key)
+
+    assert response.status_code == 200
+    assert captured["request_model"] == "gpt-5.4"
+    assert captured["request_service_tier"] is None
+    assert captured["forwarded_service_tier"] is None
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_release_forwarded_reservation_on_internal_bridge_error(monkeypatch):
     request = Request(
         {
@@ -318,7 +386,7 @@ async def test_stream_responses_does_not_release_forwarded_reservation_on_intern
         model="gpt-5.4",
     )
 
-    def fake_apply_api_key_enforcement(_payload, _api_key):
+    def fake_apply_api_key_enforcement(_payload, _api_key, **_kwargs):
         return None
 
     def fake_validate_model_access(_api_key, _model):
@@ -367,6 +435,85 @@ async def test_stream_responses_does_not_release_forwarded_reservation_on_intern
 
     assert response.status_code == 503
     release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_preserves_legacy_forwarded_reserved_service_tier(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hi",
+            "service_tier": "priority",
+        }
+    )
+    api_key = ApiKeyData(
+        id="key_omit_priority",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+    forwarded_reservation = ApiKeyUsageReservationData(
+        reservation_id="res_1",
+        key_id="key_omit_priority",
+        model="gpt-5.4",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    async def fake_stream_http_responses(stream_payload, _headers, **_kwargs):
+        captured["service_tier"] = stream_payload.service_tier
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_http_responses=fake_stream_http_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        context,
+        api_key,
+        prefer_http_bridge=True,
+        skip_limit_enforcement=True,
+        api_key_reservation_override=forwarded_reservation,
+        forwarded_request=True,
+    )
+
+    assert response.status_code == 200
+    assert payload.service_tier == "priority"
+    assert captured["service_tier"] == "priority"
 
 
 def test_public_previous_response_not_found_error_is_masked_to_stream_incomplete():

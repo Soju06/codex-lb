@@ -144,6 +144,163 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     assert payload.service_tier == "priority"
 
 
+def test_apply_api_key_enforcement_preserves_null_requested_service_tier_when_enforced():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="service-tier-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier == "priority"
+    assert proxy_request_policy.get_policy_requested_service_tier(payload) is None
+    assert proxy_request_policy.get_policy_service_tier_omitted(payload) is False
+
+
+def test_apply_api_key_enforcement_omits_priority_service_tier():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier is None
+    assert proxy_request_policy.get_policy_requested_service_tier(payload) == "priority"
+    assert proxy_request_policy.get_policy_service_tier_omitted(payload) is True
+
+
+def test_apply_api_key_enforcement_records_requested_service_tier_when_priority_omitted():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier is None
+    assert proxy_request_policy.get_policy_requested_service_tier(payload) == "priority"
+    assert proxy_request_policy.get_policy_service_tier_omitted(payload) is True
+
+
+def test_apply_api_key_enforcement_preserves_client_requested_service_tier_when_enforced_priority_is_omitted():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "default",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="enforced-omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier is None
+    assert proxy_request_policy.get_policy_requested_service_tier(payload) == "priority"
+    assert proxy_request_policy.get_policy_service_tier_omitted(payload) is True
+
+
+def test_apply_api_key_enforcement_can_preserve_submitted_priority_service_tier():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(
+        payload,
+        api_key,
+        skip_priority_service_tier_omission=True,
+    )
+
+    assert payload.service_tier == "priority"
+    assert proxy_request_policy.get_policy_requested_service_tier(payload) == "priority"
+    assert proxy_request_policy.get_policy_service_tier_omitted(payload) is False
+
+
 def _build_registry_with_model(slug: str, efforts: list[str]):
     from app.core.openai.model_registry import (
         ModelRegistry,
@@ -4180,6 +4337,121 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     assert "requested_service_tier=priority" in caplog.text
     assert "actual_service_tier=default" in caplog.text
     assert request_logs.calls[0]["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_uses_submitted_service_tier_when_priority_is_omitted(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_omit_priority")
+    settle_usage = AsyncMock()
+    captured: dict[str, str | None] = {}
+    api_key = ApiKeyData(
+        id="key_omit_priority",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_usage)
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        captured["service_tier"] = payload.service_tier
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"}, api_key=api_key)
+
+    assert result.model_extra == {"output": []}
+    assert captured["service_tier"] is None
+    assert settle_usage.await_args is not None
+    assert settle_usage.await_args.kwargs["submitted_service_tier"] is None
+    assert request_logs.calls[0]["service_tier"] is None
+    assert request_logs.calls[0]["requested_service_tier"] == "priority"
+    assert request_logs.calls[0]["service_tier_omitted"] is True
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_preserves_requested_service_tier_on_early_failure(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = ApiKeyData(
+        id="key_omit_priority",
+        name="omit-priority-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        omit_priority_request=True,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            )
+        ),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "summarize",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service.compact_responses(payload, {"session_id": "sid-compact"}, api_key=api_key)
+
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
+    assert request_logs.calls[0]["service_tier"] is None
+    assert request_logs.calls[0]["requested_service_tier"] == "priority"
+    assert request_logs.calls[0]["service_tier_omitted"] is True
 
 
 @pytest.mark.asyncio

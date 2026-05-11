@@ -149,6 +149,8 @@ from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    get_policy_requested_service_tier,
+    get_policy_service_tier_omitted,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_invalid_payload_error,
@@ -1351,6 +1353,8 @@ class ProxyService:
             downstream_turn_state=forwarded_turn_state,
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
+            requested_service_tier=get_policy_requested_service_tier(payload),
+            service_tier_omitted=get_policy_service_tier_omitted(payload),
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         start = time.monotonic()
@@ -1481,8 +1485,10 @@ class ProxyService:
         log_error_code: str | None = None
         log_error_message: str | None = None
         response: CompactResponsePayload | None = None
-        request_service_tier: str | None = None
+        request_service_tier = get_policy_requested_service_tier(payload)
         actual_service_tier: str | None = None
+        submitted_service_tier = _service_tier_from_compact_payload(payload)
+        service_tier_omitted = get_policy_service_tier_omitted(payload)
         self._raise_for_unsupported_input_image_references(payload)
         rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         settings = await get_settings_cache().get()
@@ -1591,7 +1597,9 @@ class ProxyService:
                         exc_info=True,
                     )
                     _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
-                request_service_tier = _service_tier_from_compact_payload(payload)
+                request_service_tier = get_policy_requested_service_tier(payload)
+                submitted_service_tier = _service_tier_from_compact_payload(payload)
+                service_tier_omitted = get_policy_service_tier_omitted(payload)
 
                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
                 transient_retries = 0
@@ -1606,7 +1614,7 @@ class ProxyService:
                             api_key=api_key,
                             api_key_reservation=api_key_reservation,
                             response=response,
-                            request_service_tier=request_service_tier,
+                            submitted_service_tier=submitted_service_tier,
                         )
                         log_status = "success"
                         return response
@@ -1617,7 +1625,7 @@ class ProxyService:
                                     api_key=api_key,
                                     api_key_reservation=api_key_reservation,
                                     response=None,
-                                    request_service_tier=request_service_tier,
+                                    submitted_service_tier=submitted_service_tier,
                                 )
                                 await self._handle_proxy_error(account, exc)
                                 raise
@@ -1643,7 +1651,7 @@ class ProxyService:
                                     api_key=api_key,
                                     api_key_reservation=api_key_reservation,
                                     response=None,
-                                    request_service_tier=request_service_tier,
+                                    submitted_service_tier=submitted_service_tier,
                                 )
                                 raise exc
                             except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
@@ -1651,7 +1659,7 @@ class ProxyService:
                                     api_key=api_key,
                                     api_key_reservation=api_key_reservation,
                                     response=None,
-                                    request_service_tier=request_service_tier,
+                                    submitted_service_tier=submitted_service_tier,
                                 )
                                 logger.warning(
                                     "Compact forced refresh/connect failed request_id=%s account_id=%s",
@@ -1709,7 +1717,7 @@ class ProxyService:
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,
                                 response=None,
-                                request_service_tier=request_service_tier,
+                                submitted_service_tier=submitted_service_tier,
                             )
                             raise
                         classified = await self._handle_stream_error(
@@ -1744,7 +1752,7 @@ class ProxyService:
                             api_key=api_key,
                             api_key_reservation=api_key_reservation,
                             response=None,
-                            request_service_tier=request_service_tier,
+                            submitted_service_tier=submitted_service_tier,
                         )
                         raise
                 if transient_exhausted:
@@ -1754,7 +1762,7 @@ class ProxyService:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 response=None,
-                request_service_tier=request_service_tier,
+                submitted_service_tier=submitted_service_tier,
             )
             if last_exc is not None:
                 raise last_exc
@@ -1792,9 +1800,10 @@ class ProxyService:
                 ),
                 reasoning_effort=reasoning_effort,
                 transport=_REQUEST_TRANSPORT_HTTP,
-                service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
+                service_tier=_effective_service_tier(submitted_service_tier, actual_service_tier),
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
+                service_tier_omitted=service_tier_omitted,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",
@@ -2992,6 +3001,8 @@ class ProxyService:
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
+        requested_service_tier = get_policy_requested_service_tier(payload)
+        service_tier_omitted = get_policy_service_tier_omitted(payload)
         input_item_count = 0
         input_full_fingerprint: str | None = None
         payload_input = payload.input
@@ -3009,7 +3020,8 @@ class ProxyService:
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
             api_key_reservation=api_key_reservation,
             started_at=time.monotonic(),
-            requested_service_tier=forwarded_service_tier,
+            requested_service_tier=requested_service_tier,
+            service_tier_omitted=service_tier_omitted,
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             transport=transport,
@@ -5128,6 +5140,7 @@ class ProxyService:
                 started_at=time.monotonic(),
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                service_tier_omitted=request_state.service_tier_omitted,
                 awaiting_response_created=True,
                 event_queue=asyncio.Queue(),
                 transport=_REQUEST_TRANSPORT_HTTP,
@@ -6502,6 +6515,7 @@ class ProxyService:
                 service_tier=response_service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                service_tier_omitted=request_state.service_tier_omitted,
                 latency_first_token_ms=request_state.latency_first_token_ms,
                 session_id=request_state.session_id,
             )
@@ -6531,6 +6545,7 @@ class ProxyService:
             service_tier=request_state.service_tier,
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
+            service_tier_omitted=request_state.service_tier_omitted,
             latency_first_token_ms=request_state.latency_first_token_ms,
             session_id=request_state.session_id,
         )
@@ -6671,6 +6686,7 @@ class ProxyService:
                 service_tier=request_state.service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                service_tier_omitted=request_state.service_tier_omitted,
                 latency_first_token_ms=request_state.latency_first_token_ms,
             )
 
@@ -6782,7 +6798,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         response: CompactResponsePayload | None,
-        request_service_tier: str | None,
+        submitted_service_tier: str | None,
     ) -> None:
         if api_key is None or api_key_reservation is None:
             return
@@ -6797,8 +6813,8 @@ class ProxyService:
         service_tier = (
             response_service_tier
             if isinstance(response_service_tier, str)
-            else request_service_tier
-            if isinstance(request_service_tier, str)
+            else submitted_service_tier
+            if isinstance(submitted_service_tier, str)
             else None
         )
 
@@ -7038,6 +7054,8 @@ class ProxyService:
         excluded_account_ids: set[str] = set()
         preferred_account_id: str | None = None
         require_preferred_account = False
+        requested_service_tier = get_policy_requested_service_tier(payload)
+        service_tier_omitted = get_policy_service_tier_omitted(payload)
         try:
             if payload.previous_response_id is not None:
                 preferred_account_id = await self._resolve_websocket_previous_response_owner(
@@ -7075,6 +7093,8 @@ class ProxyService:
                         error_message="Proxy request budget exhausted",
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
+                        requested_service_tier=requested_service_tier,
+                        service_tier_omitted=service_tier_omitted,
                         transport=request_transport,
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -7152,7 +7172,8 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
                             service_tier=payload.service_tier,
-                            requested_service_tier=payload.service_tier,
+                            requested_service_tier=requested_service_tier,
+                            service_tier_omitted=service_tier_omitted,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -7180,7 +7201,8 @@ class ProxyService:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
                         service_tier=payload.service_tier,
-                        requested_service_tier=payload.service_tier,
+                        requested_service_tier=requested_service_tier,
+                        service_tier_omitted=service_tier_omitted,
                     )
                     return
 
@@ -7216,7 +7238,8 @@ class ProxyService:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
                         service_tier=payload.service_tier,
-                        requested_service_tier=payload.service_tier,
+                        requested_service_tier=requested_service_tier,
+                        service_tier_omitted=service_tier_omitted,
                     )
                     return
                 try:
@@ -7239,6 +7262,8 @@ class ProxyService:
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            requested_service_tier=requested_service_tier,
+                            service_tier_omitted=service_tier_omitted,
                             transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -7264,6 +7289,8 @@ class ProxyService:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            requested_service_tier=requested_service_tier,
+                            service_tier_omitted=service_tier_omitted,
                             transport=request_transport,
                         )
                         event = response_failed_event(
@@ -7294,6 +7321,8 @@ class ProxyService:
                             error_message="Proxy request budget exhausted",
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
+                            requested_service_tier=requested_service_tier,
+                            service_tier_omitted=service_tier_omitted,
                             transport=request_transport,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -7449,6 +7478,8 @@ class ProxyService:
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                requested_service_tier=requested_service_tier,
+                                service_tier_omitted=service_tier_omitted,
                                 transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -7482,6 +7513,8 @@ class ProxyService:
                                 error_message=message,
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                requested_service_tier=requested_service_tier,
+                                service_tier_omitted=service_tier_omitted,
                                 transport=request_transport,
                             )
                             event = response_failed_event(
@@ -7511,6 +7544,8 @@ class ProxyService:
                                 error_message="Proxy request budget exhausted",
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
+                                requested_service_tier=requested_service_tier,
+                                service_tier_omitted=service_tier_omitted,
                                 transport=request_transport,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
@@ -7613,7 +7648,8 @@ class ProxyService:
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                     transport=request_transport,
                     service_tier=payload.service_tier,
-                    requested_service_tier=payload.service_tier,
+                    requested_service_tier=requested_service_tier,
+                    service_tier_omitted=service_tier_omitted,
                 )
         finally:
             if not settled and api_key is not None and api_key_reservation is not None:
@@ -7653,8 +7689,9 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
-        requested_service_tier = payload.service_tier
-        service_tier = requested_service_tier
+        requested_service_tier = get_policy_requested_service_tier(payload)
+        service_tier = payload.service_tier
+        service_tier_omitted = get_policy_service_tier_omitted(payload)
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
@@ -7941,6 +7978,7 @@ class ProxyService:
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
+                service_tier_omitted=service_tier_omitted,
                 latency_first_token_ms=latency_first_token_ms,
                 session_id=session_id,
             )
@@ -7971,6 +8009,7 @@ class ProxyService:
         service_tier: str | None = None,
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
+        service_tier_omitted: bool = False,
         session_id: str | None = None,
     ) -> None:
         with anyio.CancelScope(shield=True):
@@ -7991,6 +8030,7 @@ class ProxyService:
                         service_tier=service_tier,
                         requested_service_tier=requested_service_tier,
                         actual_service_tier=actual_service_tier,
+                        service_tier_omitted=service_tier_omitted,
                         latency_ms=latency_ms,
                         latency_first_token_ms=latency_first_token_ms,
                         status=status,
@@ -8017,6 +8057,8 @@ class ProxyService:
         error_message: str,
         reasoning_effort: str | None,
         service_tier: str | None,
+        requested_service_tier: str | None = None,
+        service_tier_omitted: bool = False,
         transport: str = _REQUEST_TRANSPORT_HTTP,
     ) -> None:
         await self._write_request_log(
@@ -8031,7 +8073,8 @@ class ProxyService:
             reasoning_effort=reasoning_effort,
             transport=transport,
             service_tier=service_tier,
-            requested_service_tier=service_tier,
+            requested_service_tier=requested_service_tier if requested_service_tier is not None else service_tier,
+            service_tier_omitted=service_tier_omitted,
         )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
@@ -8452,6 +8495,7 @@ class _WebSocketRequestState:
     request_log_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
+    service_tier_omitted: bool = False
     response_id: str | None = None
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None

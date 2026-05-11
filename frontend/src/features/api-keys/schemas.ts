@@ -32,6 +32,7 @@ export const ApiKeyUsageSummarySchema = z.object({
 
 export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
+const API_KEY_SERVICE_TIER_INPUTS = ["auto", "default", "priority", "flex", "fast"] as const;
 
 export const ApiKeySchema = z.object({
   id: z.string(),
@@ -44,9 +45,10 @@ export const ApiKeySchema = z.object({
     .nullable()
     .default(null),
   enforcedServiceTier: z
-    .enum(SERVICE_TIERS)
+    .enum(API_KEY_SERVICE_TIER_INPUTS)
     .nullable()
     .default(null),
+  omitPriorityRequest: z.boolean().default(false),
   expiresAt: z.string().datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   accountAssignmentScopeEnabled: z.boolean().default(false),
@@ -66,9 +68,10 @@ export const ApiKeyCreateRequestSchema = z.object({
     .nullable()
     .optional(),
   enforcedServiceTier: z
-    .enum(SERVICE_TIERS)
+    .enum(API_KEY_SERVICE_TIER_INPUTS)
     .nullable()
     .optional(),
+  omitPriorityRequest: z.boolean().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
@@ -87,9 +90,10 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .nullable()
     .optional(),
   enforcedServiceTier: z
-    .enum(SERVICE_TIERS)
+    .enum(API_KEY_SERVICE_TIER_INPUTS)
     .nullable()
     .optional(),
+  omitPriorityRequest: z.boolean().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),

@@ -470,6 +470,34 @@ async def test_api_key_update_accepts_fast_service_tier_alias(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_and_update_persist_omit_priority_request(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "omit-priority-key",
+            "omitPriorityRequest": True,
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    assert created.json()["omitPriorityRequest"] is True
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "omitPriorityRequest": False,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["omitPriorityRequest"] is False
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    row = next(item for item in listed.json() if item["id"] == key_id)
+    assert row["omitPriorityRequest"] is False
+
+
+@pytest.mark.asyncio
 async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, monkeypatch):
     await _populate_test_registry()
     model_ids = sorted(_TEST_MODELS)
@@ -600,6 +628,70 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
         _ = [line async for line in response.aiter_lines() if line]
 
     assert seen["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_api_key_omits_priority_service_tier_for_responses(async_client, monkeypatch):
+    await _populate_test_registry()
+    model_ids = sorted(_TEST_MODELS)
+    forced_model = model_ids[0]
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "omit-priority-service-tier",
+            "allowedModels": [forced_model],
+            "omitPriorityRequest": True,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    await _import_account(async_client, "acc_omit_priority_service_tier", "omit-priority@example.com")
+
+    seen: dict[str, str | None] = {}
+
+    async def fake_stream(payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        seen["service_tier"] = payload.service_tier
+        usage = {"input_tokens": 3, "output_tokens": 2}
+        event = {"type": "response.completed", "response": {"id": "resp_omit_priority", "usage": usage}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": forced_model,
+            "instructions": "hi",
+            "input": [],
+            "service_tier": "priority",
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert seen["service_tier"] is None
+
+    logs = await async_client.get("/api/request-logs?limit=1")
+    assert logs.status_code == 200
+    entry = logs.json()["requests"][0]
+    assert entry["requestedServiceTier"] == "priority"
+    assert entry["serviceTierOmitted"] is True
 
 
 @pytest.mark.asyncio

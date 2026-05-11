@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ApiKeyCreateRequestSchema,
   ApiKeyCreateResponseSchema,
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
@@ -35,6 +36,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.id).toBe("key-1");
     expect(parsed.allowedModels).toEqual(["gpt-4.1"]);
+    expect(parsed.omitPriorityRequest).toBe(false);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
   });
@@ -113,6 +115,33 @@ describe("ApiKeyUpdateRequestSchema", () => {
     });
 
     expect(parsed.resetUsage).toBe(true);
+  });
+
+  it("accepts omitPriorityRequest flag", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      omitPriorityRequest: true,
+    });
+
+    expect(parsed.omitPriorityRequest).toBe(true);
+  });
+
+  it("accepts fast as an enforcedServiceTier alias", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      enforcedServiceTier: "fast",
+    });
+
+    expect(parsed.enforcedServiceTier).toBe("fast");
+  });
+});
+
+describe("ApiKeyCreateRequestSchema", () => {
+  it("accepts fast as an enforcedServiceTier alias", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Fast Tier Key",
+      enforcedServiceTier: "fast",
+    });
+
+    expect(parsed.enforcedServiceTier).toBe("fast");
   });
 });
 

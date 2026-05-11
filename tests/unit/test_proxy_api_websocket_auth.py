@@ -384,9 +384,10 @@ def test_public_previous_response_not_found_error_is_masked_to_stream_incomplete
     )
 
     assert status_code == 502
-    assert masked.error.code == "stream_incomplete"
-    assert masked.error.type == "server_error"
-    assert masked.error.message == "Upstream websocket closed before response.completed"
+    error = masked.model_dump(mode="json")["error"]
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
     assert "resp_missing" not in masked.model_dump_json()
 
 
@@ -406,7 +407,8 @@ def test_public_previous_response_invalid_request_param_is_masked_to_stream_inco
     )
 
     assert status_code == 502
-    assert masked.error.code == "stream_incomplete"
+    error = masked.model_dump(mode="json")["error"]
+    assert error["code"] == "stream_incomplete"
 
 
 def test_public_previous_response_error_event_is_masked_to_response_failed():
@@ -466,5 +468,6 @@ def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking
     status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
 
     assert status_code == 502
-    assert masked.error.code == "stream_incomplete"
+    error = masked.model_dump(mode="json")["error"]
+    assert error["code"] == "stream_incomplete"
     assert "resp_missing" not in masked.model_dump_json()

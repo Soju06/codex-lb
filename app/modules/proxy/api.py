@@ -2509,7 +2509,7 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
     if not isinstance(payload, dict):
         return _default_error_envelope()
     if payload.get("type") == "error":
-        return _parse_event_error_envelope(payload)
+        return _parse_event_error_envelope(cast(dict[str, JsonValue], payload))
     try:
         return OpenAIErrorEnvelopeModel.model_validate(payload)
     except ValidationError:

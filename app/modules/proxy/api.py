@@ -1611,7 +1611,10 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
-    stream, startup_error = await _probe_stream_startup_error(stream)
+    stream, startup_error = await _probe_stream_startup_error(
+        stream,
+        convert_event_errors=bridge_active,
+    )
     if startup_error is not None:
         if reservation is not None and owns_reservation:
             await _release_reservation(reservation)
@@ -1872,6 +1875,8 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
 
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
+    *,
+    convert_event_errors: bool = False,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     first_task = asyncio.create_task(anext(stream))
     try:
@@ -1885,9 +1890,10 @@ async def _probe_stream_startup_error(
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
         return _prepend_first(None, stream), exc
-    first_error = _stream_event_error_envelope(first)
-    if first_error is not None:
-        return _prepend_first(None, stream), first_error
+    if convert_event_errors:
+        first_error = _stream_event_error_envelope(first)
+        if first_error is not None:
+            return _prepend_first(None, stream), first_error
     return _prepend_first(first, stream), None
 
 

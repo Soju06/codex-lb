@@ -366,3 +366,105 @@ async def test_stream_responses_does_not_release_forwarded_reservation_on_intern
 
     assert response.status_code == 503
     release_reservation.assert_not_awaited()
+
+
+def test_public_previous_response_not_found_error_is_masked_to_stream_incomplete():
+    envelope = proxy_api_module.OpenAIErrorEnvelopeModel(
+        error=proxy_api_module.OpenAIError(
+            message="Previous response with id 'resp_missing' not found.",
+            type="invalid_request_error",
+            code="previous_response_not_found",
+            param="previous_response_id",
+        )
+    )
+
+    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(
+        envelope,
+        default_status=400,
+    )
+
+    assert status_code == 502
+    assert masked.error.code == "stream_incomplete"
+    assert masked.error.type == "server_error"
+    assert masked.error.message == "Upstream websocket closed before response.completed"
+    assert "resp_missing" not in masked.model_dump_json()
+
+
+def test_public_previous_response_invalid_request_param_is_masked_to_stream_incomplete():
+    envelope = proxy_api_module.OpenAIErrorEnvelopeModel(
+        error=proxy_api_module.OpenAIError(
+            message="Previous response with id 'resp_missing' not found.",
+            type="invalid_request_error",
+            code="invalid_request_error",
+            param="previous_response_id",
+        )
+    )
+
+    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(
+        envelope,
+        default_status=400,
+    )
+
+    assert status_code == 502
+    assert masked.error.code == "stream_incomplete"
+
+
+def test_public_previous_response_error_event_is_masked_to_response_failed():
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": "Previous response with id 'resp_missing' not found.",
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "param": "previous_response_id",
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    response = cast(dict[str, object], normalized["response"])
+    error = cast(dict[str, object], response["error"])
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert "resp_missing" not in json.dumps(normalized)
+
+
+def test_public_stream_incomplete_error_event_is_not_rewritten_when_already_public():
+    payload = {
+        "type": "error",
+        "status": 502,
+        "error": {
+            "message": "Custom upstream stream detail",
+            "type": "server_error",
+            "code": "stream_incomplete",
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+
+    assert violation_kind is None
+    assert normalized == payload
+
+
+def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking():
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": "Previous response with id 'resp_missing' not found.",
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "param": "previous_response_id",
+        },
+    }
+
+    parsed = proxy_api_module._parse_error_envelope(payload)
+    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
+
+    assert status_code == 502
+    assert masked.error.code == "stream_incomplete"
+    assert "resp_missing" not in masked.model_dump_json()

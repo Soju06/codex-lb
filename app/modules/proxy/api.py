@@ -2217,6 +2217,20 @@ def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    if event_type == "error":
+        parsed_error = _parse_event_error_envelope(payload)
+        if _is_previous_response_not_found_public_error(parsed_error.error):
+            return (
+                cast(
+                    dict[str, JsonValue],
+                    response_failed_event(
+                        "stream_incomplete",
+                        "Upstream websocket closed before response.completed",
+                    ),
+                ),
+                None,
+            )
+        return payload, None
     if event_type in ("response.completed", "response.incomplete"):
         response = payload.get("response")
         if not is_json_mapping(response):
@@ -2494,6 +2508,8 @@ def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
 def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErrorEnvelopeModel:
     if not isinstance(payload, dict):
         return _default_error_envelope()
+    if payload.get("type") == "error":
+        return _parse_event_error_envelope(payload)
     try:
         return OpenAIErrorEnvelopeModel.model_validate(payload)
     except ValidationError:

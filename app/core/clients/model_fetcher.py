@@ -111,12 +111,17 @@ async def fetch_models_for_plan(
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     session = get_http_client().session
 
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+    try:
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
 
-        data = await resp.json(content_type=None)
+            data = await resp.json(content_type=None)
+    except TimeoutError as exc:
+        raise ModelFetchError(504, "Upstream models API timed out") from exc
+    except aiohttp.ClientError as exc:
+        raise ModelFetchError(502, f"Upstream models API request failed: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ModelFetchError(502, "Invalid response format from upstream models API")

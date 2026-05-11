@@ -7,3 +7,8 @@
 - [x] 7. Add integration tests for `/backend-api/files` and `/backend-api/files/{id}/uploaded` covering happy path, validation error (file_size, file_name), upstream error mapping, retry passthrough, and API-key auth gating.
 - [x] 8. Add a regression test asserting `ResponsesRequest` / `ResponsesCompactRequest` accept an `input_file` content item with a `file_id` (no longer raises). Update the prior `test_v1_responses_rejects_input_file_id` integration test to assert acceptance.
 - [x] 9. Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, and the targeted pytest suites for files / requests / proxy.
+- [x] 10. Persist an in-memory `file_id -> account_id` pin with `_FILE_ACCOUNT_PIN_TTL_SECONDS` retention so finalize calls and follow-up `/responses` requests can route back to the account that registered the upload.
+- [x] 11. Reject `input_image.file_id` / `input_image.image_url = "sediment://file_*"` on `/v1/responses`, `/backend-api/codex/responses`, and `/responses/compact` with HTTP 400 `unsupported_input_image_format` instead of rewriting conversation content.
+- [x] 12. Add fail-fast clean-close classification for the HTTP responses bridge and cover the classifier / retry suppression paths with unit tests.
+- [x] 13. Route large `/responses` payloads over HTTP when `upstream_stream_transport = "auto"` would otherwise exceed the upstream WebSocket frame budget, while preserving explicit transport overrides.
+- [x] 14. Bypass the HTTP responses bridge per-request when a `/responses` payload would exceed the WebSocket frame budget, and cover the branch selection with a unit test.

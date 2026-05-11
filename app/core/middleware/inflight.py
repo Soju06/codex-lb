@@ -8,7 +8,19 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 _DRAIN_ALLOWED_HTTP_PATHS = frozenset(
     {
         "/health/live",
+        "/internal/drain/start",
+        "/internal/drain/status",
         "/internal/bridge/responses",
+    }
+)
+
+_IN_FLIGHT_EXCLUDED_HTTP_PATHS = frozenset(
+    {
+        "/health/live",
+        "/health/ready",
+        "/health/startup",
+        "/internal/drain/start",
+        "/internal/drain/status",
     }
 )
 
@@ -39,6 +51,10 @@ class InFlightMiddleware:
                 },
             )
             await response(scope, receive, send)
+            return
+
+        if path in _IN_FLIGHT_EXCLUDED_HTTP_PATHS:
+            await self.app(scope, receive, send)
             return
 
         shutdown_state.increment_in_flight()

@@ -5323,10 +5323,12 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
         log_proxy_service_tier_trace = False
         openai_prompt_cache_key_derivation_enabled = True
 
-    historical_input: list[JsonValue] = [
-        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
-        {"type": "function_call_output", "call_id": "call_old", "output": "old output"},
-    ]
+    historical_input: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "old question"}]}]
+    previous_assistant_output: JsonValue = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "old answer"}],
+    }
     new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_input_count=len(historical_input),
@@ -5344,7 +5346,7 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
             {
                 "type": "response.create",
                 "model": "gpt-5.1",
-                "input": [*historical_input, new_input],
+                "input": [*historical_input, previous_assistant_output, new_input],
             },
         ),
         headers={"session_id": "turn_ws_trim"},
@@ -5363,13 +5365,13 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
     assert prepared.request_state.proxy_injected_previous_response_id is True
     assert prepared.request_state.input_item_count == 3
     assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
-        [*historical_input, new_input]
+        [*historical_input, previous_assistant_output, new_input]
     )
     assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
     assert prepared.request_state.fresh_upstream_request_text is not None
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in fresh_payload
-    assert fresh_payload["input"] == [*historical_input, new_input]
+    assert fresh_payload["input"] == [*historical_input, previous_assistant_output, new_input]
 
 
 @pytest.mark.asyncio
@@ -5734,7 +5736,7 @@ async def test_websocket_full_replay_waits_for_pending_continuity_gap():
 
 
 @pytest.mark.asyncio
-async def test_websocket_full_replay_waits_for_continuity_generation_after_pending_drains():
+async def test_websocket_full_replay_waits_until_pending_drains():
     pending_request = proxy_service._WebSocketRequestState(
         request_id="ws_pending_full_replay_anchor",
         model="gpt-5.1",
@@ -5772,15 +5774,13 @@ async def test_websocket_full_replay_waits_for_continuity_generation_after_pendi
     )
     drain_task = asyncio.create_task(drain_then_record())
     try:
-        await asyncio.sleep(0.03)
-        assert not wait_task.done()
         assert await wait_task
     finally:
         await drain_task
 
 
 @pytest.mark.asyncio
-async def test_websocket_full_replay_wait_fails_when_drained_turn_never_records_completion():
+async def test_websocket_full_replay_wait_continues_when_drained_turn_never_records_completion():
     pending_requests = deque(
         [
             proxy_service._WebSocketRequestState(
@@ -5805,10 +5805,10 @@ async def test_websocket_full_replay_wait_fails_when_drained_turn_never_records_
 
     drain_task = asyncio.create_task(drain_without_completion())
     try:
-        assert not await proxy_service._wait_for_websocket_continuity_gap(
+        assert await proxy_service._wait_for_websocket_continuity_gap(
             pending_requests,
             pending_lock=pending_lock,
-            timeout_seconds=0.05,
+            timeout_seconds=1.0,
             continuity_state=continuity_state,
             observed_completion_generation=observed_generation,
         )

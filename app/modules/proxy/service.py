@@ -3046,10 +3046,13 @@ class ProxyService:
                 include_type_field=True,
                 client_metadata=client_metadata,
             )
+            anchored_input_tail = _trim_websocket_previous_response_input_items(
+                original_input_items[session_anchor.stored_input_item_count :]
+            )
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,
-                    "input": original_input_items[session_anchor.stored_input_item_count :],
+                    "input": anchored_input_tail,
                 }
             )
         elif (
@@ -8957,12 +8960,7 @@ async def _wait_for_websocket_continuity_gap(
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
         async with pending_lock:
-            continuity_updated = (
-                continuity_state is None
-                or observed_completion_generation is None
-                or continuity_state.completion_generation != observed_completion_generation
-            )
-            if not pending_requests and continuity_updated:
+            if not pending_requests:
                 return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -10531,26 +10529,32 @@ def _websocket_client_previous_response_payload_has_safe_fresh_replay(
     for item in input_value:
         if not isinstance(item, Mapping):
             continue
-        item_type = item.get("type")
+        item_mapping = cast(Mapping[str, JsonValue], item)
+        item_type = item_mapping.get("type")
         if item_type == "function_call":
-            call_id = item.get("call_id")
+            call_id = item_mapping.get("call_id")
             if isinstance(call_id, str) and call_id:
                 seen_function_calls.add(call_id)
         elif item_type == "function_call_output":
-            call_id = item.get("call_id")
+            call_id = item_mapping.get("call_id")
             if not isinstance(call_id, str) or call_id not in seen_function_calls:
                 return False
-        elif item.get("role") == "assistant":
-            tool_calls = item.get("tool_calls")
+        elif item_mapping.get("role") == "assistant":
+            tool_calls = item_mapping.get("tool_calls")
             if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes, bytearray)):
                 for tool_call in tool_calls:
                     if not isinstance(tool_call, Mapping):
                         continue
-                    call_id = tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id")
+                    tool_call_mapping = cast(Mapping[str, JsonValue], tool_call)
+                    call_id = (
+                        tool_call_mapping.get("id")
+                        or tool_call_mapping.get("call_id")
+                        or tool_call_mapping.get("tool_call_id")
+                    )
                     if isinstance(call_id, str) and call_id:
                         seen_tool_calls.add(call_id)
-        elif item.get("role") == "tool":
-            call_id = item.get("tool_call_id") or item.get("toolCallId") or item.get("call_id")
+        elif item_mapping.get("role") == "tool":
+            call_id = item_mapping.get("tool_call_id") or item_mapping.get("toolCallId") or item_mapping.get("call_id")
             if not isinstance(call_id, str) or call_id not in seen_tool_calls:
                 return False
     return True

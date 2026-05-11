@@ -5867,6 +5867,11 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     )
 
     create_started: list[str] = []
+    create_started_events = {
+        "bridge-a": asyncio.Event(),
+        "bridge-b": asyncio.Event(),
+    }
+    release_create = asyncio.Event()
 
     async def fake_create_http_bridge_session(
         self,
@@ -5880,14 +5885,14 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.append(key.affinity_key)
-        await asyncio.sleep(0.2)
+        create_started_events[key.affinity_key].set()
+        await _wait_for_event(release_create)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key_one = proxy_module._HTTPBridgeSessionKey("request", "bridge-a", None)
     key_two = proxy_module._HTTPBridgeSessionKey("request", "bridge-b", None)
-    t0 = time.monotonic()
 
     try:
         first = asyncio.create_task(
@@ -5912,10 +5917,14 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
                 max_sessions=8,
             )
         )
-        session_one, session_two = await asyncio.gather(first, second)
-        elapsed = time.monotonic() - t0
+        await _wait_for_event(create_started_events["bridge-a"])
+        await _wait_for_event(create_started_events["bridge-b"])
+        assert key_one in service._http_bridge_inflight_sessions
+        assert key_two in service._http_bridge_inflight_sessions
 
-        assert elapsed < 0.35
+        release_create.set()
+        session_one, session_two = await asyncio.gather(first, second)
+
         assert sorted(create_started) == ["bridge-a", "bridge-b"]
         assert session_one.key == key_one
         assert session_two.key == key_two
@@ -5947,6 +5956,8 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     )
 
     create_started: list[str] = []
+    create_started_event = asyncio.Event()
+    release_create = asyncio.Event()
 
     async def fake_create_http_bridge_session(
         self,
@@ -5960,13 +5971,13 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.append(key.affinity_key)
-        await asyncio.sleep(0.2)
+        create_started_event.set()
+        await _wait_for_event(release_create)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key = proxy_module._HTTPBridgeSessionKey("request", "bridge-singleflight", None)
-    t0 = time.monotonic()
 
     try:
         first = asyncio.create_task(
@@ -5980,6 +5991,10 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
                 max_sessions=8,
             )
         )
+        await _wait_for_event(create_started_event)
+        assert create_started == ["bridge-singleflight"]
+        assert key in service._http_bridge_inflight_sessions
+
         second = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
@@ -5991,10 +6006,13 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
                 max_sessions=8,
             )
         )
-        session_one, session_two = await asyncio.gather(first, second)
-        elapsed = time.monotonic() - t0
+        await asyncio.sleep(0)
+        assert create_started == ["bridge-singleflight"]
+        assert not second.done()
 
-        assert elapsed < 0.35
+        release_create.set()
+        session_one, session_two = await asyncio.gather(first, second)
+
         assert create_started == ["bridge-singleflight"]
         assert session_one is session_two
         assert service._http_bridge_sessions[key] is session_one

@@ -40,8 +40,8 @@ def test_normalize_usage_window_defaults():
 def test_capacity_for_plan():
     assert capacity_for_plan("plus", "5h") is not None
     assert capacity_for_plan("plus", "7d") is not None
-    assert capacity_for_plan("prolite", "5h") == capacity_for_plan("pro", "5h")
-    assert capacity_for_plan("prolite", "7d") == capacity_for_plan("pro", "7d")
+    assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
+    assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
     assert capacity_for_plan("unknown", "5h") is None
 
 
@@ -66,8 +66,8 @@ def test_summarize_usage_window_includes_prolite_capacity():
 
     summary = summarize_usage_window([row], {account.id: account}, "primary")
 
-    assert summary.capacity_credits == pytest.approx(capacity_for_plan("pro", "primary") or 0.0)
-    assert summary.used_credits == pytest.approx(375.0)
+    assert summary.capacity_credits == pytest.approx(1125.0)
+    assert summary.used_credits == pytest.approx(281.25)
     assert summary.used_percent == pytest.approx(25.0)
 
 

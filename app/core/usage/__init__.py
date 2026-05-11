@@ -22,7 +22,7 @@ PLAN_CAPACITY_CREDITS_PRIMARY = {
     "team": 225.0,
     "edu": 225.0,
     "pro": 1500.0,
-    "prolite": 1500.0,
+    "prolite": 1125.0,
     "enterprise": 1500.0,
 }
 
@@ -33,7 +33,7 @@ PLAN_CAPACITY_CREDITS_SECONDARY = {
     "team": 7560.0,
     "edu": 7560.0,
     "pro": 50400.0,
-    "prolite": 50400.0,
+    "prolite": 37800.0,
     "enterprise": 50400.0,
 }
 

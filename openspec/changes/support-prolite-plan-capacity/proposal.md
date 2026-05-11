@@ -7,7 +7,7 @@ OpenAI can report ChatGPT Pro Lite accounts with `plan_type=prolite`. codex-lb c
 ## Scope
 
 - Recognize `prolite` as a supported account plan.
-- Use Pro-equivalent primary and secondary capacity values for `prolite`.
+- Use Plus x5 primary and secondary capacity values for `prolite`.
 - Treat `prolite` as Pro-equivalent for model plan eligibility checks while preserving the upstream plan value.
 - Add regression coverage for plan normalization, usage capacity summaries, dashboard totals, and proxy account selection.
 

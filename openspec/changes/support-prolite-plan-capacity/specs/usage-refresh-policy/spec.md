@@ -2,14 +2,14 @@
 
 ### Requirement: Usage capacity recognizes upstream ChatGPT plan types
 
-The system MUST recognize account plan types returned by upstream ChatGPT auth and usage payloads when calculating absolute usage capacity. `prolite` MUST be treated as a supported account plan with the same primary and secondary capacity values as `pro`, while preserving the stored plan type value for display and request-log context.
+The system MUST recognize account plan types returned by upstream ChatGPT auth and usage payloads when calculating absolute usage capacity. `prolite` MUST be treated as a supported account plan with Plus x5 capacity values (`1125.0` primary and `37800.0` secondary), while preserving the stored plan type value for display and request-log context.
 
 #### Scenario: Pro Lite account contributes aggregate remaining credits
 
 - **GIVEN** an active account whose stored `plan_type` is `prolite`
 - **AND** its latest primary and secondary usage rows report `used_percent` below 100
 - **WHEN** the system builds usage window summaries or per-account remaining credit values
-- **THEN** the account contributes Pro-equivalent primary and secondary capacity
+- **THEN** the account contributes `1125.0` primary capacity and `37800.0` secondary capacity
 - **AND** the computed remaining credits are non-zero according to the reported usage percent
 
 ### Requirement: Pro Lite accounts are eligible for Pro-gated models

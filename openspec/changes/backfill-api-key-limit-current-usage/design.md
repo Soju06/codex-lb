@@ -8,6 +8,6 @@ The lookback window is derived from the same duration used for the new limit:
 - `since = now - limit_window_delta(limit_window)`
 - `until = now`
 
-The repository computes usage from `request_logs` scoped to the API key, the time window, and the optional model filter. Token limits use token columns; cost limits use `cost_usd` converted to microdollars. Credit limits are not derived from request logs and remain zero.
+The repository computes usage from `request_logs` scoped to the API key, the time window, and the optional model filter. Token limits use token columns; cost limits convert each `cost_usd` row to truncated integer microdollars before summing, matching live cost-limit accrual. Credit limits are not derived from request logs and remain zero.
 
 Existing limit rows keep their current value, preserving the established update behavior. `resetUsage=true` still forces all submitted limit rows to zero.

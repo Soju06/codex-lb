@@ -1490,6 +1490,22 @@ async def v1_chat_completions(
         api_key_reservation=reservation,
         suppress_text_done_events=True,
     )
+    if payload.stream:
+        stream_options = payload.stream_options
+        include_usage = bool(stream_options and stream_options.include_usage)
+        return StreamingResponse(
+            inject_sse_keepalives(
+                stream_chat_chunks(
+                    _stream_proxy_errors_as_response_failed(stream),
+                    model=responses_payload.model,
+                    include_usage=include_usage,
+                ),
+                get_settings().sse_keepalive_interval_seconds,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
     try:
         first = await stream.__anext__()
     except StopAsyncIteration:
@@ -1498,18 +1514,6 @@ async def v1_chat_completions(
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
     stream_with_first = _prepend_first(first, stream)
-    if payload.stream:
-        stream_options = payload.stream_options
-        include_usage = bool(stream_options and stream_options.include_usage)
-        return StreamingResponse(
-            inject_sse_keepalives(
-                stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
-                get_settings().sse_keepalive_interval_seconds,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **rate_limit_headers},
-        )
-
     result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
@@ -1602,30 +1606,11 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
-    stream = _normalize_public_responses_stream(stream)
-    try:
-        first = await stream.__anext__()
-    except StopAsyncIteration:
-        return StreamingResponse(
-            inject_sse_keepalives(
-                _prepend_first(None, stream),
-                get_settings().sse_keepalive_interval_seconds,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **rate_limit_headers},
-        )
-    except ProxyResponseError as exc:
-        if owns_reservation:
-            await _release_reservation(reservation)
-        return _logged_error_json_response(
-            request,
-            exc.status_code,
-            exc.payload,
-            headers=rate_limit_headers,
-        )
+    del owns_reservation
+    stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream))
     return StreamingResponse(
         inject_sse_keepalives(
-            _prepend_first(first, stream),
+            stream,
             get_settings().sse_keepalive_interval_seconds,
         ),
         media_type="text/event-stream",
@@ -1874,6 +1859,24 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield first
     async for line in stream:
         yield line
+
+
+async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    try:
+        async for line in stream:
+            yield line
+    except ProxyResponseError as exc:
+        envelope = _parse_error_envelope(exc.payload)
+        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
+        error = envelope.error
+        yield format_sse_event(
+            response_failed_event(
+                error.code if error and error.code else "upstream_error",
+                error.message if error and error.message else "Upstream error",
+                error.type if error and error.type else "server_error",
+                error_param=error.param if error else None,
+            )
+        )
 
 
 def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:

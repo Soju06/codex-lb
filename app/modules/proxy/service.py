@@ -23,6 +23,7 @@ import aiohttp
 import anyio
 from fastapi import WebSocket
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 
 from app.core import shutdown as shutdown_state
 from app.core import usage as usage_core
@@ -6685,9 +6686,16 @@ class ProxyService:
         if response_create_gate is not None:
             _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
-            await websocket.send_text(
-                _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
-            )
+            try:
+                await websocket.send_text(
+                    _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
+                )
+            except WebSocketDisconnect:
+                logger.debug(
+                    "client disconnected before websocket connect failure could be sent request_id=%s error_code=%s",
+                    request_state.request_id,
+                    error_code,
+                )
 
     async def _emit_websocket_proxy_request_timeout(
         self,

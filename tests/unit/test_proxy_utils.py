@@ -15,6 +15,7 @@ from aiohttp.client_reqrep import RequestInfo
 from fastapi import WebSocket
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
+from starlette.websockets import WebSocketDisconnect
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
@@ -8676,6 +8677,56 @@ async def test_emit_websocket_connect_failure_releases_response_create_gate(monk
     assert request_state.awaiting_response_created is False
     assert request_state.response_create_gate_acquired is False
     assert request_state.response_create_gate is None
+
+
+@pytest.mark.asyncio
+async def test_emit_websocket_connect_failure_ignores_client_disconnect(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_connect_failure_disconnect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    request_state.response_create_gate_acquired = True
+    request_state.response_create_gate = response_create_gate
+
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    websocket_send = AsyncMock(side_effect=WebSocketDisconnect(code=1006))
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+
+    await service._emit_websocket_connect_failure(
+        websocket,
+        client_send_lock=anyio.Lock(),
+        account_id="acc_connect_failure",
+        api_key=None,
+        request_state=request_state,
+        status_code=502,
+        payload=openai_error(
+            "upstream_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+            error_type="server_error",
+        ),
+        error_code="upstream_unavailable",
+        error_message="Previous response owner account is unavailable; retry later.",
+    )
+
+    release_reservation.assert_awaited_once_with(None)
+    websocket_send.assert_awaited_once()
+    assert response_create_gate.locked() is False
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_gate is None
+    assert request_logs.calls[0]["request_id"] == "ws_req_connect_failure_disconnect"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio

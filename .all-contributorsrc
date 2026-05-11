@@ -424,6 +424,16 @@
         "doc",
         "test"
       ]
+    },
+    {
+      "login": "e1ektr0",
+      "name": "Maxim Feofilov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6214170?v=4",
+      "profile": "https://t.me/e1ektr0",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

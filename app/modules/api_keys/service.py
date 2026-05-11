@@ -561,6 +561,7 @@ class ApiKeysService:
             _enforce_once,
             operation_name="api_key_usage_reservation",
             logger=logger,
+            serialize_writes=_repository_uses_sqlite(self._repository),
         )
 
     async def finalize_usage_reservation(
@@ -679,6 +680,7 @@ class ApiKeysService:
             _settle_once,
             operation_name="api_key_usage_settlement",
             logger=logger,
+            serialize_writes=_repository_uses_sqlite(self._repository),
         )
         if api_key_id is not None:
             await retry_sqlite_lock(
@@ -686,6 +688,7 @@ class ApiKeysService:
                 operation_name="api_key_usage_last_used",
                 on_retry=self._repository.rollback,
                 logger=logger,
+                serialize_writes=_repository_uses_sqlite(self._repository),
             )
 
     async def release_usage_reservation(self, reservation_id: str) -> None:
@@ -732,6 +735,7 @@ class ApiKeysService:
             _release_once,
             operation_name="api_key_usage_release",
             logger=logger,
+            serialize_writes=_repository_uses_sqlite(self._repository),
         )
 
     async def record_usage(
@@ -1257,6 +1261,13 @@ def _limit_identity_from_input(limit: LimitRuleInput) -> tuple[str, str, str | N
 
 def _limit_identity_from_row(limit: ApiKeyLimit) -> tuple[str, str, str | None]:
     return (limit.limit_type.value, limit.limit_window.value, limit.model_filter)
+
+
+def _repository_uses_sqlite(repository: ApiKeysRepositoryProtocol) -> bool:
+    uses_sqlite = getattr(repository, "uses_sqlite", None)
+    if not callable(uses_sqlite):
+        return False
+    return bool(uses_sqlite())
 
 
 def _calculate_cost_microdollars(

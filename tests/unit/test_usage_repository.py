@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -25,6 +26,9 @@ class _RetryCommitSession:
 
     def add(self, row: object) -> None:
         self.added.append(row)
+
+    def get_bind(self) -> SimpleNamespace:
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
 
     async def commit(self) -> None:
         self.commits += 1

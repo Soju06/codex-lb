@@ -20,6 +20,7 @@ from app.db.models import (
     LimitWindow,
     RequestLog,
 )
+from app.db.sqlite_retry import session_uses_sqlite
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
 
@@ -84,6 +85,9 @@ _EXPIRED_LIMIT_RESET_BATCH_SIZE = 500
 class ApiKeysRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    def uses_sqlite(self) -> bool:
+        return session_uses_sqlite(self._session)
 
     def _select_api_key(self):
         return (

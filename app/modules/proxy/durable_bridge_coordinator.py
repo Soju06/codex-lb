@@ -10,7 +10,7 @@ from typing import TypeVar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import HttpBridgeSessionState
-from app.db.sqlite_retry import retry_sqlite_lock
+from app.db.sqlite_retry import retry_sqlite_lock, session_uses_sqlite
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRepository,
     DurableBridgeSessionSnapshot,
@@ -49,6 +49,7 @@ class DurableBridgeLookup:
 class DurableBridgeSessionCoordinator:
     def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
         self._session_factory = session_factory
+        self._serialize_writes: bool | None = None
 
     async def lookup_request_targets(
         self,
@@ -275,7 +276,22 @@ class DurableBridgeSessionCoordinator:
         operation_name: str,
         operation: Callable[[], Awaitable[_T]],
     ) -> _T:
-        return await retry_sqlite_lock(operation, operation_name=operation_name, logger=logger)
+        return await retry_sqlite_lock(
+            operation,
+            operation_name=operation_name,
+            logger=logger,
+            serialize_writes=await self._should_serialize_writes(),
+        )
+
+    async def _should_serialize_writes(self) -> bool:
+        if self._serialize_writes is not None:
+            return self._serialize_writes
+        session = self._session_factory()
+        try:
+            self._serialize_writes = session_uses_sqlite(session)
+        finally:
+            await session.close()
+        return self._serialize_writes
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[AsyncSession]:

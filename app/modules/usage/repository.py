@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime
@@ -12,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
-from app.db.sqlite_retry import retry_sqlite_lock
+from app.db.sqlite_retry import retry_sqlite_write
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -81,20 +80,7 @@ async def _retry_sqlite_write(
     *,
     operation_name: str,
 ) -> _T:
-    async def _rollback() -> None:
-        with contextlib.suppress(Exception):
-            await session.rollback()
-
-    try:
-        return await retry_sqlite_lock(
-            operation,
-            operation_name=operation_name,
-            on_retry=_rollback,
-            logger=logger,
-        )
-    except Exception:
-        await _rollback()
-        raise
+    return await retry_sqlite_write(session, operation, operation_name=operation_name, logger=logger)
 
 
 class UsageRepository:

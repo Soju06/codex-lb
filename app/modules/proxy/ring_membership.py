@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
-from app.db.sqlite_retry import retry_sqlite_lock
+from app.db.sqlite_retry import retry_sqlite_lock, session_uses_sqlite
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,6 +36,7 @@ class RingMembershipService:
 
     def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
         self._session_factory = session_factory
+        self._serialize_writes: bool | None = None
 
     async def register(self, instance_id: str, *, endpoint_base_url: str | None = None) -> None:
         """Upsert pod into ring. Safe to call multiple times."""
@@ -88,7 +89,12 @@ class RingMembershipService:
                 await session.execute(stmt)
                 await session.commit()
 
-        await retry_sqlite_lock(_register_once, operation_name="bridge_ring_register", logger=logger)
+        await retry_sqlite_lock(
+            _register_once,
+            operation_name="bridge_ring_register",
+            logger=logger,
+            serialize_writes=await self._should_serialize_writes(),
+        )
 
     async def heartbeat(self, instance_id: str, *, endpoint_base_url: str | None = None) -> None:
         """Upsert heartbeat — recovers from mark_stale or unregister by sibling workers."""
@@ -137,7 +143,12 @@ class RingMembershipService:
                 await session.execute(stmt)
                 await session.commit()
 
-        await retry_sqlite_lock(_heartbeat_once, operation_name="bridge_ring_heartbeat", logger=logger)
+        await retry_sqlite_lock(
+            _heartbeat_once,
+            operation_name="bridge_ring_heartbeat",
+            logger=logger,
+            serialize_writes=await self._should_serialize_writes(),
+        )
 
     async def unregister(self, instance_id: str) -> None:
         """Remove pod from ring."""
@@ -147,7 +158,12 @@ class RingMembershipService:
                 await session.execute(stmt)
                 await session.commit()
 
-        await retry_sqlite_lock(_unregister_once, operation_name="bridge_ring_unregister", logger=logger)
+        await retry_sqlite_lock(
+            _unregister_once,
+            operation_name="bridge_ring_unregister",
+            logger=logger,
+            serialize_writes=await self._should_serialize_writes(),
+        )
 
     async def mark_stale(
         self,
@@ -177,7 +193,12 @@ class RingMembershipService:
                 await session.execute(stmt)
                 await session.commit()
 
-        await retry_sqlite_lock(_mark_stale_once, operation_name="bridge_ring_mark_stale", logger=logger)
+        await retry_sqlite_lock(
+            _mark_stale_once,
+            operation_name="bridge_ring_mark_stale",
+            logger=logger,
+            serialize_writes=await self._should_serialize_writes(),
+        )
 
     async def list_active(
         self,
@@ -222,6 +243,16 @@ class RingMembershipService:
         members = await self.list_active(stale_threshold_seconds)
         data = ",".join(sorted(members))
         return sha256(data.encode()).hexdigest()
+
+    async def _should_serialize_writes(self) -> bool:
+        if self._serialize_writes is not None:
+            return self._serialize_writes
+        session = self._session_factory()
+        try:
+            self._serialize_writes = session_uses_sqlite(session)
+        finally:
+            await session.close()
+        return self._serialize_writes
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[AsyncSession]:

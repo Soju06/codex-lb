@@ -6,11 +6,36 @@ import pytest
 
 from app.core.openai.chat_responses import (
     ChatCompletion,
+    ChatMessageToolCall,
     collect_chat_completion,
     iter_chat_chunks,
     stream_chat_chunks,
 )
 from app.core.openai.models import OpenAIErrorEnvelope
+
+
+def _tool_call_args(tool_call: ChatMessageToolCall) -> str:
+    """Type-narrowing accessor for ``tool_call.function.arguments`` in tests.
+
+    The pydantic model declares both ``function`` and ``arguments`` as
+    ``Optional`` for upstream compatibility, but the streaming/non-streaming
+    adapters always populate them by the time a tool call is surfaced to the
+    client. The helper makes that invariant explicit so ``ty`` does not flag
+    every ``tool_call.function.arguments`` access as a possibly-missing
+    attribute, without weakening the production model definitions.
+    """
+
+    assert tool_call.function is not None
+    assert tool_call.function.arguments is not None
+    return tool_call.function.arguments
+
+
+def _tool_call_name(tool_call: ChatMessageToolCall) -> str:
+    """Type-narrowing accessor for ``tool_call.function.name`` in tests."""
+
+    assert tool_call.function is not None
+    assert tool_call.function.name is not None
+    return tool_call.function.name
 
 
 def test_output_text_delta_to_chat_chunk():
@@ -545,8 +570,8 @@ async def test_collect_completion_parallel_tool_calls_distinct_arguments():
     assert tool_calls is not None
     assert len(tool_calls) == 2
 
-    args_0 = json.loads(tool_calls[0].function.arguments)
-    args_1 = json.loads(tool_calls[1].function.arguments)
+    args_0 = json.loads(_tool_call_args(tool_calls[0]))
+    args_1 = json.loads(_tool_call_args(tool_calls[1]))
     assert args_0["category"] == "activity"
     assert args_0["content"] == "Biked 20km"
     assert args_1["category"] == "food"
@@ -613,9 +638,9 @@ async def test_collect_completion_three_parallel_tool_calls():
     tool_calls = result.choices[0].message.tool_calls
     assert tool_calls is not None
     assert len(tool_calls) == 3
-    assert json.loads(tool_calls[0].function.arguments) == {"cat": "activity"}
-    assert json.loads(tool_calls[1].function.arguments) == {"cat": "food"}
-    assert json.loads(tool_calls[2].function.arguments) == {"cat": "mood"}
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"cat": "activity"}
+    assert json.loads(_tool_call_args(tool_calls[1])) == {"cat": "food"}
+    assert json.loads(_tool_call_args(tool_calls[2])) == {"cat": "mood"}
     assert tool_calls[0].id == "call_1"
     assert tool_calls[1].id == "call_2"
     assert tool_calls[2].id == "call_3"
@@ -665,10 +690,10 @@ async def test_collect_completion_parallel_different_functions():
     tool_calls = result.choices[0].message.tool_calls
     assert tool_calls is not None
     assert len(tool_calls) == 2
-    assert tool_calls[0].function.name == "get_weather"
-    assert json.loads(tool_calls[0].function.arguments) == {"city": "Zurich"}
-    assert tool_calls[1].function.name == "record_observation"
-    assert json.loads(tool_calls[1].function.arguments) == {"category": "activity"}
+    assert _tool_call_name(tool_calls[0]) == "get_weather"
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"city": "Zurich"}
+    assert _tool_call_name(tool_calls[1]) == "record_observation"
+    assert json.loads(_tool_call_args(tool_calls[1])) == {"category": "activity"}
 
 
 @pytest.mark.asyncio
@@ -715,9 +740,11 @@ async def test_collect_completion_parallel_calls_item_id_equals_call_id():
     tool_calls = result.choices[0].message.tool_calls
     assert tool_calls is not None
     assert len(tool_calls) == 2
-    assert json.loads(tool_calls[0].function.arguments) == {"city": "Paris"}
-    assert json.loads(tool_calls[1].function.arguments) == {"city": "London"}
-    assert tool_calls[0].function.arguments != tool_calls[1].function.arguments
+    args_paris = _tool_call_args(tool_calls[0])
+    args_london = _tool_call_args(tool_calls[1])
+    assert json.loads(args_paris) == {"city": "Paris"}
+    assert json.loads(args_london) == {"city": "London"}
+    assert args_paris != args_london
 
 
 @pytest.mark.asyncio
@@ -769,5 +796,5 @@ async def test_collect_completion_registers_call_id_when_output_index_already_ma
     assert tool_calls is not None
     # The call_id-only legacy event must not have allocated a new slot.
     assert len(tool_calls) == 1
-    assert tool_calls[0].function.name == "get_weather"
-    assert json.loads(tool_calls[0].function.arguments) == {"city": "Paris"}
+    assert _tool_call_name(tool_calls[0]) == "get_weather"
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"city": "Paris"}

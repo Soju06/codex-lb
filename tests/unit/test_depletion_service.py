@@ -278,6 +278,122 @@ def test_aged_out_samples_do_not_keep_stale_ewma_influence() -> None:
     assert in_window_result.rate_per_second < full_window_result.rate_per_second
 
 
+def test_repeated_call_with_unchanged_history_skips_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #537: dashboard polls must reuse the cached EWMA state when the
+    in-window history is unchanged, instead of replaying every usage row."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    history = [
+        _entry(10.0, BASE_TIME),
+        _entry(20.0, BASE_TIME + timedelta(minutes=1)),
+        _entry(30.0, BASE_TIME + timedelta(minutes=2)),
+    ]
+    now = BASE_TIME + timedelta(minutes=3)
+
+    rebuild_calls = 0
+    real_rebuild = depletion_service._rebuild_ewma_state
+
+    def _counting_rebuild(history_arg):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return real_rebuild(history_arg)
+
+    monkeypatch.setattr(depletion_service, "_rebuild_ewma_state", _counting_rebuild)
+
+    first = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert first is not None
+    assert rebuild_calls == 1
+
+    # Subsequent polls with the exact same in-window history must not re-walk
+    # the history. The result must remain identical.
+    second = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert second is not None
+    assert rebuild_calls == 1
+    assert second.rate_per_second == pytest.approx(first.rate_per_second)
+    assert second.risk == pytest.approx(first.risk)
+
+    third = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert third is not None
+    assert rebuild_calls == 1
+
+
+def test_new_history_row_invalidates_memoized_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a new usage row lands the cache must rebuild so the rate reflects
+    the latest observations."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    history = [
+        _entry(10.0, BASE_TIME),
+        _entry(15.0, BASE_TIME + timedelta(minutes=1)),
+    ]
+
+    rebuild_calls = 0
+    real_rebuild = depletion_service._rebuild_ewma_state
+
+    def _counting_rebuild(history_arg):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return real_rebuild(history_arg)
+
+    monkeypatch.setattr(depletion_service, "_rebuild_ewma_state", _counting_rebuild)
+
+    first = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", history, now=BASE_TIME + timedelta(minutes=2)
+    )
+    assert first is not None
+    assert rebuild_calls == 1
+
+    appended_history = history + [_entry(40.0, BASE_TIME + timedelta(minutes=2))]
+    second = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", appended_history, now=BASE_TIME + timedelta(minutes=3)
+    )
+    assert second is not None
+    # Signature changed (new row appended) -> rebuild executed.
+    assert rebuild_calls == 2
+    # Rate must rise to reflect the steeper observation.
+    assert second.rate_per_second > first.rate_per_second
+
+
+def test_aged_out_row_invalidates_memoized_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the leading row of the in-window history drops away the cache must
+    rebuild so the rate does not retain influence from samples now outside the
+    window."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    full_history = [
+        _entry(10.0, BASE_TIME),
+        _entry(70.0, BASE_TIME + timedelta(minutes=1)),
+        _entry(80.0, BASE_TIME + timedelta(minutes=2)),
+    ]
+
+    rebuild_calls = 0
+    real_rebuild = depletion_service._rebuild_ewma_state
+
+    def _counting_rebuild(history_arg):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return real_rebuild(history_arg)
+
+    monkeypatch.setattr(depletion_service, "_rebuild_ewma_state", _counting_rebuild)
+
+    full_result = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", full_history, now=BASE_TIME + timedelta(minutes=3)
+    )
+    assert full_result is not None
+    assert rebuild_calls == 1
+
+    in_window_history = full_history[1:]
+    truncated_result = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", in_window_history, now=BASE_TIME + timedelta(minutes=3)
+    )
+    assert truncated_result is not None
+    assert rebuild_calls == 2
+    assert truncated_result.rate_per_second != pytest.approx(full_result.rate_per_second)
+
+
 def test_post_reset_window_returns_none() -> None:
     """R30-F1: When reset_at is in the past, depletion should be None (window expired)."""
     reset_ewma_state()

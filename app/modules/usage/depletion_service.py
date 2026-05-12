@@ -14,9 +14,20 @@ from app.core.usage.depletion import (
 )
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 
+# Per-account cache key: (account_id, limit_name, window).
+_StateKey = tuple[str, str, str]
+# Signature of the history slice that produced a cached EWMAState. Includes the
+# window endpoints and length so any change in the in-window history (new row,
+# aged-out row, or replaced row) invalidates the cache and forces a rebuild.
+_HistorySignature = tuple[datetime, datetime, int]
+
 # In-memory EWMA state: keyed by (account_id, limit_name, window)
 # Persists across requests; resets on process restart.
-_ewma_states: dict[tuple[str, str, str], EWMAState] = {}
+_ewma_states: dict[_StateKey, EWMAState] = {}
+# Parallel signature map used to memoize EWMA rebuilds across dashboard polls
+# (issue #537). When the in-window history is unchanged between requests we
+# reuse the cached EWMAState instead of replaying the full history.
+_history_signatures: dict[_StateKey, _HistorySignature] = {}
 
 
 @dataclass
@@ -58,7 +69,7 @@ def compute_depletion_for_account(
         return None
 
     now = now or utcnow()
-    key = (account_id, limit_name, window)
+    key: _StateKey = (account_id, limit_name, window)
 
     if len(history) < 2:
         # Only one in-window sample — seed the EWMA but don't compute
@@ -68,12 +79,24 @@ def compute_depletion_for_account(
         _ewma_states[key] = ewma_update(
             None, entry.used_percent, naive_utc_to_epoch(entry.recorded_at), reset_at=entry.reset_at
         )
+        _history_signatures[key] = (entry.recorded_at, entry.recorded_at, 1)
         return None
 
-    state = _rebuild_ewma_state(history)
+    signature: _HistorySignature = (history[0].recorded_at, history[-1].recorded_at, len(history))
+    cached_state = _ewma_states.get(key)
+    cached_signature = _history_signatures.get(key)
 
-    if state is not None:
-        _ewma_states[key] = state
+    if cached_state is not None and cached_signature == signature:
+        # Same in-window history as the last call — reuse the cached EWMA
+        # state instead of replaying every row.  Time-dependent fields below
+        # (risk, safe_usage_percent, projected_exhaustion_at) are still
+        # recomputed from `now`, so dashboard polls remain live.
+        state: EWMAState | None = cached_state
+    else:
+        state = _rebuild_ewma_state(history)
+        if state is not None:
+            _ewma_states[key] = state
+            _history_signatures[key] = signature
 
     if state is None or state.rate is None:
         return None
@@ -153,6 +176,7 @@ def compute_aggregate_depletion(
 def reset_ewma_state() -> None:
     """Clear all in-memory EWMA state. Used for testing."""
     _ewma_states.clear()
+    _history_signatures.clear()
 
 
 def _rebuild_ewma_state(history: list) -> EWMAState | None:

@@ -1,0 +1,4 @@
+- [x] Add a per-account history signature alongside `_ewma_states` and short-circuit `compute_depletion_for_account` when the signature matches a cached state.
+- [x] Invalidate the memoized state on appended rows, aged-out rows, and `reset_ewma_state()` calls.
+- [x] Add regression tests covering: cache hit on identical history (no rebuild), cache miss when a new row lands, cache miss when an old row ages out, and continued idempotency of the result for unchanged input.
+- [x] Document the memoization contract in the `query-caching` capability spec.

@@ -434,6 +434,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "ozpool",
+      "name": "ozpool",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151670776?v=4",
+      "profile": "https://github.com/ozpool",
+      "contributions": [
+        "ideas",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

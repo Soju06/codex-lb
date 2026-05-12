@@ -188,11 +188,22 @@ async def test_proxy_responses_stream_surfaces_additional_quota_data_unavailable
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_requires_instructions(async_client):
-    payload = {"model": "gpt-5.1", "input": []}
-    resp = await async_client.post("/backend-api/codex/responses", json=payload)
+async def test_proxy_responses_accepts_openai_style_payload_without_instructions(async_client):
+    payload = {"model": "gpt-5.1", "input": "hi", "stream": True}
+    request_id = "req_backend_openai_style_123"
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": request_id},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
 
-    assert resp.status_code == 400
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["id"] == request_id
+    assert event["response"]["error"]["code"] == "no_accounts"
 
 
 @pytest.mark.asyncio

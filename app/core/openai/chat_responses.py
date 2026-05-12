@@ -123,14 +123,37 @@ class ToolCallIndex:
     indexes: dict[str, int] = field(default_factory=dict)
     next_index: int = 0
 
-    def index_for(self, call_id: str | None, name: str | None) -> int:
-        key = _tool_call_key(call_id, name)
-        if key is None:
-            return 0
-        if key not in self.indexes:
-            self.indexes[key] = self.next_index
+    def index_for(
+        self,
+        call_id: str | None,
+        name: str | None,
+        item_id: str | None = None,
+    ) -> int:
+        call_key = _tool_call_key(call_id, name)
+        item_key = _tool_call_item_key(item_id)
+
+        # If either key already maps to an index, reuse it. The Responses API
+        # streams output_item.added (which carries call_id) and
+        # function_call_arguments.delta/done (which only carry item_id) for the
+        # same logical tool call; binding both keys to one slot prevents
+        # parallel tool calls from collapsing to index 0 (see issue #542).
+        existing: int | None = None
+        if call_key is not None:
+            existing = self.indexes.get(call_key)
+        if existing is None and item_key is not None:
+            existing = self.indexes.get(item_key)
+
+        if existing is None:
+            if call_key is None and item_key is None:
+                return 0
+            existing = self.next_index
             self.next_index += 1
-        return self.indexes[key]
+
+        if call_key is not None:
+            self.indexes.setdefault(call_key, existing)
+        if item_key is not None:
+            self.indexes.setdefault(item_key, existing)
+        return existing
 
 
 @dataclass
@@ -596,7 +619,8 @@ def _tool_call_delta_from_payload(payload: Mapping[str, JsonValue], indexer: Too
     if fields is None:
         return None
     call_id, name, arguments, tool_type = fields
-    index = indexer.index_for(call_id, name)
+    item_id = _extract_item_id(payload)
+    index = indexer.index_for(call_id, name, item_id=item_id)
     return ToolCallDelta(
         index=index,
         call_id=call_id,
@@ -701,6 +725,28 @@ def _tool_call_key(call_id: str | None, name: str | None) -> str | None:
         return f"id:{call_id}"
     if name:
         return f"name:{name}"
+    return None
+
+
+def _tool_call_item_key(item_id: str | None) -> str | None:
+    if item_id:
+        return f"item:{item_id}"
+    return None
+
+
+def _extract_item_id(payload: Mapping[str, JsonValue]) -> str | None:
+    # response.function_call_arguments.delta/.done carry the owning item
+    # identifier at the top level as `item_id`.
+    raw = payload.get("item_id")
+    if isinstance(raw, str) and raw:
+        return raw
+    # response.output_item.added/.done nest the item; its `id` matches the
+    # `item_id` emitted by the argument events for the same call.
+    item = _as_mapping(payload.get("item"))
+    if item is not None:
+        raw = item.get("id")
+        if isinstance(raw, str) and raw:
+            return raw
     return None
 
 

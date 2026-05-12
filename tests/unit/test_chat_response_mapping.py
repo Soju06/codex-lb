@@ -365,6 +365,149 @@ async def test_collect_completion_prefers_final_tool_call_snapshot_without_dupli
 
 
 @pytest.mark.asyncio
+async def test_collect_completion_routes_parallel_tool_calls_by_item_id():
+    """Regression test for #542.
+
+    The Responses API streams `response.function_call_arguments.delta` / `.done`
+    events that identify their owning call only via `item_id` (the `fc_...`
+    identifier from `response.output_item.added`). When two parallel tool calls
+    were in flight, the indexer routed all argument events to slot 0 because
+    `item_id` was not used as a routing key, overwriting the first call's
+    arguments with the second call's payload.
+    """
+
+    lines = [
+        # First tool call - output_item.added carries both call_id and item.id.
+        (
+            'data: {"type":"response.output_item.added","output_index":0,"item":'
+            '{"id":"fc_first","type":"function_call","call_id":"call_first",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        # First tool call - arguments are streamed using only item_id.
+        (
+            'data: {"type":"response.function_call_arguments.delta","item_id":"fc_first",'
+            '"output_index":0,"delta":"{\\"category\\":\\"activity\\",\\"content\\":'
+            '\\"Biked 20km today\\",\\"confidence\\":0.95}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","item_id":"fc_first",'
+            '"output_index":0,"arguments":"{\\"category\\":\\"activity\\",\\"content\\":'
+            '\\"Biked 20km today\\",\\"confidence\\":0.95}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,"item":'
+            '{"id":"fc_first","type":"function_call","call_id":"call_first",'
+            '"name":"record_observation","arguments":"{\\"category\\":\\"activity\\",'
+            '\\"content\\":\\"Biked 20km today\\",\\"confidence\\":0.95}"}}\n\n'
+        ),
+        # Second tool call - same shape, distinct identifiers and payload.
+        (
+            'data: {"type":"response.output_item.added","output_index":1,"item":'
+            '{"id":"fc_second","type":"function_call","call_id":"call_second",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.delta","item_id":"fc_second",'
+            '"output_index":1,"delta":"{\\"category\\":\\"food\\",\\"content\\":'
+            '\\"Pasta for dinner\\",\\"confidence\\":0.9}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","item_id":"fc_second",'
+            '"output_index":1,"arguments":"{\\"category\\":\\"food\\",\\"content\\":'
+            '\\"Pasta for dinner\\",\\"confidence\\":0.9}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":1,"item":'
+            '{"id":"fc_second","type":"function_call","call_id":"call_second",'
+            '"name":"record_observation","arguments":"{\\"category\\":\\"food\\",'
+            '\\"content\\":\\"Pasta for dinner\\",\\"confidence\\":0.9}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.4-mini")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+
+    first, second = tool_calls
+    assert first.id == "call_first"
+    assert second.id == "call_second"
+
+    assert first.function is not None
+    assert second.function is not None
+    first_args = json.loads(first.function.arguments or "")
+    second_args = json.loads(second.function.arguments or "")
+    assert first_args["content"] == "Biked 20km today"
+    assert second_args["content"] == "Pasta for dinner"
+    assert first_args != second_args
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_routes_parallel_tool_calls_by_item_id():
+    """Streaming counterpart to the parallel-tool-call regression for #542."""
+
+    lines = [
+        (
+            'data: {"type":"response.output_item.added","output_index":0,"item":'
+            '{"id":"fc_first","type":"function_call","call_id":"call_first",'
+            '"name":"do_a","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.delta","item_id":"fc_first",'
+            '"output_index":0,"delta":"{\\"x\\":1}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","item_id":"fc_first",'
+            '"output_index":0,"arguments":"{\\"x\\":1}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":1,"item":'
+            '{"id":"fc_second","type":"function_call","call_id":"call_second",'
+            '"name":"do_b","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.delta","item_id":"fc_second",'
+            '"output_index":1,"delta":"{\\"y\\":2}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","item_id":"fc_second",'
+            '"output_index":1,"arguments":"{\\"y\\":2}"}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    chunks = [
+        json.loads(chunk[5:].strip())
+        for chunk in [c async for c in stream_chat_chunks(_stream(), model="gpt-5.4-mini")]
+        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+    ]
+
+    args_by_index: dict[int, str] = {}
+    for chunk in chunks:
+        tool_calls = chunk["choices"][0]["delta"].get("tool_calls")
+        if not tool_calls:
+            continue
+        for call in tool_calls:
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if arguments:
+                args_by_index[call["index"]] = args_by_index.get(call["index"], "") + arguments
+
+    assert args_by_index[0] == '{"x":1}'
+    assert args_by_index[1] == '{"y":2}'
+
+
+@pytest.mark.asyncio
 async def test_collect_completion_uses_snapshot_only_tool_call_arguments():
     lines = [
         (

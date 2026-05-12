@@ -1,0 +1,4 @@
+- [x] Add regression tests covering parallel tool-call routing for both `collect_chat_completion` and `stream_chat_chunks` using realistic `output_item` + `function_call_arguments` event sequences.
+- [x] Extend `ToolCallIndex.index_for` to accept an `item_id`, aliasing it to the `call_id`-keyed slot when both are present.
+- [x] Thread `item_id` extraction through `_tool_call_delta_from_payload` so argument-only events resolve to the correct slot.
+- [x] Document the parallel tool-call routing requirement in the Responses compatibility spec.

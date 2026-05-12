@@ -54,8 +54,8 @@ export const AccountSummarySchema = z.object({
   email: z.string(),
   displayName: z.string(),
   planType: z.string(),
-  status: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  status: z.string(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -83,10 +83,6 @@ export const AccountImportResponseSchema = z.object({
   status: z.string(),
 });
 
-export const AccountActionResponseSchema = z.object({
-  status: z.string(),
-});
-
 export const AccountRoutingPolicyUpdateSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
@@ -94,6 +90,10 @@ export const AccountRoutingPolicyUpdateSchema = z.object({
 export const AccountRoutingPolicyResponseSchema = z.object({
   status: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
+});
+
+export const AccountActionResponseSchema = z.object({
+  status: z.string(),
 });
 
 export const OauthStartRequestSchema = z.object({

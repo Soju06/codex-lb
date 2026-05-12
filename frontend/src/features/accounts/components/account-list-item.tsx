@@ -97,8 +97,8 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
           </p>
         </div>
-        <RoutingPolicyBadge policy={account.routingPolicy} />
         <StatusBadge status={status} />
+        <RoutingPolicyBadge policy={account.routingPolicy} />
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
         {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}

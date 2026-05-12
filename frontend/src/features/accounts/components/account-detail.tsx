@@ -3,6 +3,7 @@ import { User } from "lucide-react";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
+import { AccountRoutingPolicyControl } from "@/features/accounts/components/account-routing-policy-control";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
@@ -16,8 +17,8 @@ export type AccountDetailProps = {
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
-  onReauth: () => void;
   onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  onReauth: () => void;
 };
 
 export function AccountDetail({
@@ -27,8 +28,8 @@ export function AccountDetail({
   onPause,
   onResume,
   onDelete,
-  onReauth,
   onRoutingPolicyChange,
+  onReauth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -69,6 +70,11 @@ export function AccountDetail({
 
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
+      <AccountRoutingPolicyControl
+        account={account}
+        busy={busy}
+        onRoutingPolicyChange={onRoutingPolicyChange}
+      />
       <AccountActions
         account={account}
         busy={busy}
@@ -76,7 +82,6 @@ export function AccountDetail({
         onResume={onResume}
         onDelete={onDelete}
         onReauth={onReauth}
-        onRoutingPolicyChange={onRoutingPolicyChange}
       />
     </div>
   );

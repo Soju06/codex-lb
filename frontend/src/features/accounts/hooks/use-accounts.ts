@@ -8,8 +8,8 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
-  updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
+import { updateAccountRoutingPolicy } from "@/features/accounts/api";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
@@ -69,7 +69,13 @@ export function useAccountMutations() {
     },
   });
 
-  const routingPolicyMutation = useMutation({
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+}
+
+export function useAccountRoutingPolicyMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
     mutationFn: ({ accountId, routingPolicy }: { accountId: string; routingPolicy: AccountRoutingPolicy }) =>
       updateAccountRoutingPolicy(accountId, { routingPolicy }),
     onSuccess: () => {
@@ -80,8 +86,6 @@ export function useAccountMutations() {
       toast.error(error.message || "Routing policy update failed");
     },
   });
-
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation, routingPolicyMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

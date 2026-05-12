@@ -206,16 +206,6 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
-    async def update_routing_policy(self, account_id: str, routing_policy: str) -> str | None:
-        normalized = routing_policy.strip().lower()
-        if normalized not in _ROUTING_POLICIES:
-            raise ValueError("Invalid account routing policy")
-        result = await self._repo.update_routing_policy(account_id, normalized)
-        if result:
-            get_account_selection_cache().invalidate()
-            return normalized
-        return None
-
     async def delete_account(self, account_id: str) -> bool:
         result = await self._repo.delete(account_id)
         if result:
@@ -225,3 +215,13 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def update_routing_policy(self, account_id: str, routing_policy: str) -> str | None:
+        normalized = routing_policy.strip().lower()
+        if normalized not in _ROUTING_POLICIES:
+            raise ValueError("Invalid account routing policy")
+        result = await self._repo.update_routing_policy(account_id, normalized)
+        if result:
+            get_account_selection_cache().invalidate()
+            return normalized
+        return None

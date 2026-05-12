@@ -101,8 +101,8 @@ def _account_to_summary(
         email=account.email,
         display_name=account.email,
         plan_type=plan_type,
-        status=account.status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        status=account.status.value,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

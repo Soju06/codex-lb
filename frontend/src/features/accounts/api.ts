@@ -3,8 +3,6 @@ import { del, get, patch, post } from "@/lib/api-client";
 import {
   AccountActionResponseSchema,
   AccountImportResponseSchema,
-  AccountRoutingPolicyResponseSchema,
-  AccountRoutingPolicyUpdateSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -15,6 +13,10 @@ import {
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
   RuntimeConnectAddressResponseSchema,
+} from "@/features/accounts/schemas";
+import {
+  AccountRoutingPolicyResponseSchema,
+  AccountRoutingPolicyUpdateSchema,
 } from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
@@ -46,15 +48,6 @@ export function reactivateAccount(accountId: string) {
   );
 }
 
-export function updateAccountRoutingPolicy(accountId: string, payload: unknown) {
-  const validated = AccountRoutingPolicyUpdateSchema.parse(payload);
-  return patch(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
-    AccountRoutingPolicyResponseSchema,
-    { body: validated },
-  );
-}
-
 export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
@@ -66,6 +59,15 @@ export function deleteAccount(accountId: string) {
   return del(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
     AccountActionResponseSchema,
+  );
+}
+
+export function updateAccountRoutingPolicy(accountId: string, payload: unknown) {
+  const validated = AccountRoutingPolicyUpdateSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
+    AccountRoutingPolicyResponseSchema,
+    { body: validated },
   );
 }
 

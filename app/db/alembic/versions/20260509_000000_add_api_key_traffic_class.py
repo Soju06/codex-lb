@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260509_000000_add_api_key_traffic_class"
-down_revision = "20260509_010000_add_additional_quota_routing_policies"
+down_revision = "20260424_000000_merge_dashboard_session_ttl_and_request_log_heads"
 branch_labels = None
 depends_on = None
 

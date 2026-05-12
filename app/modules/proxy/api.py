@@ -1681,7 +1681,7 @@ async def _stream_responses(
         else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
     )
     if startup_error is not None:
-        if reservation is not None and owns_reservation:
+        if owns_reservation:
             await _release_reservation(reservation)
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     stream = _normalize_public_responses_stream(
@@ -2017,7 +2017,7 @@ def _stream_startup_error_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers={**headers, **error.headers},
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(

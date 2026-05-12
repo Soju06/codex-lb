@@ -435,6 +435,32 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
     assert "resp_missing" not in json.dumps(normalized)
 
 
+@pytest.mark.asyncio
+async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
+    closed = False
+
+    async def stream():
+        nonlocal closed
+        try:
+            yield (
+                'data: {"type":"response.failed","response":{"error":{'
+                "\"message\":\"Previous response with id 'resp_missing' not found.\","
+                '"type":"invalid_request_error","code":"previous_response_not_found",'
+                '"param":"previous_response_id"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed","response":{"id":"resp_after"}}\n\n'
+        finally:
+            closed = True
+
+    _probed, startup_error = await proxy_api_module._probe_stream_startup_error(
+        stream(),
+        convert_event_errors=True,
+    )
+
+    assert startup_error is not None
+    assert closed is True
+
+
 def test_public_stream_incomplete_error_event_is_not_rewritten_when_already_public():
     payload = {
         "type": "error",

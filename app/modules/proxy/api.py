@@ -1893,6 +1893,9 @@ async def _probe_stream_startup_error(
     if convert_event_errors:
         first_error = _stream_event_error_envelope(first)
         if first_error is not None:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
             return _prepend_first(None, stream), first_error
     return _prepend_first(first, stream), None
 

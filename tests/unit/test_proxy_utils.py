@@ -5757,6 +5757,7 @@ async def test_websocket_full_replay_waits_until_pending_drains():
         async with pending_lock:
             pending_requests.clear()
         await asyncio.sleep(0.02)
+        assert not wait_task.done()
         proxy_service._record_websocket_continuity_completion(
             continuity_state,
             request_state=pending_request,
@@ -5872,6 +5873,36 @@ def test_websocket_continuity_completion_clears_prefix_for_non_list_turn():
     assert continuity_state.last_completed_response_id == "resp_string"
     assert continuity_state.last_completed_input_count == 0
     assert continuity_state.last_completed_input_prefix_fingerprint is None
+
+
+def test_websocket_continuity_completion_skips_suppressed_tool_call_response():
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_safe",
+        last_completed_input_prefix_fingerprint="safe-fingerprint",
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_suppressed_tool",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=2,
+        input_full_fingerprint="unsafe-fingerprint",
+        suppressed_downstream_tool_call=True,
+    )
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=request_state,
+        response_id="resp_unsafe",
+    )
+
+    assert continuity_state.last_completed_response_id == "resp_safe"
+    assert continuity_state.last_completed_input_count == 1
+    assert continuity_state.last_completed_input_prefix_fingerprint == "safe-fingerprint"
+    assert continuity_state.completion_generation == 1
 
 
 def test_websocket_continuity_completion_ignores_older_shorter_turn():
@@ -8834,6 +8865,73 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
     assert list(pending_requests) == [inflight_request]
 
 
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_pretty_json_previous_response_not_found(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_prev_not_found_pretty_json")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    followup_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_followup_pretty_prev_not_found",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_pretty_anchor",
+                "input": "continue",
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_pretty_anchor",
+    )
+    pending_requests = deque([followup_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps(
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "message": "Previous response with id 'resp_pretty_anchor' not found.",
+                "param": "previous_response_id",
+            },
+        },
+        indent=2,
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    finalize_request_state.assert_awaited_once()
+    finalize_call = finalize_request_state.await_args
+    assert finalize_call is not None
+    assert finalize_call.args[0] is followup_request
+    assert list(pending_requests) == []
+
+
 def test_maybe_rewrite_websocket_previous_response_not_found_rewrites_response_failed_event():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_nf",
@@ -10921,9 +11019,38 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
 
 
 def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
-    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
-    assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
-    assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+    assert (
+        proxy_service._classify_upstream_close(
+            1000,
+            request_response_events_seen=0,
+            upstream_response_events_seen=0,
+        )
+        == "rejected"
+    )
+    assert (
+        proxy_service._classify_upstream_close(
+            1000,
+            request_response_events_seen=1,
+            upstream_response_events_seen=1,
+        )
+        == "transient"
+    )
+    assert (
+        proxy_service._classify_upstream_close(
+            1000,
+            request_response_events_seen=0,
+            upstream_response_events_seen=1,
+        )
+        == "transient"
+    )
+    assert (
+        proxy_service._classify_upstream_close(
+            1011,
+            request_response_events_seen=0,
+            upstream_response_events_seen=0,
+        )
+        == "transient"
+    )
 
 
 @pytest.mark.asyncio
@@ -10963,3 +11090,50 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejecte
     assert request_state.error_code_override == "upstream_rejected_input"
     assert request_state.error_http_status_override == 502
     assert "close_code=1000" in (request_state.error_message_override or "")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_suppressed_tool_call_response_is_not_reused_as_anchor():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    session_key = proxy_service._HTTPBridgeSessionKey("session_header", "bridge-key", None)
+    session = proxy_service._HTTPBridgeSession(
+        key=session_key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_unsafe_anchor"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_completed_response_id="resp_unsafe_tool",
+    )
+    service._http_bridge_sessions[session_key] = session
+    service._http_bridge_previous_response_index[
+        proxy_service._http_bridge_previous_response_alias_key("resp_unsafe_tool", None)
+    ] = session_key
+    session.previous_response_ids.add("resp_unsafe_tool")
+
+    service._mark_http_bridge_previous_response_unsafe(session, "resp_unsafe_tool")
+    await service._register_http_bridge_previous_response_id(session, "resp_unsafe_tool")
+
+    assert session.last_completed_response_id is None
+    assert "resp_unsafe_tool" in session.unsafe_previous_response_ids
+    assert "resp_unsafe_tool" not in session.previous_response_ids
+    assert (
+        proxy_service._http_bridge_previous_response_alias_key("resp_unsafe_tool", None)
+        not in service._http_bridge_previous_response_index
+    )
+    assert (
+        proxy_service._http_bridge_session_reusable_for_request(
+            session=session,
+            key=session_key,
+            incoming_turn_state=None,
+            previous_response_id="resp_unsafe_tool",
+        )
+        is False
+    )

@@ -619,8 +619,6 @@ class ProxyService:
         effective_payload = payload
         proxy_injected_previous_response_id = False
         fresh_upstream_request_text: str | None = None
-        previous_response_trimmed_input_count: int | None = None
-        previous_response_trimmed_input_fingerprint: str | None = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -662,17 +660,6 @@ class ProxyService:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-        if (
-            proxy_injected_previous_response_id
-            and effective_payload.previous_response_id is not None
-            and isinstance(effective_payload.input, list)
-        ):
-            previous_response_input_items = cast(list[JsonValue], effective_payload.input)
-            trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
-                previous_response_trimmed_input_count = len(previous_response_input_items)
-                previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
-                effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
         request_state, text_data = self._prepare_http_bridge_request(
             effective_payload,
             headers,
@@ -682,19 +669,6 @@ class ProxyService:
         )
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
-        if previous_response_trimmed_input_count is not None:
-            request_state.input_item_count = previous_response_trimmed_input_count
-            request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
-            logger.info(
-                "http_bridge_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
-                "previous_response_id=%s",
-                request_state.request_id,
-                previous_response_trimmed_input_count,
-                len(cast(list[JsonValue], effective_payload.input))
-                if isinstance(effective_payload.input, list)
-                else None,
-                effective_payload.previous_response_id,
-            )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         request_state.request_stage = _http_bridge_request_stage(
             headers=headers,
@@ -4043,6 +4017,12 @@ class ProxyService:
                                 previous_session is not None
                                 and not previous_session.closed
                                 and previous_session.account.status == AccountStatus.ACTIVE
+                                and _http_bridge_session_reusable_for_request(
+                                    session=previous_session,
+                                    key=previous_session.key,
+                                    incoming_turn_state=incoming_turn_state,
+                                    previous_response_id=previous_response_id,
+                                )
                                 and _http_bridge_session_matches_preferred_account(
                                     session=previous_session,
                                     previous_response_id=previous_response_id,
@@ -4921,8 +4901,12 @@ class ProxyService:
         stripped_response_id = response_id.strip()
         if not stripped_response_id:
             return
+        if stripped_response_id in session.unsafe_previous_response_ids:
+            return
         async with self._http_bridge_lock:
             if session.closed:
+                return
+            if stripped_response_id in session.unsafe_previous_response_ids:
                 return
             alias_key = _http_bridge_previous_response_alias_key(stripped_response_id, session.key.api_key_id)
             self._http_bridge_previous_response_index[alias_key] = session.key
@@ -4939,6 +4923,24 @@ class ProxyService:
                 )
             except Exception:
                 logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
+
+    def _mark_http_bridge_previous_response_unsafe(
+        self,
+        session: "_HTTPBridgeSession",
+        response_id: str | None,
+    ) -> None:
+        if response_id is None:
+            return
+        stripped_response_id = response_id.strip()
+        if not stripped_response_id:
+            return
+        session.unsafe_previous_response_ids.add(stripped_response_id)
+        session.previous_response_ids.discard(stripped_response_id)
+        if session.last_completed_response_id == stripped_response_id:
+            session.last_completed_response_id = None
+        alias_key = _http_bridge_previous_response_alias_key(stripped_response_id, session.key.api_key_id)
+        if self._http_bridge_previous_response_index.get(alias_key) == session.key:
+            self._http_bridge_previous_response_index.pop(alias_key, None)
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
@@ -5645,7 +5647,8 @@ class ProxyService:
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
-                response_events_seen=request_state.response_event_count,
+                request_response_events_seen=request_state.response_event_count,
+                upstream_response_events_seen=session.upstream_response_event_count,
             )
             if close_classification == "rejected":
                 request_state.error_code_override = "upstream_rejected_input"
@@ -5786,6 +5789,7 @@ class ProxyService:
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
         session.last_upstream_close_code = None
+        session.upstream_response_event_count = 0
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -5808,9 +5812,9 @@ class ProxyService:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
-        event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
-        event = parse_sse_event(event_block)
+        payload = _parse_websocket_text_payload(text)
+        event = _parse_websocket_text_event(text, payload)
+        event_block = format_sse_event(payload) if payload is not None else f"data: {text}\n\n"
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
@@ -5925,6 +5929,8 @@ class ProxyService:
         else:
             _record_response_event(matched_request_state, event_type)
             _record_response_event(terminal_request_state, event_type)
+        if event_type is not None and event_type.startswith("response."):
+            session.upstream_response_event_count += 1
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
@@ -5955,13 +5961,19 @@ class ProxyService:
             # subsequent turns (including ones that never populated
             # input_item_count, e.g. string inputs) can still reuse this
             # anchor for continuity lookups.
-            if response_id is not None:
+            if response_id is not None and not terminal_request_state.suppressed_downstream_tool_call:
                 session.last_completed_response_id = response_id
             # Prefix trimming is only meaningful for list-shaped inputs, so
             # keep the input-count / fingerprint update scoped to that path.
-            if terminal_request_state.input_item_count > 0:
+            if (
+                terminal_request_state.input_item_count > 0
+                and not terminal_request_state.suppressed_downstream_tool_call
+            ):
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+            elif not terminal_request_state.suppressed_downstream_tool_call:
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
 
         if event_type == "error":
             http_status = _http_error_status_from_payload(payload)
@@ -5981,7 +5993,11 @@ class ProxyService:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None:
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and not matched_request_state.suppressed_downstream_tool_call
+        ):
             await self._register_http_bridge_previous_response_id(session, response_id)
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:
@@ -6385,9 +6401,8 @@ class ProxyService:
         response_create_gate: asyncio.Semaphore,
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> str:
-        event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
-        event = parse_sse_event(event_block)
+        payload = _parse_websocket_text_payload(text)
+        event = _parse_websocket_text_event(text, payload)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
@@ -8677,9 +8692,10 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
 def _classify_upstream_close(
     close_code: int | None,
     *,
-    response_events_seen: int,
+    request_response_events_seen: int,
+    upstream_response_events_seen: int = 0,
 ) -> Literal["transient", "rejected"]:
-    if close_code == 1000 and response_events_seen == 0:
+    if close_code == 1000 and request_response_events_seen == 0 and upstream_response_events_seen == 0:
         return "rejected"
     return "transient"
 
@@ -8741,6 +8757,7 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    suppressed_downstream_tool_call: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -8790,6 +8807,7 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    unsafe_previous_response_ids: set[str] = field(default_factory=set)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
@@ -8797,6 +8815,7 @@ class _HTTPBridgeSession:
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
+    upstream_response_event_count: int = 0
     closed: bool = False
 
 
@@ -8930,6 +8949,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    if request_state.suppressed_downstream_tool_call:
+        continuity_state.completion_generation += 1
+        return
     if (
         request_state.input_item_count > 0
         and continuity_state.last_completed_input_count > 0
@@ -8958,9 +8980,24 @@ async def _wait_for_websocket_continuity_gap(
     observed_completion_generation: int | None = None,
 ) -> bool:
     deadline = time.monotonic() + max(0.0, timeout_seconds)
+    drained_at: float | None = None
     while True:
+        generation_advanced = (
+            continuity_state is not None
+            and observed_completion_generation is not None
+            and continuity_state.completion_generation > observed_completion_generation
+        )
         async with pending_lock:
-            if not pending_requests:
+            has_pending_requests = bool(pending_requests)
+            if not has_pending_requests and (
+                observed_completion_generation is None or continuity_state is None or generation_advanced
+            ):
+                return True
+            if has_pending_requests:
+                drained_at = None
+            elif drained_at is None:
+                drained_at = time.monotonic()
+            elif time.monotonic() - drained_at >= _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS:
                 return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -9227,6 +9264,20 @@ def _normalize_session_id(session_id: str | None) -> str | None:
         return None
     stripped = session_id.strip()
     return stripped or None
+
+
+def _parse_websocket_text_payload(text: str) -> dict[str, JsonValue] | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = parse_sse_data_json(f"data: {text}\n\n")
+    return cast(dict[str, JsonValue], payload) if isinstance(payload, dict) else None
+
+
+def _parse_websocket_text_event(text: str, payload: dict[str, JsonValue] | None) -> OpenAIEvent | None:
+    if payload is not None:
+        return parse_sse_event(format_sse_event(payload))
+    return parse_sse_event(f"data: {text}\n\n")
 
 
 def _websocket_precreated_retry_error_code(
@@ -10828,6 +10879,8 @@ def _http_bridge_session_reusable_for_request(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
 ) -> bool:
+    if previous_response_id is not None and previous_response_id.strip() in session.unsafe_previous_response_ids:
+        return False
     if key.affinity_kind != "prompt_cache":
         return True
     if incoming_turn_state is not None:

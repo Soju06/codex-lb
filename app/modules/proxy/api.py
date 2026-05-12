@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import time
@@ -160,6 +161,10 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "additional_quota_data_unavailable",
     "no_additional_quota_eligible_accounts",
 }
+_STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
+# Keep bridge startup probing above tiny event-loop scheduling jitter:
+# PostgreSQL-backed failures may need a DB round trip before the first item.
+_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -1490,6 +1495,25 @@ async def v1_chat_completions(
         api_key_reservation=reservation,
         suppress_text_done_events=True,
     )
+    stream, startup_error = await _probe_stream_startup_error(stream)
+    if startup_error is not None:
+        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
+    if payload.stream:
+        stream_options = payload.stream_options
+        include_usage = bool(stream_options and stream_options.include_usage)
+        return StreamingResponse(
+            inject_sse_keepalives(
+                stream_chat_chunks(
+                    _stream_proxy_errors_as_response_failed(stream),
+                    model=responses_payload.model,
+                    include_usage=include_usage,
+                ),
+                get_settings().sse_keepalive_interval_seconds,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
     try:
         first = await stream.__anext__()
     except StopAsyncIteration:
@@ -1498,18 +1522,6 @@ async def v1_chat_completions(
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
     stream_with_first = _prepend_first(first, stream)
-    if payload.stream:
-        stream_options = payload.stream_options
-        include_usage = bool(stream_options and stream_options.include_usage)
-        return StreamingResponse(
-            inject_sse_keepalives(
-                stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
-                get_settings().sse_keepalive_interval_seconds,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **rate_limit_headers},
-        )
-
     result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
     if isinstance(result, OpenAIErrorEnvelopeModel):
         error = result.error
@@ -1602,30 +1614,21 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
-    stream = _normalize_public_responses_stream(stream)
-    try:
-        first = await stream.__anext__()
-    except StopAsyncIteration:
-        return StreamingResponse(
-            inject_sse_keepalives(
-                _prepend_first(None, stream),
-                get_settings().sse_keepalive_interval_seconds,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **rate_limit_headers},
-        )
-    except ProxyResponseError as exc:
-        if owns_reservation:
+    stream, startup_error = await _probe_stream_startup_error(
+        stream,
+        convert_event_errors=bridge_active,
+        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
+        if prefer_http_bridge
+        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+    )
+    if startup_error is not None:
+        if reservation is not None and owns_reservation:
             await _release_reservation(reservation)
-        return _logged_error_json_response(
-            request,
-            exc.status_code,
-            exc.payload,
-            headers=rate_limit_headers,
-        )
+        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
+    stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream))
     return StreamingResponse(
         inject_sse_keepalives(
-            _prepend_first(first, stream),
+            stream,
             get_settings().sse_keepalive_interval_seconds,
         ),
         media_type="text/event-stream",
@@ -1874,6 +1877,109 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield first
     async for line in stream:
         yield line
+
+
+async def _probe_stream_startup_error(
+    stream: AsyncIterator[str],
+    *,
+    convert_event_errors: bool = False,
+    timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
+    first_task = asyncio.create_task(anext(stream))
+    try:
+        first = await asyncio.wait_for(
+            asyncio.shield(first_task),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        return _prepend_first_task(first_task, stream), None
+    except StopAsyncIteration:
+        return _prepend_first(None, stream), None
+    except ProxyResponseError as exc:
+        return _prepend_first(None, stream), exc
+    if convert_event_errors:
+        first_error = _stream_event_error_envelope(first)
+        if first_error is not None:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            return _prepend_first(None, stream), first_error
+    return _prepend_first(first, stream), None
+
+
+async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    try:
+        yield await first_task
+    except StopAsyncIteration:
+        return
+    async for line in stream:
+        yield line
+
+
+async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    try:
+        async for line in stream:
+            yield line
+    except ProxyResponseError as exc:
+        envelope = _parse_error_envelope(exc.payload)
+        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
+        error = envelope.error
+        yield format_sse_event(
+            response_failed_event(
+                error.code if error and error.code else "upstream_error",
+                error.message if error and error.message else "Upstream error",
+                error.type if error and error.type else "server_error",
+                error_param=error.param if error else None,
+            )
+        )
+
+
+def _stream_startup_error_response(
+    request: Request,
+    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
+    *,
+    headers: Mapping[str, str],
+) -> JSONResponse:
+    if isinstance(error, ProxyResponseError):
+        envelope = _parse_error_envelope(error.payload)
+        status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        return _logged_error_json_response(
+            request,
+            status_code,
+            envelope.model_dump(mode="json", exclude_none=True),
+            headers=headers,
+        )
+    status_code, envelope = _mask_previous_response_not_found_error(error)
+    return _logged_error_json_response(
+        request,
+        status_code,
+        envelope.model_dump(mode="json", exclude_none=True),
+        headers=headers,
+    )
+
+
+def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel | None:
+    payload = _parse_sse_payload(event_block)
+    if payload is None:
+        return None
+    event_type = payload.get("type")
+    if event_type == "error":
+        return _parse_event_error_envelope(payload)
+    if event_type != "response.failed":
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return _default_error_envelope()
+    error_value = response.get("error")
+    if isinstance(error_value, dict):
+        try:
+            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
+        except ValidationError:
+            return _default_error_envelope()
+    parsed = parse_response_payload(response)
+    if parsed is not None and parsed.error is not None:
+        return _error_envelope_from_response(parsed.error)
+    return _default_error_envelope()
 
 
 def _parse_sse_payload(line: str) -> dict[str, JsonValue] | None:
@@ -2217,6 +2323,20 @@ def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    if event_type == "error":
+        parsed_error = _parse_event_error_envelope(payload)
+        if _is_previous_response_not_found_public_error(parsed_error.error):
+            return (
+                cast(
+                    dict[str, JsonValue],
+                    response_failed_event(
+                        "stream_incomplete",
+                        "Upstream websocket closed before response.completed",
+                    ),
+                ),
+                None,
+            )
+        return payload, None
     if event_type in ("response.completed", "response.incomplete"):
         response = payload.get("response")
         if not is_json_mapping(response):
@@ -2494,6 +2614,8 @@ def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
 def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErrorEnvelopeModel:
     if not isinstance(payload, dict):
         return _default_error_envelope()
+    if payload.get("type") == "error":
+        return _parse_event_error_envelope(cast(dict[str, JsonValue], payload))
     try:
         return OpenAIErrorEnvelopeModel.model_validate(payload)
     except ValidationError:
@@ -2516,11 +2638,56 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
     return OpenAIErrorEnvelopeModel(error=error_value)
 
 
+def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
+    if error_value is None:
+        return False
+    if error_value.code == "previous_response_not_found":
+        return True
+    message = error_value.message or ""
+    return (
+        error_value.code == "invalid_request_error"
+        and error_value.param == "previous_response_id"
+        and "previous response" in message.lower()
+        and "not found" in message.lower()
+    )
+
+
+def _mask_previous_response_not_found_error(
+    envelope: OpenAIErrorEnvelopeModel,
+    *,
+    default_status: int | None = None,
+) -> tuple[int, OpenAIErrorEnvelopeModel]:
+    if not _is_previous_response_not_found_public_error(envelope.error):
+        return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+    return (
+        502,
+        OpenAIErrorEnvelopeModel(
+            error=OpenAIError(
+                message="Upstream websocket closed before response.completed",
+                type="server_error",
+                code="stream_incomplete",
+            )
+        ),
+    )
+
+
 def _status_for_error(error_value: OpenAIError | None) -> int:
     if error_value and error_value.code == "previous_response_not_found":
-        return 400
+        return 502
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
+    if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
+        return 429
+    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication"}:
+        return 401
+    if error_value and error_value.code == "invalid_request_error":
+        return 400
+    if error_value and error_value.type == "authentication_error":
+        return 401
+    if error_value and error_value.type == "invalid_request_error":
+        return 400
+    if error_value and error_value.type in {"rate_limit_error", "usage_limit_reached", "insufficient_quota"}:
+        return 429
     return 502
 
 

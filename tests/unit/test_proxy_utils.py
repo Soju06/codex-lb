@@ -5559,6 +5559,70 @@ async def test_prepare_websocket_response_create_request_allows_client_full_repl
     assert fresh_payload["input"] == full_replay_input
 
 
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_rejects_tool_only_fresh_retry(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_client_prev_tool_only",
+        name="ws-client-prev-tool-only",
+        key_prefix="sk-ws-client-tool",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    tool_only_input: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_prev",
+            "name": "exec_command",
+            "arguments": '{"cmd":"date"}',
+        },
+        {"type": "function_call_output", "call_id": "call_prev", "output": "ok"},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_tool_delta",
+                "input": tool_only_input,
+            },
+        ),
+        headers={},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_tool_delta"
+    assert upstream_payload["input"] == tool_only_input
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
+
+
 def test_websocket_continuity_state_reuses_codex_session_scope():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
 
@@ -6013,6 +6077,7 @@ def test_websocket_continuity_completion_ignores_older_shorter_turn():
         second_input
     )
     assert continuity_state.completion_generation == 2
+
 
 @pytest.mark.asyncio
 async def test_pop_replayable_precreated_websocket_request_replays_injected_anchor_as_fresh_payload():

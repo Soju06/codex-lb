@@ -727,6 +727,23 @@ class ProxyService:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
+        elif _websocket_client_previous_response_payload_has_safe_fresh_replay(
+            effective_payload,
+            continuity_state=None,
+        ):
+            unanchored_payload = effective_payload.model_copy(update={"previous_response_id": None})
+            _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
+                unanchored_payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
+            del _fresh_request_state
+            request_state.fresh_upstream_request_text = fresh_upstream_request_text
+            request_state.fresh_upstream_request_is_retry_safe = (
+                len(fresh_upstream_request_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
+            )
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -5941,6 +5958,59 @@ class ProxyService:
             status_request_state is not None
             and status_request_state.previous_response_id is not None
             and is_previous_response_not_found_event
+            and response_id is None
+            and not has_other_pending_requests
+            and _request_state_has_safe_fresh_replay(status_request_state)
+            and status_request_state.replay_count < 1
+        ):
+            original_request_text = status_request_state.request_text
+            original_previous_response_id = status_request_state.previous_response_id
+            original_proxy_injected = status_request_state.proxy_injected_previous_response_id
+            original_retry_safe = status_request_state.fresh_upstream_request_is_retry_safe
+            try:
+                _switch_request_state_to_fresh_replay(status_request_state)
+                status_request_state.replay_count += 1
+                status_request_state.awaiting_response_created = True
+                status_request_state.response_id = None
+                await self._reconnect_http_bridge_session(session, request_state=status_request_state)
+                async with session.pending_lock:
+                    session.pending_requests.append(status_request_state)
+                    session.queued_request_count += 1
+                assert status_request_state.request_text is not None
+                await session.upstream.send_text(status_request_state.request_text)
+                session.last_used_at = time.monotonic()
+                _log_http_bridge_event(
+                    "retry_fresh_upstream_previous_response_not_found",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=1,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                return
+            except Exception:
+                logger.warning("HTTP bridge previous-response fresh replay retry failed", exc_info=True)
+                async with session.pending_lock:
+                    if status_request_state in session.pending_requests:
+                        session.pending_requests.remove(status_request_state)
+                        session.queued_request_count = max(0, session.queued_request_count - 1)
+                status_request_state.request_text = original_request_text
+                status_request_state.previous_response_id = original_previous_response_id
+                status_request_state.proxy_injected_previous_response_id = original_proxy_injected
+                status_request_state.fresh_upstream_request_is_retry_safe = original_retry_safe
+                status_request_state.replay_count = max(0, status_request_state.replay_count - 1)
+
+        if (
+            status_request_state is not None
+            and status_request_state.previous_response_id is not None
+            and is_previous_response_not_found_event
+            and (
+                response_id is not None
+                or has_other_pending_requests
+                or not _request_state_has_safe_fresh_replay(status_request_state)
+                or status_request_state.replay_count >= 1
+            )
         ):
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
@@ -10586,11 +10656,15 @@ def _websocket_input_items_have_replayable_previous_output(input_value: Sequence
     seen_function_calls: set[str] = set()
     seen_tool_calls: set[str] = set()
     has_previous_output = False
+    has_context_message = False
     for item in input_value:
         if not isinstance(item, Mapping):
             continue
         item_mapping = cast(Mapping[str, JsonValue], item)
         item_type = item_mapping.get("type")
+        role = item_mapping.get("role")
+        if role in {"system", "developer", "user", "assistant"}:
+            has_context_message = True
         if item_type == "function_call":
             has_previous_output = True
             call_id = item_mapping.get("call_id")
@@ -10603,7 +10677,7 @@ def _websocket_input_items_have_replayable_previous_output(input_value: Sequence
             if not isinstance(call_id, str) or call_id not in seen_function_calls:
                 return False
             has_previous_output = True
-        elif item_mapping.get("role") == "assistant":
+        elif role == "assistant":
             has_previous_output = True
             tool_calls = item_mapping.get("tool_calls")
             if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes, bytearray)):
@@ -10618,12 +10692,12 @@ def _websocket_input_items_have_replayable_previous_output(input_value: Sequence
                     )
                     if isinstance(call_id, str) and call_id:
                         seen_tool_calls.add(call_id)
-        elif item_mapping.get("role") == "tool":
+        elif role == "tool":
             call_id = item_mapping.get("tool_call_id") or item_mapping.get("toolCallId") or item_mapping.get("call_id")
             if not isinstance(call_id, str) or call_id not in seen_tool_calls:
                 return False
             has_previous_output = True
-    return has_previous_output
+    return has_previous_output and has_context_message
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

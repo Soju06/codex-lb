@@ -20,7 +20,7 @@ from app.modules.accounts.schemas import (
     UsageTrendPoint,
 )
 
-_ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+_ACCOUNT_ROUTING_POLICIES = frozenset({"normal", "burn_first", "preserve"})
 
 
 def build_account_summaries(
@@ -200,6 +200,12 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _normalize_account_routing_policy(value: str | None) -> str:
+    if value in _ACCOUNT_ROUTING_POLICIES:
+        return value
+    return "normal"
 
 
 def build_account_usage_trends(

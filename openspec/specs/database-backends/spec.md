@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define supported database backend wiring so local, Helm, SQLite, and external PostgreSQL deployments behave consistently.
 
 ## Requirements
 

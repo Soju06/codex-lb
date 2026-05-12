@@ -78,17 +78,19 @@ def test_chat_max_tokens_are_stripped():
     assert "max_completion_tokens" not in dumped
 
 
-def test_chat_temperature_is_stripped_for_upstream_compat():
+def test_temperature_and_top_p_are_stripped_for_upstream_compat():
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
         "temperature": 0.2,
+        "top_p": 0.9,
         "safety_identifier": "safe_123",
     }
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "temperature" not in dumped
+    assert "top_p" not in dumped
     assert "safety_identifier" not in dumped
 
 
@@ -121,6 +123,38 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     assert isinstance(reasoning, Mapping)
     reasoning_map = cast(Mapping[str, JsonValue], reasoning)
     assert reasoning_map.get("effort") == "high"
+
+
+def test_chat_enable_thinking_maps_to_default_reasoning_effort():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "enable_thinking": True,
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    assert "enable_thinking" not in dumped
+    reasoning = dumped.get("reasoning")
+    assert isinstance(reasoning, Mapping)
+    reasoning_map = cast(Mapping[str, JsonValue], reasoning)
+    assert reasoning_map.get("effort") == "medium"
+
+
+def test_chat_anthropic_thinking_alias_maps_to_default_reasoning_effort():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+    assert "thinking" not in dumped
+    reasoning = dumped.get("reasoning")
+    assert isinstance(reasoning, Mapping)
+    reasoning_map = cast(Mapping[str, JsonValue], reasoning)
+    assert reasoning_map.get("effort") == "medium"
 
 
 def test_chat_service_tier_is_preserved_in_responses_payload():

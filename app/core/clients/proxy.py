@@ -20,6 +20,7 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Final,
     Mapping,
     Protocol,
     TypeAlias,
@@ -90,9 +91,10 @@ _SSE_READ_CHUNK_SIZE = 1 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
+_WEBSOCKET_TRANSPORT_HEADROOM_BYTES: Final[int] = 2 * 1024 * 1024
 _BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
-_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = 12 * 1024 * 1024
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = 15 * 1024 * 1024
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
 )
@@ -1078,18 +1080,32 @@ def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> boo
     return False
 
 
+def _ws_transport_payload_budget_bytes(settings: Settings | object) -> int:
+    # Subtract 2 MiB headroom for control frames + envelope. ``getattr`` fallback
+    # keeps unit tests that pass narrowed ``SimpleNamespace`` settings working
+    # without forcing every fake to redeclare ``max_sse_event_bytes``.
+    max_sse_event_bytes = getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024)
+    return max(1 * 1024 * 1024, max_sse_event_bytes - _WEBSOCKET_TRANSPORT_HEADROOM_BYTES)
+
+
 def _resolve_stream_transport(
     *,
+    settings: Settings | object,
     transport: str,
     transport_override: str | None,
     model: str | None,
     headers: Mapping[str, str],
     has_image_generation_tool: bool = False,
+    payload_size_estimate_bytes: int | None = None,
 ) -> str:
     configured = _configured_stream_transport(transport=transport, transport_override=transport_override)
     if configured == "websocket":
         return "websocket"
     if configured == "http":
+        return "http"
+    if payload_size_estimate_bytes is not None and payload_size_estimate_bytes > _ws_transport_payload_budget_bytes(
+        settings
+    ):
         return "http"
     if has_image_generation_tool:
         return "http"
@@ -1435,7 +1451,7 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
             max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
         )
         if slim_summary is not None:
-            request_payload = cast(JsonObject, slimmed_payload)
+            request_payload = slimmed_payload
             slimmed_text = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
             logger.warning(
                 (
@@ -2092,16 +2108,20 @@ async def stream_responses(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
+    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+    payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(
         transport=settings.upstream_stream_transport,
         transport_override=upstream_stream_transport_override,
     )
     transport = _resolve_stream_transport(
+        settings=settings,
         transport=settings.upstream_stream_transport,
         transport_override=upstream_stream_transport_override,
         model=payload.model,
         headers=headers,
         has_image_generation_tool=_payload_uses_image_generation_tool(payload_dict),
+        payload_size_estimate_bytes=payload_size_estimate_bytes,
     )
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
@@ -2169,9 +2189,7 @@ async def stream_responses(
         headers=upstream_headers,
         method=method,
         payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
-        else None,
+        payload_json=payload_json if settings.log_upstream_request_payload else None,
     )
     try:
         if transport == "websocket":
@@ -2251,9 +2269,7 @@ async def stream_responses(
                     headers=upstream_headers,
                     method=method,
                     payload_summary=_summarize_json_payload(payload_dict),
-                    payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-                    if settings.log_upstream_request_payload
-                    else None,
+                    payload_json=payload_json if settings.log_upstream_request_payload else None,
                 )
                 async for event_block in _stream_via_http(upstream_headers, timeout):
                     yield event_block

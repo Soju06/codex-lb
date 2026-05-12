@@ -124,3 +124,110 @@ async def test_remove_password_clears_password_and_totp() -> None:
 
     with pytest.raises(PasswordNotConfiguredError):
         await service.verify_password("password123")
+
+
+@pytest.mark.asyncio
+async def test_verify_totp_inherits_existing_password_session_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.core.crypto import TokenEncryptor
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = DashboardAuthService(repository, store)
+    await service.setup_password("password123")
+
+    secret = pyotp.random_base32()
+    encryptor = TokenEncryptor()
+    repository.settings.totp_secret_encrypted = encryptor.encrypt(secret)
+
+    # Issue an existing password session with the previous TTL setting
+    # (12 hours), then change the TTL setting on the operator side and submit
+    # TOTP. The new session must inherit the original session's remaining
+    # lifetime, not adopt the new TTL.
+    original_ttl = 12 * 60 * 60
+    new_ttl_after_change = 24 * 60 * 60
+    password_session_id = store.create(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=original_ttl,
+    )
+    expected_remaining = original_ttl  # nothing has elapsed yet
+
+    code = pyotp.TOTP(secret).at(current["value"])
+    new_session_id, applied_ttl = await service.verify_totp(
+        session_id=password_session_id,
+        code=code,
+        ttl_seconds=new_ttl_after_change,
+    )
+
+    assert applied_ttl == expected_remaining
+    state = store.get(new_session_id)
+    assert state is not None
+    assert state.password_verified is True
+    assert state.totp_verified is True
+    assert state.expires_at == current["value"] + expected_remaining
+
+
+@pytest.mark.asyncio
+async def test_verify_totp_does_not_call_session_store_get_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.core.crypto import TokenEncryptor
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = DashboardAuthService(repository, store)
+    await service.setup_password("password123")
+
+    secret = pyotp.random_base32()
+    encryptor = TokenEncryptor()
+    repository.settings.totp_secret_encrypted = encryptor.encrypt(secret)
+
+    # Regression for the race between two store.get(session_id) calls in
+    # verify_totp: the inherited-TTL path must reuse the live state captured
+    # during the active-session check rather than re-querying the store.
+    # Asserting that store.get is called exactly once during verify_totp
+    # locks in that single-lookup contract; previously the inherited-TTL
+    # branch could mint a fresh full-length session if the second lookup
+    # raced the clock past the original session's expiry.
+    original_ttl = 12 * 60 * 60
+    new_ttl_after_change = 24 * 60 * 60
+    password_session_id = store.create(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=original_ttl,
+    )
+
+    real_get = store.get
+    get_calls: list[str | None] = []
+
+    def counted_get(session_id):
+        get_calls.append(session_id)
+        return real_get(session_id)
+
+    monkeypatch.setattr(store, "get", counted_get)
+
+    code = pyotp.TOTP(secret).at(current["value"])
+    _, applied_ttl = await service.verify_totp(
+        session_id=password_session_id,
+        code=code,
+        ttl_seconds=new_ttl_after_change,
+    )
+
+    assert applied_ttl == original_ttl
+    assert get_calls == [password_session_id]

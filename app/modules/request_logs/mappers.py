@@ -32,6 +32,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         provider_kind=log.provider_kind,
         routing_subject_id=log.routing_subject_id,
         plan_type=log.plan_type,
+        api_key_id=log.api_key_id,
         api_key_name=api_key_name,
         request_id=log.request_id,
         model=log.model,

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define proxy observability contracts so runtime failures, routing decisions, and admission rejections remain diagnosable.
 
 ## Requirements
 ### Requirement: Console runtime logs include explicit timestamps

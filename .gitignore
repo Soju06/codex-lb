@@ -13,6 +13,7 @@ __pycache__/
 # Env/config
 .env
 .env.*
+.envrc
 !.env.example
 .python-version
 
@@ -53,3 +54,5 @@ certs/
 .venv
 
 .omx/
+PROMPT.md
+SUMMARY.md

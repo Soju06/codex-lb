@@ -27,6 +27,115 @@ helm template codex-lb deploy/helm/codex-lb \
 
 ClusterSecretStore를 쓸 때는 kind도 같이 넘겨야 합니다.
 
+### Graceful Shutdown Tuning
+
+Graceful shutdown coordinates three timeout parameters to drain in-flight requests and session bridge connections:
+
+```
+preStopSleepSeconds (15s minimum) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
+```
+
+**Timeline:**
+
+1. **preStopSleepSeconds (15s minimum)**: Pod enters preStop
+   - Calls `/internal/drain/start` so readiness fails and new app requests are rejected
+   - Polls `/internal/drain/status` during the wait so in-flight state is visible while draining
+   - Gives Kubernetes/load balancers time to remove the pod from rotation before SIGTERM
+
+2. **shutdownDrainTimeoutSeconds (30s)**: Drain in-flight requests
+   - HTTP server stops accepting new connections
+   - Any remaining requests are allowed to complete (up to 30 seconds)
+   - Session bridge connections are gracefully closed
+
+3. **terminationGracePeriodSeconds (60s)**: Hard deadline
+   - Total time from SIGTERM to SIGKILL
+   - Must be ≥ `preStopSleepSeconds + shutdownDrainTimeoutSeconds`
+   - Default 60s allows 15s + 30s + 15s buffer
+
+**Tuning:**
+
+- Increase `preStopSleepSeconds` if your load balancer takes longer to deregister or short requests need a larger pre-SIGTERM drain window
+- Increase `shutdownDrainTimeoutSeconds` if requests typically take >30s to complete
+- Increase `terminationGracePeriodSeconds` proportionally (must be larger than the sum)
+- Keep the buffer small; long shutdown times delay pod replacement
+
+Example for long-running requests:
+
+```yaml
+preStopSleepSeconds: 20
+shutdownDrainTimeoutSeconds: 60
+terminationGracePeriodSeconds: 90
+```
+
+### Scale-Down Caution
+
+The `stabilizationWindowSeconds: 600` (10 minutes) in `values-prod.yaml` is intentionally high.
+
+**Why?**
+
+- Session bridge connections have idle TTLs (`sessionBridgeIdleTtlSeconds=120` for API, `sessionBridgeCodexIdleTtlSeconds=900` for Codex)
+- When a pod scales down, its in-memory sessions are lost
+- Clients reconnecting to a different pod must re-establish upstream connections
+- A 10-minute cooldown prevents rapid scale-down/up cycles that would thrash session state
+
+**Behavior:**
+
+- HPA will scale down at most 1 pod every 2 minutes (when cooldown is active)
+- If load drops suddenly, scale-down is delayed by up to 10 minutes
+- This trades off faster scale-down for session stability
+
+**Tuning:**
+
+- Reduce `stabilizationWindowSeconds` if you prioritize cost over session stability
+- Increase it if you see frequent session reconnections during scale events
+- Monitor `sessionBridgeInstanceRing` size changes in logs to detect scale-down impact
+
+## Security
+
+The chart targets the Kubernetes Restricted Pod Security Standard.
+
+- `runAsNonRoot: true`
+- `readOnlyRootFilesystem: true`
+- `allowPrivilegeEscalation: false`
+- all Linux capabilities dropped
+- `automountServiceAccountToken: false`
+
+Rollout controls for externally managed config:
+
+- `rollout.reloader.enabled=true` adds Stakater Reloader annotations
+- `rollout.manualToken` forces a StatefulSet rollout when external Secret contents change outside Helm
+
+## Ingress and Gateway API
+
+The chart supports either classic Ingress or Gateway API.
+
+Ingress example:
+
+```yaml
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - host: codex-lb.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+```
+
+Gateway API example:
+
+```yaml
+gatewayApi:
+  enabled: true
+  parentRefs:
+    - name: my-gateway
+      namespace: gateway-system
+  hostnames:
+    - codex-lb.example.com
+```
+
+## Upgrade Contract
+
 ```bash
 helm template codex-lb deploy/helm/codex-lb \
   -f deploy/helm/codex-lb/values-prod.yaml \

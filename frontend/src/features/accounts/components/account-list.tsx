@@ -13,6 +13,8 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
@@ -42,10 +44,11 @@ export function AccountList({
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return accounts.filter((account) => {
+    return sortAccountsForDisplay(accounts, quotaDisplay).filter((account) => {
       if (statusFilter !== "all" && account.status !== statusFilter) {
         return false;
       }
@@ -64,7 +67,7 @@ export function AccountList({
         (account.eligibleRouteFamilies ?? []).some((family) => family.toLowerCase().includes(needle))
       );
     });
-  }, [accounts, search, statusFilter]);
+  }, [accounts, quotaDisplay, search, statusFilter]);
 
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 

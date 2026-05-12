@@ -17,6 +17,7 @@ from app.core.usage.pricing import (
 )
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow
+from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -764,7 +765,7 @@ class ApiKeysService:
                 remaining_value=max(0, limit.max_value - max(0, min(limit.current_value, limit.max_value))),
                 model_filter=limit.model_filter,
                 reset_at=limit.reset_at,
-                source="api_key_override" if limit.limit_type == LimitType.CREDITS else "api_key_limit",
+                source="api_key_limit",
             )
             for limit in refreshed.limits
         ]
@@ -990,7 +991,7 @@ async def _lazy_reset_expired_limits(
     for limit in limits:
         if limit.reset_at >= now:
             continue
-        new_reset_at = _advance_reset(limit.reset_at, now, limit.limit_window)
+        new_reset_at = advance_limit_reset(limit.reset_at, now, limit.limit_window)
         await repository.reset_limit(
             limit.id,
             expected_reset_at=limit.reset_at,
@@ -1161,7 +1162,7 @@ def _limit_input_to_row(
         max_value=li.max_value,
         current_value=current_value,
         model_filter=li.model_filter,
-        reset_at=reset_at if reset_at is not None else _next_reset(now, window),
+        reset_at=reset_at if reset_at is not None else next_limit_reset(now, window),
     )
 
 
@@ -1213,7 +1214,7 @@ def _build_reset_limit_rows(
                 max_value=existing.max_value,
                 current_value=0,
                 model_filter=existing.model_filter,
-                reset_at=_next_reset(now, existing.limit_window),
+                reset_at=next_limit_reset(now, existing.limit_window),
             )
         )
     return rows
@@ -1225,42 +1226,6 @@ def _limit_identity_from_input(limit: LimitRuleInput) -> tuple[str, str, str | N
 
 def _limit_identity_from_row(limit: ApiKeyLimit) -> tuple[str, str, str | None]:
     return (limit.limit_type.value, limit.limit_window.value, limit.model_filter)
-
-
-def _next_reset(now: datetime, window: LimitWindow) -> datetime:
-    if window == LimitWindow.FIVE_HOURS:
-        return now + timedelta(hours=5)
-    if window == LimitWindow.SEVEN_DAYS:
-        return now + timedelta(days=7)
-    if window == LimitWindow.DAILY:
-        return now + timedelta(days=1)
-    if window == LimitWindow.WEEKLY:
-        return now + timedelta(days=7)
-    if window == LimitWindow.MONTHLY:
-        return now + timedelta(days=30)
-    return now + timedelta(days=7)
-
-
-def _advance_reset(reset_at: datetime, now: datetime, window: LimitWindow) -> datetime:
-    delta = _window_delta(window)
-    next_reset = reset_at
-    while next_reset <= now:
-        next_reset += delta
-    return next_reset
-
-
-def _window_delta(window: LimitWindow) -> timedelta:
-    if window == LimitWindow.FIVE_HOURS:
-        return timedelta(hours=5)
-    if window == LimitWindow.SEVEN_DAYS:
-        return timedelta(days=7)
-    if window == LimitWindow.DAILY:
-        return timedelta(days=1)
-    if window == LimitWindow.WEEKLY:
-        return timedelta(days=7)
-    if window == LimitWindow.MONTHLY:
-        return timedelta(days=30)
-    return timedelta(days=7)
 
 
 def _calculate_cost_microdollars(

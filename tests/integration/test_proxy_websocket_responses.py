@@ -262,6 +262,159 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["output_tokens"] == 5
 
 
+def test_backend_responses_websocket_fails_completion_after_suppressed_duplicate_tool_call(
+    app_instance,
+    monkeypatch,
+):
+    duplicate_arguments = json.dumps(
+        {"session_id": 41288, "chars": "", "yield_time_ms": 30000, "max_output_tokens": 6000},
+        separators=(",", ":"),
+    )
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_ws_duplicate_tool", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": "fc_first",
+                        "type": "function_call",
+                        "status": "completed",
+                        "arguments": duplicate_arguments,
+                        "call_id": "call_first",
+                        "name": "write_stdin",
+                    },
+                    "output_index": 0,
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": "fc_replay",
+                        "type": "function_call",
+                        "status": "completed",
+                        "arguments": duplicate_arguments,
+                        "call_id": "call_replay",
+                        "name": "write_stdin",
+                    },
+                    "output_index": 0,
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_duplicate_tool",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_duplicate_tool"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created_event = json.loads(websocket.receive_text())
+            tool_event = json.loads(websocket.receive_text())
+            terminal_event = json.loads(websocket.receive_text())
+
+    assert created_event["type"] == "response.created"
+    assert tool_event["type"] == "response.output_item.done"
+    assert tool_event["item"]["call_id"] == "call_first"
+    assert terminal_event["type"] == "response.failed"
+    assert terminal_event["response"]["id"] == "resp_ws_duplicate_tool"
+    assert terminal_event["response"]["error"]["code"] == "stream_incomplete"
+    assert "call_replay" not in json.dumps([created_event, tool_event, terminal_event])
+    assert len(log_calls) == 1
+    assert log_calls[0]["status"] == "error"
+    assert log_calls[0]["error_code"] == "stream_incomplete"
+
+
 def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

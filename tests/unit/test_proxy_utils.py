@@ -4357,6 +4357,116 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_keeps_distinct_http_tool_calls_across_response_ids(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_tool_dupe")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_tool_first",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "response_id": "resp_tool_replayed",
+        "item": {
+            **tool_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_tool_dupe"}}\n\n'
+        yield f"data: {json.dumps(tool_payload)}\n\n"
+        yield f"data: {json.dumps(replayed_tool_payload)}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_tool_dupe"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[JsonValue] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert tool_chunks == [tool_payload, replayed_tool_payload]
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_suppresses_same_response_http_tool_call_replay(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_tool_dupe")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_http_tool_dupe",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"date","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "item": {
+            **tool_payload["item"],
+            "id": "fc_replayed",
+            "call_id": "call_replayed",
+        },
+    }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_tool_dupe"}}\n\n'
+        yield f"data: {json.dumps(tool_payload)}\n\n"
+        yield f"data: {json.dumps(replayed_tool_payload)}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_tool_dupe"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[JsonValue] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert tool_chunks == [tool_payload]
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

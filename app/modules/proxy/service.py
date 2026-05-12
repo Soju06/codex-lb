@@ -159,6 +159,11 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
 )
+from app.modules.proxy.tool_call_dedupe import (
+    mark_duplicate_tool_call_downstream_event,
+    rewrite_parallel_tool_call_sse_line,
+    rewrite_parallel_tool_call_text,
+)
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     RateLimitStatusDetailsData,
@@ -5609,6 +5614,11 @@ class ProxyService:
             message=error_message,
         )
         previous_response_id_hint = _previous_response_id_from_not_found_message(error_message)
+        text, payload, event, event_type, event_block = rewrite_parallel_tool_call_text(
+            text,
+            payload,
+            event_block=event_block,
+        )
 
         async with session.pending_lock:
             matched_request_state = None
@@ -5641,6 +5651,13 @@ class ProxyService:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
+                if mark_duplicate_tool_call_downstream_event(
+                    payload,
+                    seen_tool_call_keys=session.upstream_control.seen_tool_call_keys,
+                    response_id=response_id or matched_request_state.response_id or matched_request_state.request_id,
+                ):
+                    matched_request_state.suppressed_duplicate_tool_call = True
+                    return
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -5741,6 +5758,23 @@ class ProxyService:
                 event_type=event_type,
                 upstream_control=session.upstream_control,
                 original_text=text,
+            )
+            event_block = f"data: {rewritten_text}\n\n"
+
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.suppressed_duplicate_tool_call
+        ):
+            session.upstream_control.reconnect_requested = True
+            terminal_request_state.error_http_status_override = 502
+            (
+                event,
+                payload,
+                event_type,
+                rewritten_text,
+            ) = _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
+                request_state=terminal_request_state,
             )
             event_block = f"data: {rewritten_text}\n\n"
 
@@ -6309,6 +6343,11 @@ class ProxyService:
             message=error_message,
         )
         previous_response_id_hint = _previous_response_id_from_not_found_message(error_message)
+        text, payload, event, event_type, _event_block = rewrite_parallel_tool_call_text(
+            text,
+            payload,
+            event_block=format_sse_event(payload) if payload is not None else f"data: {text}\n\n",
+        )
 
         async with pending_lock:
             request_state = None
@@ -6337,6 +6376,14 @@ class ProxyService:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+                if mark_duplicate_tool_call_downstream_event(
+                    payload,
+                    seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+                    response_id=response_id or request_state.response_id or request_state.request_id,
+                ):
+                    request_state.suppressed_duplicate_tool_call = True
+                    upstream_control.suppress_downstream_event = True
+                    return text
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -6367,6 +6414,19 @@ class ProxyService:
                 elif request_state is None and event_type == "error":
                     grouped_previous_response_request_states = list(pending_requests)
                     pending_requests.clear()
+                if (
+                    event_type == "response.completed"
+                    and request_state is not None
+                    and request_state.suppressed_duplicate_tool_call
+                ):
+                    upstream_control.reconnect_requested = True
+                    request_state.error_http_status_override = 502
+                    event, payload, event_type, rewritten_text = (
+                        _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
+                            request_state=request_state,
+                        )
+                    )
+                    text = rewritten_text
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
@@ -7909,6 +7969,7 @@ class ProxyService:
         saw_text_delta = False
         latency_first_token_ms: int | None = None
         response_create_lease = AdmissionLease(None)
+        tool_call_dedupe = _WebSocketUpstreamControl()
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
@@ -8021,6 +8082,13 @@ class ProxyService:
                 suppress_text_done_events=suppress_text_done_events,
                 saw_text_delta=saw_text_delta,
             ):
+                first, first_payload, event, event_type = rewrite_parallel_tool_call_sse_line(first, first_payload)
+                if mark_duplicate_tool_call_downstream_event(
+                    first_payload,
+                    seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
+                    response_id=_websocket_response_id(event, first_payload) or response_id,
+                ):
+                    return
                 if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 yield first
@@ -8029,8 +8097,7 @@ class ProxyService:
 
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event(line)
-                event_type = _event_type_from_payload(event, event_payload)
+                line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
                 event_service_tier = _service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
@@ -8106,6 +8173,12 @@ class ProxyService:
                             status = "error"
                 if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
+                if mark_duplicate_tool_call_downstream_event(
+                    event_payload,
+                    seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
+                    response_id=_websocket_response_id(event, event_payload) or response_id,
+                ):
+                    continue
                 yield line
         except ProxyResponseError as exc:
             response_create_lease.release()
@@ -8733,6 +8806,8 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    suppressed_downstream_tool_call: bool = False
+    suppressed_duplicate_tool_call: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -8798,6 +8873,7 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
+    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -9225,6 +9301,24 @@ def _rewrite_websocket_previous_response_owner_unavailable_event(
     rewritten_event_payload = response_failed_event(
         "upstream_unavailable",
         "Previous response owner account is unavailable; retry later.",
+        error_type="server_error",
+        response_id=request_state.response_id or request_state.request_id,
+    )
+    rewritten_text = json.dumps(rewritten_event_payload, ensure_ascii=True, separators=(",", ":"))
+    rewritten_event_block = format_sse_event(rewritten_event_payload)
+    rewritten_payload = parse_sse_data_json(rewritten_event_block)
+    rewritten_event = parse_sse_event(rewritten_event_block)
+    rewritten_event_type = _event_type_from_payload(rewritten_event, rewritten_payload)
+    return rewritten_event, rewritten_payload, rewritten_event_type, rewritten_text
+
+
+def _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
+    *,
+    request_state: _WebSocketRequestState,
+) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
+    rewritten_event_payload = response_failed_event(
+        "stream_incomplete",
+        "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely.",
         error_type="server_error",
         response_id=request_state.response_id or request_state.request_id,
     )

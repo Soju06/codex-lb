@@ -8916,6 +8916,66 @@ def test_maybe_rewrite_websocket_previous_response_invalid_request_error_rewrite
     assert "previous_response_not_found" not in rewritten_text
 
 
+def test_maybe_rewrite_websocket_missing_tool_output_rewrites_to_stream_incomplete(caplog, monkeypatch):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_output",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            "param": "input",
+        },
+    }
+    original_text = json.dumps(original_payload, separators=(",", ":"))
+    original_event = parse_sse_event(f"data: {original_text}\n\n")
+    assert original_event is not None
+    original_event_type = proxy_service._event_type_from_payload(original_event, original_payload)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    _, rewritten_payload, rewritten_event_type, rewritten_text = (
+        proxy_service._maybe_rewrite_websocket_previous_response_not_found_event(
+            request_state=request_state,
+            event=original_event,
+            payload=original_payload,
+            event_type=original_event_type,
+            upstream_control=upstream_control,
+            original_text=original_text,
+        )
+    )
+
+    assert upstream_control.reconnect_requested is True
+    assert rewritten_event_type == "response.failed"
+    assert rewritten_payload is not None
+    response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
+    error_payload = cast(dict[str, JsonValue], response_payload.get("error"))
+    assert error_payload["code"] == "stream_incomplete"
+    assert error_payload["message"] == "Upstream websocket closed before response.completed"
+    assert "No tool output found" not in rewritten_text
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in rewritten_text
+    assert "continuity_fail_closed surface=websocket_stream reason=missing_tool_output" in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_stream", "reason": "missing_tool_output"},
+            "value": 1.0,
+        }
+    ]
+
+
 def test_maybe_rewrite_websocket_previous_response_invalid_request_error_does_not_rewrite_other_message():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_invalid_other_message",
@@ -9187,6 +9247,44 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
         payload=original_payload,
         error_code="invalid_request_error",
         error_message="Previous response with id 'resp_prev_anchor' not found.",
+    )
+
+    assert rewritten_status == 502
+    assert rewritten_payload["error"]["code"] == "stream_incomplete"
+    assert rewritten_payload["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert rewritten_payload["error"]["type"] == "server_error"
+    assert rewritten_error_code == "stream_incomplete"
+    assert rewritten_error_message == "Upstream websocket closed before response.completed"
+
+
+def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_output_connect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_payload = proxy_module.openai_error(
+        "invalid_request_error",
+        "No tool output found for function call call_qFY2plVIaGr1Qv2AIxiziz3G.",
+        error_type="invalid_request_error",
+    )
+    original_payload["error"]["param"] = "input"
+
+    (
+        rewritten_status,
+        rewritten_payload,
+        rewritten_error_code,
+        rewritten_error_message,
+    ) = proxy_service._sanitize_websocket_connect_failure(
+        request_state=request_state,
+        status_code=400,
+        payload=original_payload,
+        error_code="invalid_request_error",
+        error_message="No tool output found for function call call_qFY2plVIaGr1Qv2AIxiziz3G.",
     )
 
     assert rewritten_status == 502
@@ -9765,6 +9863,76 @@ async def test_stream_previous_response_not_found_proxy_error_is_masked_to_strea
     assert counter.samples == [
         {
             "labels": {"surface": "http_stream", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+    record_error.assert_not_awaited()
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomplete(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_missing_tool_output_stream")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        error_payload = openai_error(
+            "invalid_request_error",
+            "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            error_type="invalid_request_error",
+        )
+        error_payload["error"]["param"] = "input"
+        raise proxy_module.ProxyResponseError(400, error_payload)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_prev_anchor",
+        }
+    )
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert event["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "No tool output found" not in chunks[0]
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in chunks[0]
+    assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert "continuity_fail_closed surface=http_stream reason=missing_tool_output" in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"surface": "http_stream", "reason": "missing_tool_output"},
             "value": 1.0,
         }
     ]

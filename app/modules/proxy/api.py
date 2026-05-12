@@ -2814,11 +2814,18 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     if error_value.code == "previous_response_not_found":
         return True
     message = error_value.message or ""
+    normalized_message = " ".join(message.lower().split())
+    if (
+        error_value.code == "invalid_request_error"
+        and error_value.param == "input"
+        and normalized_message.startswith("no tool output found for function call call_")
+    ):
+        return True
     return (
         error_value.code == "invalid_request_error"
         and error_value.param == "previous_response_id"
-        and "previous response" in message.lower()
-        and "not found" in message.lower()
+        and "previous response" in normalized_message
+        and "not found" in normalized_message
     )
 
 

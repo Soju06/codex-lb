@@ -5613,6 +5613,14 @@ class ProxyService:
             param=_websocket_event_error_param(event_type, payload),
             message=error_message,
         )
+        is_missing_tool_output_event = _is_missing_tool_output_error(
+            code=_normalize_error_code(
+                _websocket_event_error_code(event_type, payload),
+                _websocket_event_error_type(event_type, payload),
+            ),
+            param=_websocket_event_error_param(event_type, payload),
+            message=error_message,
+        )
         previous_response_id_hint = _previous_response_id_from_not_found_message(error_message)
         text, payload, event, event_type, event_block = rewrite_parallel_tool_call_text(
             text,
@@ -5638,7 +5646,8 @@ class ProxyService:
             elif response_id is None:
                 matched_request_state = _match_websocket_request_state_for_anonymous_event(
                     session.pending_requests,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event,
+                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                 )
@@ -5665,7 +5674,8 @@ class ProxyService:
                     session.pending_requests,
                     response_id=response_id,
                     fallback_request_state=matched_request_state,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event,
+                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_precreated_terminal_fallback=event_type
@@ -5741,6 +5751,16 @@ class ProxyService:
         if status_request_state is None and is_previous_response_not_found_event:
             session.upstream_control.reconnect_requested = True
             return
+
+        if status_request_state is not None and is_missing_tool_output_event:
+            status_request_state.error_http_status_override = 502
+            event, payload, event_type, rewritten_text = _rewrite_websocket_continuity_corruption_event(
+                request_state=status_request_state,
+                upstream_control=session.upstream_control,
+                reason="missing_tool_output",
+                original_text=text,
+            )
+            event_block = f"data: {rewritten_text}\n\n"
 
         if (
             status_request_state is not None
@@ -6342,6 +6362,14 @@ class ProxyService:
             param=_websocket_event_error_param(event_type, payload),
             message=error_message,
         )
+        is_missing_tool_output_event = _is_missing_tool_output_error(
+            code=_normalize_error_code(
+                _websocket_event_error_code(event_type, payload),
+                _websocket_event_error_type(event_type, payload),
+            ),
+            param=_websocket_event_error_param(event_type, payload),
+            message=error_message,
+        )
         previous_response_id_hint = _previous_response_id_from_not_found_message(error_message)
         text, payload, event, event_type, _event_block = rewrite_parallel_tool_call_text(
             text,
@@ -6364,7 +6392,8 @@ class ProxyService:
             elif response_id is None:
                 request_state = _match_websocket_request_state_for_anonymous_event(
                     pending_requests,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event,
+                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                 )
@@ -6392,7 +6421,8 @@ class ProxyService:
                     pending_requests,
                     response_id=response_id,
                     fallback_request_state=request_state,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event,
+                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_precreated_terminal_fallback=event_type
@@ -6427,6 +6457,14 @@ class ProxyService:
                         )
                     )
                     text = rewritten_text
+                if request_state is not None and is_missing_tool_output_event:
+                    request_state.error_http_status_override = 502
+                    event, payload, event_type, text = _rewrite_websocket_continuity_corruption_event(
+                        request_state=request_state,
+                        upstream_control=upstream_control,
+                        reason="missing_tool_output",
+                        original_text=text,
+                    )
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
@@ -9184,6 +9222,12 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
     ):
         return "stream_incomplete"
+    if _is_missing_tool_output_error(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        return "stream_incomplete"
     if error_code not in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code
@@ -9226,6 +9270,18 @@ def _is_previous_response_not_found_error(
     return _is_previous_response_not_found_message(message)
 
 
+def _is_missing_tool_output_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    if code != "invalid_request_error" or param != "input" or message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith("no tool output found for function call call_")
+
+
 def _websocket_event_error_payload(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
@@ -9262,17 +9318,43 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         param=error_param,
         message=error_message,
     )
+    reason = "previous_response_not_found"
+    if not should_rewrite:
+        should_rewrite = _is_missing_tool_output_error(
+            code=error_code,
+            param=error_param,
+            message=error_message,
+        )
+        reason = "missing_tool_output"
     if not should_rewrite:
         return event, payload, event_type, original_text
 
-    if request_state.preferred_account_id is not None:
+    reconnect_requested = reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    return _rewrite_websocket_continuity_corruption_event(
+        request_state=request_state,
+        upstream_control=upstream_control,
+        reason=reason,
+        reconnect_requested=reconnect_requested,
+        original_text=original_text,
+    )
+
+
+def _rewrite_websocket_continuity_corruption_event(
+    *,
+    request_state: _WebSocketRequestState,
+    upstream_control: _WebSocketUpstreamControl,
+    reason: str,
+    reconnect_requested: bool,
+    original_text: str,
+) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
+    del original_text
+    if reconnect_requested:
         upstream_control.reconnect_requested = True
     _record_continuity_fail_closed(
         surface="websocket_stream",
-        reason="previous_response_not_found",
+        reason=reason,
         previous_response_id=request_state.previous_response_id,
         session_id=request_state.session_id,
-        upstream_error_code=error_code,
     )
     rewritten_event_payload = response_failed_event(
         "stream_incomplete",
@@ -9347,17 +9429,26 @@ def _sanitize_websocket_connect_failure(
         parsed_error.type if parsed_error else None,
     )
     normalized_message = parsed_error.message if parsed_error and parsed_error.message else error_message
-    if not _is_previous_response_not_found_error(
+    reason = "previous_response_not_found"
+    should_rewrite = _is_previous_response_not_found_error(
         code=normalized_code,
         param=parsed_error.param if parsed_error else None,
         message=normalized_message,
-    ):
+    )
+    if not should_rewrite:
+        should_rewrite = _is_missing_tool_output_error(
+            code=normalized_code,
+            param=parsed_error.param if parsed_error else None,
+            message=normalized_message,
+        )
+        reason = "missing_tool_output"
+    if not should_rewrite:
         return status_code, payload, error_code, error_message
 
     rewritten_message = "Upstream websocket closed before response.completed"
     _record_continuity_fail_closed(
         surface="websocket_connect",
-        reason="previous_response_not_found",
+        reason=reason,
         previous_response_id=request_state.previous_response_id,
         session_id=request_state.session_id,
         upstream_error_code=normalized_code,
@@ -9393,6 +9484,22 @@ def _rewrite_previous_response_stream_error(
         _record_continuity_fail_closed(
             surface="http_stream",
             reason="previous_response_not_found",
+            previous_response_id=previous_response_id,
+            upstream_error_code=error_code,
+        )
+        return (
+            "stream_incomplete",
+            "Upstream websocket closed before response.completed",
+            None,
+        )
+    if _is_missing_tool_output_error(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        _record_continuity_fail_closed(
+            surface="http_stream",
+            reason="missing_tool_output",
             previous_response_id=previous_response_id,
             upstream_error_code=error_code,
         )

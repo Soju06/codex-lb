@@ -13,6 +13,7 @@ from starlette.requests import Request
 
 import app.core.auth.dependencies as auth_dependencies
 import app.modules.proxy.api as proxy_api_module
+from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.openai.requests import ResponsesRequest
@@ -459,6 +460,29 @@ async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
 
     assert startup_error is not None
     assert closed is True
+
+
+def test_stream_startup_error_response_masks_proxy_previous_response_error():
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    error = ProxyResponseError(
+        400,
+        {
+            "error": {
+                "message": "Previous response with id 'resp_missing' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "param": "previous_response_id",
+            }
+        },
+    )
+
+    response = proxy_api_module._stream_startup_error_response(request, error, headers={})
+
+    assert response.status_code == 502
+    response_body = bytes(response.body)
+    body = json.loads(response_body)
+    assert body["error"]["code"] == "stream_incomplete"
+    assert "resp_missing" not in response_body.decode()
 
 
 def test_public_stream_incomplete_error_event_is_not_rewritten_when_already_public():

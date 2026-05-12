@@ -1934,7 +1934,14 @@ def _stream_startup_error_response(
     headers: Mapping[str, str],
 ) -> JSONResponse:
     if isinstance(error, ProxyResponseError):
-        return _logged_error_json_response(request, error.status_code, error.payload, headers=headers)
+        envelope = _parse_error_envelope(error.payload)
+        status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        return _logged_error_json_response(
+            request,
+            status_code,
+            envelope.model_dump(mode="json", exclude_none=True),
+            headers=headers,
+        )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(
         request,

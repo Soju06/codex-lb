@@ -10584,9 +10584,9 @@ async def test_process_http_bridge_upstream_text_archives_inbound_event(monkeypa
         json.dumps(payload, separators=(",", ":")),
     )
 
-    assert await asyncio.wait_for(event_queue.get(), timeout=0.1) == (
-        'data: {"type":"response.created","response":{"id":"resp_bridge_archive"}}\n\n'
-    )
+    event_block = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+    assert event_block is not None
+    assert parse_sse_data_json(event_block) == payload
     assert archive_calls[-1]["request_id"] == "req_bridge_log"
     assert archive_calls[-1]["transport"] == "http"
     assert archive_calls[-1]["extra"] == {"frame_type": "text", "response_id": "resp_bridge_archive"}

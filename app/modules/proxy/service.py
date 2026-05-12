@@ -5354,11 +5354,7 @@ class ProxyService:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                await _send_upstream_websocket_text(
-                    session.upstream,
-                    retry_text_data,
-                    request_state.request_log_id or request_state.request_id,
-                )
+                await session.upstream.send_text(retry_text_data)
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -5963,6 +5959,7 @@ class ProxyService:
         stream_idle_timeout_seconds: float,
         downstream_activity: _DownstreamWebSocketActivity,
     ) -> None:
+        upstream_control.archive_metadata = _upstream_websocket_archive_metadata(upstream)
         try:
             while True:
                 receive_timeout = await self._next_websocket_receive_timeout(
@@ -6026,7 +6023,6 @@ class ProxyService:
                         api_key=api_key,
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
-                        upstream_archive_metadata=_upstream_websocket_archive_metadata(upstream),
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
@@ -6162,7 +6158,6 @@ class ProxyService:
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
-        upstream_archive_metadata: UpstreamWebSocketArchiveMetadata | None = None,
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -6203,12 +6198,12 @@ class ProxyService:
                 release_create_gate = False
             else:
                 release_create_gate = False
+            archive_request_state = request_state
             if request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
-            archive_request_state = request_state
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -6250,7 +6245,7 @@ class ProxyService:
                 _archive_upstream_websocket_text(
                     grouped_request_state,
                     text,
-                    archive_metadata=upstream_archive_metadata,
+                    archive_metadata=upstream_control.archive_metadata,
                     account_id=account_id_value,
                 )
                 (
@@ -6286,7 +6281,7 @@ class ProxyService:
                 _archive_upstream_websocket_text(
                     archive_request_state,
                     text,
-                    archive_metadata=upstream_archive_metadata,
+                    archive_metadata=upstream_control.archive_metadata,
                     account_id=account_id_value,
                 )
             if is_previous_response_not_found_event:
@@ -6295,7 +6290,7 @@ class ProxyService:
         _archive_upstream_websocket_text(
             request_state,
             text,
-            archive_metadata=upstream_archive_metadata,
+            archive_metadata=upstream_control.archive_metadata,
             account_id=account_id_value,
         )
 
@@ -8630,9 +8625,9 @@ class _WebSocketRequestState:
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    slim_summary: dict[str, int] | None = None
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
-    slim_summary: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -8694,6 +8689,7 @@ class _HTTPBridgeSession:
 
 @dataclass(slots=True)
 class _WebSocketUpstreamControl:
+    archive_metadata: UpstreamWebSocketArchiveMetadata | None = None
     reconnect_requested: bool = False
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None

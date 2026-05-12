@@ -1186,6 +1186,30 @@ class ProxyService:
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
                     request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
                 if (
+                    not propagate_http_errors
+                    and request_state.previous_response_id is not None
+                    and _is_previous_response_not_found_error(
+                        code=_normalize_error_code(
+                            _websocket_event_error_code(block_event_type, block_payload),
+                            _websocket_event_error_type(block_event_type, block_payload),
+                        ),
+                        param=_websocket_event_error_param(block_event_type, block_payload),
+                        message=_websocket_event_error_message(block_event_type, block_payload),
+                    )
+                ):
+                    session.upstream_control.reconnect_requested = True
+                    request_state.error_http_status_override = 502
+                    (
+                        event_block,
+                        _event,
+                        block_payload,
+                        block_event_type,
+                    ) = _build_rewritten_stream_response_failed_event(
+                        response_id=request_state.response_id or request_state.request_id,
+                        error_code="stream_incomplete",
+                        error_message="Upstream websocket closed before response.completed",
+                    )
+                if (
                     not yielded_any
                     and propagate_http_errors
                     and block_event_type == "response.failed"

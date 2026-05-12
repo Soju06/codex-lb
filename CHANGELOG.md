@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.16.0](https://github.com/CINEV/codex-lb-cinamon/compare/v1.15.2...v1.16.0) (2026-05-12)
+
+
+### Features
+
+* **accounts:** split compact quota row display ([#562](https://github.com/CINEV/codex-lb-cinamon/issues/562)) ([9581fe7](https://github.com/CINEV/codex-lb-cinamon/commit/9581fe7c65f025780943486757a0c8020d7b7917))
+* **dash:** sort the pie in decending order for better graphing. ([#580](https://github.com/CINEV/codex-lb-cinamon/issues/580)) ([3a60855](https://github.com/CINEV/codex-lb-cinamon/commit/3a60855f31d86c28e5a0ab7990cead61da4f0e52))
+* **proxy:** add /backend-api/files upload protocol ([#515](https://github.com/CINEV/codex-lb-cinamon/issues/515)) ([7ecb77a](https://github.com/CINEV/codex-lb-cinamon/commit/7ecb77ae854591e1e6c4e50e785573c74b7ca68e))
+
+
+### Bug Fixes
+
+* **accounts:** recover quota status from usage refresh ([#559](https://github.com/CINEV/codex-lb-cinamon/issues/559)) ([ee747d3](https://github.com/CINEV/codex-lb-cinamon/commit/ee747d373b50386461ed41ec6dc463cb14912a57))
+* **db:** size background pool for burst traffic ([#563](https://github.com/CINEV/codex-lb-cinamon/issues/563)) ([1e397e8](https://github.com/CINEV/codex-lb-cinamon/commit/1e397e806de92a8eb7f8fbb9326ffdebdd75e6ea))
+* **openspec:** satisfy strict purpose validation ([#552](https://github.com/CINEV/codex-lb-cinamon/issues/552)) ([1d88236](https://github.com/CINEV/codex-lb-cinamon/commit/1d882362bf9813488f1b2d9f40f32d67d491b453))
+* **proxy:** emit text deltas for final response output ([#504](https://github.com/CINEV/codex-lb-cinamon/issues/504)) ([b9c2474](https://github.com/CINEV/codex-lb-cinamon/commit/b9c24748eb983a002c007fe5fbd8dbfc48135efa))
+* **proxy:** expose drain status for graceful deploys ([#564](https://github.com/CINEV/codex-lb-cinamon/issues/564)) ([a2fca41](https://github.com/CINEV/codex-lb-cinamon/commit/a2fca41791bd62862a439b7562b7b69deefa615d))
+* **proxy:** handle model fetch timeouts ([#541](https://github.com/CINEV/codex-lb-cinamon/issues/541)) ([d4520d7](https://github.com/CINEV/codex-lb-cinamon/commit/d4520d7ad7d15d3676b1ba46a91be149f7fe2854))
+* **proxy:** inject SSE keepalive comment frames to prevent client stream hangs [Codex getting stuck issue] ([#524](https://github.com/CINEV/codex-lb-cinamon/issues/524)) ([66302c3](https://github.com/CINEV/codex-lb-cinamon/commit/66302c3efe026813fb4bd48c5754fc3b7926dfbd))
+* **proxy:** inline-rewrite input_image file references using codex-faithful image pipeline ([#571](https://github.com/CINEV/codex-lb-cinamon/issues/571)) ([2848df7](https://github.com/CINEV/codex-lb-cinamon/commit/2848df7cdbea7089746f7b929ed2a6d49acfd2bb))
+* **proxy:** narrow budget-safe gate to primary usage ([#561](https://github.com/CINEV/codex-lb-cinamon/issues/561)) ([3ed7834](https://github.com/CINEV/codex-lb-cinamon/commit/3ed78347e462c99f9b6950534b395e4850ae6e1b))
+* **proxy:** retry transient stream timeouts ([#551](https://github.com/CINEV/codex-lb-cinamon/issues/551)) ([77944c9](https://github.com/CINEV/codex-lb-cinamon/commit/77944c93b61c516f205681e1b09bbba38c46f88e))
+* **proxy:** slim oversized response.create history ([#560](https://github.com/CINEV/codex-lb-cinamon/issues/560)) ([e42af5e](https://github.com/CINEV/codex-lb-cinamon/commit/e42af5e5a0a21ce27a48af1bb4136dc015c092bf))
+* **proxy:** use DEFAULT_HOME_DIR for oversized response.create dumps ([#575](https://github.com/CINEV/codex-lb-cinamon/issues/575)) ([ad5ebf8](https://github.com/CINEV/codex-lb-cinamon/commit/ad5ebf831731ac1aa05c47cd4a5f6738b8d14dd0))
+* **release:** restore release-please baseline ([17572de](https://github.com/CINEV/codex-lb-cinamon/commit/17572ded1505562aad2259dfca307becc96d4fc4))
+* **release:** restore release-please baseline ([4764930](https://github.com/CINEV/codex-lb-cinamon/commit/4764930a4d10d3d5d48621072740ca547d9e1fa5))
+* there is no primary quota for free account, which cause the pie chart wrong on 5h ([#579](https://github.com/CINEV/codex-lb-cinamon/issues/579)) ([97b1de4](https://github.com/CINEV/codex-lb-cinamon/commit/97b1de44e437bc9ed7a5405ffc42474d18ac71bb))
+* **types:** clear existing ty diagnostics ([#517](https://github.com/CINEV/codex-lb-cinamon/issues/517)) ([0cd5d4e](https://github.com/CINEV/codex-lb-cinamon/commit/0cd5d4ebe49e4507e4aaa937c940f198e77ce7b0))
+* **upstream:** drop top_p because majority of gpt-5 don't support it, same as temperature ([#538](https://github.com/CINEV/codex-lb-cinamon/issues/538)) ([c7cc61e](https://github.com/CINEV/codex-lb-cinamon/commit/c7cc61e4a88467517912c901e483f09d0130e1bb))
+
+
+### Documentation
+
+* add e1ektr0 as a contributor for code, and test ([#581](https://github.com/CINEV/codex-lb-cinamon/issues/581)) ([26372cc](https://github.com/CINEV/codex-lb-cinamon/commit/26372cc273a45c07b84234799ae0da147e71c683))
+* add Komzpa as a contributor for code ([#531](https://github.com/CINEV/codex-lb-cinamon/issues/531)) ([5bf5d94](https://github.com/CINEV/codex-lb-cinamon/commit/5bf5d944fc200833cec0f3b82391c3a3333396cb))
+
 ## [1.16.0](https://github.com/Soju06/codex-lb/compare/v1.15.0...v1.16.0) (2026-05-10)
 
 

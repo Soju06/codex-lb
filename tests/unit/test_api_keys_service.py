@@ -37,8 +37,11 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._accounts: dict[str, Account] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
+        self.commit_calls = 0
+        self.rollback_calls = 0
 
-    async def create(self, row: ApiKey) -> ApiKey:
+    async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
+        del commit
         self.rows[row.id] = row
         row.limits = []
         row.account_assignments = []
@@ -123,9 +126,11 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.last_used_at = utcnow()
 
     async def commit(self) -> None:
+        self.commit_calls += 1
         return None
 
     async def rollback(self) -> None:
+        self.rollback_calls += 1
         return None
 
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]:
@@ -369,6 +374,44 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         )
 
 
+class _TransactionalAssignmentFailureRepo(_FakeApiKeysRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self._pending_rows: dict[str, ApiKey] = {}
+        self._pending_account_assignments: dict[str, list[ApiKeyAccountAssignment]] = {}
+
+    async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
+        row.limits = []
+        row.account_assignments = []
+        if commit:
+            return await super().create(row, commit=commit)
+        self._pending_rows[row.id] = row
+        return row
+
+    async def get_by_id(self, key_id: str) -> ApiKey | None:
+        row = self.rows.get(key_id)
+        if row is not None:
+            row.limits = self._limits.get(key_id, [])
+            row.account_assignments = self._account_assignments.get(key_id, [])
+        return row
+
+    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+        del account_ids, commit
+        raise RuntimeError("assignment insert failed")
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+        self.rows.update(self._pending_rows)
+        self._account_assignments.update(self._pending_account_assignments)
+        self._pending_rows = {}
+        self._pending_account_assignments = {}
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+        self._pending_rows = {}
+        self._pending_account_assignments = {}
+
+
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
     if limit.limit_type == LimitType.TOTAL_TOKENS:
         return input_tokens + output_tokens
@@ -554,6 +597,86 @@ async def test_update_key_tracks_assignment_scope_after_clear() -> None:
     )
     assert cleared.account_assignment_scope_enabled is False
     assert cleared.assigned_account_ids == []
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_assigned_accounts() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assignment-scope",
+            allowed_models=None,
+            expires_at=None,
+            assigned_account_ids=["acc-a"],
+        )
+    )
+
+    assert created.account_assignment_scope_enabled is True
+    assert created.assigned_account_ids == ["acc-a"]
+
+
+@pytest.mark.asyncio
+async def test_create_key_rolls_back_when_account_assignment_write_fails() -> None:
+    repo = _TransactionalAssignmentFailureRepo()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+
+    with pytest.raises(RuntimeError, match="assignment insert failed"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="assignment-scope",
+                allowed_models=None,
+                expires_at=None,
+                assigned_account_ids=["acc-a"],
+            )
+        )
+
+    assert repo.commit_calls == 0
+    assert repo.rollback_calls == 1
+    assert repo.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_unknown_assigned_accounts() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ValueError, match="Unknown account ids: missing-account"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="assignment-scope",
+                allowed_models=None,
+                expires_at=None,
+                assigned_account_ids=["missing-account"],
+            )
+        )
 
 
 @pytest.mark.asyncio

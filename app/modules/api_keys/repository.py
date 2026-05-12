@@ -95,9 +95,10 @@ class ApiKeysRepository:
             )
         )
 
-    async def create(self, row: ApiKey) -> ApiKey:
+    async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
         self._session.add(row)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
         created = await self.get_by_id(row.id)
         assert created is not None
         return created

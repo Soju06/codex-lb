@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define sticky-session operation contracts so durable sessions, dashboard affinity, and prompt-cache affinity stay distinct.
 
 ## Requirements
 ### Requirement: Sticky sessions are explicitly typed and provider-scoped

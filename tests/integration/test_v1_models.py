@@ -5,6 +5,7 @@ import pytest
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_service_module
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
+from app.core.types import JsonValue
 from app.modules.proxy.provider_adapters import ProviderModelsResult
 
 pytestmark = pytest.mark.integration
@@ -15,8 +16,13 @@ def _make_upstream_model(
     *,
     supported_in_api: bool = True,
     base_instructions: str = "",
-    raw: dict | None = None,
+    raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
+    default_raw: dict[str, JsonValue] = {
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "availability_nux": None,
+    }
     return UpstreamModel(
         slug=slug,
         display_name=slug,
@@ -35,12 +41,7 @@ def _make_upstream_model(
         priority=0,
         available_in_plans=frozenset({"plus", "pro"}),
         base_instructions=base_instructions,
-        raw=raw
-        or {
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "availability_nux": None,
-        },
+        raw=raw or default_raw,
     )
 
 

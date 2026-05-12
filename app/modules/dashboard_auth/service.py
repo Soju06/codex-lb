@@ -17,7 +17,6 @@ from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
 from app.modules.dashboard_auth.schemas import DashboardAuthSessionResponse, TotpSetupStartResponse
 
 DASHBOARD_SESSION_COOKIE = "codex_lb_dashboard_session"
-_SESSION_TTL_SECONDS = 12 * 60 * 60
 _TOTP_ISSUER = "codex-lb"
 _TOTP_ACCOUNT = "dashboard"
 
@@ -93,8 +92,8 @@ class DashboardSessionStore:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, *, password_verified: bool, totp_verified: bool) -> str:
-        expires_at = int(time()) + _SESSION_TTL_SECONDS
+    def create(self, *, password_verified: bool, totp_verified: bool, ttl_seconds: int) -> str:
+        expires_at = int(time()) + ttl_seconds
         payload = json.dumps(
             {"exp": expires_at, "pw": password_verified, "tv": totp_verified},
             separators=(",", ":"),
@@ -195,13 +194,19 @@ class DashboardAuthService:
         await self._repository.clear_password_and_totp()
 
     async def _require_active_password_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
+        settings, _state = await self._require_active_password_session_with_state(session_id)
+        return settings
+
+    async def _require_active_password_session_with_state(
+        self, session_id: str | None
+    ) -> tuple[DashboardAuthSettingsProtocol, DashboardSessionState]:
         settings = await self._repository.get_settings()
         if settings.password_hash is None:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
         session = self._session_store.get(session_id)
         if session is None or not session.password_verified:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
-        return settings
+        return settings, session
 
     async def _require_totp_verified_session(self, session_id: str | None) -> DashboardAuthSettingsProtocol:
         settings = await self._require_active_password_session(session_id)
@@ -248,8 +253,15 @@ class DashboardAuthService:
         await self._repository.set_totp_secret(self._encryptor.encrypt(secret))
         AuditService.log_async("totp_enabled", actor_ip=actor_ip)
 
-    async def verify_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> str:
-        settings = await self._require_active_password_session(session_id)
+    async def verify_totp(
+        self,
+        *,
+        session_id: str | None,
+        code: str,
+        ttl_seconds: int,
+        actor_ip: str | None = None,
+    ) -> tuple[str, int]:
+        settings, existing_state = await self._require_active_password_session_with_state(session_id)
         secret_encrypted = settings.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")
@@ -268,7 +280,20 @@ class DashboardAuthService:
             AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
             raise TotpInvalidCodeError("Invalid TOTP code")
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
-        return self._session_store.create(password_verified=True, totp_verified=True)
+        # Honor the existing password-session expiry so that a TTL change
+        # mid-flow (between password login and TOTP submission) cannot extend
+        # or shorten an already-issued session. We use the state captured by
+        # _require_active_password_session_with_state above so a second
+        # store.get() race cannot turn a near-expiry password session into a
+        # full-length ttl_seconds session.
+        now = int(time())
+        inherited_ttl = max(1, existing_state.expires_at - now)
+        new_session_id = self._session_store.create(
+            password_verified=True,
+            totp_verified=True,
+            ttl_seconds=inherited_ttl,
+        )
+        return new_session_id, inherited_ttl
 
     async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)

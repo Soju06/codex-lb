@@ -83,6 +83,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     latest = payload[0]
     assert latest["status"] == "rate_limit"
+    assert latest["apiKeyId"] == "key_logs_1"
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
@@ -90,6 +91,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     older = payload[1]
     assert older["status"] == "ok"
+    assert older["apiKeyId"] is None
     assert older["apiKeyName"] is None
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None

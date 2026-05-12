@@ -288,6 +288,12 @@ class DashboardSettings(Base):
         server_default=text("1800"),
         nullable=False,
     )
+    dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=43200,
+        server_default=text("43200"),
+        nullable=False,
+    )
     import_without_overwrite: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
@@ -728,6 +734,7 @@ Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
+Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)

@@ -11,8 +11,10 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { PlatformIdentityDialog } from "@/features/accounts/components/platform-identity-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -54,6 +56,8 @@ export function AccountsPage() {
       ),
     [accounts],
   );
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
+  const sortedAccounts = useMemo(() => sortAccountsForDisplay(accounts, quotaDisplay), [accounts, quotaDisplay]);
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const selectedAccountId = searchParams.get("selected");
 
@@ -70,8 +74,8 @@ export function AccountsPage() {
     if (selectedAccountId && accounts.some((account) => account.accountId === selectedAccountId)) {
       return selectedAccountId;
     }
-    return accounts[0].accountId;
-  }, [accounts, selectedAccountId]);
+    return sortedAccounts[0]?.accountId ?? null;
+  }, [accounts, selectedAccountId, sortedAccounts]);
 
   const selectedAccount = useMemo(
     () =>

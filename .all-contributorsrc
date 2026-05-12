@@ -376,6 +376,62 @@
       "profile": "https://github.com/stemirkhan",
       "contributions": [
         "code",
+        "test",
+        "doc",
+        "bug"
+      ]
+    },
+    {
+      "login": "tobwen",
+      "name": "tobwen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1864057?v=4",
+      "profile": "https://github.com/tobwen",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "rio-jeong",
+      "name": "Rio",
+      "avatar_url": "https://avatars.githubusercontent.com/u/193858009?v=4",
+      "profile": "https://github.com/rio-jeong",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
+    },
+    {
+      "login": "mikabytes",
+      "name": "Mika",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1054229?v=4",
+      "profile": "https://mikabytes.com",
+      "contributions": [
+        "code",
+        "doc",
+        "test"
+      ]
+    },
+    {
+      "login": "Komzpa",
+      "name": "Darafei Praliaskouski",
+      "avatar_url": "https://avatars.githubusercontent.com/u/810638?v=4",
+      "profile": "http://maumap.com/",
+      "contributions": [
+        "code",
+        "doc",
+        "test"
+      ]
+    },
+    {
+      "login": "e1ektr0",
+      "name": "Maxim Feofilov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6214170?v=4",
+      "profile": "https://t.me/e1ektr0",
+      "contributions": [
+        "code",
         "test"
       ]
     }

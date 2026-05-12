@@ -17,7 +17,14 @@ from app.core.balancer import (
 )
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
-from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, SelectionInputs, _state_from_account
+from app.modules.proxy.load_balancer import (
+    LoadBalancer,
+    RuntimeState,
+    SelectionInputs,
+    _select_account_preferring_budget_safe,
+    _state_above_sticky_budget_threshold,
+    _state_from_account,
+)
 from app.modules.proxy.sticky_repository import StickyRoutingTarget
 
 pytestmark = pytest.mark.unit
@@ -1637,6 +1644,155 @@ def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
         )
         assert result.account is not None
         assert result.account.account_id == "early"
+
+
+def test_all_primary_pressured_fallback_skips_unavailable_account():
+    now = time.time()
+    states = [
+        AccountState(
+            "blocked",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=5.0,
+            cooldown_until=now + 60,
+        ),
+        AccountState(
+            "available",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=90.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "available"
+
+
+def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe():
+    states = [
+        AccountState("secondary-high", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=90.0),
+        AccountState("secondary-low", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=1.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "secondary-low"
+
+
+def test_all_primary_pressured_fallback_prefers_healthy_over_draining():
+    states = [
+        AccountState(
+            "draining",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=5.0,
+            health_tier=1,
+        ),
+        AccountState(
+            "healthy",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=90.0,
+            health_tier=0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
+
+
+def test_primary_pressured_fallback_ignores_unavailable_safe_accounts():
+    states = [
+        AccountState(
+            "safe-but-exhausted",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+        ),
+        AccountState(
+            "higher-primary",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=1.0,
+        ),
+        AccountState(
+            "lower-primary",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=99.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "lower-primary"
+
+
+def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucket():
+    now = time.time()
+    states = [
+        AccountState(
+            "earlier-reset-higher-primary",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=1.0,
+            secondary_reset_at=int(now + 3600),
+        ),
+        AccountState(
+            "later-reset-lower-primary",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=99.0,
+            secondary_reset_at=int(now + 7 * 24 * 3600),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=True,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "later-reset-lower-primary"
+
+
+def test_sticky_budget_threshold_still_counts_secondary_pressure():
+    state = AccountState(
+        "sticky",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=99.0,
+    )
+
+    assert _state_above_sticky_budget_threshold(state, 95.0) is True
 
 
 def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():

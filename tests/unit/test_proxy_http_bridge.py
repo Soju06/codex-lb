@@ -4303,7 +4303,7 @@ async def test_get_or_create_http_bridge_session_recovers_locally_without_anchor
     claim_durable = AsyncMock()
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    service._ring_membership = None
+    setattr(service, "_ring_membership", None)
     monkeypatch.setattr(
         proxy_service,
         "_active_http_bridge_instance_ring",
@@ -4368,7 +4368,7 @@ async def test_get_or_create_http_bridge_session_prompt_cache_takes_over_stale_s
     claim_durable = AsyncMock()
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    service._ring_membership = None
+    setattr(service, "_ring_membership", None)
     monkeypatch.setattr(
         proxy_service,
         "_active_http_bridge_instance_ring",

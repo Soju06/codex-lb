@@ -246,6 +246,7 @@ export function createRequestLogEntry(
 	return RequestLogSchema.parse({
 		requestedAt: offsetIso(-1),
 		accountId: "acc_primary",
+		apiKeyId: "key_1",
 		apiKeyName: "Primary Key",
 		requestId: "req_1",
 		providerKind: "chatgpt_web",
@@ -276,6 +277,7 @@ export function createDefaultRequestLogs(): RequestLogEntry[] {
 		createRequestLogEntry({
 			requestId: "req_2",
 			accountId: "acc_secondary",
+			apiKeyId: "key_2",
 			apiKeyName: "Secondary Key",
 			routingSubjectId: "acc_secondary",
 			upstreamRequestId: "upstream_req_2",
@@ -289,6 +291,7 @@ export function createDefaultRequestLogs(): RequestLogEntry[] {
 		}),
 		createRequestLogEntry({
 			requestId: "req_3",
+			apiKeyId: null,
 			apiKeyName: null,
 			upstreamRequestId: null,
 			rejectionReason: "provider_feature_unsupported",
@@ -324,6 +327,10 @@ export function createRequestLogFilterOptions(
 			{ model: "gpt-5.1", reasoningEffort: null },
 			{ model: "gpt-5.1", reasoningEffort: "high" },
 		],
+		apiKeys: [
+			{ id: "key_1", name: "Default key", keyPrefix: "sk-test" },
+			{ id: "key_2", name: "Read only key", keyPrefix: "sk-second" },
+		],
 		statuses: ["ok", "rate_limit", "quota"],
 		...overrides,
 	});
@@ -352,6 +359,7 @@ export function createDashboardSettings(
 		preferEarlierResetAccounts: false,
 		routingStrategy: "usage_weighted",
 		openaiCacheAffinityMaxAgeSeconds: 300,
+		dashboardSessionTtlSeconds: 43200,
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,

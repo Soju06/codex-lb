@@ -1,10 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/accounts/components/account-list";
+import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 
 describe("AccountList", () => {
+  beforeEach(() => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T12:00:00.000Z").getTime());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders items and filters by search", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
@@ -50,6 +60,173 @@ describe("AccountList", () => {
 
     await user.click(screen.getByText("secondary@example.com"));
     expect(onSelect).toHaveBeenCalledWith("acc-2");
+  });
+
+  it("sorts accounts by the rows actually rendered", () => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
+
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-hidden-early",
+            email: "hidden-early@example.com",
+            displayName: "Hidden Early",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T12:05:00.000Z",
+            resetAtSecondary: "2026-01-01T13:00:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-visible-early",
+            email: "visible-early@example.com",
+            displayName: "Visible Early",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-01T12:10:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Hidden Early|Visible Early)$/).map((el) => el.textContent)).toEqual([
+      "Visible Early",
+      "Hidden Early",
+    ]);
+  });
+
+  it("ignores elapsed reset timestamps when sorting", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-stale",
+            email: "stale@example.com",
+            displayName: "Stale",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: 18,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T11:30:00.000Z",
+            resetAtSecondary: "2026-01-01T11:45:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-fresh",
+            email: "fresh@example.com",
+            displayName: "Fresh",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: 73,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            resetAtSecondary: "2026-01-01T12:20:00.000Z",
+            windowMinutesPrimary: 300,
+            windowMinutesSecondary: 10_080,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Fresh|Stale)$/).map((el) => el.textContent)).toEqual([
+      "Fresh",
+      "Stale",
+    ]);
+  });
+
+  it("sorts legacy primary quota rows by their reset timestamp", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-late",
+            email: "late@example.com",
+            displayName: "Late",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 42,
+              secondaryRemainingPercent: null,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T13:00:00.000Z",
+            resetAtSecondary: null,
+            windowMinutesPrimary: null,
+            windowMinutesSecondary: null,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-early",
+            email: "early@example.com",
+            displayName: "Early",
+            planType: "plus",
+            status: "active",
+            usage: {
+              primaryRemainingPercent: 82,
+              secondaryRemainingPercent: null,
+            },
+            eligibleRouteFamilies: [],
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            resetAtSecondary: null,
+            windowMinutesPrimary: null,
+            windowMinutesSecondary: null,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        platformIdentityRegistered={false}
+        platformPrerequisiteSatisfied
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        onOpenPlatform={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Early|Late)$/).map((el) => el.textContent)).toEqual([
+      "Early",
+      "Late",
+    ]);
   });
 
   it("shows empty state when no items match filter", async () => {

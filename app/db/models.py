@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    REAL,
     BigInteger,
     Boolean,
     DateTime,
@@ -282,13 +283,13 @@ class DashboardSettings(Base):
         nullable=False,
     )
     sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
-        Float,
+        Float().with_variant(REAL(), "sqlite"),
         default=95.0,
         server_default=text("95.0"),
         nullable=False,
     )
     sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
-        Float,
+        Float().with_variant(REAL(), "sqlite"),
         default=100.0,
         server_default=text("100.0"),
         nullable=False,

@@ -21,7 +21,7 @@ def upgrade() -> None:
             batch_op.add_column(
                 sa.Column(
                     "sticky_reallocation_primary_budget_threshold_pct",
-                    sa.Float(),
+                    sa.Float().with_variant(sa.REAL(), "sqlite"),
                     server_default="95.0",
                     nullable=False,
                 )
@@ -30,7 +30,7 @@ def upgrade() -> None:
             batch_op.add_column(
                 sa.Column(
                     "sticky_reallocation_secondary_budget_threshold_pct",
-                    sa.Float(),
+                    sa.Float().with_variant(sa.REAL(), "sqlite"),
                     server_default="100.0",
                     nullable=False,
                 )

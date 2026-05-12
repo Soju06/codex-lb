@@ -202,13 +202,22 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    try:
+        responses_payload = payload.to_responses_request()
+        enforce_strict_text_format(responses_payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,
@@ -2323,6 +2332,8 @@ def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    if isinstance(event_type, str) and event_type.startswith("codex."):
+        return None, None
     if event_type == "error":
         parsed_error = _parse_event_error_envelope(payload)
         if _is_previous_response_not_found_public_error(parsed_error.error):

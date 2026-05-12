@@ -63,8 +63,8 @@ class AccountSummary(DashboardModel):
     email: str
     display_name: str
     plan_type: str
-    status: str
     routing_policy: str = "normal"
+    status: str
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None

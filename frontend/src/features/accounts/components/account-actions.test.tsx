@@ -1,22 +1,18 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { AccountActions } from "@/features/accounts/components/account-actions";
+import { AccountRoutingPolicyControl } from "@/features/accounts/components/account-routing-policy-control";
 import { createAccountSummary } from "@/test/mocks/factories";
 
-describe("AccountActions", () => {
+describe("AccountRoutingPolicyControl", () => {
   it("renders an explicit routing policy selector", async () => {
     const onRoutingPolicyChange = vi.fn();
     const account = createAccountSummary({ routingPolicy: "normal" });
 
     render(
-      <AccountActions
+      <AccountRoutingPolicyControl
         account={account}
         busy={false}
-        onPause={vi.fn()}
-        onResume={vi.fn()}
-        onDelete={vi.fn()}
-        onReauth={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
       />,
     );

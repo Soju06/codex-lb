@@ -42,6 +42,16 @@ pytestmark = pytest.mark.unit
 _UNSET = object()
 
 
+class _StubSettingsCache:
+    async def get(self) -> SimpleNamespace:
+        return SimpleNamespace(additional_quota_routing_policies_json=None)
+
+
+@pytest.fixture(autouse=True)
+def _stub_settings_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _StubSettingsCache())
+
+
 def _make_account(account_id: str, email: str = "a@example.com") -> Account:
     encryptor = TokenEncryptor()
     return Account(

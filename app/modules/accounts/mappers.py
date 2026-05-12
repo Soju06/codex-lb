@@ -206,11 +206,8 @@ def build_account_usage_trends(
     # Group buckets by (account_id, window)
     grouped: dict[tuple[str, str], dict[int, float]] = {}
     secondary_schedule: dict[str, dict[int, tuple[int, int]]] = {}
-    secondary_bucket_keys = {(b.account_id, b.bucket_epoch) for b in buckets if b.window == "secondary"}
-    for b in buckets:
+    for b in _effective_usage_trend_buckets(buckets):
         is_weekly_primary = b.window == "primary" and usage_core.is_weekly_window_minutes(b.window_minutes)
-        if is_weekly_primary and (b.account_id, b.bucket_epoch) in secondary_bucket_keys:
-            continue
         window = "secondary" if is_weekly_primary else b.window
         key = (b.account_id, window)
         grouped.setdefault(key, {})[b.bucket_epoch] = b.avg_used_percent
@@ -250,6 +247,46 @@ def build_account_usage_trends(
         )
 
     return result
+
+
+def _effective_usage_trend_buckets(buckets: list[UsageTrendBucket]) -> list[UsageTrendBucket]:
+    secondary_by_key = {
+        (bucket.account_id, bucket.bucket_epoch): bucket for bucket in buckets if bucket.window == "secondary"
+    }
+    weekly_primary_by_key = {
+        (bucket.account_id, bucket.bucket_epoch): bucket
+        for bucket in buckets
+        if bucket.window == "primary" and usage_core.is_weekly_window_minutes(bucket.window_minutes)
+    }
+    result: list[UsageTrendBucket] = []
+    for bucket in buckets:
+        key = (bucket.account_id, bucket.bucket_epoch)
+        weekly_primary = weekly_primary_by_key.get(key)
+        if bucket.window == "secondary" and weekly_primary is not None:
+            if usage_core.should_use_weekly_primary(
+                _trend_bucket_to_window_row(weekly_primary),
+                _trend_bucket_to_window_row(bucket),
+            ):
+                continue
+        if bucket is weekly_primary and key in secondary_by_key:
+            secondary = secondary_by_key[key]
+            if not usage_core.should_use_weekly_primary(
+                _trend_bucket_to_window_row(bucket),
+                _trend_bucket_to_window_row(secondary),
+            ):
+                continue
+        result.append(bucket)
+    return result
+
+
+def _trend_bucket_to_window_row(bucket: UsageTrendBucket) -> UsageWindowRow:
+    return UsageWindowRow(
+        account_id=bucket.account_id,
+        used_percent=bucket.avg_used_percent,
+        reset_at=bucket.reset_at,
+        window_minutes=bucket.window_minutes,
+        recorded_at=bucket.recorded_at,
+    )
 
 
 def _fill_trend_points(

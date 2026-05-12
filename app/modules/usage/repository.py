@@ -272,6 +272,7 @@ class UsageRepository:
                 func.count(UsageHistory.id).label("samples"),
                 func.max(UsageHistory.reset_at).label("reset_at"),
                 func.max(UsageHistory.window_minutes).label("window_minutes"),
+                func.max(UsageHistory.recorded_at).label("recorded_at"),
             )
             .where(*conditions)
             .group_by(
@@ -291,6 +292,7 @@ class UsageRepository:
                 samples=int(row.samples),
                 reset_at=int(row.reset_at) if row.reset_at is not None else None,
                 window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                recorded_at=row.recorded_at,
             )
             for row in result.all()
         ]

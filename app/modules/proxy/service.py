@@ -10557,40 +10557,54 @@ def _websocket_client_previous_response_payload_has_safe_fresh_replay(
     *,
     continuity_state: _WebSocketContinuityState | None,
 ) -> bool:
-    if (
-        continuity_state is None
-        or payload.previous_response_id is None
-        or payload.previous_response_id != continuity_state.last_completed_response_id
-        or continuity_state.last_completed_input_count <= 0
-        or continuity_state.last_completed_input_prefix_fingerprint is None
-    ):
+    if payload.previous_response_id is None:
         return False
     input_value = payload.input
     if not isinstance(input_value, Sequence) or isinstance(input_value, (str, bytes, bytearray)):
         return False
-    stored_count = continuity_state.last_completed_input_count
-    if len(input_value) <= stored_count:
-        return False
-    incoming_prefix = cast(Sequence[JsonValue], input_value[:stored_count])
-    if _fingerprint_input_items(incoming_prefix) != continuity_state.last_completed_input_prefix_fingerprint:
-        return False
+    input_items = cast(Sequence[JsonValue], input_value)
+    if (
+        continuity_state is not None
+        and payload.previous_response_id == continuity_state.last_completed_response_id
+        and continuity_state.last_completed_input_count > 0
+        and continuity_state.last_completed_input_prefix_fingerprint is not None
+    ):
+        stored_count = continuity_state.last_completed_input_count
+        if len(input_items) <= stored_count:
+            return False
+        incoming_prefix = input_items[:stored_count]
+        if _fingerprint_input_items(incoming_prefix) != continuity_state.last_completed_input_prefix_fingerprint:
+            return False
+        return _websocket_input_items_have_replayable_previous_output(input_items)
 
+    if len(input_items) <= 1:
+        return False
+    return _websocket_input_items_have_replayable_previous_output(input_items)
+
+
+def _websocket_input_items_have_replayable_previous_output(input_value: Sequence[JsonValue]) -> bool:
     seen_function_calls: set[str] = set()
     seen_tool_calls: set[str] = set()
+    has_previous_output = False
     for item in input_value:
         if not isinstance(item, Mapping):
             continue
         item_mapping = cast(Mapping[str, JsonValue], item)
         item_type = item_mapping.get("type")
         if item_type == "function_call":
+            has_previous_output = True
             call_id = item_mapping.get("call_id")
             if isinstance(call_id, str) and call_id:
                 seen_function_calls.add(call_id)
+        elif item_type in {"reasoning", "custom_tool_call"}:
+            has_previous_output = True
         elif item_type == "function_call_output":
             call_id = item_mapping.get("call_id")
             if not isinstance(call_id, str) or call_id not in seen_function_calls:
                 return False
+            has_previous_output = True
         elif item_mapping.get("role") == "assistant":
+            has_previous_output = True
             tool_calls = item_mapping.get("tool_calls")
             if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes, bytearray)):
                 for tool_call in tool_calls:
@@ -10608,7 +10622,8 @@ def _websocket_client_previous_response_payload_has_safe_fresh_replay(
             call_id = item_mapping.get("tool_call_id") or item_mapping.get("toolCallId") or item_mapping.get("call_id")
             if not isinstance(call_id, str) or call_id not in seen_tool_calls:
                 return False
-    return True
+            has_previous_output = True
+    return has_previous_output
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

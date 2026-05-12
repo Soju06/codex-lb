@@ -2516,9 +2516,42 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
     return OpenAIErrorEnvelopeModel(error=error_value)
 
 
+def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
+    if error_value is None:
+        return False
+    if error_value.code == "previous_response_not_found":
+        return True
+    message = error_value.message or ""
+    return (
+        error_value.code == "invalid_request_error"
+        and error_value.param == "previous_response_id"
+        and "previous response" in message.lower()
+        and "not found" in message.lower()
+    )
+
+
+def _mask_previous_response_not_found_error(
+    envelope: OpenAIErrorEnvelopeModel,
+    *,
+    default_status: int | None = None,
+) -> tuple[int, OpenAIErrorEnvelopeModel]:
+    if not _is_previous_response_not_found_public_error(envelope.error):
+        return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+    return (
+        502,
+        OpenAIErrorEnvelopeModel(
+            error=OpenAIError(
+                message="Upstream websocket closed before response.completed",
+                type="server_error",
+                code="stream_incomplete",
+            )
+        ),
+    )
+
+
 def _status_for_error(error_value: OpenAIError | None) -> int:
     if error_value and error_value.code == "previous_response_not_found":
-        return 400
+        return 502
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     return 502

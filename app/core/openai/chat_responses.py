@@ -134,10 +134,23 @@ class ToolCallIndex:
         return self.indexes[key]
 
     def index_for_output_index(self, output_index: int | None, call_id: str | None, name: str | None) -> int:
-        """Resolve tool call index, preferring output_index mapping when available."""
-        if output_index is not None and output_index in self.output_index_map:
-            return self.output_index_map[output_index]
+        """Resolve tool call index, preferring output_index mapping when available.
+
+        Always records the resolved index against every routing key that is
+        present (``output_index``, ``call_id``/``name``) so a later event for
+        the same logical tool call that only carries one of those identifiers
+        does not get assigned a new slot. Without this, a stream that first
+        routes by ``item_id`` + ``output_index`` and later emits a
+        ``call_id``-only event without ``output_index`` (e.g. legacy delta
+        formats) would split one tool call into two ``tool_calls[]`` slots and
+        reintroduce the duplication this change fixes.
+        """
         key = _tool_call_key(call_id, name)
+        if output_index is not None and output_index in self.output_index_map:
+            idx = self.output_index_map[output_index]
+            if key is not None and key not in self.indexes:
+                self.indexes[key] = idx
+            return idx
         if key is None:
             if output_index is not None:
                 idx = self.output_index_map.get(output_index, self.next_index)

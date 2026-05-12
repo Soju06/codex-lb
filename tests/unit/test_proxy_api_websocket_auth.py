@@ -445,7 +445,7 @@ async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
         try:
             yield (
                 'data: {"type":"response.failed","response":{"error":{'
-                "\"message\":\"Previous response with id 'resp_missing' not found.\","
+                '"message":"Previous response with id \'resp_missing\' not found.",'
                 '"type":"invalid_request_error","code":"previous_response_not_found",'
                 '"param":"previous_response_id"}}}\n\n'
             )

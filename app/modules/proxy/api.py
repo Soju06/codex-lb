@@ -162,6 +162,9 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
+# Keep bridge startup probing above tiny event-loop scheduling jitter:
+# PostgreSQL-backed failures may need a DB round trip before the first item.
+_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -1614,6 +1617,9 @@ async def _stream_responses(
     stream, startup_error = await _probe_stream_startup_error(
         stream,
         convert_event_errors=bridge_active,
+        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
+        if prefer_http_bridge
+        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
     )
     if startup_error is not None:
         if reservation is not None and owns_reservation:
@@ -1877,12 +1883,13 @@ async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
+    timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     first_task = asyncio.create_task(anext(stream))
     try:
         first = await asyncio.wait_for(
             asyncio.shield(first_task),
-            timeout=_STREAM_STARTUP_ERROR_PROBE_SECONDS,
+            timeout=timeout_seconds,
         )
     except TimeoutError:
         return _prepend_first_task(first_task, stream), None

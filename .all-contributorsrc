@@ -434,6 +434,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "klaascommerce",
+      "name": "klaascommerce",
+      "avatar_url": "https://avatars.githubusercontent.com/u/264425820?v=4",
+      "profile": "https://github.com/klaascommerce",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

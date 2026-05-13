@@ -5792,6 +5792,11 @@ class ProxyService:
             and terminal_request_state.suppressed_duplicate_tool_call
         ):
             session.upstream_control.reconnect_requested = True
+            session.closed = True
+            try:
+                await session.upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream after suppressed duplicate tool call", exc_info=True)
             terminal_request_state.error_http_status_override = 502
             (
                 event,

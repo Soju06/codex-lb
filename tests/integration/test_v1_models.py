@@ -220,6 +220,162 @@ async def test_backend_codex_models_filters_disallowed_models(async_client):
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility",
+            "allowedModels": ["gpt-5.2"],
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "list"
+    assert entries["gpt-5.3-codex"]["visibility"] == "hide"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_visibility_allowlist_respects_enforced_model(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility-enforced",
+            "allowedModels": ["gpt-5.2", "gpt-5.3-codex"],
+            "applyToCodexModel": True,
+            "enforcedModel": "gpt-5.3-codex",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.3-codex"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_preserves_original_flow_without_allowlist(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility-no-allowlist",
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.3-codex"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [

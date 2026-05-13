@@ -15,6 +15,7 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -85,6 +86,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
   const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
+  const [applyToCodexModel, setApplyToCodexModel] = useState<boolean>(apiKey.applyToCodexModel);
   const [enforcedModel, setEnforcedModel] = useState<string>(apiKey.enforcedModel || "");
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
     apiKey.enforcedReasoningEffort || "none",
@@ -101,6 +103,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
+      applyToCodexModel,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
@@ -146,6 +149,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="edit-api-key-apply-to-codex-model"
+                checked={applyToCodexModel}
+                onCheckedChange={(checked) => setApplyToCodexModel(checked === true)}
+              />
+              <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
+                Apply to codex /model
+              </label>
             </div>
 
             <div className="space-y-1">

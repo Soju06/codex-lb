@@ -1698,16 +1698,17 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code = _status_for_error(error_payload.error)
+            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -1718,7 +1719,7 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
-    status_code = _status_for_error(response_payload.error)
+    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
@@ -1806,9 +1807,10 @@ async def _compact_responses(
         )
     except ProxyResponseError as exc:
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )

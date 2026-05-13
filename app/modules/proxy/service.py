@@ -1216,6 +1216,14 @@ class ProxyService:
                     and request_state.error_http_status_override is not None
                     and request_state.error_http_status_override >= 400
                 ):
+                    if request_state.previous_response_not_found_rewritten:
+                        raise ProxyResponseError(
+                            request_state.error_http_status_override,
+                            openai_error(
+                                "bridge_previous_response_not_found",
+                                "Upstream websocket closed before response.completed",
+                            ),
+                        )
                     raise ProxyResponseError(
                         request_state.error_http_status_override,
                         _openai_error_envelope_from_response_failed_payload(block_payload),
@@ -2914,6 +2922,26 @@ class ProxyService:
             request_state.preferred_account_id = await self._resolve_file_account_for_responses(
                 responses_payload, headers
             )
+
+        # Direct WebSocket retry-safety classification.
+        #
+        # The single-previous-response-miss masking path in
+        # ``_process_upstream_websocket_text`` only attempts a transparent
+        # reconnect-and-replay for a turn marked
+        # ``fresh_upstream_request_is_retry_safe`` with a captured
+        # ``fresh_upstream_request_text``. Without these flags, even a
+        # full-resend turn whose semantic payload does not depend on the
+        # upstream anchor (no client-supplied ``previous_response_id`` and no
+        # proxy-injected anchor) would fall through to ``stream_incomplete``
+        # instead of being recovered. That regresses the recovery behavior
+        # this PR is explicitly trying to preserve for full-resend variants.
+        #
+        # The HTTP-bridge path sets these flags at request prep time; mirror
+        # the same classification here for the direct WebSocket path so the
+        # mask in the reception path treats both variants identically.
+        if responses_payload.previous_response_id is None and not request_state.proxy_injected_previous_response_id:
+            request_state.fresh_upstream_request_text = text_data
+            request_state.fresh_upstream_request_is_retry_safe = True
 
         return _PreparedWebSocketRequest(
             text_data=text_data,
@@ -5650,9 +5678,11 @@ class ProxyService:
             status_request_state is not None
             and status_request_state.previous_response_id is not None
             and is_previous_response_not_found_event
-            and (response_id is not None or has_other_pending_requests)
         ):
             status_request_state.error_http_status_override = 502
+            status_request_state.previous_response_not_found_rewritten = (
+                response_id is None and not has_other_pending_requests
+            )
             event, payload, event_type, rewritten_text = _maybe_rewrite_websocket_previous_response_not_found_event(
                 request_state=status_request_state,
                 event=event,
@@ -6246,14 +6276,29 @@ class ProxyService:
             )
             retry_error_code = None
         if retry_error_code is not None:
-            upstream_control.reconnect_requested = True
             if retry_is_previous_response_not_found:
-                request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
-                upstream_control.suppress_downstream_event = True
-                upstream_control.replay_request_state = request_state
+                if not (
+                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
+                ):
+                    # A short continuation depends entirely on the upstream
+                    # anchor. Replaying the same lost previous_response_id on a
+                    # new websocket just re-surfaces the raw upstream 400; only
+                    # full-resend payloads with a prepared fresh body can be
+                    # transparently retried.
+                    retry_error_code = None
+                else:
+                    upstream_control.reconnect_requested = True
+                    request_state.request_text = request_state.fresh_upstream_request_text
+                    request_state.previous_response_id = None
+                    request_state.proxy_injected_previous_response_id = False
+                    request_state.fresh_upstream_request_is_retry_safe = False
+                    request_state.replay_count += 1
+                    request_state.awaiting_response_created = True
+                    request_state.response_id = None
+                    upstream_control.suppress_downstream_event = True
+                    upstream_control.replay_request_state = request_state
             else:
+                upstream_control.reconnect_requested = True
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
@@ -6264,7 +6309,8 @@ class ProxyService:
                     {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                     retry_error_code,
                 )
-            return downstream_text
+            if retry_error_code is not None:
+                return downstream_text
 
         await self._finalize_websocket_request_state(
             request_state,
@@ -8436,6 +8482,7 @@ class _WebSocketRequestState:
     error_param_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    previous_response_not_found_rewritten: bool = False
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -10769,6 +10816,7 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     code = error.get("code")
     if code in {
         "bridge_owner_unreachable",
+        "bridge_previous_response_not_found",
         "previous_response_not_found",
         "bridge_instance_mismatch",
     }:

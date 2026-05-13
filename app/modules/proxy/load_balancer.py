@@ -416,7 +416,7 @@ class LoadBalancer:
                 allowed_account_ids = set(account_ids)
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
             pre_model_filter_accounts = accounts
-            if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
+            if model and _mapped_model_has_registry_entry(model):
                 accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
             if model and not accounts:
                 if not all_accounts:

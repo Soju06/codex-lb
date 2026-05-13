@@ -434,6 +434,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mgwals",
+      "name": "Manu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/155856544?v=4",
+      "profile": "https://github.com/mgwals",
+      "contributions": [
+        "test",
+        "review"
+      ]
     }
   ],
   "contributorsPerLine": 7,

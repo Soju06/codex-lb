@@ -54,6 +54,7 @@ class Account(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
+    alias: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

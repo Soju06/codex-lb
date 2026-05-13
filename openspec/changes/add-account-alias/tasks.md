@@ -1,0 +1,7 @@
+- [x] Add a nullable `alias` column to `Account` in `app/db/models.py` and ship the alembic migration `20260513_000000_add_accounts_alias` (idempotent upgrade + matching downgrade, parented on the current heads merge).
+- [x] Add `alias` to `AccountSummary` and make `display_name` resolve to `alias` when set, else the email, in `app/modules/accounts/mappers.py`.
+- [x] Add `AccountsRepository.update_alias` and `AccountsService.set_account_alias` (with whitespace trimming and empty-string-to-NULL normalization).
+- [x] Wire `PUT /api/accounts/{account_id}/alias` in `app/modules/accounts/api.py`, guarded by the existing dashboard-session dependency; return 404 with `account_not_found` for unknown ids.
+- [x] Add `AccountAliasRequest` / `AccountAliasResponse` pydantic schemas with `max_length=255` on the alias field.
+- [x] Add integration regressions in `tests/integration/test_accounts_api.py`: missing account 404, set-and-list, whitespace trim, clear-via-empty restores the email fallback on `display_name`.
+- [x] Document the new contract under the `frontend-architecture` capability spec so dashboard consumers know the field is available.

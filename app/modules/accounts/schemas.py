@@ -60,6 +60,7 @@ class AccountAdditionalQuota(DashboardModel):
 class AccountSummary(DashboardModel):
     account_id: str
     email: str
+    alias: str | None = None
     display_name: str
     plan_type: str
     status: str
@@ -115,3 +116,12 @@ class AccountTrendsResponse(DashboardModel):
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)
+
+
+class AccountAliasRequest(DashboardModel):
+    alias: str | None = Field(default=None, max_length=255)
+
+
+class AccountAliasResponse(DashboardModel):
+    account_id: str
+    alias: str | None = None

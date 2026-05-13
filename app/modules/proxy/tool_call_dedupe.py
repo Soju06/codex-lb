@@ -98,8 +98,8 @@ def mark_duplicate_tool_call_downstream_event(
     call_id = item.get("call_id")
     if call_id is not None and not isinstance(call_id, str):
         call_id = None
-    is_side_effect_tool_call = (
-        item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES or item_name in _SIDE_EFFECT_TOOL_CALL_NAMES
+    is_side_effect_tool_call = item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES or (
+        item_name in _SIDE_EFFECT_TOOL_CALL_NAMES and _tool_call_has_side_effect_arguments(item_name, argument_value)
     )
     # Same-response replays have shown distinct call_ids for byte-identical shell/edit requests.
     # For local side-effect tools, running the same payload twice is worse than dropping a duplicate-looking call_id.
@@ -176,6 +176,25 @@ def canonical_side_effect_argument_key(item_name: str | None, argument_value: st
     canonical_argument = dict(argument)
     canonical_argument["tool_uses"] = canonical_tool_uses
     return canonical_json_key(cast(JsonValue, canonical_argument))
+
+
+def _tool_call_has_side_effect_arguments(item_name: str | None, argument_value: str) -> bool:
+    if item_name != _PARALLEL_TOOL_CALL_NAME:
+        return item_name in _SIDE_EFFECT_TOOL_CALL_NAMES
+
+    argument = json_object_from_argument(argument_value)
+    if argument is None:
+        return False
+    tool_uses = argument.get("tool_uses")
+    if not isinstance(tool_uses, list):
+        return False
+    for tool_use in tool_uses:
+        if not isinstance(tool_use, dict):
+            continue
+        recipient_name = tool_use.get("recipient_name")
+        if isinstance(recipient_name, str) and recipient_name in _PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES:
+            return True
+    return False
 
 
 def canonical_parallel_tool_use_key(tool_use: dict[str, JsonValue]) -> str:
@@ -293,7 +312,7 @@ def rewrite_parallel_tool_call_text(
         return text, payload, event, event_type_from_payload(event, payload), event_block
     assert rewritten_payload is not None
     rewritten_text = json.dumps(rewritten_payload, ensure_ascii=True, separators=(",", ":"))
-    rewritten_event_block = f"data: {rewritten_text}\n\n"
+    rewritten_event_block = format_sse_event(rewritten_payload)
     rewritten_event = parse_sse_event(rewritten_event_block)
     return (
         rewritten_text,

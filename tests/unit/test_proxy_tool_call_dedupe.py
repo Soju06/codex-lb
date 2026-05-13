@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.core.types import JsonValue
+from app.core.utils.sse import format_sse_event
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy import tool_call_dedupe
 
@@ -386,6 +387,61 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_r
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_keeps_read_only_parallel_wrapper_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "github.read_file",
+                    "parameters": {
+                        "repo": "Soju06/codex-lb",
+                        "path": "README.md",
+                    },
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_read",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_first",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_read",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_replayed",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_read",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_read",
+        )
+        is False
+    )
+
+
 def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_read_only_call_ids():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
@@ -527,3 +583,41 @@ def test_mark_duplicate_tool_call_downstream_event_bounds_seen_key_cache():
         )
 
     assert len(upstream_control.seen_tool_call_keys) == tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT
+
+
+def test_rewrite_parallel_tool_call_text_preserves_sse_event_name():
+    arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr merge"},
+            },
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr merge"},
+            },
+        ]
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": json.dumps(arguments),
+            "call_id": "call_parallel",
+        },
+    }
+
+    _text, rewritten_payload, rewritten_event, rewritten_event_type, rewritten_event_block = (
+        tool_call_dedupe.rewrite_parallel_tool_call_text(
+            json.dumps(payload),
+            payload,
+            event_block=format_sse_event(payload),
+        )
+    )
+
+    assert rewritten_event_block.startswith("event: response.output_item.done\n")
+    assert rewritten_event_type == "response.output_item.done"
+    assert rewritten_event is not None
+    assert rewritten_payload is not None

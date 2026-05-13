@@ -1237,6 +1237,151 @@ def test_v1_responses_websocket_masks_short_previous_response_not_found_without_
     assert connect_count == 1
 
 
+def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for the codex-review P1 on the original branch revision.
+
+    A direct WebSocket turn whose semantic payload does **not** depend on the
+    upstream anchor (no client-supplied ``previous_response_id``, no
+    proxy-injected anchor) must be classified as retry-safe at
+    request-preparation time, with ``fresh_upstream_request_text`` and
+    ``fresh_upstream_request_is_retry_safe`` populated on the request state.
+
+    Without that classification, the single-previous-response-miss masking
+    path in ``_process_upstream_websocket_text`` (which gates its
+    reconnect-and-replay on exactly those two flags) would short-circuit
+    every direct-WebSocket recovery into ``stream_incomplete`` -- the
+    regression the codex review on this PR flagged. The HTTP-bridge path
+    already populates these fields at prep time; this test pins that the
+    direct WebSocket path now mirrors that classification.
+    """
+
+    upstream_socket = _SequencedUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_ws_fresh_turn_ok",
+                            "status": "in_progress",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_fresh_turn_ok",
+                            "status": "completed",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ],
+    )
+    connect_count = 0
+    connect_record: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        nonlocal connect_count
+        connect_count += 1
+        # Pin the retry-safety classification at the moment the upstream
+        # is being connected. The masking path in
+        # ``_process_upstream_websocket_text`` reads these flags after a
+        # ``previous_response_not_found`` error and only reconnects when
+        # they are populated for this request.
+        connect_record.append(
+            {
+                "connect_count": connect_count,
+                "fresh_upstream_request_is_retry_safe": request_state.fresh_upstream_request_is_retry_safe,
+                "fresh_upstream_request_text_set": bool(request_state.fresh_upstream_request_text),
+            }
+        )
+        return SimpleNamespace(id="acct_ws_fresh_turn"), upstream_socket
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                        # No client-supplied previous_response_id. This is a
+                        # full-resend / fresh-turn shape, so the direct
+                        # WebSocket prep path must mark it retry-safe.
+                    }
+                )
+            )
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    # The direct-WebSocket retry-safety classification must run at request
+    # prep time so the masking path in
+    # ``_process_upstream_websocket_text`` (which gates its
+    # reconnect-and-replay on exactly these two fields) can recover the
+    # turn instead of short-circuiting to ``stream_incomplete``.
+    assert len(connect_record) == 1
+    assert connect_record[0]["fresh_upstream_request_is_retry_safe"] is True
+    assert connect_record[0]["fresh_upstream_request_text_set"] is True
+
+
 def test_v1_responses_websocket_masks_multi_item_previous_response_miss_without_retry(
     app_instance,
     monkeypatch,

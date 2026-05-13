@@ -2923,6 +2923,26 @@ class ProxyService:
                 responses_payload, headers
             )
 
+        # Direct WebSocket retry-safety classification.
+        #
+        # The single-previous-response-miss masking path in
+        # ``_process_upstream_websocket_text`` only attempts a transparent
+        # reconnect-and-replay for a turn marked
+        # ``fresh_upstream_request_is_retry_safe`` with a captured
+        # ``fresh_upstream_request_text``. Without these flags, even a
+        # full-resend turn whose semantic payload does not depend on the
+        # upstream anchor (no client-supplied ``previous_response_id`` and no
+        # proxy-injected anchor) would fall through to ``stream_incomplete``
+        # instead of being recovered. That regresses the recovery behavior
+        # this PR is explicitly trying to preserve for full-resend variants.
+        #
+        # The HTTP-bridge path sets these flags at request prep time; mirror
+        # the same classification here for the direct WebSocket path so the
+        # mask in the reception path treats both variants identically.
+        if responses_payload.previous_response_id is None and not request_state.proxy_injected_previous_response_id:
+            request_state.fresh_upstream_request_text = text_data
+            request_state.fresh_upstream_request_is_retry_safe = True
+
         return _PreparedWebSocketRequest(
             text_data=text_data,
             request_state=request_state,

@@ -7899,7 +7899,20 @@ def test_remember_websocket_previous_response_owner_eviction_keeps_latest_entrie
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_masks_precreated_previous_response_not_found(monkeypatch):
+async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch):
+    """A precreated retry-safe full-resend turn (with both
+    ``fresh_upstream_request_is_retry_safe=True`` and
+    ``fresh_upstream_request_text`` populated by the request-prep path) must
+    be transparently retried on a fresh upstream when upstream returns
+    ``previous_response_not_found``. The retry strips the stale
+    ``previous_response_id`` and replays the prepared fresh text.
+
+    This is the inverse of
+    ``test_process_upstream_websocket_text_short_previous_response_not_found_fails_closed`` below: when the request prep path has
+    classified the turn as retry-safe, the masking path must replay rather
+    than fail closed.
+    """
+
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -7916,6 +7929,8 @@ async def test_process_upstream_websocket_text_masks_precreated_previous_respons
         "previous_response_id": "resp_anchor",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
     }
+    fresh_request_payload = dict(request_payload)
+    fresh_request_payload.pop("previous_response_id")
     pending_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_not_found_retry",
         model="gpt-5.1",
@@ -7926,6 +7941,8 @@ async def test_process_upstream_websocket_text_masks_precreated_previous_respons
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
         previous_response_id="resp_anchor",
+        fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -7952,15 +7969,17 @@ async def test_process_upstream_websocket_text_masks_precreated_previous_respons
         response_create_gate=asyncio.Semaphore(1),
     )
 
-    assert '"code":"stream_incomplete"' in downstream_text
-    assert "previous_response_not_found" not in downstream_text
-    finalize_request_state.assert_awaited_once()
     handle_stream_error.assert_not_awaited()
     assert upstream_control.reconnect_requested is True
-    assert upstream_control.suppress_downstream_event is False
-    assert upstream_control.replay_request_state is None
-    assert pending_request.replay_count == 0
-    assert list(pending_requests) == []
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.replay_count == 1
+    # The retry must strip the stale ``previous_response_id`` and use the
+    # prepared retry-safe text instead of the original anchored payload.
+    assert pending_request.previous_response_id is None
+    assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
+    # Retry-safety flag is consumed (set back to False) so we don't loop.
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
 
 
 @pytest.mark.asyncio

@@ -5670,6 +5670,8 @@ class ProxyService:
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
+                if payload is not None:
+                    event_block = format_sse_event(payload)
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -6416,6 +6418,8 @@ class ProxyService:
                     request_state.suppressed_duplicate_tool_call = True
                     upstream_control.suppress_downstream_event = True
                     return text
+                if payload is not None:
+                    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -8132,6 +8136,8 @@ class ProxyService:
                 ):
                     suppressed_duplicate_tool_call = True
                 else:
+                    if first_payload is not None:
+                        first = format_sse_event(first_payload)
                     if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
                         latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                     yield first
@@ -8234,6 +8240,8 @@ class ProxyService:
                 ):
                     suppressed_duplicate_tool_call = True
                     continue
+                if event_payload is not None:
+                    line = format_sse_event(event_payload)
                 yield line
         except ProxyResponseError as exc:
             response_create_lease.release()

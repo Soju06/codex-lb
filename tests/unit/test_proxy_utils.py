@@ -4475,6 +4475,89 @@ async def test_stream_responses_suppresses_same_response_http_tool_call_replay(m
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_trims_overlapping_parallel_http_tool_call_replay(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_parallel_tool_overlap")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    first_arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+            },
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr checks --repo Soju06/codex-lb"},
+            },
+        ]
+    }
+    replay_arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+            },
+            {
+                "recipient_name": "github.read_file",
+                "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+            },
+        ]
+    }
+
+    def _parallel_payload(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": "resp_http_parallel_overlap",
+            "item": {
+                "type": "function_call",
+                "name": "multi_tool_use.parallel",
+                "arguments": json.dumps(arguments),
+                "call_id": "call_parallel",
+            },
+        }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_parallel_overlap"}}\n\n'
+        yield proxy_service.format_sse_event(_parallel_payload(first_arguments))
+        yield proxy_service.format_sse_event(_parallel_payload(replay_arguments))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_parallel_overlap"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[dict[str, JsonValue]] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert len(tool_chunks) == 2
+    replay_item = tool_chunks[1]["item"]
+    assert isinstance(replay_item, dict)
+    replay_item_arguments = replay_item["arguments"]
+    assert isinstance(replay_item_arguments, str)
+    assert json.loads(replay_item_arguments)["tool_uses"] == [
+        {
+            "recipient_name": "github.read_file",
+            "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

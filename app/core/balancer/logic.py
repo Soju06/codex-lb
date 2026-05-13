@@ -14,6 +14,12 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_expired": "Refresh token expired - re-login required",
     "refresh_token_reused": "Refresh token was reused - re-login required",
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
+    # ``token_expired`` from the OAuth refresh endpoint means the refresh
+    # request itself failed because the refresh token (or the session it
+    # belonged to) is no longer usable -- access-token-only expiry would have
+    # returned a fresh token pair instead. Treat it as a permanent failure so
+    # the account stops being routed to until it is re-authenticated.
+    "token_expired": "Authentication token expired - re-login required",
     "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",

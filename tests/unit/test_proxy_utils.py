@@ -5375,6 +5375,69 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_rejects_incomplete_session_anchor_fresh_retry(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_trim_partial_replay",
+        name="ws-trim-partial-replay",
+        key_prefix="sk-ws-trim-partial",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "old question"}]}]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_trim"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_completed_anchor"
+    assert upstream_payload["input"] == [new_input]
+    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_preserves_client_previous_response_output(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     reserve_usage = AsyncMock(return_value=None)
@@ -5750,12 +5813,49 @@ def test_trim_websocket_previous_response_input_items_drops_leading_text_output(
 
     trimmed = proxy_service._trim_websocket_previous_response_input_items(
         [
-            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
+            {"role": "assistant", "content": "old answer"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "old answer 2"}]},
             next_input,
         ]
     )
 
     assert trimmed == [next_input]
+
+
+def test_trim_websocket_previous_response_input_items_drops_protocol_output_types():
+    next_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(
+        [
+            {"type": "reasoning", "summary": []},
+            {"type": "function_call", "call_id": "call_old", "name": "exec_command", "arguments": "{}"},
+            {"type": "web_search_call", "id": "ws_old", "status": "completed"},
+            {"type": "file_search_call", "id": "fs_old", "status": "completed"},
+            {"type": "computer_call", "id": "computer_old", "status": "completed"},
+            {"type": "code_interpreter_call", "id": "ci_old", "status": "completed"},
+            {"type": "mcp_approval_request", "id": "mcp_approval_old"},
+            {"type": "mcp_list_tools", "id": "mcp_tools_old"},
+            {"type": "output_image", "id": "img_old"},
+            next_input,
+        ]
+    )
+
+    assert trimmed == [next_input]
+
+
+def test_trim_websocket_previous_response_input_items_preserves_tool_output():
+    tool_output: JsonValue = {"type": "function_call_output", "call_id": "call_old", "output": "ok"}
+    next_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(
+        [
+            {"type": "function_call", "call_id": "call_old", "name": "exec_command", "arguments": "{}"},
+            tool_output,
+            next_input,
+        ]
+    )
+
+    assert trimmed == [tool_output, next_input]
 
 
 @pytest.mark.asyncio
@@ -5784,6 +5884,26 @@ async def test_websocket_full_replay_waits_for_pending_continuity_gap():
     assert (
         await proxy_service._websocket_full_replay_continuity_wait_snapshot(
             next_request,
+            pending_requests,
+            pending_lock=pending_lock,
+            codex_session_affinity=True,
+            continuity_state=continuity_state,
+        )
+        == 0
+    )
+    small_fresh_replay = proxy_service._WebSocketRequestState(
+        request_id="ws_small_fresh_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=2,
+    )
+
+    assert (
+        await proxy_service._websocket_full_replay_continuity_wait_snapshot(
+            small_fresh_replay,
             pending_requests,
             pending_lock=pending_lock,
             codex_session_affinity=True,
@@ -8837,6 +8957,84 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_retries_safe_previous_response_transient_as_fresh(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_prev_transient_retry")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "first answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    }
+    fresh_request_payload = dict(request_payload)
+    fresh_request_payload.pop("previous_response_id")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_transient_retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(request_payload, separators=(",", ":")),
+        previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
+        fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+        proxy_injected_previous_response_id=True,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps(
+        {
+            "type": "error",
+            "status": 429,
+            "error": {
+                "type": "rate_limit_exceeded",
+                "code": "rate_limit_exceeded",
+                "message": "slow down",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"code":"rate_limit_exceeded"' in downstream_text
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_awaited_once()
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.replay_count == 1
+    assert pending_request.previous_response_id is None
+    assert pending_request.proxy_injected_previous_response_id is False
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_does_not_retry_unsafe_previous_response_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -11150,7 +11348,6 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
         proxy_service._classify_upstream_close(
             1000,
             request_response_events_seen=0,
-            upstream_response_events_seen=0,
         )
         == "rejected"
     )
@@ -11158,15 +11355,6 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
         proxy_service._classify_upstream_close(
             1000,
             request_response_events_seen=1,
-            upstream_response_events_seen=1,
-        )
-        == "transient"
-    )
-    assert (
-        proxy_service._classify_upstream_close(
-            1000,
-            request_response_events_seen=0,
-            upstream_response_events_seen=1,
         )
         == "transient"
     )
@@ -11174,7 +11362,6 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
         proxy_service._classify_upstream_close(
             1011,
             request_response_events_seen=0,
-            upstream_response_events_seen=0,
         )
         == "transient"
     )

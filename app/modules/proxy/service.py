@@ -251,6 +251,20 @@ _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
+_WEBSOCKET_PREVIOUS_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
+    {
+        "reasoning",
+        "function_call",
+        "custom_tool_call",
+        "web_search_call",
+        "file_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "mcp_approval_request",
+        "mcp_list_tools",
+        "output_image",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -732,18 +746,22 @@ class ProxyService:
             continuity_state=None,
         ):
             unanchored_payload = effective_payload.model_copy(update={"previous_response_id": None})
-            _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
+            raw_fresh_upstream_request_text = _response_create_text(
                 unanchored_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                request_id=request_id,
+                include_type_field=True,
+                client_metadata=_response_create_client_metadata(unanchored_payload.to_payload(), headers=headers),
             )
-            del _fresh_request_state
-            request_state.fresh_upstream_request_text = fresh_upstream_request_text
-            request_state.fresh_upstream_request_is_retry_safe = (
-                len(fresh_upstream_request_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
-            )
+            if len(raw_fresh_upstream_request_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+                _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
+                    unanchored_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                )
+                del _fresh_request_state
+                request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                request_state.fresh_upstream_request_is_retry_safe = True
         session_or_forward = await self._get_or_create_http_bridge_session(
             bridge_session_key,
             headers=dict(headers),
@@ -3023,6 +3041,7 @@ class ProxyService:
         original_input_fingerprint: str | None = None
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        session_anchor_has_safe_fresh_replay = False
         session_anchor = _websocket_continuity_anchor_for_payload(
             continuity_state,
             responses_payload=responses_payload,
@@ -3037,9 +3056,11 @@ class ProxyService:
                 include_type_field=True,
                 client_metadata=client_metadata,
             )
-            anchored_input_tail = _trim_websocket_previous_response_input_items(
-                original_input_items[session_anchor.stored_input_item_count :]
+            original_input_tail = original_input_items[session_anchor.stored_input_item_count :]
+            session_anchor_has_safe_fresh_replay = _websocket_input_items_have_replayable_previous_output(
+                original_input_tail
             )
+            anchored_input_tail = _trim_websocket_previous_response_input_items(original_input_tail)
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,
@@ -3086,9 +3107,12 @@ class ProxyService:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
             request_state.input_full_fingerprint = original_input_fingerprint
-            request_state.fresh_upstream_request_text = original_full_resend_text
+            request_state.fresh_upstream_request_text = (
+                original_full_resend_text if session_anchor_has_safe_fresh_replay else None
+            )
             request_state.fresh_upstream_request_is_retry_safe = (
-                original_full_resend_text is not None
+                session_anchor_has_safe_fresh_replay
+                and original_full_resend_text is not None
                 and len(original_full_resend_text.encode("utf-8")) <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
             )
             logger.info(
@@ -5665,7 +5689,6 @@ class ProxyService:
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
                 request_response_events_seen=request_state.response_event_count,
-                upstream_response_events_seen=session.upstream_response_event_count,
             )
             if close_classification == "rejected":
                 request_state.error_code_override = "upstream_rejected_input"
@@ -5806,7 +5829,6 @@ class ProxyService:
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
         session.last_upstream_close_code = None
-        session.upstream_response_event_count = 0
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -5946,9 +5968,6 @@ class ProxyService:
         else:
             _record_response_event(matched_request_state, event_type)
             _record_response_event(terminal_request_state, event_type)
-        if event_type is not None and event_type.startswith("response."):
-            session.upstream_response_event_count += 1
-
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
             session.upstream_control.reconnect_requested = True
@@ -6625,6 +6644,7 @@ class ProxyService:
             retry_error_code = None
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
+                upstream_control.reconnect_requested = True
                 _switch_request_state_to_fresh_replay(request_state)
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
@@ -6633,6 +6653,8 @@ class ProxyService:
                 upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
+                if _request_state_has_safe_fresh_replay(request_state):
+                    _switch_request_state_to_fresh_replay(request_state)
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
@@ -8763,9 +8785,8 @@ def _classify_upstream_close(
     close_code: int | None,
     *,
     request_response_events_seen: int,
-    upstream_response_events_seen: int = 0,
 ) -> Literal["transient", "rejected"]:
-    if close_code == 1000 and request_response_events_seen == 0 and upstream_response_events_seen == 0:
+    if close_code == 1000 and request_response_events_seen == 0:
         return "rejected"
     return "transient"
 
@@ -8885,7 +8906,6 @@ class _HTTPBridgeSession:
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
-    upstream_response_event_count: int = 0
     closed: bool = False
 
 
@@ -8998,9 +9018,9 @@ def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) 
 
 def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
     item_type = _websocket_input_item_type(item)
-    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+    if item_type in _WEBSOCKET_PREVIOUS_RESPONSE_OUTPUT_ITEM_TYPES:
         return True
-    if item_type != "message" or not isinstance(item, dict):
+    if not isinstance(item, dict):
         return False
     role = item.get("role")
     return role == "assistant"
@@ -9085,9 +9105,15 @@ async def _websocket_full_replay_continuity_wait_snapshot(
 ) -> int | None:
     if (
         not codex_session_affinity
-        or (request_state.previous_response_id is not None and not request_state.proxy_injected_previous_response_id)
-        or not request_state.proxy_injected_previous_response_id
         or continuity_state is None
+        or (request_state.previous_response_id is not None and not request_state.proxy_injected_previous_response_id)
+        or (
+            not request_state.proxy_injected_previous_response_id
+            and (
+                request_state.previous_response_id is not None
+                or request_state.input_item_count < _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS
+            )
+        )
     ):
         return None
     async with pending_lock:
@@ -10670,7 +10696,7 @@ def _websocket_input_items_have_replayable_previous_output(input_value: Sequence
             call_id = item_mapping.get("call_id")
             if isinstance(call_id, str) and call_id:
                 seen_function_calls.add(call_id)
-        elif item_type in {"reasoning", "custom_tool_call"}:
+        elif item_type in _WEBSOCKET_PREVIOUS_RESPONSE_OUTPUT_ITEM_TYPES - {"function_call_output"}:
             has_previous_output = True
         elif item_type == "function_call_output":
             call_id = item_mapping.get("call_id")

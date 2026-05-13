@@ -7908,9 +7908,9 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     ``previous_response_id`` and replays the prepared fresh text.
 
     This is the inverse of
-    ``test_process_upstream_websocket_text_short_previous_response_not_found_fails_closed`` below: when the request prep path has
-    classified the turn as retry-safe, the masking path must replay rather
-    than fail closed.
+    ``test_process_upstream_websocket_text_short_previous_response_not_found_fails_closed``
+    below: when the request prep path has classified the turn as retry-safe,
+    the masking path must replay rather than fail closed.
     """
 
     request_logs = _RequestLogsRecorder()
@@ -7958,7 +7958,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     }
     upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
 
-    downstream_text = await service._process_upstream_websocket_text(
+    await service._process_upstream_websocket_text(
         upstream_text,
         account=account,
         account_id_value=account.id,

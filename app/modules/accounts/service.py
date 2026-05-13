@@ -201,3 +201,9 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def set_account_alias(self, account_id: str, alias: str | None) -> bool:
+        normalized = alias.strip() if isinstance(alias, str) else None
+        if normalized == "":
+            normalized = None
+        return await self._repo.update_alias(account_id, normalized)

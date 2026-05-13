@@ -201,6 +201,13 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def update_alias(self, account_id: str, alias: str | None) -> bool:
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(alias=alias).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def delete(self, account_id: str) -> bool:
         await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
         await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))

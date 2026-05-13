@@ -8,6 +8,8 @@ from app.core.exceptions import DashboardBadRequestError, DashboardConflictError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
+    AccountAliasRequest,
+    AccountAliasResponse,
     AccountDeleteResponse,
     AccountImportResponse,
     AccountPauseResponse,
@@ -84,6 +86,21 @@ async def pause_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountPauseResponse(status="paused")
+
+
+@router.put("/{account_id}/alias", response_model=AccountAliasResponse)
+async def set_account_alias(
+    account_id: str,
+    payload: AccountAliasRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountAliasResponse:
+    success = await context.service.set_account_alias(account_id, payload.alias)
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    normalized = payload.alias.strip() if isinstance(payload.alias, str) else None
+    if normalized == "":
+        normalized = None
+    return AccountAliasResponse(account_id=account_id, alias=normalized)
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

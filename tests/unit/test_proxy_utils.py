@@ -4464,6 +4464,14 @@ async def test_stream_responses_suppresses_same_response_http_tool_call_replay(m
             tool_chunks.append(chunk_payload)
 
     assert tool_chunks == [tool_payload]
+    terminal_payload = parse_sse_data_json(chunks[-1])
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.failed"
+    terminal_response = cast(dict[str, object], terminal_payload["response"])
+    terminal_error = cast(dict[str, object], terminal_response["error"])
+    assert terminal_error["code"] == "stream_incomplete"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

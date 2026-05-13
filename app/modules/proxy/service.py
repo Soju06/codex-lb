@@ -254,6 +254,9 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
     }
 )
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
+_SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
+    "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -8008,6 +8011,7 @@ class ProxyService:
         latency_first_token_ms: int | None = None
         response_create_lease = AdmissionLease(None)
         tool_call_dedupe = _WebSocketUpstreamControl()
+        suppressed_duplicate_tool_call = False
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
@@ -8126,10 +8130,11 @@ class ProxyService:
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
                     response_id=_websocket_response_id(event, first_payload) or response_id,
                 ):
-                    return
-                if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
-                    latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
-                yield first
+                    suppressed_duplicate_tool_call = True
+                else:
+                    if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
+                        latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
+                    yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
 
@@ -8209,6 +8214,17 @@ class ProxyService:
                             response_id = response.id
                         if event_type == "response.incomplete":
                             status = "error"
+                    if event_type == "response.completed" and suppressed_duplicate_tool_call:
+                        line, event, event_payload, event_type = _build_rewritten_stream_response_failed_event(
+                            response_id=response_id,
+                            error_code="stream_incomplete",
+                            error_message=_SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
+                        )
+                        status = "error"
+                        error_code = "stream_incomplete"
+                        error_message = _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
+                        settlement.record_success = False
+                        settlement.account_health_error = False
                 if latency_first_token_ms is None and event_type in _TEXT_DELTA_EVENT_TYPES:
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 if mark_duplicate_tool_call_downstream_event(
@@ -8216,6 +8232,7 @@ class ProxyService:
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
                     response_id=_websocket_response_id(event, event_payload) or response_id,
                 ):
+                    suppressed_duplicate_tool_call = True
                     continue
                 yield line
         except ProxyResponseError as exc:
@@ -9400,7 +9417,7 @@ def _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
     rewritten_event_payload = response_failed_event(
         "stream_incomplete",
-        "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely.",
+        _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
         error_type="server_error",
         response_id=request_state.response_id or request_state.request_id,
     )

@@ -101,6 +101,13 @@ def mark_duplicate_tool_call_downstream_event(
     is_side_effect_tool_call = item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES or (
         item_name in _SIDE_EFFECT_TOOL_CALL_NAMES and _tool_call_has_side_effect_arguments(item_name, argument_value)
     )
+    if item_name == _PARALLEL_TOOL_CALL_NAME and is_side_effect_tool_call:
+        return _mark_duplicate_parallel_tool_call_downstream_event(
+            cast(dict[str, JsonValue], item),
+            argument_value,
+            seen_tool_call_keys=seen_tool_call_keys,
+            response_id=response_id,
+        )
     # Same-response replays have shown distinct call_ids for byte-identical shell/edit requests.
     # For local side-effect tools, running the same payload twice is worse than dropping a duplicate-looking call_id.
     dedupe_call_id = None if is_side_effect_tool_call else call_id
@@ -120,6 +127,62 @@ def mark_duplicate_tool_call_downstream_event(
     seen_tool_call_keys[key] = None
     while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
         seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))
+    return False
+
+
+def _mark_duplicate_parallel_tool_call_downstream_event(
+    item: dict[str, JsonValue],
+    argument_value: str,
+    *,
+    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None],
+    response_id: str | None,
+) -> bool:
+    argument = json_object_from_argument(argument_value)
+    if argument is None:
+        return False
+    tool_uses = argument.get("tool_uses")
+    if not isinstance(tool_uses, list):
+        return False
+
+    kept_tool_uses: list[JsonValue] = []
+    removed_count = 0
+    for tool_use in tool_uses:
+        if not isinstance(tool_use, dict):
+            kept_tool_uses.append(cast(JsonValue, tool_use))
+            continue
+        recipient_name = tool_use.get("recipient_name")
+        if not isinstance(recipient_name, str) or recipient_name not in _PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES:
+            kept_tool_uses.append(cast(JsonValue, tool_use))
+            continue
+        key = (
+            response_id or "",
+            "parallel_tool_use",
+            recipient_name,
+            None,
+            canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),
+        )
+        if key in seen_tool_call_keys:
+            removed_count += 1
+            continue
+        seen_tool_call_keys[key] = None
+        kept_tool_uses.append(cast(JsonValue, tool_use))
+
+    while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
+        seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))
+
+    if removed_count == 0:
+        return False
+    logger.warning(
+        "Suppressed duplicate downstream parallel tool uses response_id=%s removed=%s",
+        response_id,
+        removed_count,
+    )
+    if not kept_tool_uses:
+        return True
+
+    rewritten_argument = dict(argument)
+    rewritten_argument["tool_uses"] = kept_tool_uses
+    item["arguments"] = json.dumps(rewritten_argument, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return False
 
 

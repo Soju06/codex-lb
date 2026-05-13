@@ -387,6 +387,88 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_r
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_trims_overlapping_parallel_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+                },
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "gh pr checks --repo Soju06/codex-lb"},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
+    replay_arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+                },
+                {
+                    "recipient_name": "github.read_file",
+                    "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_overlap",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": first_arguments,
+            "call_id": "call_first",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_overlap",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": replay_arguments,
+            "call_id": "call_replayed",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_overlap",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_overlap",
+        )
+        is False
+    )
+    replay_item = replay_payload["item"]
+    assert isinstance(replay_item, dict)
+    replay_item_arguments = replay_item["arguments"]
+    assert isinstance(replay_item_arguments, str)
+    rewritten_replay_arguments = json.loads(replay_item_arguments)
+    assert rewritten_replay_arguments["tool_uses"] == [
+        {
+            "recipient_name": "github.read_file",
+            "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+        }
+    ]
+
+
 def test_mark_duplicate_tool_call_downstream_event_keeps_read_only_parallel_wrapper_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     arguments = json.dumps(

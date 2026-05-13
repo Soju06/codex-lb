@@ -106,6 +106,20 @@ def test_responses_preserves_service_tier():
     assert dumped["service_tier"] == "priority"
 
 
+def test_responses_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "default",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
+
+
 def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     payload = {
         "model": "gpt-5.1",
@@ -179,6 +193,20 @@ def test_compact_preserves_ultrafast_service_tier_literal():
     assert request.service_tier == "ultrafast"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "ultrafast"
+
+
+def test_compact_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "default",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
 
 
 def test_openai_prompt_cache_aliases_are_normalized():
@@ -325,6 +353,19 @@ def test_v1_responses_preserves_service_tier():
 
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_v1_responses_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "service_tier": "default",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
 
 
 def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():
@@ -622,11 +663,13 @@ def test_v1_allows_native_tool_surface_with_context_opt_in():
             },
         ],
     }
-    request = V1ResponsesRequest.model_validate(payload, context={"allow_native_tool_types": True}).to_responses_request(
-        allow_native_tool_types=True
-    )
+    request = V1ResponsesRequest.model_validate(
+        payload,
+        context={"allow_native_tool_types": True},
+    ).to_responses_request(allow_native_tool_types=True)
 
     assert request.tools == payload["tools"]
+
 
 def test_v1_compact_messages_convert():
     payload = {

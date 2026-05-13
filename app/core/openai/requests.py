@@ -741,6 +741,9 @@ def _normalize_openai_compatible_aliases(payload: MutableJsonObject) -> None:
 
 def _normalize_service_tier_aliases(payload: MutableJsonObject) -> None:
     service_tier = payload.get("service_tier")
+    if isinstance(service_tier, str) and service_tier.strip().lower() == "default":
+        payload.pop("service_tier", None)
+        return
     normalized = _normalize_service_tier_alias_value(service_tier)
     if isinstance(normalized, str):
         payload["service_tier"] = normalized

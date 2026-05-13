@@ -314,6 +314,29 @@ async def test_backend_responses_normalizes_fast_service_tier_for_upstream(async
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_strips_default_service_tier_for_upstream(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_default_tier", "backend-default-tier@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_backend_default_tier")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Default"}]}],
+        "service_tier": "default",
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert "service_tier" not in seen["payload"]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_preserves_ultrafast_service_tier_literal(async_client, monkeypatch):
     await _import_account(async_client, "acc_backend_ultrafast_tier", "backend-ultrafast-tier@example.com")
 

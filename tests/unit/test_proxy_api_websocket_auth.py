@@ -379,11 +379,12 @@ def test_public_previous_response_not_found_error_is_masked_to_stream_incomplete
         )
     )
 
-    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(
+    masked, was_masked = proxy_api_module._mask_previous_response_not_found_error_envelope(
         envelope,
-        default_status=400,
+        "resp_prev_1",
     )
-
+    status_code = proxy_api_module._status_for_error(masked.error)
+    assert was_masked is True
     assert status_code == 502
     error = masked.model_dump(mode="json")["error"]
     assert error["code"] == "stream_incomplete"
@@ -402,11 +403,13 @@ def test_public_previous_response_invalid_request_param_is_masked_to_stream_inco
         )
     )
 
-    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(
+    masked, was_masked = proxy_api_module._mask_previous_response_not_found_error_envelope(
         envelope,
-        default_status=400,
+        "resp_prev_1",
     )
 
+    status_code = proxy_api_module._status_for_error(masked.error)
+    assert was_masked is True
     assert status_code == 502
     error = masked.model_dump(mode="json")["error"]
     assert error["code"] == "stream_incomplete"
@@ -424,7 +427,10 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(
+        payload,
+        previous_response_id="resp_prev_1",
+    )
 
     assert violation_kind is None
     assert normalized is not None
@@ -476,7 +482,12 @@ def test_stream_startup_error_response_masks_proxy_previous_response_error():
         },
     )
 
-    response = proxy_api_module._stream_startup_error_response(request, error, headers={})
+    response = proxy_api_module._stream_startup_error_response(
+        request,
+        error,
+        headers={},
+        previous_response_id="resp_prev_1",
+    )
 
     assert response.status_code == 502
     response_body = bytes(response.body)
@@ -515,8 +526,10 @@ def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking
     }
 
     parsed = proxy_api_module._parse_error_envelope(payload)
-    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
+    masked, was_masked = proxy_api_module._mask_previous_response_not_found_error_envelope(parsed, "resp_prev_1")
 
+    status_code = proxy_api_module._status_for_error(masked.error)
+    assert was_masked is True
     assert status_code == 502
     error = masked.model_dump(mode="json")["error"]
     assert error["code"] == "stream_incomplete"

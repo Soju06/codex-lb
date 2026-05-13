@@ -60,8 +60,11 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
         async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks("data: {not-json}\n\n"))
     ]
 
-    assert len(blocks) == 1
-    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert len(blocks) == 2
+    created_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert created_payload is not None
+    assert created_payload["type"] == "response.created"
+    payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.failed"
     response = payload["response"]
@@ -223,6 +226,73 @@ async def test_normalize_public_responses_stream_does_not_duplicate_existing_del
         "response.output_item.done",
         "response.completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_previous_response_error_event() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"error","error":{"type":"invalid_request_error",'
+                    '"code":"previous_response_not_found","param":"previous_response_id",'
+                    '"message":"Previous response not found"}}\n\n'
+                )
+            ),
+            previous_response_id="resp_prev_1",
+        )
+    ]
+
+    assert len(blocks) == 2
+    created_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert created_payload is not None
+    assert created_payload["type"] == "response.created"
+    payload = proxy_api_module._parse_sse_payload(blocks[1])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = payload["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_previous_response_failed_event() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.failed","response":{"id":"resp_current",'
+                    '"status":"failed","error":{"type":"invalid_request_error",'
+                    '"code":"previous_response_not_found","param":"previous_response_id",'
+                    '"message":"Previous response not found"}}}\n\n'
+                )
+            ),
+            previous_response_id="resp_prev_1",
+        )
+    ]
+
+    assert len(blocks) == 2
+    created_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert created_payload is not None
+    assert created_payload["type"] == "response.created"
+    created_response = created_payload["response"]
+    assert isinstance(created_response, dict)
+    assert created_response["id"] == "resp_current"
+    payload = proxy_api_module._parse_sse_payload(blocks[1])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = payload["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == "resp_current"
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in blocks[1]
 
 
 @pytest.mark.asyncio

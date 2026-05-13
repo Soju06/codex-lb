@@ -434,6 +434,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "jumski",
+      "name": "Wojtek Majewski",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9126?v=4",
+      "profile": "https://pgflow.dev",
+      "contributions": [
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

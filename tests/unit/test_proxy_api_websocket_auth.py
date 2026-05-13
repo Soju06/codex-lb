@@ -523,7 +523,7 @@ def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking
     assert "resp_missing" not in masked.model_dump_json()
 
 
-def test_public_missing_tool_output_error_is_parsed_for_masking():
+def test_public_missing_tool_output_input_error_preserves_client_status():
     payload = {
         "type": "error",
         "status": 400,
@@ -538,7 +538,8 @@ def test_public_missing_tool_output_error_is_parsed_for_masking():
     parsed = proxy_api_module._parse_error_envelope(payload)
     status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
 
-    assert status_code == 502
+    assert status_code == 400
     error = masked.model_dump(mode="json")["error"]
-    assert error["code"] == "stream_incomplete"
-    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in masked.model_dump_json()
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" in masked.model_dump_json()

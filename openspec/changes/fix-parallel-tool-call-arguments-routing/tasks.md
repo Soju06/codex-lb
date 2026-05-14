@@ -1,0 +1,6 @@
+- [x] Add `output_index_map` field and `index_for_output_index`, `register_alias`, `register_output_index` helpers to `ToolCallIndex`, keeping the existing `index_for` signature for legacy callers.
+- [x] Route `response.function_call_arguments.delta` / `.done` events through `index_for_output_index` using `output_index` as the primary routing key and falling back to `call_id` / `item_id` when present.
+- [x] On `output_item.added` / `.done`, register `item.id` as an alias to the same slot as the resolved `call_id`-keyed index when both are observed.
+- [x] Guard the public `tool_calls[].id` / `call_id` surfaces so the internal `fc_...` item id never replaces the upstream `call_...` value.
+- [x] Add regression tests covering parallel tool-call routing for both `collect_chat_completion` and `stream_chat_chunks` using realistic `output_item` + `function_call_arguments` event sequences (call_id-only, item_id-only, and out-of-order variants).
+- [x] Document the parallel tool-call routing requirement (output_index primary, item_id alias, no fc_ leakage) in the Responses compatibility spec.

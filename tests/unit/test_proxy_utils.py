@@ -14,6 +14,7 @@ import pytest
 from aiohttp.client_reqrep import RequestInfo
 from fastapi import WebSocket
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
@@ -444,6 +445,83 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
     assert headers["User-Agent"] == "codex-test"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_returns_before_first_upstream_event(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(10.0)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_slow","status":"completed"}}\n\n'
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await asyncio.wait_for(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, context),
+            api_key=None,
+        ),
+        timeout=0.2,
+    )
+
+    assert isinstance(response, StreamingResponse)
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.1)
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+        )
+        yield ""
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    assert response.headers["X-RateLimit-Limit"] == "1"
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "response.failed" in body
+    assert "rate_limit_exceeded" in body
 
 
 def test_has_native_codex_transport_headers_requires_allowlisted_originator():
@@ -7822,6 +7900,19 @@ def test_remember_websocket_previous_response_owner_eviction_keeps_latest_entrie
 
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch):
+    """A precreated retry-safe full-resend turn (with both
+    ``fresh_upstream_request_is_retry_safe=True`` and
+    ``fresh_upstream_request_text`` populated by the request-prep path) must
+    be transparently retried on a fresh upstream when upstream returns
+    ``previous_response_not_found``. The retry strips the stale
+    ``previous_response_id`` and replays the prepared fresh text.
+
+    This is the inverse of
+    ``test_process_upstream_websocket_text_short_previous_response_not_found_fails_closed``
+    below: when the request prep path has classified the turn as retry-safe,
+    the masking path must replay rather than fail closed.
+    """
+
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -7838,6 +7929,8 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         "previous_response_id": "resp_anchor",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
     }
+    fresh_request_payload = dict(request_payload)
+    fresh_request_payload.pop("previous_response_id")
     pending_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_not_found_retry",
         model="gpt-5.1",
@@ -7848,6 +7941,8 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
         previous_response_id="resp_anchor",
+        fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -7863,7 +7958,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     }
     upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
 
-    downstream_text = await service._process_upstream_websocket_text(
+    await service._process_upstream_websocket_text(
         upstream_text,
         account=account,
         account_id_value=account.id,
@@ -7874,14 +7969,17 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         response_create_gate=asyncio.Semaphore(1),
     )
 
-    assert '"code":"stream_incomplete"' in downstream_text
-    finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
     assert upstream_control.reconnect_requested is True
     assert upstream_control.suppress_downstream_event is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1
-    assert list(pending_requests) == []
+    # The retry must strip the stale ``previous_response_id`` and use the
+    # prepared retry-safe text instead of the original anchored payload.
+    assert pending_request.previous_response_id is None
+    assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
+    # Retry-safety flag is consumed (set back to False) so we don't loop.
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
 
 
 @pytest.mark.asyncio

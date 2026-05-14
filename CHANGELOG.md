@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.17.0](https://github.com/Soju06/codex-lb/compare/v1.16.0...v1.17.0) (2026-05-12)
+
+
+### Features
+
+* **dash:** sort the pie in decending order for better graphing. ([#580](https://github.com/Soju06/codex-lb/issues/580)) ([3a60855](https://github.com/Soju06/codex-lb/commit/3a60855f31d86c28e5a0ab7990cead61da4f0e52))
+
+
+### Bug Fixes
+
+* **accounts:** recover quota status from usage refresh ([#559](https://github.com/Soju06/codex-lb/issues/559)) ([ee747d3](https://github.com/Soju06/codex-lb/commit/ee747d373b50386461ed41ec6dc463cb14912a57))
+* **chat:** resolve parallel tool_call argument duplication via output_index routing ([#543](https://github.com/Soju06/codex-lb/issues/543)) ([6b1cb47](https://github.com/Soju06/codex-lb/commit/6b1cb47e3e39a9825b25282b0f8ec2911743786a))
+* **proxy:** emit text deltas for final response output ([#504](https://github.com/Soju06/codex-lb/issues/504)) ([b9c2474](https://github.com/Soju06/codex-lb/commit/b9c24748eb983a002c007fe5fbd8dbfc48135efa))
+* **proxy:** expose drain status for graceful deploys ([#564](https://github.com/Soju06/codex-lb/issues/564)) ([a2fca41](https://github.com/Soju06/codex-lb/commit/a2fca41791bd62862a439b7562b7b69deefa615d))
+* **proxy:** handle model fetch timeouts ([#541](https://github.com/Soju06/codex-lb/issues/541)) ([d4520d7](https://github.com/Soju06/codex-lb/commit/d4520d7ad7d15d3676b1ba46a91be149f7fe2854))
+* **proxy:** inject SSE keepalive comment frames to prevent client stream hangs [Codex getting stuck issue] ([#524](https://github.com/Soju06/codex-lb/issues/524)) ([66302c3](https://github.com/Soju06/codex-lb/commit/66302c3efe026813fb4bd48c5754fc3b7926dfbd))
+* **proxy:** narrow budget-safe gate to primary usage ([#561](https://github.com/Soju06/codex-lb/issues/561)) ([3ed7834](https://github.com/Soju06/codex-lb/commit/3ed78347e462c99f9b6950534b395e4850ae6e1b))
+* **proxy:** preserve websocket stream error statuses ([#585](https://github.com/Soju06/codex-lb/issues/585)) ([8530f89](https://github.com/Soju06/codex-lb/commit/8530f89374e9c648f5fb91deaa9adaf244c3535c))
+* there is no primary quota for free account, which cause the pie chart wrong on 5h ([#579](https://github.com/Soju06/codex-lb/issues/579)) ([97b1de4](https://github.com/Soju06/codex-lb/commit/97b1de44e437bc9ed7a5405ffc42474d18ac71bb))
+* **upstream:** drop top_p because majority of gpt-5 don't support it, same as temperature ([#538](https://github.com/Soju06/codex-lb/issues/538)) ([c7cc61e](https://github.com/Soju06/codex-lb/commit/c7cc61e4a88467517912c901e483f09d0130e1bb))
+
+
+### Documentation
+
+* add e1ektr0 as a contributor for code, and test ([#581](https://github.com/Soju06/codex-lb/issues/581)) ([26372cc](https://github.com/Soju06/codex-lb/commit/26372cc273a45c07b84234799ae0da147e71c683))
+
 ## [1.16.0](https://github.com/Soju06/codex-lb/compare/v1.15.0...v1.16.0) (2026-05-10)
 
 

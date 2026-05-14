@@ -422,7 +422,8 @@
       "contributions": [
         "code",
         "doc",
-        "test"
+        "test",
+        "bug"
       ]
     },
     {
@@ -433,6 +434,16 @@
       "contributions": [
         "code",
         "test"
+      ]
+    },
+    {
+      "login": "JeffKandt",
+      "name": "JeffKandt",
+      "avatar_url": "https://avatars.githubusercontent.com/u/31992445?v=4",
+      "profile": "https://github.com/JeffKandt",
+      "contributions": [
+        "test",
+        "review"
       ]
     }
   ],

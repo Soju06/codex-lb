@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.17.0](https://github.com/CINEV/codex-lb-cinamon/compare/v1.16.0...v1.17.0) (2026-05-14)
+
+
+### Features
+
+* **proxy:** alert on platform cache misses ([9263d2e](https://github.com/CINEV/codex-lb-cinamon/commit/9263d2ed42cf19efcd145d271f1b79367d1aa40a))
+
+
+### Bug Fixes
+
+* **chat:** resolve parallel tool_call argument duplication via output_index routing ([#543](https://github.com/CINEV/codex-lb-cinamon/issues/543)) ([6b1cb47](https://github.com/CINEV/codex-lb-cinamon/commit/6b1cb47e3e39a9825b25282b0f8ec2911743786a))
+* **proxy:** preserve platform fallback cache affinity ([118bbcc](https://github.com/CINEV/codex-lb-cinamon/commit/118bbcc0942552ba30a3b1c51d3f92dc0caf960a))
+* **proxy:** preserve platform fallback cache affinity ([d7df03e](https://github.com/CINEV/codex-lb-cinamon/commit/d7df03e1f8e3c43c8fc875365ca9d398b668b191))
+* **proxy:** preserve websocket stream error statuses ([#585](https://github.com/CINEV/codex-lb-cinamon/issues/585)) ([8530f89](https://github.com/CINEV/codex-lb-cinamon/commit/8530f89374e9c648f5fb91deaa9adaf244c3535c))
+
 ## [1.16.0](https://github.com/CINEV/codex-lb-cinamon/compare/v1.15.2...v1.16.0) (2026-05-12)
 
 

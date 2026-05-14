@@ -298,6 +298,9 @@ class _AffinityPolicy:
     reallocate_sticky: bool = False
     max_age_seconds: int | None = None
     budget_reallocation_enabled: bool = True
+    platform_key: str | None = None
+    platform_kind: StickySessionKind | None = None
+    platform_max_age_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,7 +574,12 @@ class ProxyService:
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
+        platform_sticky_key: str | None = None,
+        platform_sticky_kind: StickySessionKind | None = None,
+        platform_sticky_max_age_seconds: int | None = None,
     ) -> tuple[str | None, StickySessionKind | None, bool, int | None]:
+        if platform_sticky_key and platform_sticky_kind == StickySessionKind.PROMPT_CACHE:
+            return platform_sticky_key, platform_sticky_kind, False, platform_sticky_max_age_seconds
         if sticky_key and sticky_kind == StickySessionKind.PROMPT_CACHE:
             return sticky_key, sticky_kind, reallocate_sticky, sticky_max_age_seconds
         return None, None, False, None
@@ -585,6 +593,9 @@ class ProxyService:
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
+        platform_sticky_key: str | None = None,
+        platform_sticky_kind: StickySessionKind | None = None,
+        platform_sticky_max_age_seconds: int | None = None,
     ) -> ProviderSelectionResult:
         scoped_account_ids = (
             api_key.assigned_account_ids if api_key is not None and api_key.account_assignment_scope_enabled else None
@@ -728,8 +739,60 @@ class ProxyService:
             )
             return self._provider_selection_failure(decision, capabilities)
 
+        (
+            selection_platform_sticky_key,
+            selection_platform_sticky_kind,
+            selection_platform_reallocate_sticky,
+            selection_platform_sticky_max_age_seconds,
+        ) = self._platform_affinity_for_selection(
+            sticky_key=sticky_key,
+            sticky_kind=sticky_kind,
+            reallocate_sticky=reallocate_sticky,
+            sticky_max_age_seconds=sticky_max_age_seconds,
+            platform_sticky_key=platform_sticky_key,
+            platform_sticky_kind=platform_sticky_kind,
+            platform_sticky_max_age_seconds=platform_sticky_max_age_seconds,
+        )
         identity = await self.select_platform_identity(capabilities.route_family)
         if has_compatible_chatgpt:
+            platform_sticky_identity = await self._select_platform_prompt_cache_identity(
+                capabilities.route_family,
+                sticky_key=selection_platform_sticky_key,
+                sticky_kind=selection_platform_sticky_kind,
+                sticky_max_age_seconds=selection_platform_sticky_max_age_seconds,
+            )
+            if platform_sticky_identity is not None:
+                decision = platform_adapter.check_capabilities(
+                    self._platform_provider_subject(platform_sticky_identity),
+                    capabilities,
+                )
+                if decision.allowed:
+                    if get_settings().log_proxy_request_shape:
+                        logger.warning(
+                            "proxy_request_shape_provider_affinity request_id=%s route_family=%s "
+                            "affinity_decision_reason=platform_prompt_cache_hit sticky_kind=%s",
+                            get_request_id(),
+                            capabilities.route_family,
+                            selection_platform_sticky_kind.value
+                            if selection_platform_sticky_kind is not None
+                            else None,
+                        )
+                    logger.info(
+                        "Reusing Platform prompt-cache affinity request_id=%s route_family=%s sticky_kind=%s",
+                        get_request_id(),
+                        capabilities.route_family,
+                        selection_platform_sticky_kind.value
+                        if selection_platform_sticky_kind is not None
+                        else None,
+                    )
+                    return ProviderSelectionResult(
+                        selected=SelectedPlatformSubject(
+                            provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                            route_class=capabilities.route_class,
+                            routing_subject_id=platform_sticky_identity.id,
+                            identity=platform_sticky_identity,
+                        )
+                    )
             should_fallback = await self.should_fallback_to_platform_for_usage_drain(
                 model=capabilities.model,
                 additional_limit_name=additional_limit_name,
@@ -782,23 +845,12 @@ class ProxyService:
                         )
             if should_fallback:
                 if identity is not None:
-                    (
-                        platform_sticky_key,
-                        platform_sticky_kind,
-                        platform_reallocate_sticky,
-                        platform_sticky_max_age_seconds,
-                    ) = self._platform_affinity_for_selection(
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        reallocate_sticky=reallocate_sticky,
-                        sticky_max_age_seconds=sticky_max_age_seconds,
-                    )
                     identity = await self.select_platform_identity(
                         capabilities.route_family,
-                        sticky_key=platform_sticky_key,
-                        sticky_kind=platform_sticky_kind,
-                        reallocate_sticky=platform_reallocate_sticky,
-                        sticky_max_age_seconds=platform_sticky_max_age_seconds,
+                        sticky_key=selection_platform_sticky_key,
+                        sticky_kind=selection_platform_sticky_kind,
+                        reallocate_sticky=selection_platform_reallocate_sticky,
+                        sticky_max_age_seconds=selection_platform_sticky_max_age_seconds,
                     )
                 if identity is not None:
                     decision = platform_adapter.check_capabilities(
@@ -822,6 +874,15 @@ class ProxyService:
                 )
             )
         if identity is not None and has_active_chatgpt:
+            platform_identity = await self.select_platform_identity(
+                capabilities.route_family,
+                sticky_key=selection_platform_sticky_key,
+                sticky_kind=selection_platform_sticky_kind,
+                reallocate_sticky=selection_platform_reallocate_sticky,
+                sticky_max_age_seconds=selection_platform_sticky_max_age_seconds,
+            )
+            if platform_identity is not None:
+                identity = platform_identity
             decision = platform_adapter.check_capabilities(
                 self._platform_provider_subject(identity),
                 capabilities,
@@ -884,6 +945,54 @@ class ProxyService:
             identity = await platform_identities.get_by_id(selection.routing_subject_id)
             if identity is None:
                 return None
+            return _SelectedPlatformIdentity(
+                id=identity.id,
+                api_key_encrypted=identity.api_key_encrypted,
+                organization_id=identity.organization_id,
+                project_id=identity.project_id,
+            )
+
+    async def _select_platform_prompt_cache_identity(
+        self,
+        route_family: str,
+        *,
+        sticky_key: str | None,
+        sticky_kind: StickySessionKind | None,
+        sticky_max_age_seconds: int | None,
+    ) -> _SelectedPlatformIdentity | None:
+        if not sticky_key or sticky_kind != StickySessionKind.PROMPT_CACHE:
+            return None
+        async with self._repo_factory() as repos:
+            platform_identities = repos.platform_identities
+            if platform_identities is None:
+                return None
+            sticky_target = await repos.sticky_sessions.get_target(
+                sticky_key,
+                kind=sticky_kind,
+                provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                max_age_seconds=sticky_max_age_seconds,
+            )
+            if sticky_target is None:
+                return None
+            identities = await platform_identities.list_eligible_identities(route_family)  # type: ignore[arg-type]
+            identity = next(
+                (candidate for candidate in identities if candidate.id == sticky_target.routing_subject_id),
+                None,
+            )
+            if identity is None:
+                await repos.sticky_sessions.delete_scoped(
+                    sticky_key,
+                    kind=sticky_kind,
+                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                )
+                return None
+            if sticky_max_age_seconds is not None:
+                await repos.sticky_sessions.upsert_target(
+                    sticky_key,
+                    kind=sticky_kind,
+                    provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+                    routing_subject_id=identity.id,
+                )
             return _SelectedPlatformIdentity(
                 id=identity.id,
                 api_key_encrypted=identity.api_key_encrypted,
@@ -1224,6 +1333,7 @@ class ProxyService:
         upstream_request_id: str | None = None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
         latency_ms: int = 0,
+        session_id: str | None = None,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -1240,6 +1350,7 @@ class ProxyService:
             rejection_reason=rejection_reason,
             upstream_request_id=upstream_request_id,
             transport=transport,
+            session_id=session_id,
         )
 
     async def _record_platform_auth_failure(self, identity_id: str, exc: OpenAIPlatformError) -> None:
@@ -2524,6 +2635,9 @@ class ProxyService:
                     sticky_kind=affinity.kind,
                     reallocate_sticky=affinity.reallocate_sticky,
                     sticky_max_age_seconds=affinity.max_age_seconds,
+                    platform_sticky_key=affinity.platform_key,
+                    platform_sticky_kind=affinity.platform_kind,
+                    platform_sticky_max_age_seconds=affinity.platform_max_age_seconds,
                 )
                 current_identity = selected_subject.identity
                 excluded_identity_ids: set[str] = set()
@@ -11510,12 +11624,18 @@ def _sticky_key_for_responses_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    platform_key = cache_key if openai_cache_affinity and cache_key else None
+    platform_kind = StickySessionKind.PROMPT_CACHE if platform_key else None
+    platform_max_age_seconds = openai_cache_affinity_max_age_seconds if platform_key else None
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         return _AffinityPolicy(
             key=turn_state_key,
             kind=StickySessionKind.CODEX_SESSION,
             budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
+            platform_key=platform_key,
+            platform_kind=platform_kind,
+            platform_max_age_seconds=platform_max_age_seconds,
         )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
@@ -11524,18 +11644,27 @@ def _sticky_key_for_responses_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
                 budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
+                platform_key=platform_key,
+                platform_kind=platform_kind,
+                platform_max_age_seconds=platform_max_age_seconds,
             )
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            platform_key=platform_key,
+            platform_kind=platform_kind,
+            platform_max_age_seconds=platform_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            platform_key=platform_key,
+            platform_kind=platform_kind,
+            platform_max_age_seconds=platform_max_age_seconds,
         )
     return _AffinityPolicy()
 
@@ -12159,6 +12288,9 @@ def _sticky_key_for_compact_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    platform_key = cache_key if openai_cache_affinity and cache_key else None
+    platform_kind = StickySessionKind.PROMPT_CACHE if platform_key else None
+    platform_max_age_seconds = openai_cache_affinity_max_age_seconds if platform_key else None
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -12166,18 +12298,27 @@ def _sticky_key_for_compact_request(
                 key=session_key,
                 kind=StickySessionKind.CODEX_SESSION,
                 budget_reallocation_enabled=codex_session_budget_reallocation_enabled,
+                platform_key=platform_key,
+                platform_kind=platform_kind,
+                platform_max_age_seconds=platform_max_age_seconds,
             )
     if openai_cache_affinity:
         return _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            platform_key=platform_key,
+            platform_kind=platform_kind,
+            platform_max_age_seconds=platform_max_age_seconds,
         )
     if sticky_threads_enabled:
         return _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            platform_key=platform_key,
+            platform_kind=platform_kind,
+            platform_max_age_seconds=platform_max_age_seconds,
         )
     return _AffinityPolicy()
 

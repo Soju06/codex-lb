@@ -466,6 +466,69 @@ async def test_select_routing_subject_keeps_platform_fallback_for_prompt_cache_a
 
 
 @pytest.mark.asyncio
+async def test_select_routing_subject_reuses_platform_prompt_cache_affinity_when_chatgpt_recovers(
+    monkeypatch,
+) -> None:
+    sticky_repo = DummyStickyRepository(
+        StickyRoutingTarget(
+            provider_kind=OPENAI_PLATFORM_PROVIDER_KIND,
+            routing_subject_id="plat_2",
+            account_id=None,
+        )
+    )
+    service = proxy_service_module.ProxyService(
+        lambda: _repo_factory(
+            identities=[_platform_identity("plat_1"), _platform_identity("plat_2")],
+            sticky_repo=sticky_repo,
+        )
+    )
+    fallback_probe_calls = 0
+
+    async def fake_has_chatgpt_candidates(model: str | None = None, *, account_ids=None) -> bool:
+        del model, account_ids
+        return True
+
+    async def fake_should_fallback(*, model: str | None, account_ids=None) -> bool:
+        nonlocal fallback_probe_calls
+        fallback_probe_calls += 1
+        del model, account_ids
+        return False
+
+    monkeypatch.setattr(service, "has_chatgpt_candidates", fake_has_chatgpt_candidates)
+    monkeypatch.setattr(
+        service,
+        "has_compatible_chatgpt_candidates",
+        _adapt_compatible_candidate_checker(fake_has_chatgpt_candidates),
+    )
+    monkeypatch.setattr(
+        service,
+        "should_fallback_to_platform_for_usage_drain",
+        _adapt_should_fallback(fake_should_fallback),
+    )
+
+    result = await service.select_routing_subject(
+        capabilities=proxy_service_module.RequestCapabilities(
+            route_family=PUBLIC_RESPONSES_HTTP_ROUTE_FAMILY,
+            route_class=OPENAI_PUBLIC_HTTP_ROUTE_CLASS,
+            transport="http",
+            model="gpt-5.1",
+        ),
+        sticky_key="cache-key",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_max_age_seconds=300,
+    )
+
+    assert result.is_platform is True
+    selected = result.selected
+    assert isinstance(selected, proxy_service_module.SelectedPlatformSubject)
+    assert selected.routing_subject_id == "plat_2"
+    assert fallback_probe_calls == 0
+    assert sticky_repo.upsert_calls == [
+        ("cache-key", StickySessionKind.PROMPT_CACHE, OPENAI_PLATFORM_PROVIDER_KIND, "plat_2")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_select_routing_subject_keeps_chatgpt_for_hard_session_affinity_when_sticky_target_is_healthy(
     monkeypatch,
 ) -> None:
@@ -750,6 +813,78 @@ async def test_select_routing_subject_uses_platform_for_backend_codex_continuity
         "sticky_kind": None,
         "reallocate_sticky": False,
         "sticky_max_age_seconds": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_select_routing_subject_forwards_platform_prompt_cache_affinity_for_backend_codex_session(
+    monkeypatch,
+) -> None:
+    service = proxy_service_module.ProxyService(lambda: _repo_factory())
+    identity = proxy_service_module._SelectedPlatformIdentity(
+        id="plat_1",
+        api_key_encrypted=TokenEncryptor().encrypt("sk-platform"),
+        organization_id="org_test",
+        project_id="proj_test",
+    )
+    platform_selection_kwargs: dict[str, object] = {}
+
+    async def fake_has_chatgpt_candidates(model: str | None = None, *, account_ids=None) -> bool:
+        del model, account_ids
+        return True
+
+    async def fake_should_fallback(*, model: str | None, account_ids=None) -> bool:
+        del model, account_ids
+        return True
+
+    async def fake_select_platform_identity(route_family: str, **kwargs):
+        del route_family
+        platform_selection_kwargs.update(kwargs)
+        return identity
+
+    async def fake_sticky_chatgpt_healthy(**kwargs) -> bool:
+        del kwargs
+        return False
+
+    monkeypatch.setattr(service, "has_chatgpt_candidates", fake_has_chatgpt_candidates)
+    monkeypatch.setattr(
+        service,
+        "has_compatible_chatgpt_candidates",
+        _adapt_compatible_candidate_checker(fake_has_chatgpt_candidates),
+    )
+    monkeypatch.setattr(
+        service,
+        "should_fallback_to_platform_for_usage_drain",
+        _adapt_should_fallback(fake_should_fallback),
+    )
+    monkeypatch.setattr(service, "select_platform_identity", fake_select_platform_identity)
+    monkeypatch.setattr(
+        service,
+        "sticky_chatgpt_target_is_healthy_for_platform_fallback",
+        fake_sticky_chatgpt_healthy,
+    )
+
+    result = await service.select_routing_subject(
+        capabilities=proxy_service_module.RequestCapabilities(
+            route_family=BACKEND_CODEX_HTTP_ROUTE_FAMILY,
+            route_class=CHATGPT_PRIVATE_ROUTE_CLASS,
+            transport="http",
+            model="gpt-5.1",
+        ),
+        sticky_key="session-1",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        platform_sticky_key="cache-key",
+        platform_sticky_kind=StickySessionKind.PROMPT_CACHE,
+        platform_sticky_max_age_seconds=300,
+    )
+
+    assert result.is_platform is True
+    assert platform_selection_kwargs == {
+        "sticky_key": "cache-key",
+        "sticky_kind": StickySessionKind.PROMPT_CACHE,
+        "reallocate_sticky": False,
+        "sticky_max_age_seconds": 300,
     }
 
 

@@ -3,10 +3,10 @@ import type { DashboardStat } from "@/features/dashboard/utils";
 import { cn } from "@/lib/utils";
 
 const ACCENT_STYLES = [
-  "bg-blue-500/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400",
-  "bg-violet-500/10 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400",
-  "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400",
-  "bg-amber-500/10 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
 ];
 
 export type StatsGridProps = {

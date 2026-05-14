@@ -24,10 +24,29 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 - **WHEN** a client sends `gpt-image-1.5`, `gpt-image-1`, or `gpt-image-1-mini` with `size` outside `{1024x1024, 1536x1024, 1024x1536, auto}`
 - **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: size`
 
-#### Scenario: Multi-image requests are rejected until upstream support arrives
+#### Scenario: Non-streaming multi-image generation fans out internally
 
-- **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` with `n > 1`
-- **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: n`, with a message that explains the upstream `image_generation` tool does not yet support multi-image responses. Operators may raise the cap by overriding `images_max_n`.
+- **WHEN** a client sends non-streaming `POST /v1/images/generations` with `n > 1` and `n <= images_max_n`
+- **THEN** the service performs `n` internal Responses requests using the `image_generation` tool
+- **AND** returns 200 with a JSON body of shape `{created, data: [{b64_json, revised_prompt}], usage}` containing exactly `n` entries
+- **AND** the `data` entries preserve the deterministic fan-out order
+
+#### Scenario: Non-streaming multi-image edits fan out internally
+
+- **WHEN** a client sends non-streaming `POST /v1/images/edits` with `n > 1` and `n <= images_max_n`
+- **THEN** the service performs `n` internal Responses requests using the same uploaded image and mask inputs for each fan-out attempt
+- **AND** returns 200 with a JSON body of shape `{created, data: [{b64_json, revised_prompt}], usage}` containing exactly `n` entries
+- **AND** the `data` entries preserve the deterministic fan-out order
+
+#### Scenario: Multi-image requests above the configured cap are rejected
+
+- **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` with `n > images_max_n`
+- **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: n`, with a message that references the configured cap
+
+#### Scenario: Streaming multi-image requests remain unsupported until streaming fan-out is specified
+
+- **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` with `stream=true` and `n > 1`
+- **THEN** the service returns 400 with OpenAI `invalid_request_error` and `param: n`, with a message that explains streaming multi-image fan-out is not yet supported
 
 #### Scenario: Missing model defaults to images_default_model
 
@@ -50,7 +69,7 @@ The system SHALL expose `POST /v1/images/edits` and accept the OpenAI Images Edi
 
 ### Requirement: Image generation is implemented as a Responses tool adapter
 
-The system SHALL implement `/v1/images/generations` and `/v1/images/edits` by issuing an internal `/v1/responses` request whose `tools` array includes `{"type": "image_generation", ...}` and whose `input` is constructed to deterministically force a single `image_generation` tool call. The system MUST route that internal request through the existing proxy account-selection, sticky session, retry, and authentication pipeline. The system MUST NOT introduce a new `chatgpt-token → openai-api-key` token-exchange path solely to support these endpoints.
+The system SHALL implement `/v1/images/generations` and `/v1/images/edits` by issuing internal `/v1/responses` request(s) whose `tools` array includes `{"type": "image_generation", ...}` and whose `input` is constructed to deterministically force a single `image_generation` tool call per internal request. For non-streaming requests with `n > 1`, the system MUST fan out into one internal Responses request per requested image because the upstream `image_generation` tool accepts only one image per call. The system MUST route every internal request through the existing proxy account-selection, sticky session, retry, and authentication pipeline. The system MUST NOT introduce a new `chatgpt-token → openai-api-key` token-exchange path solely to support these endpoints.
 
 #### Scenario: Internal Responses call uses existing routing
 
@@ -61,6 +80,12 @@ The system SHALL implement `/v1/images/generations` and `/v1/images/edits` by is
 
 - **WHEN** an edit request includes `image` and optional `mask` multipart parts
 - **THEN** each binary part is encoded as a `data:` URL and inserted as `input_image` content in the internal Responses input
+
+#### Scenario: Fan-out failure returns one public error envelope
+
+- **WHEN** any internal Responses request in a non-streaming multi-image fan-out fails before producing a valid image result
+- **THEN** the public `/v1/images/*` request fails as a single OpenAI error envelope
+- **AND** the service does not return a partial-success image list
 
 ### Requirement: Image generation streaming uses canonical OpenAI Images events
 
@@ -83,7 +108,7 @@ When a client requests `stream=true` on `/v1/images/generations` or `/v1/images/
 
 ### Requirement: Image routes participate in usage accounting and policy
 
-The system SHALL apply API-key allowed-model policy and model-scoped usage limits to `/v1/images/*` using the publicly-requested `gpt-image-*` value as the effective model. The system SHALL record the publicly-requested `gpt-image-*` value (not the internal host model) in the request log's `model` column once the upstream response id becomes known.
+The system SHALL apply API-key allowed-model policy and model-scoped usage limits to `/v1/images/*` using the publicly-requested `gpt-image-*` value as the effective model. The system SHALL record the publicly-requested `gpt-image-*` value (not the internal host model) in request-log rows once upstream response ids become known. For non-streaming multi-image fan-out, the system SHALL aggregate image usage from all successful internal Responses calls into the single public response's `usage` block and SHALL finalize API-key usage against the same public `gpt-image-*` model.
 
 #### Scenario: API key allowed-model policy blocks gpt-image-2
 
@@ -93,4 +118,9 @@ The system SHALL apply API-key allowed-model policy and model-scoped usage limit
 #### Scenario: Request log surfaces the publicly requested image model
 
 - **WHEN** an `/v1/images/*` request completes successfully against an internal host Responses model (for example `gpt-5.5`)
-- **THEN** the resulting `request_logs` row has `model` equal to the publicly requested value (for example `gpt-image-2`) so dashboards and usage views surface the user-visible model rather than the internal host model
+- **THEN** every resulting `request_logs` row has `model` equal to the publicly requested value (for example `gpt-image-2`) so dashboards and usage views surface the user-visible model rather than the internal host model
+
+#### Scenario: Fan-out usage is aggregated in the public response
+
+- **WHEN** a non-streaming `/v1/images/*` request fans out into multiple internal Responses calls
+- **THEN** the public response `usage` block sums `input_tokens`, `output_tokens`, `total_tokens`, and token-detail fields across all successful internal calls

@@ -8,6 +8,7 @@
   - [x] 1.3.1 `gpt-image-2`: quality, size constraints, reject `input_fidelity`, reject `background=transparent`.
   - [x] 1.3.2 `gpt-image-1.5` / `gpt-image-1` / `gpt-image-1-mini`: fixed sizes; `input_fidelity` only on edits.
   - [x] 1.3.3 Non-`gpt-image-*` model rejected with `invalid_request_error` / `param: model`.
+  - [ ] 1.3.4 Relax non-streaming `n > 1` validation up to `images_max_n` while keeping `stream=true && n > 1` rejected until streaming fan-out is specified.
 
 ## 2. API Routes
 
@@ -24,6 +25,7 @@
 - [x] 3.4 Non-streaming responses: drain the upstream stream via `collect_responses_stream_for_images`, then `images_response_from_responses` extracts `image_generation_call` items and `tool_usage.image_gen`.
 - [x] 3.5 Streaming responses: `translate_responses_stream_to_images_stream` maps upstream events per §6.
 - [x] 3.6 Upstream errors / `image_generation_call.status == "failed"` map to OpenAI error envelopes (`content_policy_violation` / `image_generation_failed` / `rate_limit_exceeded` / `server_error`).
+- [ ] 3.7 Add non-streaming fan-out orchestration for `/v1/images/generations` and `/v1/images/edits`: one internal Responses request per requested image, deterministic output ordering, and single public error envelope on the first failed internal call.
 
 ## 4. Usage and Limits
 
@@ -31,6 +33,7 @@
 - [x] 4.2 `tool_usage.image_gen.input_tokens` and `output_tokens` are surfaced verbatim on the public `usage` block. No size×quality fallback estimate is implemented (and it isn't required: upstream consistently emits the block).
 - [x] 4.3 `validate_model_access` runs against the public `gpt-image-*` value before the host-model swap, so API-key allowed-models policy works correctly.
 - [ ] 4.4 Surface image usage in `/v1/usage` and the dashboard usage views — not required as a separate code path because usage already groups by `model`. Dashboard model breakdown will display `gpt-image-2` automatically.
+- [ ] 4.5 Aggregate `tool_usage.image_gen` token counts across non-streaming fan-out calls and finalize API-key usage once against the public `gpt-image-*` model.
 
 ## 5. Configuration and Observability
 
@@ -52,6 +55,8 @@
 - [x] 7.3 `tests/unit/test_images_translation.py::TestTranslateResponsesStreamToImagesStream` (success, multi-partial, failed, truncated, error event passthrough) plus integration streaming test.
 - [x] 7.4 `tests/unit/test_images_schemas.py` covers the validation matrix with rejection assertions.
 - [x] 7.5 `tests/integration/test_proxy_images.py` exercises the route end-to-end with a fake upstream Responses stream (mirrors the existing `core_stream_responses` monkeypatch pattern). Live-account marker not added — follow the same opt-in pattern as `tests/integration/test_proxy_responses.py` if/when the team wants a full live-call assertion.
+- [ ] 7.6 Add schema tests for `n > images_max_n`, non-streaming `n > 1`, and streaming `n > 1` rejection.
+- [ ] 7.7 Add unit/integration tests proving non-streaming generation/edit fan-out preserves order, aggregates usage, rewrites request-log models for all internal calls, and fails as one public error envelope on internal-call failure.
 
 ## 8. Verification
 
@@ -59,3 +64,4 @@
 - [x] 8.2 `ruff check app tests` — clean.
 - [ ] 8.3 `openspec validate --strict --specs` — CLI not available in the workspace; deferred.
 - [ ] 8.4 Empirical dev-container hit — pending (the dev container requires an API key the worker did not have access to). The mocked integration stream matches the empirical event sequence the parent agent verified.
+- [ ] 8.5 Fan-out verification: `uv run pytest tests/unit/test_images_schemas.py tests/unit/test_images_translation.py tests/integration/test_proxy_images.py -q`.

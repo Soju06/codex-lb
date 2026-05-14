@@ -16,6 +16,7 @@ import pytest
 from aiohttp.client_reqrep import RequestInfo
 from fastapi import WebSocket
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
@@ -468,6 +469,83 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
     assert headers["User-Agent"] == "codex-test"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_returns_before_first_upstream_event(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(10.0)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_slow","status":"completed"}}\n\n'
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await asyncio.wait_for(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, context),
+            api_key=None,
+        ),
+        timeout=0.2,
+    )
+
+    assert isinstance(response, StreamingResponse)
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.1)
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+        )
+        yield ""
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    assert response.headers["X-RateLimit-Limit"] == "1"
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "response.failed" in body
+    assert "rate_limit_exceeded" in body
 
 
 def test_has_native_codex_transport_headers_requires_allowlisted_originator():

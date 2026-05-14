@@ -5269,6 +5269,19 @@ class ProxyService:
                 if message.kind == "text" and message.text is not None:
                     session.last_upstream_close_code = None
                     await self._process_http_bridge_upstream_text(session, message.text)
+                    if session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain:
+                        async with session.pending_lock:
+                            should_reconnect = not session.pending_requests
+                        if should_reconnect:
+                            session.closed = True
+                            try:
+                                await session.upstream.close()
+                            except Exception:
+                                logger.debug(
+                                    "Failed to close HTTP bridge upstream for reconnect",
+                                    exc_info=True,
+                                )
+                            break
                     continue
 
                 session.last_upstream_close_code = message.close_code
@@ -5692,6 +5705,55 @@ class ProxyService:
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
+
+        retry_error_code = _websocket_precreated_retry_error_code(
+            status_request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
+        if retry_error_code is not None and not is_previous_response_not_found_event:
+            await self._handle_stream_error(
+                session.account,
+                {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                retry_error_code,
+            )
+            if status_request_state is not None and status_request_state.previous_response_id is None:
+                async with session.pending_lock:
+                    if status_request_state not in session.pending_requests:
+                        session.pending_requests.appendleft(status_request_state)
+                        session.queued_request_count += 1
+                    status_request_state.awaiting_response_created = True
+                    status_request_state.response_id = None
+                retried = await self._retry_http_bridge_precreated_request(session)
+                if retried:
+                    return
+                async with session.pending_lock:
+                    if status_request_state in session.pending_requests:
+                        session.pending_requests.remove(status_request_state)
+                        session.queued_request_count = max(0, session.queued_request_count - 1)
+                status_request_state.error_http_status_override = 502
+                (
+                    _downstream_text,
+                    event_block,
+                    event,
+                    payload,
+                    event_type,
+                ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+            elif (
+                status_request_state is not None
+                and status_request_state.previous_response_id is not None
+                and status_request_state.preferred_account_id is not None
+            ):
+                status_request_state.error_http_status_override = 502
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                event, payload, event_type, rewritten_text = (
+                    _rewrite_websocket_previous_response_owner_unavailable_event(
+                        request_state=status_request_state,
+                    )
+                )
+                event_block = f"data: {rewritten_text}\n\n"
 
         if event_type == "response.completed" and terminal_request_state is not None:
             # Record the completed response id regardless of input shape so
@@ -8551,6 +8613,7 @@ class _HTTPBridgeSession:
 @dataclass(slots=True)
 class _WebSocketUpstreamControl:
     reconnect_requested: bool = False
+    retire_after_drain: bool = False
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None

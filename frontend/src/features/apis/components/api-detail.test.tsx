@@ -1,10 +1,12 @@
 import type { ComponentProps } from "react";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import {
 	createApiKey,
+	createApiKeyAccountUsage7Day,
 	createApiKeyTrends,
 	createApiKeyUsage7Day,
 } from "@/test/mocks/factories";
@@ -19,6 +21,11 @@ const callbacks = {
 	onToggleActive: vi.fn(),
 };
 
+beforeEach(() => {
+	vi.clearAllMocks();
+	usePrivacyStore.setState({ blurred: false });
+});
+
 function renderApiDetail(overrides: Partial<ComponentProps<typeof ApiDetail>> = {}) {
 	const apiKey = createApiKey({ name: "Analytics Key" });
 	return renderWithProviders(
@@ -28,6 +35,9 @@ function renderApiDetail(overrides: Partial<ComponentProps<typeof ApiDetail>> = 
 			usage7Day={null}
 			usage7DayLoading={false}
 			usage7DayError={null}
+			accountUsage7Day={null}
+			accountUsage7DayLoading={false}
+			accountUsage7DayError={null}
 			busy={false}
 			{...callbacks}
 			{...overrides}
@@ -44,6 +54,9 @@ describe("ApiDetail", () => {
 				usage7Day={null}
 				usage7DayLoading={false}
 				usage7DayError={null}
+				accountUsage7Day={null}
+				accountUsage7DayLoading={false}
+				accountUsage7DayError={null}
 				busy={false}
 				{...callbacks}
 			/>,
@@ -68,6 +81,8 @@ describe("ApiDetail", () => {
 		});
 
 		expect(screen.getByRole("heading", { name: "Analytics Key" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "Usage trend" })).toBeInTheDocument();
+		expect(screen.getByText("Last 7 days by tokens and cost.")).toBeInTheDocument();
 		expect(screen.getByText("Tokens")).toBeInTheDocument();
 		expect(screen.getByText("Cost")).toBeInTheDocument();
 		expect(screen.getByRole("switch")).toBeInTheDocument();
@@ -96,6 +111,134 @@ describe("ApiDetail", () => {
 		expect(screen.getByText(/45K cached/)).toBeInTheDocument();
 		expect(screen.getByText(/350 req/)).toBeInTheDocument();
 		expect(screen.getByText(/\$2.47/)).toBeInTheDocument();
+	});
+
+	it("renders account cost donut labels in cost order with unknown last", () => {
+		renderApiDetail({
+			accountUsage7Day: createApiKeyAccountUsage7Day({
+				accounts: [
+					{
+						accountId: "acc_low",
+						displayName: "Low Account",
+						totalCostUsd: 1.25,
+						totalTokens: 1000,
+						totalRequests: 4,
+					},
+					{
+						accountId: null,
+						displayName: "Unknown Account",
+						totalCostUsd: 99,
+						totalTokens: 9000,
+						totalRequests: 9,
+					},
+					{
+						accountId: "acc_high",
+						displayName: "High Account",
+						totalCostUsd: 3.5,
+						totalTokens: 3000,
+						totalRequests: 8,
+					},
+				],
+			}),
+		});
+
+		expect(screen.getByTestId("api-account-cost-donut")).toBeInTheDocument();
+		expect(screen.getByText("High Account")).toBeInTheDocument();
+		expect(screen.getByText("Low Account")).toBeInTheDocument();
+		expect(screen.getByText("Unknown Account")).toBeInTheDocument();
+		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("High Account");
+		expect(screen.getByTestId("api-account-cost-legend-1")).toHaveTextContent("Low Account");
+		expect(screen.getByTestId("api-account-cost-legend-2")).toHaveTextContent("Unknown Account");
+		expect(screen.getByTestId("api-account-cost-legend-2")).toHaveTextContent("$99.00");
+	});
+
+	it("keeps deleted and unknown account cost buckets distinct", () => {
+		renderApiDetail({
+			accountUsage7Day: createApiKeyAccountUsage7Day({
+				accounts: [
+					{
+						accountId: null,
+						displayName: "Deleted Accounts",
+						totalCostUsd: 4.5,
+						totalTokens: 4500,
+						totalRequests: 12,
+					},
+					{
+						accountId: null,
+						displayName: "Unknown Account",
+						totalCostUsd: 2.25,
+						totalTokens: 2250,
+						totalRequests: 6,
+					},
+				],
+			}),
+		});
+
+		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("Deleted Accounts");
+		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("$4.50");
+		expect(screen.getByTestId("api-account-cost-legend-1")).toHaveTextContent("Unknown Account");
+		expect(screen.getByTestId("api-account-cost-legend-1")).toHaveTextContent("$2.25");
+	});
+
+	it("limits the account cost legend to three rows", () => {
+		renderApiDetail({
+			accountUsage7Day: createApiKeyAccountUsage7Day({
+				accounts: [
+					{
+						accountId: "acc_one",
+						displayName: "One Account",
+						totalCostUsd: 4,
+						totalTokens: 4000,
+						totalRequests: 8,
+					},
+					{
+						accountId: "acc_two",
+						displayName: "Two Account",
+						totalCostUsd: 3,
+						totalTokens: 3000,
+						totalRequests: 6,
+					},
+					{
+						accountId: "acc_three",
+						displayName: "Three Account",
+						totalCostUsd: 2,
+						totalTokens: 2000,
+						totalRequests: 4,
+					},
+					{
+						accountId: "acc_four",
+						displayName: "Four Account",
+						totalCostUsd: 1,
+						totalTokens: 1000,
+						totalRequests: 2,
+					},
+				],
+			}),
+		});
+
+		expect(screen.queryByTestId("api-account-cost-legend-3")).not.toBeInTheDocument();
+		expect(screen.queryByText("Four Account")).not.toBeInTheDocument();
+	});
+
+	it("applies privacy blur to email account names in the account cost legend", () => {
+		usePrivacyStore.setState({ blurred: true });
+
+		const { container } = renderApiDetail({
+			accountUsage7Day: createApiKeyAccountUsage7Day({
+				accounts: [
+					{
+						accountId: "acc_email",
+						displayName: "owner@example.com",
+						totalCostUsd: 4.2,
+						totalTokens: 4000,
+						totalRequests: 10,
+					},
+				],
+			}),
+		});
+
+		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("owner@example.com");
+		expect(container.querySelector(".privacy-blur")).not.toBeNull();
 	});
 
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {
@@ -160,6 +303,9 @@ describe("ApiDetail", () => {
 				usage7Day={null}
 				usage7DayLoading={false}
 				usage7DayError={null}
+				accountUsage7Day={null}
+				accountUsage7DayLoading={false}
+				accountUsage7DayError={null}
 				busy={false}
 				{...callbacks}
 			/>,
@@ -175,6 +321,9 @@ describe("ApiDetail", () => {
 				usage7Day={null}
 				usage7DayLoading={false}
 				usage7DayError={null}
+				accountUsage7Day={null}
+				accountUsage7DayLoading={false}
+				accountUsage7DayError={null}
 				busy={false}
 				{...callbacks}
 			/>,

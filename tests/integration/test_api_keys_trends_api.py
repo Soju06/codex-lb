@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import RequestLog
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
@@ -24,6 +25,27 @@ async def _insert_request_logs(*rows: RequestLog) -> None:
         await session.commit()
 
 
+def _make_account(account_id: str, email: str) -> Account:
+    encryptor = TokenEncryptor()
+    return Account(
+        id=account_id,
+        email=email,
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+
+async def _insert_accounts(*rows: Account) -> None:
+    async with SessionLocal() as session:
+        session.add_all(rows)
+        await session.commit()
+
+
 def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
@@ -37,7 +59,7 @@ def _hour_bucket(value: datetime) -> datetime:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint", ["trends", "usage-7d"])
+@pytest.mark.parametrize("endpoint", ["trends", "usage-7d", "account-usage-7d"])
 async def test_api_key_detail_endpoints_return_404_for_missing_key(async_client, endpoint: str):
     response = await async_client.get(f"/api/api-keys/missing-key/{endpoint}")
     assert response.status_code == 404
@@ -405,4 +427,127 @@ async def test_usage_7d_clamps_cached_input_tokens_to_total_input(async_client):
         "totalCostUsd": 0.15,
         "totalRequests": 2,
         "cachedInputTokens": 14,
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_usage_7d_sorts_known_accounts_by_cost_and_places_unknown_last(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    key_id = await _create_api_key(async_client, name="account-breakdown-key")
+    now = datetime(2026, 4, 2, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_accounts(
+        _make_account("acc_low", "low@example.com"),
+        _make_account("acc_high", "high@example.com"),
+    )
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            account_id="acc_low",
+            request_id="req-account-low",
+            requested_at=now - timedelta(hours=5),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=1.25,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            account_id="acc_high",
+            request_id="req-account-high",
+            requested_at=now - timedelta(hours=4),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=20,
+            output_tokens=10,
+            cost_usd=3.5,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            account_id=None,
+            request_id="req-account-unknown",
+            requested_at=now - timedelta(hours=3),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=30,
+            output_tokens=10,
+            cost_usd=99.0,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            account_id=None,
+            account_deleted=True,
+            request_id="req-account-deleted-a",
+            requested_at=now - timedelta(hours=2),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=40,
+            output_tokens=15,
+            cost_usd=7.0,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            account_id=None,
+            account_deleted=True,
+            request_id="req-account-deleted-b",
+            requested_at=now - timedelta(hours=1),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=5,
+            output_tokens=5,
+            cost_usd=0.5,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            account_id="acc_high",
+            request_id="req-account-old",
+            requested_at=now - timedelta(days=7, minutes=1),
+            model="gpt-5.1",
+            status="ok",
+            input_tokens=100,
+            output_tokens=100,
+            cost_usd=40.0,
+        ),
+    )
+
+    response = await async_client.get(f"/api/api-keys/{key_id}/account-usage-7d")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload == {
+        "keyId": key_id,
+        "accounts": [
+            {
+                "accountId": "acc_high",
+                "displayName": "high@example.com",
+                "totalCostUsd": 3.5,
+                "totalTokens": 30,
+                "totalRequests": 1,
+            },
+            {
+                "accountId": "acc_low",
+                "displayName": "low@example.com",
+                "totalCostUsd": 1.25,
+                "totalTokens": 15,
+                "totalRequests": 1,
+            },
+            {
+                "accountId": None,
+                "displayName": "Deleted Accounts",
+                "totalCostUsd": 7.5,
+                "totalTokens": 65,
+                "totalRequests": 2,
+            },
+            {
+                "accountId": None,
+                "displayName": "Unknown Account",
+                "totalCostUsd": 99.0,
+                "totalTokens": 40,
+                "totalRequests": 1,
+            },
+        ],
     }

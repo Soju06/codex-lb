@@ -7,6 +7,8 @@ from app.core.auth.dependencies import set_dashboard_error_format, validate_dash
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
+    ApiKeyAccountUsage7DayItem,
+    ApiKeyAccountUsage7DayResponse,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyResponse,
@@ -256,4 +258,27 @@ async def get_api_key_usage_7d(
         total_cost_usd=result.total_cost_usd,
         total_requests=result.total_requests,
         cached_input_tokens=result.cached_input_tokens,
+    )
+
+
+@router.get("/{key_id}/account-usage-7d", response_model=ApiKeyAccountUsage7DayResponse)
+async def get_api_key_account_usage_7d(
+    key_id: str,
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyAccountUsage7DayResponse:
+    result = await context.service.get_key_account_usage_7d(key_id)
+    if result is None:
+        raise DashboardNotFoundError(f"API key not found: {key_id}")
+    return ApiKeyAccountUsage7DayResponse(
+        key_id=result.key_id,
+        accounts=[
+            ApiKeyAccountUsage7DayItem(
+                account_id=item.account_id,
+                display_name=item.display_name,
+                total_cost_usd=item.total_cost_usd,
+                total_tokens=item.total_tokens,
+                total_requests=item.total_requests,
+            )
+            for item in result.accounts
+        ],
     )

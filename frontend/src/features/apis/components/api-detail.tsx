@@ -17,9 +17,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import type { ApiKey } from "@/features/api-keys/schemas";
+import { ApiAccountCostDonut } from "@/features/apis/components/api-account-cost-donut";
 import { ApiKeyInfo } from "@/features/apis/components/api-key-info";
 import { ApiTrendChart } from "@/features/apis/components/api-trend-chart";
-import type { ApiKeyUsage7DayResponse } from "@/features/apis/schemas";
+import type {
+	ApiKeyAccountUsage7DayResponse,
+	ApiKeyUsage7DayResponse,
+} from "@/features/apis/schemas";
 
 export type ApiDetailProps = {
 	apiKey: ApiKey | null;
@@ -30,6 +34,9 @@ export type ApiDetailProps = {
 	usage7Day?: ApiKeyUsage7DayResponse | null;
 	usage7DayLoading?: boolean;
 	usage7DayError?: string | null;
+	accountUsage7Day?: ApiKeyAccountUsage7DayResponse | null;
+	accountUsage7DayLoading?: boolean;
+	accountUsage7DayError?: string | null;
 	busy: boolean;
 	onEdit: (apiKey: ApiKey) => void;
 	onDelete: (apiKey: ApiKey) => void;
@@ -53,6 +60,9 @@ export function ApiDetail({
 	usage7Day,
 	usage7DayLoading = false,
 	usage7DayError = null,
+	accountUsage7Day,
+	accountUsage7DayLoading = false,
+	accountUsage7DayError = null,
 	busy,
 	onEdit,
 	onDelete,
@@ -138,31 +148,55 @@ export function ApiDetail({
 				</DropdownMenu>
 			</div>
 
-			<div className="space-y-4 rounded-lg border bg-muted/30 p-4">
-				<div className="flex items-center justify-end gap-3">
-					<div className="flex items-center gap-3 text-[10px] text-muted-foreground">
-						<span className="flex items-center gap-1.5">
-							Tokens
-							<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-						</span>
-						<span className="flex items-center gap-1.5">
-							Cost
-							<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-						</span>
+			<div className="grid gap-4 rounded-lg border bg-muted/30 p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(0,3fr)]">
+				<div className="min-w-0 border-b pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4">
+					<div className="mb-4">
+						<h3 className="text-sm font-semibold">Account cost</h3>
+						<p className="mt-0.5 text-xs text-muted-foreground">
+							Last 7 days by routed account.
+						</p>
 					</div>
-					<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
-						<span className="text-[10px]">Accumulated</span>
-						<Switch
-							size="sm"
-							checked={showAccumulated}
-							onCheckedChange={setShowAccumulated}
-						/>
-					</div>
+					<ApiAccountCostDonut
+						accounts={accountUsage7Day?.accounts ?? []}
+						loading={accountUsage7DayLoading}
+						error={accountUsage7DayError}
+					/>
 				</div>
 
-				{hasTrends && chartData && (
-					<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
-				)}
+				<div className="min-w-0 space-y-4">
+					<div className="flex flex-wrap items-start justify-between gap-3">
+						<div>
+							<h3 className="text-sm font-semibold">Usage trend</h3>
+							<p className="mt-0.5 text-xs text-muted-foreground">
+								Last 7 days by tokens and cost.
+							</p>
+						</div>
+						<div className="flex flex-col items-end gap-1.5">
+							<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+								<span className="text-[10px]">Accumulated</span>
+								<Switch
+									size="sm"
+									checked={showAccumulated}
+									onCheckedChange={setShowAccumulated}
+								/>
+							</div>
+							<div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+								<span className="flex items-center gap-1.5">
+									Tokens
+									<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+								</span>
+								<span className="flex items-center gap-1.5">
+									Cost
+									<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+								</span>
+							</div>
+						</div>
+					</div>
+
+					{hasTrends && chartData && (
+						<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
+					)}
+				</div>
 			</div>
 
 			{usage7DayError ? (

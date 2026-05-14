@@ -69,6 +69,7 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/api-keys/:keyId/regenerate",
 	"GET /api/api-keys/:keyId/trends",
 	"GET /api/api-keys/:keyId/usage-7d",
+	"GET /api/api-keys/:keyId/account-usage-7d",
 ];
 
 describe("MSW handler coverage", () => {

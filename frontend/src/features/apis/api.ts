@@ -7,7 +7,11 @@ import {
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
 } from "@/features/api-keys/schemas";
-import { ApiKeyTrendsResponseSchema, ApiKeyUsage7DayResponseSchema } from "@/features/apis/schemas";
+import {
+  ApiKeyAccountUsage7DayResponseSchema,
+  ApiKeyTrendsResponseSchema,
+  ApiKeyUsage7DayResponseSchema,
+} from "@/features/apis/schemas";
 
 const API_KEYS_BASE_PATH = "/api/api-keys";
 
@@ -51,5 +55,12 @@ export function getApiKeyUsage7Day(keyId: string) {
   return get(
     `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/usage-7d`,
     ApiKeyUsage7DayResponseSchema,
+  );
+}
+
+export function getApiKeyAccountUsage7Day(keyId: string) {
+  return get(
+    `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/account-usage-7d`,
+    ApiKeyAccountUsage7DayResponseSchema,
   );
 }

@@ -14,6 +14,7 @@ import { ApiList } from "@/features/apis/components/api-list";
 import { ApisSkeleton } from "@/features/apis/components/apis-skeleton";
 import {
 	useApiKeys,
+	useApiKeyAccountUsage7Day,
 	useApiKeyTrends,
 	useApiKeyUsage7Day,
 } from "@/features/apis/hooks/use-apis";
@@ -80,6 +81,9 @@ export function ApisPage() {
 
 	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null);
 	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null);
+	const accountUsage7DayQuery = useApiKeyAccountUsage7Day(
+		selectedApiKey?.id ?? null,
+	);
 
 	const mutationBusy =
 		createMutation.isPending ||
@@ -94,6 +98,9 @@ export function ApisPage() {
 		getErrorMessageOrNull(regenerateMutation.error);
 	const listError = getErrorMessageOrNull(apiKeysQuery.error);
 	const usage7DayError = getErrorMessageOrNull(usage7DayQuery.error);
+	const accountUsage7DayError = getErrorMessageOrNull(
+		accountUsage7DayQuery.error,
+	);
 	const pageError = mutationError || (apiKeysQuery.data ? listError : null);
 
 	const handleCreate = async (payload: ApiKeyCreateRequest) => {
@@ -155,6 +162,9 @@ export function ApisPage() {
 						usage7Day={usage7DayQuery.data}
 						usage7DayLoading={usage7DayQuery.isPending}
 						usage7DayError={usage7DayError}
+						accountUsage7Day={accountUsage7DayQuery.data}
+						accountUsage7DayLoading={accountUsage7DayQuery.isPending}
+						accountUsage7DayError={accountUsage7DayError}
 						busy={mutationBusy}
 						onEdit={(apiKey) => editDialog.show(apiKey)}
 						onToggleActive={(apiKey) => {

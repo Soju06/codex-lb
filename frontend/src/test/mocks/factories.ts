@@ -18,10 +18,12 @@ import {
 	ApiKeySchema,
 } from "@/features/api-keys/schemas";
 import type {
+	ApiKeyAccountUsage7DayResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
 } from "@/features/apis/schemas";
 import {
+	ApiKeyAccountUsage7DayResponseSchema,
 	ApiKeyTrendsResponseSchema,
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
@@ -62,6 +64,7 @@ export type {
 	ApiKeyCreateResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
+	ApiKeyAccountUsage7DayResponse,
 };
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
@@ -499,6 +502,31 @@ export function createApiKeyUsage7Day(
 		cachedInputTokens: 45_000,
 		totalRequests: 350,
 		totalCostUsd: 2.47,
+		...overrides,
+	});
+}
+
+export function createApiKeyAccountUsage7Day(
+	overrides: Partial<ApiKeyAccountUsage7DayResponse> = {},
+): ApiKeyAccountUsage7DayResponse {
+	return ApiKeyAccountUsage7DayResponseSchema.parse({
+		keyId: "key_1",
+		accounts: [
+			{
+				accountId: "acc_primary",
+				displayName: "primary@example.com",
+				totalCostUsd: 1.58,
+				totalTokens: 180_000,
+				totalRequests: 220,
+			},
+			{
+				accountId: "acc_secondary",
+				displayName: "secondary@example.com",
+				totalCostUsd: 0.89,
+				totalTokens: 100_000,
+				totalRequests: 130,
+			},
+		],
 		...overrides,
 	});
 }

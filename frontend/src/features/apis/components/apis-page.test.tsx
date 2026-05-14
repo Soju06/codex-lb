@@ -11,6 +11,7 @@ const hookMocks = vi.hoisted(() => ({
 	useApiKeys: vi.fn(),
 	useApiKeyTrends: vi.fn(),
 	useApiKeyUsage7Day: vi.fn(),
+	useApiKeyAccountUsage7Day: vi.fn(),
 }));
 
 vi.mock("@/features/apis/hooks/use-apis", () => hookMocks);
@@ -52,6 +53,7 @@ function renderApisPage({
 	apiKeysQuery = createQueryMock(apiKeys),
 	trendsQuery = createQueryMock(null),
 	usage7DayQuery = createQueryMock(null),
+	accountUsage7DayQuery = createQueryMock(null),
 	createMutation = createMutationMock(),
 	updateMutation = createMutationMock(),
 	deleteMutation = createMutationMock(),
@@ -61,6 +63,7 @@ function renderApisPage({
 	apiKeysQuery?: QueryMock<ReturnType<typeof createApiKey>[]>;
 	trendsQuery?: QueryMock<null>;
 	usage7DayQuery?: QueryMock<null>;
+	accountUsage7DayQuery?: QueryMock<null>;
 	createMutation?: MutationMock;
 	updateMutation?: MutationMock;
 	deleteMutation?: MutationMock;
@@ -75,6 +78,7 @@ function renderApisPage({
 	});
 	hookMocks.useApiKeyTrends.mockReturnValue(trendsQuery);
 	hookMocks.useApiKeyUsage7Day.mockReturnValue(usage7DayQuery);
+	hookMocks.useApiKeyAccountUsage7Day.mockReturnValue(accountUsage7DayQuery);
 
 	return renderWithProviders(<ApisPage />);
 }

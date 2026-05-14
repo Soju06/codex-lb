@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -199,3 +199,47 @@ async def test_request_logs_repository_filters(db_setup):
         assert len(results) == 1
         assert results[0].error_code == "rate_limit_exceeded"
         assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_account_delete_marks_request_logs_and_preserves_metrics(db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_deleted", "deleted@example.com"))
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id="acc_deleted",
+            request_id="req_deleted_account",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=20,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+
+        deleted = await accounts_repo.delete("acc_deleted")
+
+        assert deleted is True
+        stored_log = (
+            await session.execute(select(RequestLog).where(RequestLog.request_id == "req_deleted_account"))
+        ).scalar_one()
+        assert stored_log.account_id is None
+        assert stored_log.account_deleted is True
+
+        visible_logs, visible_total = await logs_repo.list_recent(limit=10)
+        assert visible_logs == []
+        assert visible_total == 0
+
+        metrics = await logs_repo.aggregate_activity_since(now - timedelta(minutes=1))
+        assert metrics.request_count == 1
+        assert metrics.input_tokens == 10
+        assert metrics.output_tokens == 20
+
+        account_options, model_options, api_key_options, status_options = await logs_repo.list_filter_options()
+        assert account_options == []
+        assert model_options == []
+        assert api_key_options == []
+        assert status_options == []

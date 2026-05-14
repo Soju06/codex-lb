@@ -203,7 +203,9 @@ class AccountsRepository:
 
     async def delete(self, account_id: str) -> bool:
         await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
-        await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+        await self._session.execute(
+            update(RequestLog).where(RequestLog.account_id == account_id).values(account_id=None, account_deleted=True)
+        )
         await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
         result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
         await self._session.commit()

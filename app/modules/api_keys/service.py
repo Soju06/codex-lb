@@ -20,6 +20,7 @@ from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyAccountUsageTotals,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ApiKeyUsageTotals,
@@ -162,6 +163,13 @@ class ApiKeysRepositoryProtocol(Protocol):
         until: datetime,
     ) -> ApiKeyUsageTotals: ...
 
+    async def account_usage_7d(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[ApiKeyAccountUsageTotals]: ...
+
 
 class ApiKeyNotFoundError(ValueError):
     pass
@@ -267,6 +275,21 @@ class ApiKeyUsageReservationData:
     reservation_id: str
     key_id: str
     model: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyAccountUsage7DayData:
+    account_id: str | None
+    display_name: str
+    total_cost_usd: float
+    total_tokens: int
+    total_requests: int
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyAccountUsage7DayResult:
+    key_id: str
+    accounts: list[ApiKeyAccountUsage7DayData]
 
 
 class ApiKeysService:
@@ -792,6 +815,16 @@ class ApiKeysService:
             cached_input_tokens=data.cached_input_tokens,
         )
 
+    async def get_key_account_usage_7d(self, key_id: str) -> ApiKeyAccountUsage7DayResult | None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+        now = utcnow()
+        since = now - timedelta(days=7)
+        rows = await self._repository.account_usage_7d(key_id, since, now)
+        accounts = _build_account_usage_breakdown(rows)
+        return ApiKeyAccountUsage7DayResult(key_id=key_id, accounts=accounts)
+
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyTrendsPoint:
@@ -1142,6 +1175,64 @@ def _to_usage_summary_data(summary: ApiKeyUsageSummary | None) -> ApiKeyUsageSum
         cached_input_tokens=summary.cached_input_tokens,
         total_cost_usd=summary.total_cost_usd,
     )
+
+
+def _build_account_usage_breakdown(rows: list[ApiKeyAccountUsageTotals]) -> list[ApiKeyAccountUsage7DayData]:
+    known: list[ApiKeyAccountUsage7DayData] = []
+    deleted_cost = 0.0
+    deleted_tokens = 0
+    deleted_requests = 0
+    unknown_cost = 0.0
+    unknown_tokens = 0
+    unknown_requests = 0
+
+    for row in rows:
+        if row.account_deleted:
+            deleted_cost += row.total_cost_usd
+            deleted_tokens += row.total_tokens
+            deleted_requests += row.total_requests
+            continue
+
+        display_name = (row.display_name or "").strip()
+        if row.account_id is None or not display_name:
+            unknown_cost += row.total_cost_usd
+            unknown_tokens += row.total_tokens
+            unknown_requests += row.total_requests
+            continue
+
+        known.append(
+            ApiKeyAccountUsage7DayData(
+                account_id=row.account_id,
+                display_name=display_name,
+                total_cost_usd=row.total_cost_usd,
+                total_tokens=row.total_tokens,
+                total_requests=row.total_requests,
+            )
+        )
+
+    known.sort(key=lambda item: item.total_cost_usd, reverse=True)
+    if deleted_requests > 0:
+        known.append(
+            ApiKeyAccountUsage7DayData(
+                account_id=None,
+                display_name="Deleted Accounts",
+                total_cost_usd=round(deleted_cost, 6),
+                total_tokens=deleted_tokens,
+                total_requests=deleted_requests,
+            )
+        )
+    if unknown_requests > 0:
+        known.append(
+            ApiKeyAccountUsage7DayData(
+                account_id=None,
+                display_name="Unknown Account",
+                total_cost_usd=round(unknown_cost, 6),
+                total_tokens=unknown_tokens,
+                total_requests=unknown_requests,
+            )
+        )
+
+    return known
 
 
 def _limit_input_to_row(

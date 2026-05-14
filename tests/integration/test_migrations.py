@@ -571,6 +571,36 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "idx_logs_requested_at_model_tier" in request_log_index_names
             assert "idx_logs_model_effort_time" in request_log_index_names
             assert "idx_logs_status_error_time" in request_log_index_names
+            assert "idx_logs_api_key_time_account" in request_log_index_names
+            assert "account_deleted" in request_log_columns
+            api_key_usage_index_info = (
+                await session.execute(text('PRAGMA index_info("idx_logs_api_key_time_account")'))
+            ).fetchall()
+            api_key_usage_index_columns = [str(row[2]) for row in api_key_usage_index_info if len(row) > 2]
+            assert api_key_usage_index_columns == [
+                "api_key_id",
+                "requested_at",
+                "account_deleted",
+                "account_id",
+            ]
+            usage_plan_rows = (
+                await session.execute(
+                    text(
+                        """
+                        EXPLAIN QUERY PLAN
+                        SELECT account_deleted, account_id, count(*)
+                        FROM request_logs
+                        WHERE api_key_id = 'key_plan'
+                          AND requested_at >= '2026-01-01 00:00:00'
+                          AND requested_at < '2026-01-08 00:00:00'
+                        GROUP BY account_deleted, account_id
+                        """
+                    )
+                )
+            ).fetchall()
+            usage_plan_details = " ".join(str(row[-1]) for row in usage_plan_rows)
+            assert "idx_logs_api_key_time_account" in usage_plan_details
+            assert "SCAN request_logs" not in usage_plan_details
             api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names

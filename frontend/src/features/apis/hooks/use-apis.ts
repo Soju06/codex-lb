@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   createApiKey,
   deleteApiKey,
+  getApiKeyAccountUsage7Day,
   getApiKeyTrends,
   getApiKeyUsage7Day,
   listApiKeys,
@@ -18,6 +19,7 @@ import type {
 function invalidateApiKeys(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
   void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+  void queryClient.invalidateQueries({ queryKey: ["api-keys", "account-usage-7d"] });
 }
 
 export function useApiKeys() {
@@ -100,6 +102,17 @@ export function useApiKeyUsage7Day(keyId: string | null) {
   return useQuery({
     queryKey: ["api-keys", "usage-7d", keyId],
     queryFn: () => getApiKeyUsage7Day(keyId!),
+    enabled: !!keyId,
+    staleTime: 2 * 60_000,
+    refetchInterval: 2 * 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useApiKeyAccountUsage7Day(keyId: string | null) {
+  return useQuery({
+    queryKey: ["api-keys", "account-usage-7d", keyId],
+    queryFn: () => getApiKeyAccountUsage7Day(keyId!),
     enabled: !!keyId,
     staleTime: 2 * 60_000,
     refetchInterval: 2 * 60_000,

@@ -8,6 +8,7 @@ import {
 	createAccountSummary,
 	createAccountTrends,
 	createApiKey,
+	createApiKeyAccountUsage7Day,
 	createApiKeyCreateResponse,
 	createApiKeyTrends,
 	createApiKeyUsage7Day,
@@ -868,5 +869,17 @@ export const handlers = [
 			);
 		}
 		return HttpResponse.json(createApiKeyUsage7Day({ keyId }));
+	}),
+
+	http.get("/api/api-keys/:keyId/account-usage-7d", ({ params }) => {
+		const keyId = String(params.keyId);
+		const existing = findApiKey(keyId);
+		if (!existing) {
+			return HttpResponse.json(
+				{ error: { code: "not_found", message: "API key not found" } },
+				{ status: 404 },
+			);
+		}
+		return HttpResponse.json(createApiKeyAccountUsage7Day({ keyId }));
 	}),
 ];

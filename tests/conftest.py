@@ -138,6 +138,12 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.modules.proxy.platform_cache_alerts import reset_platform_cache_alert_service
+
+        reset_platform_cache_alert_service()
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

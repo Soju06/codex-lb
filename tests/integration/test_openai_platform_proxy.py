@@ -15,6 +15,7 @@ from starlette.testclient import WebSocketDenialResponse
 import app.modules.accounts.service as accounts_service_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.load_balancer as load_balancer_module
+import app.modules.proxy.platform_cache_alerts as platform_cache_alerts_module
 import app.modules.proxy.provider_adapters as provider_adapters_module
 import app.modules.proxy.service as proxy_service_module
 import app.modules.upstream_identities.repository as platform_repository_module
@@ -134,6 +135,11 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         drain_primary_threshold_pct=85.0,
         drain_secondary_threshold_pct=90.0,
         platform_fallback_force_enabled=False,
+        platform_cache_alert_proxy_url=None,
+        platform_cache_alert_window_size=7,
+        platform_cache_alert_threshold=4,
+        platform_cache_alert_timeout_seconds=2.0,
+        platform_cache_alert_cooldown_seconds=300.0,
     )
 
     class _SettingsCache:
@@ -630,6 +636,61 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
     assert log.requested_service_tier == "priority"
     assert log.actual_service_tier == "default"
     assert log.service_tier == "default"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_platform_cache_miss_window_alerts_with_key_suffix(async_client, monkeypatch):
+    account_id = await _import_account(async_client, "acc_resp_cache_alert", "resp-cache-alert@example.com")
+    await _seed_primary_usage(account_id, 95.0)
+    await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+
+    settings = SimpleNamespace(
+        platform_cache_alert_proxy_url="http://alerts.local",
+        platform_cache_alert_window_size=7,
+        platform_cache_alert_threshold=4,
+        platform_cache_alert_timeout_seconds=2.0,
+        platform_cache_alert_cooldown_seconds=300.0,
+    )
+    monkeypatch.setattr(platform_cache_alerts_module, "get_settings", lambda: settings)
+
+    posts: list[tuple[str, str, float]] = []
+
+    async def sender(url: str, suffix: str, timeout: float) -> None:
+        posts.append((url, suffix, timeout))
+
+    alert_service = platform_cache_alerts_module.PlatformCacheAlertService(sender=sender)
+    monkeypatch.setattr(proxy_service_module, "get_platform_cache_alert_service", lambda: alert_service)
+    cached_tokens_by_call = [0, 2, 0, 2, 0, 2, 0]
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        seen_payloads.append(payload)
+        cached_tokens = cached_tokens_by_call[len(seen_payloads) - 1]
+        return PlatformResponseResult(
+            payload=OpenAIResponsePayload.model_validate(
+                {
+                    "id": f"resp_platform_cache_alert_{len(seen_payloads)}",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 1,
+                        "total_tokens": 11,
+                        "input_tokens_details": {"cached_tokens": cached_tokens},
+                    },
+                }
+            ),
+            upstream_request_id=f"up_req_resp_cache_alert_{len(seen_payloads)}",
+        )
+
+    monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
+
+    for index in range(7):
+        response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": f"hi {index}"})
+        assert response.status_code == 200
+
+    assert len(seen_payloads) == 7
+    assert posts == [("http://alerts.local", "test", 2.0)]
 
 
 @pytest.mark.asyncio

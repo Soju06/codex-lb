@@ -152,6 +152,7 @@ from app.modules.proxy.load_balancer import (
     _filter_accounts_for_model,
     _gated_limit_name_for_model,
 )
+from app.modules.proxy.platform_cache_alerts import get_platform_cache_alert_service
 from app.modules.proxy.provider_adapters import (
     ChatGPTWebProviderAdapter,
     OpenAIPlatformProviderAdapter,
@@ -433,6 +434,37 @@ class ProxyService:
             api_key_encrypted=identity.api_key_encrypted,
             organization_id=identity.organization_id,
             project_id=identity.project_id,
+        )
+
+    def platform_api_key_suffix(self, identity: _SelectedPlatformIdentity | None) -> str | None:
+        if identity is None:
+            return None
+        try:
+            api_key = self._encryptor.decrypt(identity.api_key_encrypted).strip()
+        except Exception:
+            logger.warning(
+                "Failed to decrypt Platform API key suffix routing_subject_id=%s",
+                identity.id,
+                exc_info=True,
+            )
+            return None
+        if not api_key:
+            return None
+        return api_key[-4:]
+
+    async def record_platform_cache_observation(
+        self,
+        *,
+        input_tokens: int | None,
+        cached_input_tokens: int | None,
+        identity: _SelectedPlatformIdentity | None = None,
+        api_key_suffix: str | None = None,
+    ) -> bool:
+        suffix = api_key_suffix or self.platform_api_key_suffix(identity)
+        return await get_platform_cache_alert_service().observe(
+            api_key_suffix=suffix,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
         )
 
     @staticmethod
@@ -2527,6 +2559,7 @@ class ProxyService:
         log_error_code: str | None = None
         log_error_message: str | None = None
         response: CompactResponsePayload | None = None
+        platform_api_key_suffix_value: str | None = None
         requested_service_tier = _normalize_service_tier_value(payload.service_tier)
         effective_request_service_tier = requested_service_tier
         actual_service_tier: str | None = None
@@ -2638,6 +2671,7 @@ class ProxyService:
                     platform_sticky_max_age_seconds=affinity.platform_max_age_seconds,
                 )
                 current_identity = selected_subject.identity
+                platform_api_key_suffix_value = self.platform_api_key_suffix(current_identity)
                 excluded_identity_ids: set[str] = set()
                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
                 transient_retries = 0
@@ -2671,6 +2705,7 @@ class ProxyService:
                             )
                             if replacement_identity is not None:
                                 current_identity = replacement_identity
+                                platform_api_key_suffix_value = self.platform_api_key_suffix(current_identity)
                                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
                                 transient_retries = 0
                                 continue
@@ -2942,6 +2977,20 @@ class ProxyService:
         finally:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+            input_tokens = usage.input_tokens if usage else None
+            output_tokens = usage.output_tokens if usage else None
+            cached_input_tokens = (
+                usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
+            )
+            reasoning_tokens = (
+                usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+            )
+            if log_status == "success" and provider_kind_value == OPENAI_PLATFORM_PROVIDER_KIND:
+                await self.record_platform_cache_observation(
+                    api_key_suffix=platform_api_key_suffix_value,
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                )
             await self._write_request_log(
                 account_id=account_id_value,
                 provider_kind=provider_kind_value,
@@ -2953,14 +3002,10 @@ class ProxyService:
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                cached_input_tokens=(
-                    usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
-                ),
-                reasoning_tokens=(
-                    usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
-                ),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=_REQUEST_TRANSPORT_HTTP,
                 service_tier=_effective_service_tier(effective_request_service_tier, actual_service_tier),
@@ -8609,6 +8654,7 @@ class ProxyService:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     await self._handle_stream_error(account, exc.error, exc.code)
+                    excluded_account_ids.add(account.id)
                     continue
                 except _TerminalStreamError as exc:
                     if _should_penalize_stream_error(exc.code):

@@ -2597,6 +2597,7 @@ async def _maybe_handle_platform_responses(
             requested_service_tier=requested_service_tier,
             forwarded_service_tier=forwarded_service_tier,
             session_id=log_session_id,
+            platform_api_key_suffix=context.service.platform_api_key_suffix(identity),
         )
         return StreamingResponse(
             stream,
@@ -2679,6 +2680,12 @@ async def _maybe_handle_platform_responses(
         upstream_request_id=result.upstream_request_id,
         session_id=log_session_id,
     )
+    if status == "success":
+        await context.service.record_platform_cache_observation(
+            identity=identity,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+        )
     return JSONResponse(content=result_payload, headers=rate_limit_headers)
 
 
@@ -2749,6 +2756,7 @@ async def _instrument_platform_stream(
     requested_service_tier: str | None,
     forwarded_service_tier: str | None,
     session_id: str | None,
+    platform_api_key_suffix: str | None,
 ) -> AsyncIterator[str]:
     status = "success"
     error_code: str | None = None
@@ -2822,6 +2830,12 @@ async def _instrument_platform_stream(
             upstream_request_id=upstream_request_id,
             session_id=session_id,
         )
+        if status == "success":
+            await context.service.record_platform_cache_observation(
+                api_key_suffix=platform_api_key_suffix,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+            )
 
 
 def _normalize_service_tier_value(value: object) -> str | None:

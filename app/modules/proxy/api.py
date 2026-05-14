@@ -2050,6 +2050,9 @@ async def _compact_responses(
         sticky_kind=affinity.kind,
         reallocate_sticky=affinity.reallocate_sticky,
         sticky_max_age_seconds=affinity.max_age_seconds,
+        platform_sticky_key=affinity.platform_key,
+        platform_sticky_kind=affinity.platform_kind,
+        platform_sticky_max_age_seconds=affinity.platform_max_age_seconds,
     )
     if selection.failure is not None:
         return await _provider_selection_failure_response(
@@ -2451,6 +2454,9 @@ async def _maybe_handle_platform_responses(
         sticky_kind=affinity.kind,
         reallocate_sticky=affinity.reallocate_sticky,
         sticky_max_age_seconds=affinity.max_age_seconds,
+        platform_sticky_key=affinity.platform_key,
+        platform_sticky_kind=affinity.platform_kind,
+        platform_sticky_max_age_seconds=affinity.platform_max_age_seconds,
     )
     if selection.failure is not None:
         return await _provider_selection_failure_response(
@@ -2476,6 +2482,7 @@ async def _maybe_handle_platform_responses(
     )
     rate_limit_headers = await context.service.rate_limit_headers()
     request_id = ensure_request_id()
+    log_session_id = proxy_service_module._owner_lookup_session_id_from_headers(request.headers)
     start = time.monotonic()
     if payload.stream:
         identity = None
@@ -2508,6 +2515,7 @@ async def _maybe_handle_platform_responses(
                 upstream_request_id=(upstream_response.upstream_request_id if upstream_response is not None else None),
                 transport="http",
                 latency_ms=int((time.monotonic() - start) * 1000),
+                session_id=log_session_id,
             )
             return _logged_error_json_response(
                 request,
@@ -2555,6 +2563,7 @@ async def _maybe_handle_platform_responses(
                 route_class=route_class,
                 rejection_reason="platform_stream_start_failed",
                 transport="http",
+                session_id=log_session_id,
             )
             return _logged_error_json_response(
                 request,
@@ -2587,6 +2596,8 @@ async def _maybe_handle_platform_responses(
             reasoning_effort=reasoning_effort,
             requested_service_tier=requested_service_tier,
             forwarded_service_tier=forwarded_service_tier,
+            session_id=log_session_id,
+            platform_api_key_suffix=context.service.platform_api_key_suffix(identity),
         )
         return StreamingResponse(
             stream,
@@ -2667,7 +2678,14 @@ async def _maybe_handle_platform_responses(
         actual_service_tier=actual_service_tier,
         route_class=route_class,
         upstream_request_id=result.upstream_request_id,
+        session_id=log_session_id,
     )
+    if status == "success":
+        await context.service.record_platform_cache_observation(
+            identity=identity,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+        )
     return JSONResponse(content=result_payload, headers=rate_limit_headers)
 
 
@@ -2737,6 +2755,8 @@ async def _instrument_platform_stream(
     reasoning_effort: str | None,
     requested_service_tier: str | None,
     forwarded_service_tier: str | None,
+    session_id: str | None,
+    platform_api_key_suffix: str | None,
 ) -> AsyncIterator[str]:
     status = "success"
     error_code: str | None = None
@@ -2808,7 +2828,14 @@ async def _instrument_platform_stream(
             actual_service_tier=actual_service_tier,
             route_class=route_class,
             upstream_request_id=upstream_request_id,
+            session_id=session_id,
         )
+        if status == "success":
+            await context.service.record_platform_cache_observation(
+                api_key_suffix=platform_api_key_suffix,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+            )
 
 
 def _normalize_service_tier_value(value: object) -> str | None:

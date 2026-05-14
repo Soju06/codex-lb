@@ -233,6 +233,11 @@ class Settings(BaseSettings):
     platform_fallback_primary_remaining_threshold_pct: float = 10.0
     platform_fallback_secondary_remaining_threshold_pct: float = 5.0
     platform_fallback_force_enabled: bool = False
+    platform_cache_alert_proxy_url: str | None = None
+    platform_cache_alert_window_size: int = Field(default=7, gt=0)
+    platform_cache_alert_threshold: int = Field(default=4, gt=0)
+    platform_cache_alert_timeout_seconds: float = Field(default=2.0, gt=0.0)
+    platform_cache_alert_cooldown_seconds: float = Field(default=300.0, ge=0.0)
     drain_error_window_seconds: float = 60.0
     drain_error_count_threshold: int = 2
     probe_quiet_seconds: float = 60.0

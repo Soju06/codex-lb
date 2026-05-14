@@ -15,6 +15,7 @@ from starlette.testclient import WebSocketDenialResponse
 import app.modules.accounts.service as accounts_service_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.load_balancer as load_balancer_module
+import app.modules.proxy.platform_cache_alerts as platform_cache_alerts_module
 import app.modules.proxy.provider_adapters as provider_adapters_module
 import app.modules.proxy.service as proxy_service_module
 import app.modules.upstream_identities.repository as platform_repository_module
@@ -134,6 +135,11 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         drain_primary_threshold_pct=85.0,
         drain_secondary_threshold_pct=90.0,
         platform_fallback_force_enabled=False,
+        platform_cache_alert_proxy_url=None,
+        platform_cache_alert_window_size=7,
+        platform_cache_alert_threshold=4,
+        platform_cache_alert_timeout_seconds=2.0,
+        platform_cache_alert_cooldown_seconds=300.0,
     )
 
     class _SettingsCache:
@@ -630,6 +636,125 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
     assert log.requested_service_tier == "priority"
     assert log.actual_service_tier == "default"
     assert log.service_tier == "default"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_platform_cache_miss_window_alerts_with_key_suffix(async_client, monkeypatch):
+    account_id = await _import_account(async_client, "acc_resp_cache_alert", "resp-cache-alert@example.com")
+    await _seed_primary_usage(account_id, 95.0)
+    await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+
+    settings = SimpleNamespace(
+        platform_cache_alert_proxy_url="http://alerts.local",
+        platform_cache_alert_window_size=7,
+        platform_cache_alert_threshold=4,
+        platform_cache_alert_timeout_seconds=2.0,
+        platform_cache_alert_cooldown_seconds=300.0,
+    )
+    monkeypatch.setattr(platform_cache_alerts_module, "get_settings", lambda: settings)
+
+    posts: list[tuple[str, str, float]] = []
+
+    async def sender(url: str, suffix: str, timeout: float) -> None:
+        posts.append((url, suffix, timeout))
+
+    alert_service = platform_cache_alerts_module.PlatformCacheAlertService(sender=sender)
+    monkeypatch.setattr(proxy_service_module, "get_platform_cache_alert_service", lambda: alert_service)
+    cached_tokens_by_call = [0, 2, 0, 2, 0, 2, 0]
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        seen_payloads.append(payload)
+        cached_tokens = cached_tokens_by_call[len(seen_payloads) - 1]
+        return PlatformResponseResult(
+            payload=OpenAIResponsePayload.model_validate(
+                {
+                    "id": f"resp_platform_cache_alert_{len(seen_payloads)}",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 1,
+                        "total_tokens": 11,
+                        "input_tokens_details": {"cached_tokens": cached_tokens},
+                    },
+                }
+            ),
+            upstream_request_id=f"up_req_resp_cache_alert_{len(seen_payloads)}",
+        )
+
+    monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
+
+    for index in range(7):
+        response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": f"hi {index}"})
+        assert response.status_code == 200
+
+    assert len(seen_payloads) == 7
+    assert posts == [("http://alerts.local", "test", 2.0)]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_reuses_platform_prompt_cache_affinity_after_chatgpt_pool_recovers(
+    async_client,
+    monkeypatch,
+):
+    account_id = await _import_account(
+        async_client,
+        "acc_resp_platform_cache_reuse",
+        "resp-platform-cache-reuse@example.com",
+    )
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
+    calls: list[str] = []
+
+    async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        assert payload["prompt_cache_key"] == "cache-key-v1-response-reuse"
+        calls.append(payload["prompt_cache_key"])
+        return PlatformResponseResult(
+            payload=OpenAIResponsePayload.model_validate(
+                {
+                    "id": f"resp_platform_reuse_{len(calls)}",
+                    "status": "completed",
+                    "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                }
+            ),
+            upstream_request_id=f"up_req_resp_platform_reuse_{len(calls)}",
+        )
+
+    async def fail_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, _kw
+        raise AssertionError("fresh Platform prompt-cache affinity must win over recovered ChatGPT pool")
+        yield ""
+
+    monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
+    monkeypatch.setattr(provider_adapters_module, "core_stream_responses", fail_stream)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "hi", "prompt_cache_key": "cache-key-v1-response-reuse"},
+    )
+    assert first.status_code == 200
+    assert first.json()["id"] == "resp_platform_reuse_1"
+
+    await _seed_primary_usage(account_id, 10.0)
+    await _seed_secondary_usage(account_id, 10.0)
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "follow up", "prompt_cache_key": "cache-key-v1-response-reuse"},
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_platform_reuse_2"
+    assert calls == ["cache-key-v1-response-reuse", "cache-key-v1-response-reuse"]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.upstream_request_id == "up_req_resp_platform_reuse_2"
 
 
 @pytest.mark.asyncio
@@ -1425,6 +1550,71 @@ async def test_v1_compact_falls_back_to_platform_and_rebinds_prompt_cache_affini
     assert sticky is not None
     assert sticky.provider_kind == "openai_platform"
     assert sticky.routing_subject_id == identity_id
+
+
+@pytest.mark.asyncio
+async def test_v1_compact_reuses_platform_prompt_cache_affinity_after_chatgpt_pool_recovers(
+    async_client,
+    monkeypatch,
+):
+    account_id = await _import_account(
+        async_client,
+        "acc_v1_compact_prompt_cache_reuse",
+        "v1-compact-prompt-cache-reuse@example.com",
+    )
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch)
+    calls: list[str] = []
+
+    async def fake_create_platform_compact_response(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        assert payload["prompt_cache_key"] == "cache-key-v1-compact-reuse"
+        calls.append(payload["prompt_cache_key"])
+        return PlatformCompactResponseResult(
+            payload=CompactResponsePayload.model_validate(
+                {
+                    "object": "response.compaction",
+                    "status": "completed",
+                    "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    "output": [],
+                }
+            ),
+            upstream_request_id=f"up_req_v1_compact_reuse_{len(calls)}",
+        )
+
+    async def fail_chatgpt_compact(_payload, _headers, _access_token, _account_id):
+        raise AssertionError("fresh Platform prompt-cache affinity must bypass recovered ChatGPT compact transport")
+
+    monkeypatch.setattr(
+        provider_adapters_module,
+        "create_platform_compact_response",
+        fake_create_platform_compact_response,
+    )
+    monkeypatch.setattr(provider_adapters_module, "core_compact_responses", fail_chatgpt_compact)
+
+    first = await async_client.post(
+        "/v1/responses/compact",
+        json={"model": "gpt-5.1", "input": "hi", "prompt_cache_key": "cache-key-v1-compact-reuse"},
+    )
+    assert first.status_code == 200
+
+    await _seed_primary_usage(account_id, 10.0)
+    await _seed_secondary_usage(account_id, 10.0)
+
+    second = await async_client.post(
+        "/v1/responses/compact",
+        json={"model": "gpt-5.1", "input": "follow up", "prompt_cache_key": "cache-key-v1-compact-reuse"},
+    )
+    assert second.status_code == 200
+    assert calls == ["cache-key-v1-compact-reuse", "cache-key-v1-compact-reuse"]
+
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.provider_kind == "openai_platform"
+    assert log.routing_subject_id == identity_id
+    assert log.upstream_request_id == "up_req_v1_compact_reuse_2"
 
 
 @pytest.mark.asyncio
@@ -2269,6 +2459,86 @@ async def test_backend_codex_responses_uses_platform_when_backend_http_usage_is_
     assert log.routing_subject_id == identity_id
     assert log.route_class == "chatgpt_private"
     assert log.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_platform_fallback_binds_prompt_cache_key_not_session(
+    async_client,
+    monkeypatch,
+):
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_platform_cache_key",
+        "backend-http-platform-cache-key@example.com",
+    )
+    await _seed_primary_usage(account_id, 95.0)
+    await _seed_secondary_usage(account_id, 95.0)
+    identity_id = await _create_platform_identity(async_client, monkeypatch, route_families=["backend_codex_http"])
+    forwarded_prompt_cache_keys: list[str] = []
+
+    async def fake_stream_platform_responses(*, base_url, payload, api_key, organization=None, project=None):
+        del base_url, api_key, organization, project
+        assert payload["model"] == "gpt-5.1"
+        cache_key = payload.get("prompt_cache_key")
+        assert isinstance(cache_key, str)
+        forwarded_prompt_cache_keys.append(cache_key)
+        return PlatformStreamResponse(
+            event_stream=_stream_lines(
+                [
+                    'data: {"type":"response.created"}\n\n',
+                    'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform_cache"}}\n\n',
+                ]
+            ),
+            upstream_request_id="up_req_backend_http_platform_cache_stream",
+        )
+
+    def fail_stream_http_responses(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("backend Codex Platform fallback should not use ChatGPT transport")
+
+    monkeypatch.setattr(provider_adapters_module, "stream_platform_responses", fake_stream_platform_responses)
+    monkeypatch.setattr(proxy_service_module.ProxyService, "stream_http_responses", fail_stream_http_responses)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"session_id": "backend-session-1"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "stable system prompt",
+            "input": [{"role": "user", "content": "first prompt"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert lines[-1] == 'data: {"type":"response.completed","response":{"id":"resp_backend_http_platform_cache"}}'
+    assert len(forwarded_prompt_cache_keys) == 1
+    prompt_cache_key = forwarded_prompt_cache_keys[0]
+
+    async with SessionLocal() as session:
+        platform_sticky = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == prompt_cache_key,
+                StickySession.kind == StickySessionKind.PROMPT_CACHE,
+                StickySession.provider_kind == "openai_platform",
+            )
+        )
+        session_sticky = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == "backend-session-1",
+                StickySession.kind == StickySessionKind.PROMPT_CACHE,
+                StickySession.provider_kind == "openai_platform",
+            )
+        )
+
+    assert platform_sticky is not None
+    assert platform_sticky.routing_subject_id == identity_id
+    assert session_sticky is None
+    log = await _latest_request_log()
+    assert log is not None
+    assert log.session_id == "backend-session-1"
 
 
 @pytest.mark.asyncio

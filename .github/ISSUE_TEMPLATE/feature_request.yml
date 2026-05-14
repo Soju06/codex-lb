@@ -1,0 +1,79 @@
+name: ✨ Feature Request
+description: Propose a new feature, enhancement, or behavior change.
+title: "feat: <one-line summary of the proposed feature>"
+type: Feature
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an idea! Before you continue:
+
+        - For open-ended ideas, please consider opening a
+          [Discussion](https://github.com/Soju06/codex-lb/discussions) first to
+          collect feedback. Use this form when you have a concrete, scoped proposal.
+        - codex-lb uses **OpenSpec-first** development. Significant behavior
+          changes will eventually live as an `openspec/changes/<change>/`
+          proposal — you don't need to write the spec yourself, but think about
+          *what changes* in observable behavior, not just *how* to implement it.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched existing issues and discussions for similar proposals.
+          required: true
+        - label: This is a concrete proposal, not an open-ended question.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What user-facing pain point or limitation does this address?
+      placeholder: |
+        e.g. "When a ChatGPT account hits its 5h quota, codex-lb continues to
+        route to it for ~30s before marking it cooled, causing intermittent 429s
+        on user-visible requests."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: |
+        Describe the desired behavior. Be concrete: what's the API/CLI/dashboard
+        change? What new config or flag, if any? Default value?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you ruled out, and why.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Proxy / upstream routing
+        - Account management & quota tracking
+        - Dashboard UI
+        - Authentication / OAuth
+        - Chat Completions API surface
+        - Responses API surface
+        - Images / files API
+        - Helm / Docker / packaging
+        - OpenSpec / docs
+        - Other
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Mockups, related upstream issues, prior art in similar projects.

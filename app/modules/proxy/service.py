@@ -781,9 +781,7 @@ class ProxyService:
                         "Reusing Platform prompt-cache affinity request_id=%s route_family=%s sticky_kind=%s",
                         get_request_id(),
                         capabilities.route_family,
-                        selection_platform_sticky_kind.value
-                        if selection_platform_sticky_kind is not None
-                        else None,
+                        selection_platform_sticky_kind.value if selection_platform_sticky_kind is not None else None,
                     )
                     return ProviderSelectionResult(
                         selected=SelectedPlatformSubject(

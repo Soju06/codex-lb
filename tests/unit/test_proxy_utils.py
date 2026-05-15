@@ -4357,7 +4357,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_keeps_distinct_http_tool_calls_across_response_ids(monkeypatch):
+async def test_stream_responses_suppresses_replayed_side_effect_tool_calls_across_response_ids(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4408,7 +4408,7 @@ async def test_stream_responses_keeps_distinct_http_tool_calls_across_response_i
         if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
             tool_chunks.append(chunk_payload)
 
-    assert tool_chunks == [tool_payload, replayed_tool_payload]
+    assert tool_chunks == [tool_payload]
 
 
 @pytest.mark.asyncio

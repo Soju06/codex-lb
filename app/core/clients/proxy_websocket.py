@@ -181,6 +181,10 @@ async def connect_responses_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", "Request to upstream timed out"),
+            failure_phase="websocket_open_timeout",
+            retryable_same_contract=True,
+            failure_detail=str(exc) or "Upstream websocket opening handshake timed out",
+            failure_exception_type=type(exc).__name__,
         ) from exc
     except InvalidStatus as exc:
         response = exc.response

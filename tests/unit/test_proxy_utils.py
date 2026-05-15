@@ -1600,13 +1600,21 @@ def test_log_proxy_service_tier_trace(monkeypatch, caplog):
             "stream",
             requested_service_tier=payload.service_tier,
             actual_service_tier="default",
+            response_id="resp_tier_trace_1",
+            model=payload.model,
+            transport="http",
+            status="success",
         )
     finally:
         reset_request_id(token)
 
     assert "proxy_service_tier_trace" in caplog.text
     assert "request_id=req_tier_trace_1" in caplog.text
+    assert "response_id=resp_tier_trace_1" in caplog.text
     assert "kind=stream" in caplog.text
+    assert "model=gpt-5.1" in caplog.text
+    assert "transport=http" in caplog.text
+    assert "status=success" in caplog.text
     assert "requested_service_tier=priority" in caplog.text
     assert "actual_service_tier=default" in caplog.text
     assert "secret instructions" not in caplog.text
@@ -4090,7 +4098,11 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
     assert request_logs.calls[0]["requested_service_tier"] == "priority"
     assert request_logs.calls[0]["actual_service_tier"] == "default"
     assert f"request_id={request_id}" in caplog.text
+    assert "response_id=resp_trace_stream" in caplog.text
     assert "kind=stream" in caplog.text
+    assert "model=gpt-5.1" in caplog.text
+    assert "transport=http" in caplog.text
+    assert "status=success" in caplog.text
     assert "requested_service_tier=priority" in caplog.text
     assert "actual_service_tier=default" in caplog.text
 
@@ -4874,6 +4886,73 @@ async def test_connect_proxy_websocket_surfaces_refresh_transport_error(monkeypa
     assert sent_payload["error"]["message"] == "Request to upstream timed out"
     assert request_logs.calls[0]["request_id"] == "ws_req_refresh_timeout"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_message"] == "Request to upstream timed out"
+    assert request_logs.calls[0]["transport"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_logs_upstream_open_timeout_distinctly(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_open_timeout")
+    release_reservation = AsyncMock()
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket",
+        AsyncMock(
+            side_effect=proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "Request to upstream timed out"),
+                failure_phase="websocket_open_timeout",
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_decide_websocket_failover_action", AsyncMock(return_value="surface"))
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_open_timeout",
+        model="gpt-5.1",
+        service_tier="fast",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    release_reservation.assert_awaited_once_with(None)
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "upstream_unavailable"
+    assert sent_payload["error"]["message"] == "Request to upstream timed out"
+    assert request_logs.calls[0]["request_id"] == "ws_req_open_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_websocket_open_timeout"
+    assert request_logs.calls[0]["error_message"] == "Request to upstream timed out"
     assert request_logs.calls[0]["transport"] == "websocket"
 
 
@@ -5118,6 +5197,7 @@ async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(m
     assert sent_payload["error"]["message"] == "Request to upstream timed out"
     assert request_logs.calls[0]["request_id"] == "ws_req_forced_refresh_timeout"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_message"] == "Request to upstream timed out"
     assert request_logs.calls[0]["transport"] == "websocket"
 
 

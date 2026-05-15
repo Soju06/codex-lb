@@ -3210,6 +3210,10 @@ class ProxyService:
                     transport="websocket",
                     error_code=error_code or "upstream_error",
                 )
+                request_log_error_code = _websocket_connect_request_log_error_code(
+                    exc,
+                    error_code or "upstream_error",
+                )
                 await self._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
@@ -3218,7 +3222,7 @@ class ProxyService:
                     request_state=request_state,
                     status_code=exc.status_code,
                     payload=exc.payload,
-                    error_code=error_code or "upstream_error",
+                    error_code=request_log_error_code,
                     error_message=error_message or "Upstream error",
                 )
                 return None, None
@@ -3235,6 +3239,10 @@ class ProxyService:
                 transport="websocket",
                 error_code=error_code or "upstream_error",
             )
+            request_log_error_code = _websocket_connect_request_log_error_code(
+                last_failover_exc,
+                error_code or "upstream_error",
+            )
             await self._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -3243,7 +3251,7 @@ class ProxyService:
                 request_state=request_state,
                 status_code=last_failover_exc.status_code,
                 payload=last_failover_exc.payload,
-                error_code=error_code or "upstream_error",
+                error_code=request_log_error_code,
                 error_message=error_message or "Upstream error",
             )
         return None, None
@@ -6625,6 +6633,15 @@ class ProxyService:
                 latency_first_token_ms=request_state.latency_first_token_ms,
                 session_id=request_state.session_id,
             )
+        _maybe_log_proxy_service_tier_trace(
+            "websocket",
+            requested_service_tier=request_state.requested_service_tier,
+            actual_service_tier=request_state.actual_service_tier,
+            response_id=response_id,
+            model=request_state.model,
+            transport=request_state.transport,
+            status=status,
+        )
 
     async def _write_websocket_connect_failure(
         self,
@@ -8096,6 +8113,10 @@ class ProxyService:
                 "stream",
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
+                response_id=response_id,
+                model=model,
+                transport=request_transport,
+                status=status,
             )
 
     async def _write_request_log(
@@ -9192,6 +9213,12 @@ def _sanitize_websocket_connect_failure(
     )
 
 
+def _websocket_connect_request_log_error_code(exc: ProxyResponseError, error_code: str) -> str:
+    if exc.failure_phase == "websocket_open_timeout" and error_code == "upstream_unavailable":
+        return "upstream_websocket_open_timeout"
+    return error_code
+
+
 def _rewrite_previous_response_stream_error(
     *,
     previous_response_id: str | None,
@@ -10155,6 +10182,10 @@ def _maybe_log_proxy_service_tier_trace(
     *,
     requested_service_tier: str | None,
     actual_service_tier: str | None,
+    response_id: str | None = None,
+    model: str | None = None,
+    transport: str | None = None,
+    status: str | None = None,
 ) -> None:
     _record_service_tier_mismatch(
         kind,
@@ -10166,9 +10197,14 @@ def _maybe_log_proxy_service_tier_trace(
         return
 
     logger.warning(
-        "proxy_service_tier_trace request_id=%s kind=%s requested_service_tier=%s actual_service_tier=%s",
+        "proxy_service_tier_trace request_id=%s response_id=%s kind=%s model=%s transport=%s status=%s "
+        "requested_service_tier=%s actual_service_tier=%s",
         get_request_id(),
+        response_id,
         kind,
+        model,
+        transport,
+        status,
         requested_service_tier,
         actual_service_tier,
     )

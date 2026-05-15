@@ -422,6 +422,75 @@ def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, 
             """,
             params,
         ),
+        "runtime_correlation_rows": (
+            f"""
+            SELECT
+                model,
+                coalesce(transport, '') AS transport,
+                coalesce(reasoning_effort, '') AS reasoning_effort,
+                coalesce(requested_service_tier, '') AS requested_service_tier,
+                coalesce(actual_service_tier, '') AS actual_service_tier,
+                status,
+                coalesce(error_code, '') AS error_code,
+                CASE
+                    WHEN input_tokens IS NULL THEN 'unknown'
+                    WHEN input_tokens < 10000 THEN '<10k'
+                    WHEN input_tokens < 30000 THEN '10-30k'
+                    WHEN input_tokens < 70000 THEN '30-70k'
+                    WHEN input_tokens < 150000 THEN '70-150k'
+                    ELSE '150k+'
+                END AS input_token_bucket,
+                CASE
+                    WHEN output_tokens IS NULL THEN 'unknown'
+                    WHEN output_tokens < 500 THEN '<500'
+                    WHEN output_tokens < 1500 THEN '500-1500'
+                    WHEN output_tokens < 3000 THEN '1500-3000'
+                    WHEN output_tokens < 6000 THEN '3000-6000'
+                    ELSE '6000+'
+                END AS output_token_bucket,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms,
+                round(avg(latency_first_token_ms), 1) AS avg_latency_first_token_ms,
+                round(avg(input_tokens), 1) AS avg_input_tokens,
+                round(avg(output_tokens), 1) AS avg_output_tokens,
+                round(sum(coalesce(cost_usd, 0.0)), 6) AS cost_usd
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+            ORDER BY count DESC, avg_latency_ms DESC
+            LIMIT 25
+            """,
+            params,
+        ),
+        "correlation_request_rows": (
+            f"""
+            SELECT
+                requested_at,
+                request_id AS response_id,
+                status,
+                model,
+                transport,
+                service_tier,
+                requested_service_tier,
+                actual_service_tier,
+                reasoning_effort,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                reasoning_tokens,
+                cost_usd,
+                latency_ms,
+                latency_first_token_ms,
+                error_code
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            ORDER BY requested_at DESC, id DESC
+            LIMIT 25
+            """,
+            params,
+        ),
         "recent_errors": (
             f"""
             SELECT requested_at, status, error_code, substr(coalesce(error_message, ''), 1, 160) AS message
@@ -450,6 +519,8 @@ def _build_request_logs_snapshot(
     slowest_rows = rows["slowest_rows"]
     output_bucket_rows = rows["output_bucket_rows"]
     input_bucket_rows = rows["input_bucket_rows"]
+    runtime_correlation_rows = rows["runtime_correlation_rows"]
+    correlation_request_rows = rows["correlation_request_rows"]
     recent_errors = rows["recent_errors"]
     total = sum(row["count"] for row in status_rows)
     successes = sum(row["count"] for row in status_rows if row["status"] == "success")
@@ -471,6 +542,11 @@ def _build_request_logs_snapshot(
         "slowest_requests": slowest_rows,
         "output_token_buckets": output_bucket_rows,
         "input_token_buckets": input_bucket_rows,
+        "runtime_correlation": {
+            "response_id_column": "request_id",
+            "groups": runtime_correlation_rows,
+            "recent_requests": correlation_request_rows,
+        },
         "recent_requests": recent_requests,
         "recent_errors": recent_errors,
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import cast
 
@@ -173,6 +174,40 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
     assert exc_info.value.status_code == 403
     assert _proxy_error_code(exc_info.value) == "forbidden"
     assert _proxy_error_type(exc_info.value) == "permission_error"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_marks_open_timeout_for_request_logs(monkeypatch):
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise asyncio.TimeoutError("timed out during opening handshake")
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert _proxy_error_message(exc_info.value) == "Request to upstream timed out"
+    assert exc_info.value.failure_phase == "websocket_open_timeout"
+    assert exc_info.value.failure_detail == "timed out during opening handshake"
+    assert exc_info.value.failure_exception_type == "TimeoutError"
 
 
 @pytest.mark.asyncio

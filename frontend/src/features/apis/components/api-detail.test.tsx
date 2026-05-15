@@ -152,6 +152,40 @@ describe("ApiDetail", () => {
 		expect(screen.getByTestId("api-account-cost-legend-2")).toHaveTextContent("$99.00");
 	});
 
+	it("keeps deleted and unknown account cost buckets distinct and styles deleted like dashboard used", () => {
+		renderApiDetail({
+			accountUsage7Day: createApiKeyAccountUsage7Day({
+				accounts: [
+					{
+						accountId: null,
+						displayName: "Deleted Accounts",
+						totalCostUsd: 4.5,
+						totalTokens: 4500,
+						totalRequests: 12,
+					},
+					{
+						accountId: null,
+						displayName: "Unknown Account",
+						totalCostUsd: 2.25,
+						totalTokens: 2250,
+						totalRequests: 6,
+					},
+				],
+			}),
+		});
+
+		const deletedLegend = screen.getByTestId("api-account-cost-legend-0");
+		const unknownLegend = screen.getByTestId("api-account-cost-legend-1");
+		const deletedDot = deletedLegend.querySelector("span[aria-hidden='true']");
+		const unknownDot = unknownLegend.querySelector("span[aria-hidden='true']");
+		expect(deletedLegend).toHaveTextContent("Deleted Accounts");
+		expect(deletedLegend).toHaveTextContent("$4.50");
+		expect(unknownLegend).toHaveTextContent("Unknown Account");
+		expect(unknownLegend).toHaveTextContent("$2.25");
+		expect(deletedDot).toHaveStyle({ backgroundColor: "rgb(211, 211, 211)" });
+		expect(unknownDot).not.toHaveStyle({ backgroundColor: "rgb(211, 211, 211)" });
+	});
+
 
 	it("limits the account cost legend to three rows", () => {
 		renderApiDetail({

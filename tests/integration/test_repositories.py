@@ -202,7 +202,7 @@ async def test_request_logs_repository_filters(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_account_delete_removes_request_logs(db_setup):
+async def test_account_delete_marks_request_logs_and_preserves_metrics(db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
@@ -225,17 +225,18 @@ async def test_account_delete_removes_request_logs(db_setup):
         assert deleted is True
         stored_log = (
             await session.execute(select(RequestLog).where(RequestLog.request_id == "req_deleted_account"))
-        ).scalar_one_or_none()
-        assert stored_log is None
+        ).scalar_one()
+        assert stored_log.account_id is None
+        assert stored_log.account_deleted is True
 
         visible_logs, visible_total = await logs_repo.list_recent(limit=10)
         assert visible_logs == []
         assert visible_total == 0
 
         metrics = await logs_repo.aggregate_activity_since(now - timedelta(minutes=1))
-        assert metrics.request_count == 0
-        assert metrics.input_tokens == 0
-        assert metrics.output_tokens == 0
+        assert metrics.request_count == 1
+        assert metrics.input_tokens == 10
+        assert metrics.output_tokens == 20
 
         account_options, model_options, api_key_options, status_options = await logs_repo.list_filter_options()
         assert account_options == []

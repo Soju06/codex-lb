@@ -571,6 +571,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "idx_logs_requested_at_model_tier" in request_log_index_names
             assert "idx_logs_model_effort_time" in request_log_index_names
             assert "idx_logs_status_error_time" in request_log_index_names
+            assert "account_deleted" in request_log_columns
             api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names

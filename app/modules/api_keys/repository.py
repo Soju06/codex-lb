@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, delete, func, select, update
+from sqlalchemy import Integer, case, cast, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -77,6 +77,7 @@ class ApiKeyUsageTotals:
 class ApiKeyAccountUsageTotals:
     account_id: str | None
     display_name: str | None
+    account_deleted: bool
     total_requests: int
     total_tokens: int
     total_cost_usd: float
@@ -689,10 +690,13 @@ class ApiKeysRepository:
         since: datetime,
         until: datetime,
     ) -> list[ApiKeyAccountUsageTotals]:
+        account_id_group = case((RequestLog.account_deleted.is_(True), None), else_=RequestLog.account_id)
+        display_name_group = case((RequestLog.account_deleted.is_(True), "Deleted Accounts"), else_=Account.email)
         stmt = (
             select(
-                RequestLog.account_id.label("account_id"),
-                Account.email.label("display_name"),
+                account_id_group.label("account_id"),
+                display_name_group.label("display_name"),
+                RequestLog.account_deleted,
                 func.count(RequestLog.id).label("total_requests"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
                 func.coalesce(
@@ -707,7 +711,7 @@ class ApiKeysRepository:
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
             )
-            .group_by(RequestLog.account_id, Account.email)
+            .group_by(account_id_group, display_name_group, RequestLog.account_deleted)
         )
         result = await self._session.execute(stmt)
         rows: list[ApiKeyAccountUsageTotals] = []
@@ -718,6 +722,7 @@ class ApiKeysRepository:
                 ApiKeyAccountUsageTotals(
                     account_id=row.account_id,
                     display_name=row.display_name,
+                    account_deleted=bool(row.account_deleted),
                     total_requests=int(row.total_requests or 0),
                     total_tokens=input_sum + output_sum,
                     total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),

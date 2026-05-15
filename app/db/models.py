@@ -129,6 +129,7 @@ class RequestLog(Base):
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    account_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)

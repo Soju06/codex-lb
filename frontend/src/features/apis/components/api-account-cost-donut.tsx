@@ -29,6 +29,7 @@ const INNER_RADIUS = 53;
 const OUTER_RADIUS = 68;
 const ACTIVE_RADIUS_OFFSET = 4;
 const LEGEND_VISIBLE_COUNT = 3;
+const DELETED_ACCOUNTS_LABEL = "Deleted Accounts";
 
 function getAccountCostDatumId(account: ApiKeyAccountUsage7DayItem, index: number) {
 	return account.accountId ?? `__unknown_account__:${index}:${account.displayName}`;
@@ -50,7 +51,7 @@ export function ApiAccountCostDonut({
 	const isDark = useThemeStore((s) => s.theme === "dark");
 	const blurred = usePrivacyStore((s) => s.blurred);
 	const reducedMotion = useReducedMotion();
-	const deletedAccountColor = isDark ? "#404040" : "#d3d3d3";
+	const usedColor = isDark ? "#404040" : "#d3d3d3";
 	const [activeId, setActiveId] = useState<string | null>(null);
 	const sortedAccounts = useMemo(() => sortAccountsForDonut(accounts), [accounts]);
 	const palette = buildDonutPalette(sortedAccounts.length, isDark);
@@ -65,8 +66,8 @@ export function ApiAccountCostDonut({
 			name: account.displayName,
 			value: account.totalCostUsd,
 			fill:
-				account.accountId === null
-					? deletedAccountColor
+				account.displayName === DELETED_ACCOUNTS_LABEL
+					? usedColor
 					: palette[index % palette.length],
 		}));
 	const legendData = chartData.slice(0, LEGEND_VISIBLE_COUNT);

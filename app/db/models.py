@@ -640,13 +640,6 @@ Index(
     RequestLog.id.desc(),
 )
 Index(
-    "idx_logs_api_key_time_account",
-    RequestLog.api_key_id,
-    RequestLog.requested_at,
-    RequestLog.account_deleted,
-    RequestLog.account_id,
-)
-Index(
     "idx_logs_request_status_api_key_time",
     RequestLog.request_id,
     RequestLog.status,

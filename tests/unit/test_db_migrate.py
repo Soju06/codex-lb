@@ -303,7 +303,6 @@ def test_check_schema_drift_detects_missing_dashboard_read_indexes(tmp_path: Pat
         connection.execute(text("DROP INDEX idx_logs_requested_at_model_tier"))
         connection.execute(text("DROP INDEX idx_logs_model_effort_time"))
         connection.execute(text("DROP INDEX idx_logs_status_error_time"))
-        connection.execute(text("DROP INDEX idx_logs_api_key_time_account"))
         connection.execute(text("DROP INDEX idx_api_keys_name"))
         connection.commit()
 
@@ -312,7 +311,6 @@ def test_check_schema_drift_detects_missing_dashboard_read_indexes(tmp_path: Pat
     assert any("idx_logs_requested_at_model_tier" in diff for diff in drift)
     assert any("idx_logs_model_effort_time" in diff for diff in drift)
     assert any("idx_logs_status_error_time" in diff for diff in drift)
-    assert any("idx_logs_api_key_time_account" in diff for diff in drift)
     assert any("idx_api_keys_name" in diff for diff in drift)
 
 

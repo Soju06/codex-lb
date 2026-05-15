@@ -160,6 +160,7 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.tool_call_dedupe import (
+    dedupe_replayed_side_effect_input_items,
     mark_duplicate_tool_call_downstream_event,
     rewrite_parallel_tool_call_sse_line,
     rewrite_parallel_tool_call_text,
@@ -3030,6 +3031,18 @@ class ProxyService:
         request_id: str | None = None,
         request_log_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
+        deduped_replayed_input_count: int | None = None
+        deduped_replayed_input_fingerprint: str | None = None
+        deduped_replayed_tool_call_count = 0
+        if isinstance(payload.input, list):
+            replayed_input_items = cast(list[JsonValue], payload.input)
+            deduped_input_items, deduped_replayed_tool_call_count = dedupe_replayed_side_effect_input_items(
+                replayed_input_items
+            )
+            if deduped_replayed_tool_call_count > 0:
+                deduped_replayed_input_count = len(replayed_input_items)
+                deduped_replayed_input_fingerprint = _fingerprint_input_items(replayed_input_items)
+                payload = payload.model_copy(update={"input": deduped_input_items})
         upstream_payload = dict(payload.to_payload())
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
@@ -3065,6 +3078,19 @@ class ProxyService:
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
         )
+        if deduped_replayed_input_count is not None:
+            request_state.input_item_count = deduped_replayed_input_count
+            request_state.input_full_fingerprint = deduped_replayed_input_fingerprint
+            logger.warning(
+                "%s_replayed_tool_call_input_deduped request_id=%s original_items=%s deduped_to=%s "
+                "removed_tool_calls=%s previous_response_id=%s",
+                transport,
+                request_state.request_id,
+                deduped_replayed_input_count,
+                input_item_count,
+                deduped_replayed_tool_call_count,
+                payload.previous_response_id,
+            )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         payload_size = len(text_data.encode("utf-8"))
         if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:

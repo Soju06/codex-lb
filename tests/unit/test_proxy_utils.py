@@ -11168,6 +11168,56 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
 
+def test_prepare_response_bridge_request_state_dedupes_replayed_tool_calls_before_serializing():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "Process running with session ID 75180",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 1000}),
+            "call_id": "call_replay",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_replay",
+            "output": "Process exited with code 0",
+        },
+    ]
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": input_items})
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 4
+    assert len(upstream_input) == 3
+    assert upstream_input[0]["call_id"] == "call_first"
+    assert upstream_input[1]["call_id"] == "call_first"
+    assert upstream_input[1]["output"] == "Process running with session ID 75180"
+    assert upstream_input[2]["role"] == "assistant"
+    assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
+
+
 @pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
     request_logs = _RequestLogsRecorder()

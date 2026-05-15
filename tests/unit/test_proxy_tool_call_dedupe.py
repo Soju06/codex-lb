@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 
@@ -665,6 +666,219 @@ def test_mark_duplicate_tool_call_downstream_event_bounds_seen_key_cache():
         )
 
     assert len(upstream_control.seen_tool_call_keys) == tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT
+
+
+def test_dedupe_replayed_side_effect_input_items_removes_duplicate_call_but_preserves_outputs():
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps(
+                {"session_id": 75180, "chars": "", "yield_time_ms": 30000, "max_output_tokens": 22000}
+            ),
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "Process running with session ID 75180",
+        },
+        {"type": "reasoning", "summary": []},
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps(
+                {"session_id": 75180, "chars": "", "yield_time_ms": 1000, "max_output_tokens": 4000}
+            ),
+            "call_id": "call_replay",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_replay",
+            "output": "Process exited with code 0",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert [item.get("type") for item in deduped_items if isinstance(item, dict)] == [
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
+    first_call = cast(dict[str, JsonValue], deduped_items[0])
+    first_output = cast(dict[str, JsonValue], deduped_items[1])
+    replay_output_message = cast(dict[str, JsonValue], deduped_items[-1])
+    assert first_call["call_id"] == "call_first"
+    assert first_output["output"] == "Process running with session ID 75180"
+    assert replay_output_message["role"] == "assistant"
+    assert replay_output_message["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
+
+
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_write_payloads():
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_poll",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "y", "yield_time_ms": 30000}),
+            "call_id": "call_input",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_resets_across_user_turns():
+    repeated_arguments = json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000})
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "first result",
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "poll again"}]},
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_second_turn",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_second_turn",
+            "output": "second result",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_resets_across_role_only_user_turns():
+    repeated_arguments = json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000})
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_first",
+        },
+        {"type": "function_call_output", "call_id": "call_first", "output": "first result"},
+        {"role": "user", "content": [{"type": "input_text", "text": "poll again"}]},
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_second_turn",
+        },
+        {"type": "function_call_output", "call_id": "call_second_turn", "output": "second result"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_preserves_all_outputs_when_call_id_repeats():
+    repeated_arguments = json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000})
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_same",
+        },
+        {"type": "function_call_output", "call_id": "call_same", "output": "Process running"},
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": repeated_arguments,
+            "call_id": "call_same",
+        },
+        {"type": "function_call_output", "call_id": "call_same", "output": "Process exited"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert len(deduped_items) == 3
+    first_output = cast(dict[str, JsonValue], deduped_items[1])
+    replay_output_message = cast(dict[str, JsonValue], deduped_items[-1])
+    assert first_output["output"] == "Process running"
+    assert replay_output_message["content"] == [{"type": "output_text", "text": "Process exited"}]
+
+
+def test_dedupe_replayed_side_effect_input_items_keeps_repeat_after_intervening_side_effect():
+    repeated_arguments = json.dumps({"cmd": "pytest"})
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": repeated_arguments,
+            "call_id": "call_pytest_first",
+        },
+        {"type": "function_call_output", "call_id": "call_pytest_first", "output": "failed"},
+        {
+            "type": "apply_patch_call",
+            "operation": {"type": "update", "path": "app.py"},
+            "call_id": "call_patch",
+        },
+        {"type": "apply_patch_call_output", "call_id": "call_patch", "output": "patched"},
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": repeated_arguments,
+            "call_id": "call_pytest_second",
+        },
+        {"type": "function_call_output", "call_id": "call_pytest_second", "output": "passed"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_keeps_read_only_custom_tool_calls():
+    input_items: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "name": "read_context",
+            "input": json.dumps({"path": "README.md"}),
+            "call_id": "call_custom_a",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "read_context",
+            "input": json.dumps({"path": "README.md"}),
+            "call_id": "call_custom_b",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
 
 
 def test_rewrite_parallel_tool_call_text_preserves_sse_event_name():

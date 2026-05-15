@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import cast
 
 from app.core.openai.models import OpenAIEvent
@@ -239,6 +240,169 @@ def canonical_side_effect_argument_key(item_name: str | None, argument_value: st
     canonical_argument = dict(argument)
     canonical_argument["tool_uses"] = canonical_tool_uses
     return canonical_json_key(cast(JsonValue, canonical_argument))
+
+
+def dedupe_replayed_side_effect_input_items(input_items: list[JsonValue]) -> tuple[list[JsonValue], int]:
+    call_keys: dict[int, tuple[str, str | None, str]] = {}
+    call_ids: dict[int, str] = {}
+    output_indices_by_call_id: dict[str, list[int]] = {}
+    for index, item in enumerate(input_items):
+        if not isinstance(item, dict):
+            continue
+        tool_call_key = replayed_side_effect_tool_call_key(item)
+        if tool_call_key is not None:
+            call_keys[index] = tool_call_key
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                call_ids[index] = call_id
+            continue
+        output_call_id = replayed_tool_output_call_id(item)
+        if output_call_id is not None:
+            output_indices_by_call_id.setdefault(output_call_id, []).append(index)
+
+    if not call_keys:
+        return input_items, 0
+
+    kept = [True] * len(input_items)
+    rewritten: dict[int, JsonValue] = {}
+    first_call_id_by_key: dict[tuple[str, str | None, str], str | None] = {}
+    next_output_cursor_by_call_id: dict[str, int] = {}
+    last_side_effect_key: tuple[str, str | None, str] | None = None
+    removed_count = 0
+    for index, item in enumerate(input_items):
+        if isinstance(item, dict) and replayed_input_segment_boundary(item):
+            first_call_id_by_key.clear()
+            last_side_effect_key = None
+        key = call_keys.get(index)
+        if key is None:
+            continue
+        if last_side_effect_key is not None and key != last_side_effect_key:
+            first_call_id_by_key.clear()
+        last_side_effect_key = key
+        call_id = call_ids.get(index)
+        output_index = (
+            replayed_tool_output_index_for_call(
+                output_indices_by_call_id,
+                next_output_cursor_by_call_id,
+                call_index=index,
+                call_id=call_id,
+            )
+            if call_id is not None
+            else None
+        )
+        if key not in first_call_id_by_key:
+            first_call_id_by_key[key] = call_id
+            continue
+
+        removed_count += 1
+        kept[index] = False
+        if output_index is not None:
+            output_item = input_items[output_index]
+            if isinstance(output_item, dict):
+                rewritten[output_index] = replayed_tool_output_as_assistant_message(output_item)
+
+    if removed_count == 0:
+        return input_items, 0
+
+    deduped_items: list[JsonValue] = []
+    for index, item in enumerate(input_items):
+        if kept[index]:
+            deduped_items.append(rewritten.get(index, item))
+    return deduped_items, removed_count
+
+
+def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> tuple[str, str | None, str] | None:
+    item_type_value = item.get("type")
+    item_type = item_type_value if isinstance(item_type_value, str) else None
+    if item_type == "function_call":
+        item_name_value = item.get("name")
+        item_name = item_name_value if isinstance(item_name_value, str) else None
+        argument_value = item.get("arguments")
+        if not isinstance(argument_value, str):
+            return None
+        is_side_effect_tool_call = item_name in _SIDE_EFFECT_TOOL_CALL_NAMES and _tool_call_has_side_effect_arguments(
+            item_name,
+            argument_value,
+        )
+        if not is_side_effect_tool_call:
+            return None
+        argument_key = canonical_side_effect_argument_key(item_name, argument_value)
+    elif item_type == "custom_tool_call":
+        item_name_value = item.get("name")
+        item_name = item_name_value if isinstance(item_name_value, str) else None
+        if item_name not in _SIDE_EFFECT_TOOL_CALL_NAMES:
+            return None
+        argument_value = item.get("input")
+        if not isinstance(argument_value, str):
+            return None
+        argument_key = canonical_side_effect_argument_key(item_name, argument_value)
+    elif item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES:
+        item_name = item_type
+        operation_value = item.get("operation")
+        argument_key = canonical_json_key(operation_value)
+    else:
+        return None
+    return (cast(str, item_type), item_name, argument_key)
+
+
+def replayed_input_segment_boundary(item: Mapping[str, JsonValue]) -> bool:
+    role = item.get("role")
+    if role not in {"developer", "system", "user"}:
+        return False
+    item_type = item.get("type")
+    return item_type in {None, "message"}
+
+
+def replayed_tool_output_call_id(item: Mapping[str, JsonValue]) -> str | None:
+    if item.get("type") not in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "apply_patch_call_output",
+    }:
+        return None
+    call_id = item.get("call_id")
+    if isinstance(call_id, str) and call_id:
+        return call_id
+    return None
+
+
+def replayed_tool_output_as_assistant_message(item: Mapping[str, JsonValue]) -> JsonValue:
+    output_value = item.get("output")
+    if isinstance(output_value, str):
+        output_text = output_value
+    else:
+        output_text = canonical_json_key(cast(JsonValue, output_value))
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": output_text,
+            }
+        ],
+    }
+
+
+def replayed_tool_output_index_for_call(
+    output_indices_by_call_id: dict[str, list[int]],
+    next_output_cursor_by_call_id: dict[str, int],
+    *,
+    call_index: int,
+    call_id: str,
+) -> int | None:
+    output_indices = output_indices_by_call_id.get(call_id)
+    if not output_indices:
+        return None
+    cursor = next_output_cursor_by_call_id.get(call_id, 0)
+    while cursor < len(output_indices) and output_indices[cursor] < call_index:
+        cursor += 1
+    if cursor >= len(output_indices):
+        next_output_cursor_by_call_id[call_id] = cursor
+        return None
+    output_index = output_indices[cursor]
+    next_output_cursor_by_call_id[call_id] = cursor + 1
+    return output_index
 
 
 def _tool_call_has_side_effect_arguments(item_name: str | None, argument_value: str) -> bool:

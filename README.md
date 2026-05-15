@@ -446,7 +446,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/SHAREN"><img src="https://avatars.githubusercontent.com/u/6128858?v=4?s=100" width="100px;" alt="Renat Sharipov"/><br /><sub><b>Renat Sharipov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=SHAREN" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=SHAREN" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://ximatai.net"><img src="https://avatars.githubusercontent.com/u/1785495?v=4?s=100" width="100px;" alt="Liu Rui"/><br /><sub><b>Liu Rui</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aruis" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://ximatai.net"><img src="https://avatars.githubusercontent.com/u/1785495?v=4?s=100" width="100px;" alt="Liu Rui"/><br /><sub><b>Liu Rui</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aruis" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aruis" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aruis" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aaruis" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>

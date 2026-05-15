@@ -118,6 +118,7 @@ class LoadBalancer:
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
+        secondary_budget_threshold_pct: float = 100.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -176,6 +177,7 @@ class LoadBalancer:
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     budget_threshold_pct=budget_threshold_pct,
+                    secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                 )
 
                 selected_account_map = account_map
@@ -312,6 +314,7 @@ class LoadBalancer:
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         sticky_repo=repos.sticky_sessions,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                     )
                     selected_account_map = account_map
                     selected_states = []
@@ -642,6 +645,7 @@ class LoadBalancer:
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
         budget_threshold_pct: float = 95.0,
+        secondary_budget_threshold_pct: float = 100.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -652,6 +656,7 @@ class LoadBalancer:
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
                 budget_threshold_pct=budget_threshold_pct,
+                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -682,7 +687,11 @@ class LoadBalancer:
                 budget_pressured = (
                     sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
                     and pinned.status != AccountStatus.RATE_LIMITED
-                    and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
+                    and _state_above_sticky_budget_threshold(
+                        pinned,
+                        budget_threshold_pct,
+                        secondary_budget_threshold_pct,
+                    )
                 )
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
@@ -714,11 +723,18 @@ class LoadBalancer:
                             routing_strategy=routing_strategy,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
                             if _state_above_budget_threshold(pinned, budget_threshold_pct)
-                            else _state_above_sticky_budget_threshold
+                            else (
+                                lambda state, _: _state_above_sticky_budget_threshold(
+                                    state,
+                                    budget_threshold_pct,
+                                    secondary_budget_threshold_pct,
+                                )
+                            )
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
@@ -782,6 +798,7 @@ class LoadBalancer:
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
             budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1312,9 +1329,13 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
     return state.used_percent is not None and state.used_percent > budget_threshold_pct
 
 
-def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+def _state_above_sticky_budget_threshold(
+    state: AccountState,
+    budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float,
+) -> bool:
     return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
-        state.secondary_used_percent is not None and state.secondary_used_percent > budget_threshold_pct
+        state.secondary_used_percent is not None and state.secondary_used_percent > secondary_budget_threshold_pct
     )
 
 
@@ -1324,6 +1345,7 @@ def _select_account_preferring_budget_safe(
     prefer_earlier_reset: bool,
     routing_strategy: RoutingStrategy,
     budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float = 100.0,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
 ) -> SelectionResult:

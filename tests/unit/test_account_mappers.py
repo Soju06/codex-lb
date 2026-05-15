@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def _make_account(*, routing_policy: str | None, status: AccountStatus | None = AccountStatus.ACTIVE) -> Account:
     encryptor = TokenEncryptor()
-    return Account(
+    account = Account(
         id="acc-1",
         chatgpt_account_id="chatgpt-acc-1",
         email="account@example.com",
@@ -23,8 +23,10 @@ def _make_account(*, routing_policy: str | None, status: AccountStatus | None = 
         id_token_encrypted=encryptor.encrypt("id"),
         last_refresh=datetime.now(tz=timezone.utc),
         status=status,
-        routing_policy=routing_policy,
     )
+    if routing_policy is not None:
+        account.routing_policy = routing_policy
+    return account
 
 
 def test_account_summary_normalizes_unknown_routing_policy_to_normal() -> None:

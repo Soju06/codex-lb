@@ -13,6 +13,7 @@ from app.modules.proxy.additional_model_limits import (
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     clear_additional_quota_registry_cache,
+    get_additional_quota_routing_policy,
     reload_additional_quota_registry,
 )
 

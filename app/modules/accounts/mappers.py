@@ -103,7 +103,7 @@ def _account_to_summary(
         display_name=account.email,
         plan_type=plan_type,
         status=status.value,
-        routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        routing_policy=_normalize_account_routing_policy(getattr(account, "routing_policy", None)),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

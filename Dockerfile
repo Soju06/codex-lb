@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 COPY frontend ./
 RUN bun run build
 
-FROM python:3.13-slim AS python-build
+FROM python:3.14-slim AS python-build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,7 +28,7 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
 
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

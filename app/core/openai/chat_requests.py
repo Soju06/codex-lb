@@ -189,14 +189,21 @@ def _normalize_chat_tools(tools: list[JsonValue]) -> list[JsonValue]:
             name = function.get("name")
             if not isinstance(name, str) or not name:
                 continue
-            normalized.append(
-                {
-                    "type": tool_type or "function",
-                    "name": name,
-                    "description": function.get("description"),
-                    "parameters": function.get("parameters"),
-                }
-            )
+            # Preserve the function-level ``strict`` flag so the responses-side
+            # ``enforce_strict_function_tools_format`` pre-validator can run on
+            # chat-completions traffic too. Without this, ``strict: true``
+            # would be silently dropped here, masking schema violations the
+            # upstream Codex backend would otherwise reject.
+            normalized_tool: dict[str, JsonValue] = {
+                "type": tool_type or "function",
+                "name": name,
+                "description": function.get("description"),
+                "parameters": function.get("parameters"),
+            }
+            strict = function.get("strict")
+            if isinstance(strict, bool):
+                normalized_tool["strict"] = strict
+            normalized.append(normalized_tool)
             continue
         if isinstance(tool_type, str):
             normalized_type = normalize_tool_type(tool_type)

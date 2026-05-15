@@ -15,9 +15,13 @@ import pytest
 
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.strict_schema import validate_strict_json_schema
+from app.core.openai.strict_schema import (
+    validate_strict_function_tool_schema,
+    validate_strict_json_schema,
+)
 from app.core.types import JsonValue
 from app.modules.proxy.request_policy import (
+    enforce_strict_function_tools_format,
     enforce_strict_text_format,
     normalize_responses_request_payload,
 )
@@ -296,3 +300,352 @@ def test_chat_completions_strict_schema_violation_surfaces_via_enforce_helper():
     err = exc_info.value
     assert err.code == "invalid_json_schema"
     assert err.param == "text.format.schema"
+
+
+# ---------------------------------------------------------------------------
+# Strict function tool parameter schemas (PR fix/validate-strict-function-tool-schema)
+# ---------------------------------------------------------------------------
+
+
+def test_strict_function_tool_missing_additional_properties():
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+    violation = validate_strict_function_tool_schema(schema, name="get_weather", param="tools[0].parameters")
+    assert violation is not None
+    assert violation.code == "invalid_function_parameters"
+    assert violation.param == "tools[0].parameters"
+    assert "Invalid schema for function 'get_weather'" in violation.message
+    assert "additionalProperties" in violation.message
+
+
+def test_strict_function_tool_additional_properties_true_rejected():
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": True,
+    }
+    violation = validate_strict_function_tool_schema(schema, name="get_weather", param="tools[0].parameters")
+    assert violation is not None
+    assert violation.code == "invalid_function_parameters"
+
+
+def test_strict_function_tool_missing_required_rejected():
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": False,
+    }
+    violation = validate_strict_function_tool_schema(schema, name="get_weather", param="tools[0].parameters")
+    assert violation is not None
+    assert "required" in violation.message.lower()
+
+
+def test_strict_function_tool_valid_schema_passes():
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": False,
+    }
+    assert validate_strict_function_tool_schema(schema, name="get_weather", param="tools[0].parameters") is None
+
+
+def test_strict_function_tool_nested_violation_surfaced():
+    schema = {
+        "type": "object",
+        "properties": {
+            "filter": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                # missing additionalProperties:false on nested object
+            }
+        },
+        "required": ["filter"],
+        "additionalProperties": False,
+    }
+    violation = validate_strict_function_tool_schema(schema, name="search", param="tools[0].parameters")
+    assert violation is not None
+    assert "filter" in violation.message
+
+
+def test_strict_function_tool_anonymous_name_falls_back():
+    schema: dict[str, JsonValue] = {"type": "object"}
+    violation = validate_strict_function_tool_schema(schema, name=None, param="tools[0].parameters")
+    assert violation is not None
+    assert "Invalid schema for function 'function'" in violation.message
+
+
+# ---------------------------------------------------------------------------
+# enforce_strict_function_tools_format integration
+# ---------------------------------------------------------------------------
+
+
+def _responses_payload_with_tools(tools: list[JsonValue]) -> dict[str, JsonValue]:
+    return _json_object(
+        {
+            "model": "gpt-5.5",
+            "instructions": "",
+            "input": "hi",
+            "tools": tools,
+        }
+    )
+
+
+def test_enforce_strict_function_tools_rejects_missing_additional_properties():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        }
+    ]
+    with pytest.raises(ClientPayloadError) as exc_info:
+        normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
+    err = exc_info.value
+    assert err.code == "invalid_function_parameters"
+    assert err.error_type == "invalid_request_error"
+    assert err.param == "tools[0].parameters"
+    assert "get_weather" in str(err)
+
+
+def test_enforce_strict_function_tools_rejects_at_correct_index():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "compliant",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "broken",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+                # missing additionalProperties:false
+            },
+            "strict": True,
+        },
+    ]
+    with pytest.raises(ClientPayloadError) as exc_info:
+        normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
+    err = exc_info.value
+    assert err.param == "tools[1].parameters"
+    assert "broken" in str(err)
+
+
+def test_enforce_strict_function_tools_accepts_strict_false():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": False,
+        }
+    ]
+    # No violation should be raised for strict=False — pre-validator skips entirely.
+    normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
+
+
+def test_enforce_strict_function_tools_accepts_omitted_strict():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        }
+    ]
+    normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
+
+
+def test_enforce_strict_function_tools_accepts_compliant_schema():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+    request = normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
+    assert request.tools[0]["strict"] is True  # type: ignore[index]
+
+
+def test_enforce_strict_function_tools_param_template_for_chat():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "x",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        }
+    ]
+    # Build the request without triggering the default-template enforcement so
+    # we can call the helper with the chat-style param template directly.
+    from app.core.openai.requests import ResponsesRequest
+
+    request = ResponsesRequest.model_validate(_responses_payload_with_tools(tools))
+    with pytest.raises(ClientPayloadError) as exc_info:
+        enforce_strict_function_tools_format(request, param_template="tools[{index}].function.parameters")
+    assert exc_info.value.param == "tools[0].function.parameters"
+
+
+# ---------------------------------------------------------------------------
+# Chat → responses coercion preserves strict (PR fix/validate-strict-function-tool-schema)
+# ---------------------------------------------------------------------------
+
+
+def test_chat_function_tool_strict_true_preserved_in_coercion():
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    responses_request = request.to_responses_request()
+    assert responses_request.tools[0]["strict"] is True  # type: ignore[index]
+    # Compliant schema passes the strict pre-validator.
+    enforce_strict_function_tools_format(
+        responses_request,
+        param_template="tools[{index}].function.parameters",
+    )
+
+
+def test_chat_function_tool_strict_true_violation_pre_validates():
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        # missing additionalProperties:false
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    responses_request = request.to_responses_request()
+    with pytest.raises(ClientPayloadError) as exc_info:
+        enforce_strict_function_tools_format(
+            responses_request,
+            param_template="tools[{index}].function.parameters",
+        )
+    err = exc_info.value
+    assert err.code == "invalid_function_parameters"
+    assert err.param == "tools[0].function.parameters"
+
+
+def test_chat_function_tool_strict_false_is_preserved_as_false():
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": False,
+                },
+            }
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    responses_request = request.to_responses_request()
+    assert responses_request.tools[0].get("strict") is False  # type: ignore[union-attr]
+
+
+def test_chat_function_tool_without_strict_has_no_strict_key():
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    responses_request = request.to_responses_request()
+    tool = responses_request.tools[0]
+    assert isinstance(tool, dict)
+    assert "strict" not in tool

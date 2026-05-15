@@ -73,6 +73,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    enforce_strict_function_tools_format,
     enforce_strict_text_format,
     openai_client_payload_error,
     openai_validation_error,
@@ -266,6 +267,7 @@ async def v1_responses(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -1488,6 +1490,10 @@ async def v1_chat_completions(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(
+            responses_payload,
+            param_template="tools[{index}].function.parameters",
+        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)

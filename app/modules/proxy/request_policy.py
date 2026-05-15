@@ -9,7 +9,10 @@ from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
-from app.core.openai.strict_schema import validate_strict_json_schema
+from app.core.openai.strict_schema import (
+    validate_strict_function_tool_schema,
+    validate_strict_json_schema,
+)
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
@@ -194,6 +197,7 @@ def normalize_responses_request_payload(
     else:
         responses = ResponsesRequest.model_validate(payload)
     enforce_strict_text_format(responses)
+    enforce_strict_function_tools_format(responses)
     return responses
 
 
@@ -228,3 +232,53 @@ def enforce_strict_text_format(request: ResponsesRequest) -> None:
         code=violation.code,
         error_type="invalid_request_error",
     )
+
+
+def enforce_strict_function_tools_format(
+    request: ResponsesRequest,
+    *,
+    param_template: str = "tools[{index}].parameters",
+) -> None:
+    """Reject strict-mode function tools whose parameter schemas violate OpenAI rules.
+
+    Mirrors :func:`enforce_strict_text_format` for function tools that
+    set ``strict: true``. The Codex backend rejects an invalid strict
+    tool schema by closing the WebSocket with ``close_code=1000``; the
+    surfaced error is a generic ``upstream_rejected_input`` 502, which
+    well-behaved retry loops misclassify as transient. Real OpenAI
+    returns a deterministic ``400 invalid_function_parameters`` for the
+    same payload, so codex-lb pre-validates here.
+
+    ``param_template`` controls how the rejected parameter is named in
+    the error envelope: native ``/v1/responses`` callers see
+    ``tools[<i>].parameters``; the chat-completions handler passes
+    ``"tools[{index}].function.parameters"`` to mirror the inbound
+    shape.
+    """
+    if not request.tools:
+        return
+    for index, tool in enumerate(request.tools):
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") != "function":
+            continue
+        if tool.get("strict") is not True:
+            continue
+        parameters = tool.get("parameters")
+        if parameters is None:
+            continue
+        raw_name = tool.get("name")
+        name = raw_name if isinstance(raw_name, str) else None
+        violation = validate_strict_function_tool_schema(
+            parameters,
+            name=name,
+            param=param_template.format(index=index),
+        )
+        if violation is None:
+            continue
+        raise ClientPayloadError(
+            violation.message,
+            param=violation.param,
+            code=violation.code,
+            error_type="invalid_request_error",
+        )

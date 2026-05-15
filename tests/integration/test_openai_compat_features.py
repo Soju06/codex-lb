@@ -507,6 +507,79 @@ async def test_v1_chat_completions_rejects_strict_schema_violation(async_client)
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_rejects_strict_function_tool_violation(async_client):
+    """Strict-mode violations on function tool parameters are rejected with 400.
+
+    Before this fix, ``_normalize_chat_tools`` dropped the ``strict`` flag
+    silently, so the request reached the upstream Codex backend with a
+    spec-violating schema and surfaced as a 502 ``upstream_rejected_input``.
+    Real OpenAI returns 400 ``invalid_function_parameters`` for the same
+    payload; codex-lb now does too.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        # No additionalProperties: false → strict-mode violation.
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].function.parameters"
+    assert "get_weather" in body["error"]["message"]
+    assert "additionalProperties" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_rejects_strict_function_tool_violation(async_client):
+    """Same as the chat-completions case, but on the native /v1/responses endpoint.
+
+    The param shape differs: native responses callers see
+    ``tools[<i>].parameters`` rather than ``tools[<i>].function.parameters``.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "strict": True,
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_rejects_missing_json_schema(async_client):
     payload = {
         "model": "gpt-5.2",

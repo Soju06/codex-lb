@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 
@@ -560,3 +561,83 @@ async def test_normalize_public_responses_stream_codex_route_does_not_backfill_o
     completed = next(p for p in payloads if p and p.get("type") == "response.completed")
     # Output stays empty — Codex CLI handles its own assembly.
     assert completed["response"]["output"] == []
+
+
+# ----------------------------------------------------------------------------
+# internal_bridge_responses must opt out of OpenAI SDK contract enforcement.
+# (Regression guard: a forwarded /backend-api/codex/responses request that
+# travels through the internal bridge MUST NOT drop codex.* events or
+# synthesize a response.created envelope on the owner instance — the origin
+# instance is responsible for honouring the original route's policy.)
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_internal_bridge_responses_disables_openai_sdk_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.modules.proxy import http_bridge_forwarding as bridge_module
+
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(*args: object, **kwargs: object) -> object:
+        captured["kwargs"] = kwargs
+        return object()  # any non-None response; the handler returns it directly
+
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fake_stream_responses)
+
+    # Bypass HMAC verification + header parsing — we only care about the flag
+    # that internal_bridge_responses passes to _stream_responses.
+    fake_context = bridge_module.HTTPBridgeForwardContext(
+        origin_instance="origin-a",
+        target_instance="owner-b",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        original_affinity_kind="session",
+        original_affinity_key="sid-abc",
+        reservation=None,
+    )
+    fake_forwarded = bridge_module.HTTPBridgeForwardedRequest(context=fake_context)
+
+    def fake_parse(headers, *, payload, current_instance):
+        return fake_forwarded, None
+
+    monkeypatch.setattr(proxy_api_module, "parse_forwarded_request", fake_parse)
+    # The API-key validation hits the DB by default; short-circuit it.
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_validate_internal_bridge_api_key",
+        AsyncMock(return_value=(None, None)),
+    )
+    monkeypatch.setattr(proxy_api_module, "_strip_internal_bridge_headers", lambda h: dict(h))
+
+    # Minimal payload + request stubs.
+    from app.core.openai.requests import ResponsesRequest
+
+    payload = ResponsesRequest(model="gpt-5.5", input="hi", instructions="")
+
+    class _StubRequest:
+        @property
+        def headers(self) -> dict[str, str]:
+            return {}
+
+    response = await proxy_api_module.internal_bridge_responses(
+        request=cast(Any, _StubRequest()),
+        payload=payload,
+        context=cast(Any, object()),
+    )
+
+    assert response is not None
+    kwargs_obj = captured["kwargs"]
+    assert isinstance(kwargs_obj, dict)
+    # cast for the type-checker — isinstance narrows at runtime, ty doesn't track it here.
+    kwargs = cast(dict[str, object], kwargs_obj)
+    # The regression we are guarding against: enforce_openai_sdk_contract must
+    # be passed AS False so the owner instance forwards the upstream stream
+    # verbatim. The origin instance reapplies normalization based on the
+    # original route's policy.
+    assert kwargs.get("enforce_openai_sdk_contract") is False, (
+        f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
+    )

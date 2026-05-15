@@ -340,6 +340,17 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
+        # output, synthesize ``response.created``) MUST be applied by the
+        # origin instance — the one that actually responds to the client — so
+        # they can honour the original route's ``enforce_openai_sdk_contract``
+        # decision. This handler runs on the owner instance after the origin
+        # forwarded the request via the internal bridge; if we re-applied them
+        # here, a forwarded ``/backend-api/codex/responses`` request would
+        # lose ``codex.*`` events (and gain a synthetic ``response.created``)
+        # before the origin ever sees the stream. Forward verbatim and let
+        # the origin run its own normalization.
+        enforce_openai_sdk_contract=False,
     )
 
 

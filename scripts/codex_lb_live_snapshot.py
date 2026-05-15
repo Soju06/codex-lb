@@ -9,9 +9,13 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable, Sequence
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 DEFAULT_BASE_URL = "http://127.0.0.1:2455"
@@ -26,12 +30,65 @@ LOG_PATTERNS = (
     "stream_incomplete",
 )
 
+_POSTGRES_CONTAINER_QUERY_SCRIPT = r"""
+import json
+import os
+import sys
+from datetime import date, datetime
+from decimal import Decimal
+
+import psycopg
+from psycopg.rows import dict_row
+
+
+def sync_url(database_url):
+    if database_url.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    if database_url.startswith("postgresql+psycopg://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    if database_url.startswith("postgres://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    return database_url
+
+
+def normalize_value(value):
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def normalize_row(row):
+    return {key: normalize_value(value) for key, value in dict(row).items()}
+
+
+payload = json.load(sys.stdin)
+database_url = os.environ.get("CODEX_LB_DATABASE_URL")
+if not database_url:
+    raise RuntimeError("CODEX_LB_DATABASE_URL is not set in container")
+
+output = {}
+with psycopg.connect(sync_url(database_url), row_factory=dict_row, connect_timeout=5) as conn:
+    with conn.cursor() as cursor:
+        for query in payload["queries"]:
+            cursor.execute(query["sql"], query.get("params", []))
+            output[query["name"]] = [normalize_row(row) for row in cursor.fetchall()]
+
+print(json.dumps(output, separators=(",", ":")))
+"""
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a small codex-lb live health and hiccup snapshot.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--container", default=DEFAULT_CONTAINER)
     parser.add_argument("--container-db-path", default=DEFAULT_DB_PATH)
+    parser.add_argument("--database-url", default=None, help="Optional CODEX_LB_DATABASE_URL to query directly.")
     parser.add_argument("--db-path", type=Path, default=None)
     parser.add_argument("--minutes", type=int, default=15)
     parser.add_argument("--health-samples", type=int, default=5)
@@ -39,7 +96,13 @@ def main() -> int:
 
     snapshot: dict[str, Any] = {
         "health": _health(args.base_url, samples=max(args.health_samples, 1)),
-        "request_logs": _request_logs(args.db_path, args.container, args.container_db_path, args.minutes),
+        "request_logs": _request_logs(
+            args.db_path,
+            args.container,
+            args.container_db_path,
+            args.minutes,
+            database_url=args.database_url,
+        ),
         "container": _container_state(args.container),
         "log_patterns": _log_patterns(args.container, args.minutes),
     }
@@ -82,220 +145,335 @@ def _request_logs(
     container: str,
     container_db_path: str,
     minutes: int,
+    *,
+    database_url: str | None = None,
 ) -> dict[str, Any]:
-    local_db = db_path
-    temp_dir: tempfile.TemporaryDirectory[str] | None = None
-    if local_db is None:
-        if shutil.which("docker") is None:
-            return {"error": "docker unavailable and --db-path was not provided"}
-        temp_dir = tempfile.TemporaryDirectory()
-        local_db = Path(temp_dir.name) / "store.db"
-        copy_error = _copy_sqlite_snapshot(container, container_db_path, local_db)
-        if copy_error is not None:
-            if temp_dir is not None:
-                temp_dir.cleanup()
-            return {"error": copy_error}
+    if db_path is not None:
+        return _request_logs_from_sqlite(db_path, minutes, source={"backend": "sqlite", "path": str(db_path)})
+
+    if database_url is not None:
+        return _request_logs_from_database_url(database_url, minutes)
+
+    if shutil.which("docker") is None:
+        return {"error": "docker unavailable and neither --db-path nor --database-url was provided"}
+
+    container_database_url = _container_database_url(container)
+    backend = _database_backend(container_database_url)
+    if backend == "postgresql":
+        return _request_logs_from_container_postgres(container, minutes)
+    if container_database_url is not None and backend is None:
+        return {
+            "error": "unsupported container CODEX_LB_DATABASE_URL driver: "
+            f"{_database_driver(container_database_url) or 'unknown'}"
+        }
+
+    sqlite_container_path = _sqlite_path_from_database_url(container_database_url) or container_db_path
+    temp_dir = tempfile.TemporaryDirectory()
+    local_db = Path(temp_dir.name) / "store.db"
+    copy_error = _copy_sqlite_snapshot(container, sqlite_container_path, local_db)
+    if copy_error is not None:
+        temp_dir.cleanup()
+        return {"error": copy_error}
+    try:
+        return _request_logs_from_sqlite(
+            local_db,
+            minutes,
+            source={"backend": "sqlite", "container": container, "path": sqlite_container_path},
+        )
+    finally:
+        temp_dir.cleanup()
+
+
+def _request_logs_from_database_url(database_url: str, minutes: int) -> dict[str, Any]:
+    backend = _database_backend(database_url)
+    if backend == "postgresql":
+        return _request_logs_from_postgres_url(database_url, minutes)
+    if backend == "sqlite":
+        sqlite_path = _sqlite_path_from_database_url(database_url)
+        if sqlite_path is None:
+            return {"error": "sqlite database URL does not include a path"}
+        return _request_logs_from_sqlite(
+            Path(sqlite_path),
+            minutes,
+            source={"backend": "sqlite", "path": sqlite_path},
+        )
+    return {"error": f"unsupported database URL driver: {_database_driver(database_url) or 'unknown'}"}
+
+
+def _request_logs_from_sqlite(db_path: Path, minutes: int, *, source: dict[str, Any]) -> dict[str, Any]:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+
+        def execute(sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
+            return [_normalize_row(dict(row)) for row in conn.execute(sql, params).fetchall()]
+
+        rows = _fetch_request_log_rows(execute, "sqlite", minutes)
+    return _build_request_logs_snapshot(rows, minutes, source=source)
+
+
+def _request_logs_from_postgres_url(database_url: str, minutes: int) -> dict[str, Any]:
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except ImportError as exc:
+        return {"error": f"psycopg unavailable for PostgreSQL request-log snapshot: {exc}"}
 
     try:
-        with sqlite3.connect(str(local_db)) as conn:
-            conn.row_factory = sqlite3.Row
-            window = f"-{minutes} minutes"
-            status_rows = conn.execute(
-                """
-                SELECT status, coalesce(error_code, '') AS error_code, count(*) AS count
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                GROUP BY status, error_code
-                ORDER BY status, error_code
-                """,
-                (window,),
-            ).fetchall()
-            transport_rows = conn.execute(
-                """
-                SELECT coalesce(transport, '') AS transport, status, count(*) AS count
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                GROUP BY transport, status
-                ORDER BY transport, status
-                """,
-                (window,),
-            ).fetchall()
-            service_tier_rows = conn.execute(
-                """
-                SELECT
-                    coalesce(requested_service_tier, '') AS requested_service_tier,
-                    coalesce(actual_service_tier, '') AS actual_service_tier,
-                    coalesce(service_tier, '') AS service_tier,
-                    status,
-                    coalesce(error_code, '') AS error_code,
-                    count(*) AS count,
-                    round(avg(latency_ms), 1) AS avg_latency_ms,
-                    min(latency_ms) AS min_latency_ms,
-                    max(latency_ms) AS max_latency_ms
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                GROUP BY requested_service_tier, actual_service_tier, service_tier, status, error_code
-                ORDER BY count DESC, avg_latency_ms DESC
-                LIMIT 20
-                """,
-                (window,),
-            ).fetchall()
-            tier_mismatch_rows = conn.execute(
-                """
-                SELECT
-                    coalesce(requested_service_tier, '') AS requested_service_tier,
-                    coalesce(actual_service_tier, '') AS actual_service_tier,
-                    status,
-                    coalesce(error_code, '') AS error_code,
-                    count(*) AS count,
-                    round(avg(latency_ms), 1) AS avg_latency_ms,
-                    min(latency_ms) AS min_latency_ms,
-                    max(latency_ms) AS max_latency_ms
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                    AND coalesce(requested_service_tier, '') != coalesce(actual_service_tier, '')
-                GROUP BY requested_service_tier, actual_service_tier, status, error_code
-                ORDER BY count DESC, avg_latency_ms DESC
-                LIMIT 20
-                """,
-                (window,),
-            ).fetchall()
-            latency_rows = conn.execute(
-                """
-                SELECT status, latency_ms, latency_first_token_ms
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?) AND latency_ms IS NOT NULL
-                """,
-                (window,),
-            ).fetchall()
-            recent_requests = conn.execute(
-                """
-                SELECT
-                    requested_at,
-                    status,
-                    model,
-                    transport,
-                    latency_ms,
-                    latency_first_token_ms,
-                    service_tier,
-                    requested_service_tier,
-                    actual_service_tier,
-                    error_code
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                ORDER BY requested_at DESC, id DESC
-                LIMIT 10
-                """,
-                (window,),
-            ).fetchall()
-            slowest_rows = conn.execute(
-                """
-                SELECT
-                    requested_at,
-                    status,
-                    model,
-                    transport,
-                    latency_ms,
-                    latency_first_token_ms,
-                    service_tier,
-                    requested_service_tier,
-                    actual_service_tier,
-                    reasoning_effort,
-                    input_tokens,
-                    output_tokens,
-                    cached_input_tokens,
-                    reasoning_tokens,
-                    error_code
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?) AND latency_ms IS NOT NULL
-                ORDER BY latency_ms DESC
-                LIMIT 10
-                """,
-                (window,),
-            ).fetchall()
-            output_bucket_rows = conn.execute(
-                """
-                SELECT
-                    CASE
-                        WHEN output_tokens IS NULL THEN 'unknown'
-                        WHEN output_tokens < 500 THEN '<500'
-                        WHEN output_tokens < 1500 THEN '500-1500'
-                        WHEN output_tokens < 3000 THEN '1500-3000'
-                        WHEN output_tokens < 6000 THEN '3000-6000'
-                        ELSE '6000+'
-                    END AS bucket,
-                    count(*) AS count,
-                    round(avg(latency_ms), 1) AS avg_latency_ms,
-                    min(latency_ms) AS min_latency_ms,
-                    max(latency_ms) AS max_latency_ms,
-                    round(avg(input_tokens), 1) AS avg_input_tokens
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                GROUP BY bucket
-                ORDER BY avg_latency_ms DESC
-                """,
-                (window,),
-            ).fetchall()
-            input_bucket_rows = conn.execute(
-                """
-                SELECT
-                    CASE
-                        WHEN input_tokens IS NULL THEN 'unknown'
-                        WHEN input_tokens < 10000 THEN '<10k'
-                        WHEN input_tokens < 30000 THEN '10-30k'
-                        WHEN input_tokens < 70000 THEN '30-70k'
-                        WHEN input_tokens < 150000 THEN '70-150k'
-                        ELSE '150k+'
-                    END AS bucket,
-                    count(*) AS count,
-                    round(avg(latency_ms), 1) AS avg_latency_ms,
-                    min(latency_ms) AS min_latency_ms,
-                    max(latency_ms) AS max_latency_ms,
-                    round(avg(output_tokens), 1) AS avg_output_tokens
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?)
-                GROUP BY bucket
-                ORDER BY avg_latency_ms DESC
-                """,
-                (window,),
-            ).fetchall()
-            recent_errors = conn.execute(
-                """
-                SELECT requested_at, status, error_code, substr(coalesce(error_message, ''), 1, 160) AS message
-                FROM request_logs
-                WHERE requested_at >= datetime('now', ?) AND status != 'success'
-                ORDER BY requested_at DESC, id DESC
-                LIMIT 10
-                """,
-                (window,),
-            ).fetchall()
-            total = sum(row["count"] for row in status_rows)
-            successes = sum(row["count"] for row in status_rows if row["status"] == "success")
-            return {
-                "window_minutes": minutes,
-                "total": total,
-                "success_rate": None if total == 0 else round(successes / total, 4),
-                "status_counts": [dict(row) for row in status_rows],
-                "transport_counts": [dict(row) for row in transport_rows],
-                "service_tier_counts": [dict(row) for row in service_tier_rows],
-                "tier_mismatches": {
-                    "count": sum(row["count"] for row in tier_mismatch_rows),
-                    "groups": [dict(row) for row in tier_mismatch_rows],
-                },
-                "latency_ms": _latency_summary(row["latency_ms"] for row in latency_rows),
-                "success_latency_ms": _latency_summary(
-                    row["latency_ms"] for row in latency_rows if row["status"] == "success"
-                ),
-                "latency_first_token_ms": _latency_summary(row["latency_first_token_ms"] for row in latency_rows),
-                "slowest_requests": [dict(row) for row in slowest_rows],
-                "output_token_buckets": [dict(row) for row in output_bucket_rows],
-                "input_token_buckets": [dict(row) for row in input_bucket_rows],
-                "recent_requests": [dict(row) for row in recent_requests],
-                "recent_errors": [dict(row) for row in recent_errors],
-            }
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
+        with psycopg.connect(_postgres_sync_url(database_url), row_factory=dict_row, connect_timeout=5) as conn:
+
+            def execute(sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, params)
+                    return [_normalize_row(dict(row)) for row in cursor.fetchall()]
+
+            rows = _fetch_request_log_rows(execute, "postgresql", minutes)
+    except Exception as exc:  # pragma: no cover - live diagnostic path
+        return {"error": f"PostgreSQL request-log query failed: {exc}"}
+    return _build_request_logs_snapshot(rows, minutes, source={"backend": "postgresql", "source": "database_url"})
+
+
+def _request_logs_from_container_postgres(container: str, minutes: int) -> dict[str, Any]:
+    rows_or_error = _fetch_postgres_rows_in_container(container, _request_log_queries("postgresql", minutes))
+    if isinstance(rows_or_error, str):
+        return {"error": rows_or_error}
+    return _build_request_logs_snapshot(
+        rows_or_error,
+        minutes,
+        source={"backend": "postgresql", "container": container, "source": "container_env"},
+    )
+
+
+RequestLogDialect = Literal["sqlite", "postgresql"]
+
+
+def _fetch_request_log_rows(
+    execute: Callable[[str, Sequence[Any]], list[dict[str, Any]]],
+    dialect: RequestLogDialect,
+    minutes: int,
+) -> dict[str, list[dict[str, Any]]]:
+    return {name: execute(sql, params) for name, (sql, params) in _request_log_queries(dialect, minutes).items()}
+
+
+def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, tuple[str, Sequence[Any]]]:
+    if dialect == "sqlite":
+        window_expr = "datetime('now', ?)"
+        params: Sequence[Any] = (f"-{minutes} minutes",)
+    else:
+        window_expr = "(timezone('utc', now()) - (%s * interval '1 minute'))"
+        params = (minutes,)
+
+    return {
+        "status_rows": (
+            f"""
+            SELECT status, coalesce(error_code, '') AS error_code, count(*) AS count
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY status, coalesce(error_code, '')
+            ORDER BY status, coalesce(error_code, '')
+            """,
+            params,
+        ),
+        "transport_rows": (
+            f"""
+            SELECT coalesce(transport, '') AS transport, status, count(*) AS count
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY coalesce(transport, ''), status
+            ORDER BY coalesce(transport, ''), status
+            """,
+            params,
+        ),
+        "service_tier_rows": (
+            f"""
+            SELECT
+                coalesce(requested_service_tier, '') AS requested_service_tier,
+                coalesce(actual_service_tier, '') AS actual_service_tier,
+                coalesce(service_tier, '') AS service_tier,
+                status,
+                coalesce(error_code, '') AS error_code,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY 1, 2, 3, 4, 5
+            ORDER BY count DESC, avg_latency_ms DESC
+            LIMIT 20
+            """,
+            params,
+        ),
+        "tier_mismatch_rows": (
+            f"""
+            SELECT
+                coalesce(requested_service_tier, '') AS requested_service_tier,
+                coalesce(actual_service_tier, '') AS actual_service_tier,
+                status,
+                coalesce(error_code, '') AS error_code,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+                AND coalesce(requested_service_tier, '') != coalesce(actual_service_tier, '')
+            GROUP BY 1, 2, 3, 4
+            ORDER BY count DESC, avg_latency_ms DESC
+            LIMIT 20
+            """,
+            params,
+        ),
+        "latency_rows": (
+            f"""
+            SELECT status, latency_ms, latency_first_token_ms
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND latency_ms IS NOT NULL
+            """,
+            params,
+        ),
+        "recent_requests": (
+            f"""
+            SELECT
+                requested_at,
+                status,
+                model,
+                transport,
+                latency_ms,
+                latency_first_token_ms,
+                service_tier,
+                requested_service_tier,
+                actual_service_tier,
+                error_code
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            ORDER BY requested_at DESC, id DESC
+            LIMIT 10
+            """,
+            params,
+        ),
+        "slowest_rows": (
+            f"""
+            SELECT
+                requested_at,
+                status,
+                model,
+                transport,
+                latency_ms,
+                latency_first_token_ms,
+                service_tier,
+                requested_service_tier,
+                actual_service_tier,
+                reasoning_effort,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                reasoning_tokens,
+                error_code
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND latency_ms IS NOT NULL
+            ORDER BY latency_ms DESC
+            LIMIT 10
+            """,
+            params,
+        ),
+        "output_bucket_rows": (
+            f"""
+            SELECT
+                CASE
+                    WHEN output_tokens IS NULL THEN 'unknown'
+                    WHEN output_tokens < 500 THEN '<500'
+                    WHEN output_tokens < 1500 THEN '500-1500'
+                    WHEN output_tokens < 3000 THEN '1500-3000'
+                    WHEN output_tokens < 6000 THEN '3000-6000'
+                    ELSE '6000+'
+                END AS bucket,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms,
+                round(avg(input_tokens), 1) AS avg_input_tokens
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY 1
+            ORDER BY avg_latency_ms DESC
+            """,
+            params,
+        ),
+        "input_bucket_rows": (
+            f"""
+            SELECT
+                CASE
+                    WHEN input_tokens IS NULL THEN 'unknown'
+                    WHEN input_tokens < 10000 THEN '<10k'
+                    WHEN input_tokens < 30000 THEN '10-30k'
+                    WHEN input_tokens < 70000 THEN '30-70k'
+                    WHEN input_tokens < 150000 THEN '70-150k'
+                    ELSE '150k+'
+                END AS bucket,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms,
+                round(avg(output_tokens), 1) AS avg_output_tokens
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+            GROUP BY 1
+            ORDER BY avg_latency_ms DESC
+            """,
+            params,
+        ),
+        "recent_errors": (
+            f"""
+            SELECT requested_at, status, error_code, substr(coalesce(error_message, ''), 1, 160) AS message
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND status != 'success'
+            ORDER BY requested_at DESC, id DESC
+            LIMIT 10
+            """,
+            params,
+        ),
+    }
+
+
+def _build_request_logs_snapshot(
+    rows: dict[str, list[dict[str, Any]]],
+    minutes: int,
+    *,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    status_rows = rows["status_rows"]
+    transport_rows = rows["transport_rows"]
+    service_tier_rows = rows["service_tier_rows"]
+    tier_mismatch_rows = rows["tier_mismatch_rows"]
+    latency_rows = rows["latency_rows"]
+    recent_requests = rows["recent_requests"]
+    slowest_rows = rows["slowest_rows"]
+    output_bucket_rows = rows["output_bucket_rows"]
+    input_bucket_rows = rows["input_bucket_rows"]
+    recent_errors = rows["recent_errors"]
+    total = sum(row["count"] for row in status_rows)
+    successes = sum(row["count"] for row in status_rows if row["status"] == "success")
+    return {
+        "source": source,
+        "window_minutes": minutes,
+        "total": total,
+        "success_rate": None if total == 0 else round(successes / total, 4),
+        "status_counts": status_rows,
+        "transport_counts": transport_rows,
+        "service_tier_counts": service_tier_rows,
+        "tier_mismatches": {
+            "count": sum(row["count"] for row in tier_mismatch_rows),
+            "groups": tier_mismatch_rows,
+        },
+        "latency_ms": _latency_summary(row["latency_ms"] for row in latency_rows),
+        "success_latency_ms": _latency_summary(row["latency_ms"] for row in latency_rows if row["status"] == "success"),
+        "latency_first_token_ms": _latency_summary(row["latency_first_token_ms"] for row in latency_rows),
+        "slowest_requests": slowest_rows,
+        "output_token_buckets": output_bucket_rows,
+        "input_token_buckets": input_bucket_rows,
+        "recent_requests": recent_requests,
+        "recent_errors": recent_errors,
+    }
 
 
 def _copy_sqlite_snapshot(container: str, container_db_path: str, local_db: Path) -> str | None:
@@ -315,6 +493,100 @@ def _copy_sqlite_snapshot(container: str, container_db_path: str, local_db: Path
             text=True,
         )
     return None
+
+
+def _container_database_url(container: str) -> str | None:
+    result = subprocess.run(
+        ["docker", "inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key == "CODEX_LB_DATABASE_URL":
+            return value
+    return None
+
+
+def _database_driver(database_url: str | None) -> str | None:
+    if not database_url:
+        return None
+    return urlsplit(database_url).scheme or None
+
+
+def _database_backend(database_url: str | None) -> Literal["sqlite", "postgresql"] | None:
+    driver = _database_driver(database_url)
+    if driver in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"}:
+        return "postgresql"
+    if driver in {"sqlite", "sqlite+aiosqlite"}:
+        return "sqlite"
+    return None
+
+
+def _sqlite_path_from_database_url(database_url: str | None) -> str | None:
+    if _database_backend(database_url) != "sqlite":
+        return None
+    path = urlsplit(database_url or "").path
+    return path or None
+
+
+def _postgres_sync_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    if database_url.startswith("postgresql+psycopg://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    if database_url.startswith("postgres://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    return database_url
+
+
+def _fetch_postgres_rows_in_container(
+    container: str,
+    queries: dict[str, tuple[str, Sequence[Any]]],
+) -> dict[str, list[dict[str, Any]]] | str:
+    payload = {
+        "queries": [{"name": name, "sql": sql, "params": list(params)} for name, (sql, params) in queries.items()]
+    }
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "-i", container, "python", "-c", _POSTGRES_CONTAINER_QUERY_SCRIPT],
+            input=json.dumps(payload),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return "PostgreSQL request-log query timed out inside container"
+
+    if result.returncode != 0:
+        return result.stderr.strip() or result.stdout.strip() or "container PostgreSQL query failed"
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return f"container PostgreSQL query returned invalid JSON: {exc}"
+    if not isinstance(rows, dict):
+        return "container PostgreSQL query returned an unexpected payload"
+    return rows
+
+
+def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: _normalize_value(value) for key, value in row.items()}
+
+
+def _normalize_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
 
 
 def _latency_summary(values: Any) -> dict[str, int | float] | None:

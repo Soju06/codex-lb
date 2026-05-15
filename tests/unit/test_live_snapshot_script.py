@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import codex_lb_live_snapshot as snapshot
 from scripts.codex_lb_live_snapshot import _latency_summary, _request_logs
 
 pytestmark = pytest.mark.unit
@@ -174,3 +175,31 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
     assert snapshot["slowest_requests"][0]["error_code"] == "upstream_unavailable"
     assert snapshot["recent_requests"][0]["error_code"] == "upstream_unavailable"
     assert snapshot["recent_errors"][0]["message"] == "Request to upstream timed out"
+
+
+def test_request_logs_uses_container_postgres_when_live_env_is_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {"source": {"backend": "postgresql", "container": "codex-lb-direct"}}
+    calls: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(snapshot.shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        snapshot,
+        "_container_database_url",
+        lambda container: "postgresql+asyncpg://user:password@codex-lb-postgres:5432/codex_lb",
+    )
+
+    def fake_postgres_snapshot(container: str, minutes: int) -> dict[str, object]:
+        calls.append((container, minutes))
+        return expected
+
+    monkeypatch.setattr(snapshot, "_request_logs_from_container_postgres", fake_postgres_snapshot)
+
+    assert _request_logs(None, "codex-lb-direct", "/var/lib/codex-lb/store.db", 15) == expected
+    assert calls == [("codex-lb-direct", 15)]
+
+
+def test_postgres_sync_url_removes_sqlalchemy_async_driver() -> None:
+    assert (
+        snapshot._postgres_sync_url("postgresql+asyncpg://user:password@db:5432/codex_lb")
+        == "postgresql://user:password@db:5432/codex_lb"
+    )

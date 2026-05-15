@@ -223,8 +223,18 @@ def _normalize_message_content(message: OpenAIMessage) -> OpenAIMessage:
     role = message.get("role")
     role_str = role if isinstance(role, str) else "user"
     refusal = _get_assistant_refusal(message) if role_str == "assistant" else None
+
+    # The Responses API input message item only carries `role` + `content`.
+    # Build a fresh dict with exactly those keys so unknown message-object
+    # fields (the standard chat `name` field, client-internal bookkeeping
+    # keys, etc.) are never forwarded upstream — OpenAI's own
+    # `/v1/chat/completions` ignores them rather than relaying them, and
+    # the upstream Responses API rejects the whole request if it sees them.
     if content is None and refusal is None:
-        return message
+        if "content" in message:
+            return cast(OpenAIMessage, {"role": role, "content": content})
+        return cast(OpenAIMessage, {"role": role})
+
     if content is not None:
         normalized = _normalize_content_parts(content, role_str)
     else:
@@ -233,13 +243,7 @@ def _normalize_message_content(message: OpenAIMessage) -> OpenAIMessage:
         parts = _to_content_list(normalized)
         parts.append({"type": "refusal", "refusal": refusal})
         normalized = parts
-    if normalized is content and refusal is None:
-        return message
-    updated = dict(message)
-    updated["content"] = normalized
-    if refusal is not None:
-        updated.pop("refusal", None)
-    return cast(OpenAIMessage, updated)
+    return cast(OpenAIMessage, {"role": role, "content": normalized})
 
 
 def _get_assistant_refusal(message: OpenAIMessage) -> str | None:

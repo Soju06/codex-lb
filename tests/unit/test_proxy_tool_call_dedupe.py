@@ -113,6 +113,88 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_with_
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_suppresses_direct_wait_agent_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_wait",
+        "item": {
+            "type": "function_call",
+            "name": "wait_agent",
+            "arguments": '{"targets":["agent_b","agent_a"],"timeout_ms":30000}',
+            "call_id": "call_a",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_wait",
+        "item": {
+            "type": "function_call",
+            "name": "wait_agent",
+            "arguments": '{"targets":["agent_a","agent_b"],"timeout_ms":60000}',
+            "call_id": "call_b",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_wait",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_wait",
+        )
+        is True
+    )
+
+
+def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_write_stdin_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_namespaced",
+        "item": {
+            "type": "function_call",
+            "name": "functions.write_stdin",
+            "arguments": '{"session_id":17,"chars":"","yield_time_ms":1000,"max_output_tokens":4000}',
+            "call_id": "call_a",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_namespaced",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":17,"chars":"","yield_time_ms":60000,"max_output_tokens":24000}',
+            "call_id": "call_b",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_namespaced",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_namespaced",
+        )
+        is True
+    )
+
+
 def test_rewrite_parallel_tool_call_payload_removes_duplicate_side_effect_tool_uses():
     arguments = {
         "tool_uses": [

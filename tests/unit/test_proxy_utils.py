@@ -4357,7 +4357,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_keeps_distinct_side_effect_tool_calls_across_response_ids(monkeypatch):
+async def test_stream_responses_keeps_side_effect_tool_calls_across_response_ids(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4409,6 +4409,11 @@ async def test_stream_responses_keeps_distinct_side_effect_tool_calls_across_res
             tool_chunks.append(chunk_payload)
 
     assert tool_chunks == [tool_payload, replayed_tool_payload]
+    assert parse_sse_data_json(chunks[-1]) == {
+        "type": "response.completed",
+        "response": {"id": "resp_http_tool_dupe"},
+    }
+    assert request_logs.calls[0]["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -6978,6 +6983,79 @@ async def test_process_upstream_websocket_text_masks_anonymous_previous_response
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_output_for_same_anchor_followups(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_anonymous_missing_tool_same_anchor")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    followup_request_a = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_same_anchor_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    followup_request_b = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_same_anchor_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    pending_requests = deque([followup_request_a, followup_request_b])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(2),
+    )
+
+    assert "No tool output found" not in downstream_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.downstream_texts is not None
+    assert len(upstream_control.downstream_texts) == 2
+    for emitted_text in upstream_control.downstream_texts:
+        assert '"type":"response.failed"' in emitted_text
+        assert '"code":"stream_incomplete"' in emitted_text
+        assert "call_missing_output" not in emitted_text
+    assert finalize_request_state.await_count == 2
+    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
+    assert finalized_requests == [followup_request_a, followup_request_b]
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_failure(
     monkeypatch,
 ):
@@ -8818,6 +8896,75 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
     # Retry-safety flag is consumed (set back to False) so we don't loop.
     assert pending_request.fresh_upstream_request_is_retry_safe is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_across_reconnect(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_reconnect_tool_dedupe")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_reconnect_tool_dedupe",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_reconnect_tool",
+    )
+    pending_requests = deque([pending_request])
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_reconnect_tool",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "item": {
+            **tool_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    first_text = await service._process_upstream_websocket_text(
+        json.dumps(tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    replay_control = proxy_service._WebSocketUpstreamControl()
+    replay_text = await service._process_upstream_websocket_text(
+        json.dumps(replayed_tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=replay_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"call_id":"call_first"' in first_text
+    assert '"call_id":"call_replayed"' in replay_text
+    assert replay_control.suppress_downstream_event is True
+    assert pending_request.suppressed_duplicate_tool_call is True
+    finalize_request_state.assert_not_awaited()
+    assert list(pending_requests) == [pending_request]
 
 
 @pytest.mark.asyncio
@@ -11220,6 +11367,88 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_previous_respons
     assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
 
 
+def test_prepare_response_bridge_request_state_rewrites_replayed_side_effect_call_without_output():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 1000}),
+            "call_id": "call_missing",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 2
+    assert upstream_input[0]["type"] == "message"
+    assert upstream_input[0]["role"] == "assistant"
+    assert "without matching output: exec_command" in upstream_input[0]["content"][0]["text"]
+    assert "function_call" not in json.dumps(upstream_input)
+
+
+def test_prepare_response_bridge_request_state_rewrites_first_duplicate_when_only_replay_has_output():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 1000}),
+            "call_id": "call_missing",
+        },
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 30000}),
+            "call_id": "call_replay",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_replay",
+            "output": "needle found",
+        },
+    ]
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 3
+    assert len(upstream_input) == 2
+    assert upstream_input[0]["type"] == "message"
+    assert "without matching output: exec_command" in upstream_input[0]["content"][0]["text"]
+    assert upstream_input[1]["type"] == "message"
+    assert upstream_input[1]["content"] == [{"type": "output_text", "text": "needle found"}]
+    assert "function_call" not in json.dumps(upstream_input)
+
+
 def test_prepare_response_bridge_request_state_keeps_repeated_first_attempt_tool_calls():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -11310,22 +11539,33 @@ async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
     }
     replay_payload = {
         **first_payload,
+        "response_id": "resp_bridge_tool_replay_after_reconnect",
         "item": {
             **first_payload["item"],
             "call_id": "call_replayed",
         },
     }
+    replay_created_payload = {
+        "type": "response.created",
+        "response": {"id": "resp_bridge_tool_replay_after_reconnect", "status": "in_progress"},
+    }
 
     await service._process_http_bridge_upstream_text(session, json.dumps(first_payload, separators=(",", ":")))
     session.upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_created_payload, separators=(",", ":")))
     await service._process_http_bridge_upstream_text(session, json.dumps(replay_payload, separators=(",", ":")))
 
     assert request_state.suppressed_duplicate_tool_call is True
     event_queue = request_state.event_queue
     assert event_queue is not None
-    forwarded = await event_queue.get()
+    forwarded = await asyncio.wait_for(event_queue.get(), timeout=1.0)
     assert forwarded is not None
     assert proxy_service.parse_sse_data_json(forwarded) == first_payload
+    forwarded_created = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert forwarded_created is not None
+    assert proxy_service.parse_sse_data_json(forwarded_created) == replay_created_payload
     assert event_queue.empty()
 
 

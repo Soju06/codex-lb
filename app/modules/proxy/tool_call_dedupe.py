@@ -14,11 +14,27 @@ logger = logging.getLogger(__name__)
 
 _TOOL_CALL_DEDUPE_CACHE_LIMIT = 1024
 _PARALLEL_TOOL_CALL_NAME = "multi_tool_use.parallel"
+_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
+    {
+        "apply_patch",
+        "close_agent",
+        "create_goal",
+        "exec_command",
+        "request_user_input",
+        "resume_agent",
+        "send_input",
+        "spawn_agent",
+        "update_goal",
+        "update_plan",
+        "wait_agent",
+        "write_stdin",
+    }
+)
 _SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
     {
-        "exec_command",
         _PARALLEL_TOOL_CALL_NAME,
-        "write_stdin",
+        *_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES,
+        *(f"functions.{name}" for name in _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
     }
 )
 _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES = frozenset({"apply_patch_call"})
@@ -115,6 +131,7 @@ def mark_duplicate_tool_call_downstream_event(
     # For local side-effect tools, running the same payload twice is worse than dropping a duplicate-looking call_id.
     dedupe_call_id = None if is_side_effect_tool_call else call_id
     if is_side_effect_tool_call:
+        item_name = normalize_tool_call_name(item_name)
         argument_key = canonical_side_effect_argument_key(item_name, argument_value)
     else:
         argument_key = argument_value
@@ -226,10 +243,26 @@ def canonical_side_effect_argument_key(item_name: str | None, argument_value: st
     argument = json_object_from_argument(argument_value)
     if argument is None:
         return argument_value
-    if item_name in {"exec_command", "write_stdin"}:
-        return canonical_parameters_key(str(item_name), argument)
+    normalized_item_name = normalize_tool_call_name(item_name)
+    if normalized_item_name == "write_stdin":
+        return canonical_json_key(
+            {
+                "name": normalized_item_name,
+                "session_id": argument.get("session_id"),
+                "chars": argument.get("chars"),
+            }
+        )
+    if normalized_item_name == "wait_agent":
+        return canonical_json_key(
+            {
+                "name": normalized_item_name,
+                "targets": canonical_wait_agent_targets(argument.get("targets")),
+            }
+        )
+    if normalized_item_name == "exec_command":
+        return canonical_parameters_key(normalized_item_name, argument)
     if item_name != _PARALLEL_TOOL_CALL_NAME:
-        return canonical_json_key(cast(JsonValue, argument))
+        return canonical_json_key({"name": normalized_item_name or item_name, "parameters": cast(JsonValue, argument)})
 
     tool_uses = argument.get("tool_uses")
     if not isinstance(tool_uses, list):
@@ -247,7 +280,11 @@ def canonical_side_effect_argument_key(item_name: str | None, argument_value: st
     return canonical_json_key(cast(JsonValue, canonical_argument))
 
 
-def dedupe_replayed_side_effect_input_items(input_items: list[JsonValue]) -> tuple[list[JsonValue], int]:
+def dedupe_replayed_side_effect_input_items(
+    input_items: list[JsonValue],
+    *,
+    sanitize_missing_outputs: bool = False,
+) -> tuple[list[JsonValue], int]:
     call_keys: dict[int, tuple[str, str | None, str]] = {}
     call_ids: dict[int, str] = {}
     output_indices_by_call_id: dict[str, list[int]] = {}
@@ -271,12 +308,15 @@ def dedupe_replayed_side_effect_input_items(input_items: list[JsonValue]) -> tup
     kept = [True] * len(input_items)
     rewritten: dict[int, JsonValue] = {}
     first_call_id_by_key: dict[tuple[str, str | None, str], str | None] = {}
+    first_call_index_by_key: dict[tuple[str, str | None, str], int] = {}
+    output_index_by_call_index: dict[int, int | None] = {}
     next_output_cursor_by_call_id: dict[str, int] = {}
     last_side_effect_key: tuple[str, str | None, str] | None = None
     removed_count = 0
     for index, item in enumerate(input_items):
         if isinstance(item, dict) and replayed_input_segment_boundary(item):
             first_call_id_by_key.clear()
+            first_call_index_by_key.clear()
             last_side_effect_key = None
         key = call_keys.get(index)
         if key is None:
@@ -295,10 +335,17 @@ def dedupe_replayed_side_effect_input_items(input_items: list[JsonValue]) -> tup
             if call_id is not None
             else None
         )
+        output_index_by_call_index[index] = output_index
         if key not in first_call_id_by_key:
             first_call_id_by_key[key] = call_id
+            first_call_index_by_key[key] = index
             continue
 
+        first_call_index = first_call_index_by_key.get(key)
+        if first_call_index is not None and output_index_by_call_index.get(first_call_index) is None:
+            rewritten[first_call_index] = replayed_tool_call_without_output_as_assistant_message(
+                cast(Mapping[str, JsonValue], input_items[first_call_index])
+            )
         removed_count += 1
         kept[index] = False
         if output_index is not None:
@@ -306,14 +353,29 @@ def dedupe_replayed_side_effect_input_items(input_items: list[JsonValue]) -> tup
             if isinstance(output_item, dict):
                 rewritten[output_index] = replayed_tool_output_as_assistant_message(output_item)
 
+    missing_output_rewrites = 0
+    if sanitize_missing_outputs:
+        for index, key in call_keys.items():
+            del key
+            if not kept[index] or index in rewritten:
+                continue
+            if output_index_by_call_index.get(index) is not None:
+                continue
+            item = input_items[index]
+            if not isinstance(item, dict):
+                continue
+            rewritten[index] = replayed_tool_call_without_output_as_assistant_message(item)
+            missing_output_rewrites += 1
+
     if removed_count == 0:
-        return input_items, 0
+        if missing_output_rewrites == 0:
+            return input_items, 0
 
     deduped_items: list[JsonValue] = []
     for index, item in enumerate(input_items):
         if kept[index]:
             deduped_items.append(rewritten.get(index, item))
-    return deduped_items, removed_count
+    return deduped_items, removed_count + missing_output_rewrites
 
 
 def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> tuple[str, str | None, str] | None:
@@ -389,6 +451,21 @@ def replayed_tool_output_as_assistant_message(item: Mapping[str, JsonValue]) -> 
     }
 
 
+def replayed_tool_call_without_output_as_assistant_message(item: Mapping[str, JsonValue]) -> JsonValue:
+    name_value = item.get("name")
+    name = name_value if isinstance(name_value, str) and name_value else "tool"
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": f"Omitted replayed side-effect tool call without matching output: {name}.",
+            }
+        ],
+    }
+
+
 def replayed_tool_output_index_for_call(
     output_indices_by_call_id: dict[str, list[int]],
     next_output_cursor_by_call_id: dict[str, int],
@@ -434,10 +511,11 @@ def canonical_parallel_tool_use_key(tool_use: dict[str, JsonValue]) -> str:
     parameters = tool_use.get("parameters")
     if not isinstance(recipient_name, str):
         return json.dumps(tool_use, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    if recipient_name == "functions.write_stdin" and isinstance(parameters, dict):
+    normalized_recipient_name = normalize_tool_call_name(recipient_name)
+    if normalized_recipient_name == "write_stdin" and isinstance(parameters, dict):
         return json.dumps(
             {
-                "recipient_name": recipient_name,
+                "recipient_name": normalized_recipient_name,
                 "session_id": parameters.get("session_id"),
                 "chars": parameters.get("chars"),
             },
@@ -445,20 +523,28 @@ def canonical_parallel_tool_use_key(tool_use: dict[str, JsonValue]) -> str:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-    if recipient_name == "functions.wait_agent" and isinstance(parameters, dict):
+    if normalized_recipient_name == "wait_agent" and isinstance(parameters, dict):
         targets = parameters.get("targets")
         return json.dumps(
             {
-                "recipient_name": recipient_name,
+                "recipient_name": normalized_recipient_name,
                 "targets": canonical_wait_agent_targets(targets),
             },
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
         )
-    if recipient_name == "functions.exec_command" and isinstance(parameters, dict):
-        return canonical_parameters_key(recipient_name, cast(dict[str, JsonValue], parameters))
+    if normalized_recipient_name == "exec_command" and isinstance(parameters, dict):
+        return canonical_parameters_key(normalized_recipient_name, cast(dict[str, JsonValue], parameters))
     return json.dumps(tool_use, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def normalize_tool_call_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    if name.startswith("functions."):
+        return name.removeprefix("functions.")
+    return name
 
 
 def dedupe_parallel_tool_uses_argument(argument_value: str) -> tuple[str, bool, int]:

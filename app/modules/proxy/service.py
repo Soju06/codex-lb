@@ -3038,7 +3038,8 @@ class ProxyService:
         if payload.previous_response_id is not None and isinstance(payload.input, list):
             replayed_input_items = cast(list[JsonValue], payload.input)
             deduped_input_items, deduped_replayed_tool_call_count = dedupe_replayed_side_effect_input_items(
-                replayed_input_items
+                replayed_input_items,
+                sanitize_missing_outputs=True,
             )
             if deduped_replayed_tool_call_count > 0:
                 deduped_replayed_input_count = len(replayed_input_items)
@@ -5693,7 +5694,7 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=session.seen_tool_call_keys,
-                    response_id=response_id or matched_request_state.response_id or matched_request_state.request_id,
+                    response_id=matched_request_state.request_id,
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
@@ -5719,7 +5720,7 @@ class ProxyService:
                 )
                 if terminal_request_state is not None:
                     session.queued_request_count = max(0, session.queued_request_count - 1)
-                elif is_previous_response_not_found_event:
+                elif is_previous_response_not_found_event or is_missing_tool_output_event:
                     grouped_previous_response_request_states = _pop_matching_websocket_request_states(
                         session.pending_requests,
                         _matching_websocket_request_states_for_previous_response_error(
@@ -6444,8 +6445,8 @@ class ProxyService:
                     request_state.service_tier = actual_service_tier
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
-                    seen_tool_call_keys=upstream_control.seen_tool_call_keys,
-                    response_id=response_id or request_state.response_id or request_state.request_id,
+                    seen_tool_call_keys=request_state.seen_tool_call_keys,
+                    response_id=request_state.request_id,
                 ):
                     request_state.suppressed_duplicate_tool_call = True
                     upstream_control.suppress_downstream_event = True
@@ -6471,7 +6472,7 @@ class ProxyService:
                         "error",
                     },
                 )
-                if request_state is None and is_previous_response_not_found_event:
+                if request_state is None and (is_previous_response_not_found_event or is_missing_tool_output_event):
                     grouped_previous_response_request_states = _pop_matching_websocket_request_states(
                         pending_requests,
                         _matching_websocket_request_states_for_previous_response_error(
@@ -8907,6 +8908,7 @@ class _WebSocketRequestState:
     input_full_fingerprint: str | None = None
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
+    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

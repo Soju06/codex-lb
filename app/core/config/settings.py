@@ -206,6 +206,7 @@ class Settings(BaseSettings):
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
+    firewall_cache_ttl_seconds: int = Field(default=2, gt=0)
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     dashboard_auth_proxy_header: str = "Remote-User"
 

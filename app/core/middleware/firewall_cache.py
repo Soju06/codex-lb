@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import anyio
 
+from app.core.config.settings import get_settings
+
 
 @dataclass(slots=True)
 class _CachedFirewallDecision:
@@ -47,7 +49,7 @@ class FirewallIPCache:
         self._version += 1
 
 
-_firewall_ip_cache = FirewallIPCache(ttl_seconds=2)
+_firewall_ip_cache = FirewallIPCache(ttl_seconds=get_settings().firewall_cache_ttl_seconds)
 
 
 def get_firewall_ip_cache() -> FirewallIPCache:

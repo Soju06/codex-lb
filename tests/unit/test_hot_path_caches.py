@@ -599,3 +599,11 @@ async def test_invalidate_clears_all_keyed_entries() -> None:
     # Next call must re-load from DB
     await balancer._load_selection_inputs(model=None)
     assert accounts_repo.calls == 2  # must re-load after invalidation
+
+
+def test_firewall_cache_singleton_reflects_configured_ttl() -> None:
+    from app.core.config.settings import get_settings
+
+    settings = get_settings()
+    cache = get_firewall_ip_cache()
+    assert cache._ttl_seconds == settings.firewall_cache_ttl_seconds

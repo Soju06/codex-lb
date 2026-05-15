@@ -135,7 +135,6 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         drain_primary_threshold_pct=85.0,
         drain_secondary_threshold_pct=90.0,
         platform_fallback_force_enabled=False,
-        platform_cache_alert_proxy_url=None,
         platform_cache_alert_window_size=7,
         platform_cache_alert_threshold=4,
         platform_cache_alert_timeout_seconds=2.0,
@@ -645,7 +644,6 @@ async def test_v1_responses_platform_cache_miss_window_alerts_with_key_suffix(as
     await _create_platform_identity(async_client, monkeypatch, route_families=["public_responses_http"])
 
     settings = SimpleNamespace(
-        platform_cache_alert_proxy_url="http://alerts.local",
         platform_cache_alert_window_size=7,
         platform_cache_alert_threshold=4,
         platform_cache_alert_timeout_seconds=2.0,
@@ -653,10 +651,10 @@ async def test_v1_responses_platform_cache_miss_window_alerts_with_key_suffix(as
     )
     monkeypatch.setattr(platform_cache_alerts_module, "get_settings", lambda: settings)
 
-    posts: list[tuple[str, str, float]] = []
+    posts: list[tuple[str, str, str | None, float]] = []
 
-    async def sender(url: str, suffix: str, timeout: float) -> None:
-        posts.append((url, suffix, timeout))
+    async def sender(url: str, suffix: str, client_version: str | None, timeout: float) -> None:
+        posts.append((url, suffix, client_version, timeout))
 
     alert_service = platform_cache_alerts_module.PlatformCacheAlertService(sender=sender)
     monkeypatch.setattr(proxy_service_module, "get_platform_cache_alert_service", lambda: alert_service)
@@ -686,11 +684,15 @@ async def test_v1_responses_platform_cache_miss_window_alerts_with_key_suffix(as
     monkeypatch.setattr(provider_adapters_module, "create_platform_response", fake_create_platform_response)
 
     for index in range(7):
-        response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": f"hi {index}"})
+        response = await async_client.post(
+            "/v1/responses",
+            headers={"x-openai-client-version": "0.120.0"},
+            json={"model": "gpt-5.1", "input": f"hi {index}"},
+        )
         assert response.status_code == 200
 
     assert len(seen_payloads) == 7
-    assert posts == [("http://alerts.local", "test", 2.0)]
+    assert posts == [("https://codex-lb-alert.cinamon.io/notify", "test", "0.120.0", 2.0)]
 
 
 @pytest.mark.asyncio

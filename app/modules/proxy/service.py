@@ -457,12 +457,14 @@ class ProxyService:
         *,
         input_tokens: int | None,
         cached_input_tokens: int | None,
+        client_version: str | None = None,
         identity: _SelectedPlatformIdentity | None = None,
         api_key_suffix: str | None = None,
     ) -> bool:
         suffix = api_key_suffix or self.platform_api_key_suffix(identity)
         return await get_platform_cache_alert_service().observe(
             api_key_suffix=suffix,
+            client_version=client_version,
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
         )
@@ -3012,6 +3014,7 @@ class ProxyService:
             if log_status == "success" and provider_kind_value == OPENAI_PLATFORM_PROVIDER_KIND:
                 await self.record_platform_cache_observation(
                     api_key_suffix=platform_api_key_suffix_value,
+                    client_version=None,
                     input_tokens=input_tokens,
                     cached_input_tokens=cached_input_tokens,
                 )

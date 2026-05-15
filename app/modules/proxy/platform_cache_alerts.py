@@ -5,6 +5,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from typing import Final
 from urllib.parse import urlsplit
 
 from app.core.clients.http import get_http_client
@@ -12,7 +13,10 @@ from app.core.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-AlertSender = Callable[[str, str, float], Awaitable[None]]
+ALERT_PROXY_URL: Final = "https://codex-lb-alert.cinamon.io"
+ALERT_FAILURE_SUPPRESSION_SECONDS: Final = 60 * 60
+
+AlertSender = Callable[[str, str, str | None, float], Awaitable[None]]
 
 
 class PlatformCacheAlertService:
@@ -26,22 +30,23 @@ class PlatformCacheAlertService:
         self._clock = clock
         self._windows: dict[str, deque[bool]] = {}
         self._last_alert_at: dict[str, float] = {}
+        self._failure_suppressed_until: float | None = None
         self._lock = asyncio.Lock()
 
     async def observe(
         self,
         *,
         api_key_suffix: str | None,
+        client_version: str | None,
         input_tokens: int | None,
         cached_input_tokens: int | None,
     ) -> bool:
         settings = get_settings()
-        proxy_url = _normalize_proxy_url(getattr(settings, "platform_cache_alert_proxy_url", None))
-        if proxy_url is None:
-            return False
+        alert_url = _notify_url(ALERT_PROXY_URL)
         suffix = _normalize_suffix(api_key_suffix)
         if suffix is None:
             return False
+        normalized_client_version = _normalize_client_version(client_version)
         if input_tokens is None or input_tokens <= 0:
             return False
 
@@ -58,14 +63,18 @@ class PlatformCacheAlertService:
             if len(window) < window_size or sum(window) < threshold:
                 return False
             now = self._clock()
+            if self._failure_suppressed_until is not None and now < self._failure_suppressed_until:
+                return False
             last_alert_at = self._last_alert_at.get(suffix)
             if last_alert_at is not None and now - last_alert_at < cooldown_seconds:
                 return False
             self._last_alert_at[suffix] = now
 
         try:
-            await self._sender(proxy_url, suffix, timeout_seconds)
+            await self._sender(alert_url, suffix, normalized_client_version, timeout_seconds)
         except Exception:
+            async with self._lock:
+                self._failure_suppressed_until = self._clock() + ALERT_FAILURE_SUPPRESSION_SECONDS
             logger.warning("Failed to send Platform cache-miss alert api_key_suffix=%s", suffix, exc_info=True)
             return False
         return True
@@ -82,25 +91,19 @@ class PlatformCacheAlertService:
         return window
 
 
-async def _post_alert(proxy_url: str, suffix: str, timeout_seconds: float) -> None:
-    alert_url = _notify_url(proxy_url)
+async def _post_alert(alert_url: str, suffix: str, client_version: str | None, timeout_seconds: float) -> None:
     client = get_http_client()
     async with asyncio.timeout(timeout_seconds):
         async with client.session.post(
             alert_url,
-            data=suffix,
-            headers={"Content-Type": "text/plain; charset=utf-8"},
+            json={
+                "api_key_suffix": suffix,
+                "client_version": client_version,
+            },
         ) as response:
             if response.status >= 400:
                 text = await response.text()
                 raise RuntimeError(f"alert proxy returned {response.status}: {text[:200]}")
-
-
-def _normalize_proxy_url(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    return stripped or None
 
 
 def _normalize_suffix(value: str | None) -> str | None:
@@ -110,6 +113,13 @@ def _normalize_suffix(value: str | None) -> str | None:
     if not stripped:
         return None
     return stripped[-4:]
+
+
+def _normalize_client_version(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _notify_url(proxy_url: str) -> str:

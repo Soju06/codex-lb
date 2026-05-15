@@ -25,7 +25,7 @@ from app.core.auth.dependencies import (
 )
 from app.core.clients.files import FileProxyError
 from app.core.clients.openai_platform import OpenAIPlatformError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, _resolve_codex_models_client_version
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -2589,6 +2589,7 @@ async def _maybe_handle_platform_responses(
     rate_limit_headers = await context.service.rate_limit_headers()
     request_id = ensure_request_id()
     log_session_id = proxy_service_module._owner_lookup_session_id_from_headers(request.headers)
+    client_version = _resolve_codex_models_client_version(request.headers)
     start = time.monotonic()
     if payload.stream:
         identity = None
@@ -2704,6 +2705,7 @@ async def _maybe_handle_platform_responses(
             forwarded_service_tier=forwarded_service_tier,
             session_id=log_session_id,
             platform_api_key_suffix=context.service.platform_api_key_suffix(identity),
+            client_version=client_version,
         )
         return StreamingResponse(
             stream,
@@ -2789,6 +2791,7 @@ async def _maybe_handle_platform_responses(
     if status == "success":
         await context.service.record_platform_cache_observation(
             identity=identity,
+            client_version=client_version,
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
         )
@@ -2863,6 +2866,7 @@ async def _instrument_platform_stream(
     forwarded_service_tier: str | None,
     session_id: str | None,
     platform_api_key_suffix: str | None,
+    client_version: str | None,
 ) -> AsyncIterator[str]:
     status = "success"
     error_code: str | None = None
@@ -2939,6 +2943,7 @@ async def _instrument_platform_stream(
         if status == "success":
             await context.service.record_platform_cache_observation(
                 api_key_suffix=platform_api_key_suffix,
+                client_version=client_version,
                 input_tokens=input_tokens,
                 cached_input_tokens=cached_input_tokens,
             )

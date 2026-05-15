@@ -1368,7 +1368,8 @@ async def _load_additional_quota_routing_overrides() -> dict[str, str]:
     except SQLAlchemyError:
         logger.warning("Additional quota routing policy settings unavailable; using inherited policies", exc_info=True)
         return {}
-    return parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
+    raw_overrides = getattr(dashboard_settings, "additional_quota_routing_policies_json", None)
+    return parse_additional_quota_routing_policies(raw_overrides)
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:

@@ -1035,7 +1035,7 @@ class LoadBalancer:
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
             capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
-            routing_policy=account.routing_policy,
+            routing_policy=getattr(account, "routing_policy", "normal"),
         )
 
     def _sync_runtime_state(
@@ -1301,7 +1301,7 @@ def _state_from_account(
                 last_error_at=runtime.last_error_at,
                 error_count=runtime.error_count,
                 health_tier=runtime.health_tier,
-                routing_policy=account.routing_policy,
+                routing_policy=getattr(account, "routing_policy", "normal"),
             ),
             now=time.time(),
             drain_entered_at=runtime.drain_entered_at,
@@ -1346,7 +1346,7 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         health_tier=new_tier,
-        routing_policy=account.routing_policy,
+        routing_policy=getattr(account, "routing_policy", "normal"),
     )
 
 

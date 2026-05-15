@@ -1,0 +1,111 @@
+name: 📊 Account / Quota / Dashboard Issue
+description: |
+  Report a problem specifically with account state, quota tracking, rate-limit
+  recovery, or the dashboard view of accounts. Use the Bug Report form instead
+  if the issue is about proxy/request behavior.
+title: "bug(accounts): <one-line summary>"
+type: Bug
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for problems like:
+        - Account stuck "Rate-limited" / "Disabled" when it shouldn't be
+        - Quota / usage values look wrong in the dashboard
+        - Refresh / OAuth callback fails for one or more accounts
+        - "Requested account is always the same" routing imbalance
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched existing issues for similar reports.
+          required: true
+        - label: I'm on the latest patch release of my minor version.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: codex-lb version
+      placeholder: "1.17.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: account_plan
+    attributes:
+      label: Affected account plan(s)
+      multiple: true
+      options:
+        - Free
+        - Plus
+        - Pro
+        - Team
+        - Business
+        - Enterprise
+        - Edu
+        - API-key only
+        - Mixed pool
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: Symptom category
+      multiple: true
+      options:
+        - Account stuck Rate-limited
+        - Account stuck Disabled / Unknown
+        - Quota / usage values are wrong
+        - Quota reset time is wrong / missing
+        - Same account always picked (load-balancing imbalance)
+        - OAuth / refresh / token failure
+        - Dashboard display bug only
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What does the dashboard / logs show?
+      description: |
+        Paste the relevant rows from the **Accounts** dashboard view (you can
+        crop sensitive bits) and any related lines from the codex-lb log. Mask
+        emails, account IDs, and tokens.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+
+  - type: input
+    id: last_quota_reset
+    attributes:
+      label: Last observed quota reset time (UTC)
+      description: |
+        From the dashboard or `/v1/usage`. Use the most recent reset for the
+        affected account — primary/5h quota row preferred. Leave blank if not
+        applicable (e.g. dashboard-only display bug).
+      placeholder: "2026-05-14 03:00 UTC"
+
+  - type: textarea
+    id: when
+    attributes:
+      label: When did it start?
+      description: |
+        E.g. "after upgrading from 1.15.0 → 1.16.0", "after a 429 burst at 03:00 UTC",
+        "right after I added a new account".
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, recent quota reset times, account count, traffic shape.

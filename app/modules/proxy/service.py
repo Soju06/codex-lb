@@ -5221,6 +5221,25 @@ class ProxyService:
         _release_websocket_response_create_gate(request_state, session.response_create_gate)
         await self._release_websocket_reservation(request_state.api_key_reservation)
         request_state.api_key_reservation = None
+        await self._retire_http_bridge_after_drain_if_ready(session)
+        return True
+
+    async def _retire_http_bridge_after_drain_if_ready(self, session: "_HTTPBridgeSession") -> bool:
+        if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
+            return False
+        async with session.pending_lock:
+            should_reconnect = not session.pending_requests
+        if not should_reconnect:
+            return False
+
+        session.closed = True
+        try:
+            await session.upstream.close()
+        except Exception:
+            logger.debug(
+                "Failed to close HTTP bridge upstream for reconnect",
+                exc_info=True,
+            )
         return True
 
     async def _relay_http_bridge_upstream_messages(
@@ -5269,19 +5288,8 @@ class ProxyService:
                 if message.kind == "text" and message.text is not None:
                     session.last_upstream_close_code = None
                     await self._process_http_bridge_upstream_text(session, message.text)
-                    if session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain:
-                        async with session.pending_lock:
-                            should_reconnect = not session.pending_requests
-                        if should_reconnect:
-                            session.closed = True
-                            try:
-                                await session.upstream.close()
-                            except Exception:
-                                logger.debug(
-                                    "Failed to close HTTP bridge upstream for reconnect",
-                                    exc_info=True,
-                                )
-                            break
+                    if await self._retire_http_bridge_after_drain_if_ready(session):
+                        break
                     continue
 
                 session.last_upstream_close_code = message.close_code

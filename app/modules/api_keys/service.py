@@ -171,6 +171,19 @@ class ApiKeyInvalidError(ValueError):
     pass
 
 
+class ApiKeyValidationError(ValueError):
+    """Raised when api_keys service input fails domain validation.
+
+    Subclasses ValueError so existing transitive callers that catch
+    ``ValueError`` continue to work, but lets API routes catch the
+    typed exception explicitly so unrelated programming errors that
+    happen to surface as ``ValueError`` are no longer silently
+    converted into 4xx client responses (#619).
+    """
+
+    pass
+
+
 class ApiKeyRateLimitExceededError(ValueError):
     def __init__(self, *, message: str, reset_at: datetime) -> None:
         super().__init__(message)
@@ -335,7 +348,7 @@ class ApiKeysService:
             ]
             if missing_account_ids:
                 missing = ", ".join(missing_account_ids)
-                raise ValueError(f"Unknown account ids: {missing}")
+                raise ApiKeyValidationError(f"Unknown account ids: {missing}")
             account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
         else:
             assigned_account_ids = None
@@ -839,7 +852,7 @@ class ApiKeySelfUsageData:
 def _normalize_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
-        raise ValueError("API key name is required")
+        raise ApiKeyValidationError("API key name is required")
     return normalized
 
 
@@ -914,7 +927,7 @@ def _normalize_reasoning_effort(value: str | None) -> str | None:
         return None
     if normalized not in _SUPPORTED_REASONING_EFFORTS:
         options = ", ".join(sorted(_SUPPORTED_REASONING_EFFORTS))
-        raise ValueError(f"Unsupported enforced reasoning effort '{normalized}'. Expected one of: {options}")
+        raise ApiKeyValidationError(f"Unsupported enforced reasoning effort '{normalized}'. Expected one of: {options}")
     return normalized
 
 
@@ -939,7 +952,7 @@ def _normalize_service_tier(value: str | None) -> str | None:
         normalized = "priority"
     if normalized not in _SUPPORTED_SERVICE_TIERS:
         options = ", ".join(sorted(_SUPPORTED_SERVICE_TIERS | {"fast"}))
-        raise ValueError(f"Unsupported enforced service tier '{normalized}'. Expected one of: {options}")
+        raise ApiKeyValidationError(f"Unsupported enforced service tier '{normalized}'. Expected one of: {options}")
     return normalized
 
 
@@ -960,7 +973,9 @@ def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: l
     if enforced_model is None or not allowed_models:
         return
     if enforced_model not in allowed_models:
-        raise ValueError("enforced_model must be present in allowed_models when allowed_models is configured")
+        raise ApiKeyValidationError(
+            "enforced_model must be present in allowed_models when allowed_models is configured"
+        )
 
 
 def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
@@ -1154,7 +1169,7 @@ def _limit_input_to_row(
 ) -> ApiKeyLimit:
     window = LimitWindow(li.limit_window)
     if li.limit_type == LimitType.CREDITS.value and li.model_filter is not None:
-        raise ValueError("credits limits do not support model_filter")
+        raise ApiKeyValidationError("credits limits do not support model_filter")
     return ApiKeyLimit(
         api_key_id=key_id,
         limit_type=LimitType(li.limit_type),
@@ -1177,7 +1192,7 @@ def _build_limit_rows_for_update(
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
     if len(submitted_by_key) != len(submitted_limits):
-        raise ValueError("Duplicate limit rules are not allowed")
+        raise ApiKeyValidationError("Duplicate limit rules are not allowed")
 
     rows: list[ApiKeyLimit] = []
     for submitted in submitted_limits:

@@ -391,7 +391,7 @@ async def test_platform_adapter_compact_response_delegates_to_core_client(monkey
 
 
 @pytest.mark.asyncio
-async def test_platform_adapter_compact_response_downgrades_fast_alias_to_default(monkeypatch) -> None:
+async def test_platform_adapter_compact_response_forwards_default_service_tier(monkeypatch) -> None:
     async def fake_create_compact_response(*, base_url, payload, api_key, organization=None, project=None):
         assert base_url == "https://api.openai.com"
         assert payload["service_tier"] == "default"
@@ -418,7 +418,7 @@ async def test_platform_adapter_compact_response_downgrades_fast_alias_to_defaul
             "model": "gpt-5.1",
             "instructions": "summarize",
             "input": "hello",
-            "service_tier": "fast",
+            "service_tier": "priority",
         }
     )
     result = await adapter.compact_response(

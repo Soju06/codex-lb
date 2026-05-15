@@ -520,9 +520,7 @@ class ResponsesRequest(BaseModel):
         return self
 
     def platform_forwarded_service_tier(self) -> str | None:
-        if _is_fast_service_tier_input(self.service_tier_input):
-            return "default"
-        return self.service_tier
+        return "default"
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
@@ -572,9 +570,7 @@ class ResponsesCompactRequest(BaseModel):
         return False
 
     def platform_forwarded_service_tier(self) -> str | None:
-        if _is_fast_service_tier_input(self.service_tier_input):
-            return "default"
-        return self.service_tier
+        return "default"
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)

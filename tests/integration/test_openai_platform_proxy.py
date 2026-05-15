@@ -619,7 +619,7 @@ async def test_v1_responses_falls_back_to_platform_for_stateless_requests(async_
 
     response = await async_client.post(
         "/v1/responses",
-        json={"model": "gpt-5.1", "input": "hi", "service_tier": "fast"},
+        json={"model": "gpt-5.1", "input": "hi", "service_tier": "priority"},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -1004,7 +1004,7 @@ async def test_v1_responses_stream_falls_back_to_platform_when_primary_usage_is_
     async with async_client.stream(
         "POST",
         "/v1/responses",
-        json={"model": "gpt-5.1", "input": "hi", "stream": True, "service_tier": "fast"},
+        json={"model": "gpt-5.1", "input": "hi", "stream": True, "service_tier": "priority"},
     ) as response:
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
@@ -2942,7 +2942,7 @@ async def test_v1_responses_platform_logs_enforced_api_key_service_tier(async_cl
     async def fake_create_platform_response(*, base_url, payload, api_key, organization=None, project=None):
         del base_url, api_key, organization, project
         assert payload["model"] == "gpt-5.1"
-        assert payload["service_tier"] == "priority"
+        assert payload["service_tier"] == "default"
         _assert_platform_text_input(payload, "hi")
         return PlatformResponseResult(
             payload=OpenAIResponsePayload.model_validate(
@@ -2970,7 +2970,7 @@ async def test_v1_responses_platform_logs_enforced_api_key_service_tier(async_cl
     assert log.provider_kind == "openai_platform"
     assert log.requested_service_tier == "priority"
     assert log.actual_service_tier is None
-    assert log.service_tier == "priority"
+    assert log.service_tier == "default"
 
 
 @pytest.mark.asyncio

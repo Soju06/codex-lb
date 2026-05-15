@@ -93,7 +93,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert dumped["custom_field"] == "kept"
 
 
-def test_responses_preserves_service_tier():
+def test_responses_preserves_service_tier_for_chatgpt_payload_and_uses_default_for_platform():
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
@@ -104,6 +104,19 @@ def test_responses_preserves_service_tier():
 
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+    assert request.platform_forwarded_service_tier() == "default"
+
+
+def test_responses_platform_forwarded_service_tier_uses_default_without_requested_tier():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier is None
+    assert request.platform_forwarded_service_tier() == "default"
 
 
 def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
@@ -155,6 +168,31 @@ def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.platform_forwarded_service_tier() == "default"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_compact_platform_forwarded_service_tier_uses_default_for_priority():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "priority",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "priority"
+    assert request.platform_forwarded_service_tier() == "default"
+
+
+def test_compact_platform_forwarded_service_tier_uses_default_without_requested_tier():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier is None
+    assert request.platform_forwarded_service_tier() == "default"
 
 
 def test_openai_prompt_cache_aliases_are_normalized():

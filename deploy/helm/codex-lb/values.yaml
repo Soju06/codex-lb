@@ -363,8 +363,9 @@ metrics:
     relabelings: []
   prometheusRule:
     # @param metrics.prometheusRule.enabled Create PrometheusRule for alerting
-    # Requires Prometheus Operator. Includes alerts for: high error rate, circuit breaker open,
-    # all accounts exhausted, high request latency. See templates/prometheusrule.yaml for details.
+    # Requires Prometheus Operator. Includes greenfield baseline alerts for request success,
+    # latency, upstream failures, SQLite lock pressure, bridge continuity, tier mismatches,
+    # and container restart/OOM health. See templates/prometheusrule.yaml for details.
     enabled: false
     # @param metrics.prometheusRule.additionalLabels Additional labels for PrometheusRule
     additionalLabels: {}

@@ -201,6 +201,18 @@ if PROMETHEUS_AVAILABLE:
         ["transport", "error_code"],
         registry=REGISTRY,
     )
+    sqlite_lock_retries_total = Counter(
+        "codex_lb_sqlite_lock_retries_total",
+        "Total SQLite lock retry events by operation and outcome",
+        ["operation", "outcome"],
+        registry=REGISTRY,
+    )
+    service_tier_mismatch_total = Counter(
+        "codex_lb_service_tier_mismatch_total",
+        "Total requested service tier mismatches observed in upstream responses",
+        ["kind", "requested_tier", "actual_tier"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -246,6 +258,8 @@ else:
     failover_total: CounterLike | None = None
     drain_transitions_total: CounterLike | None = None
     client_exposed_errors_total: CounterLike | None = None
+    sqlite_lock_retries_total: CounterLike | None = None
+    service_tier_mismatch_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -285,6 +299,8 @@ __all__ = [
     "rate_limit_hits_total",
     "request_duration_seconds",
     "requests_total",
+    "service_tier_mismatch_total",
+    "sqlite_lock_retries_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
 ]

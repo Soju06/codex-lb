@@ -1636,6 +1636,57 @@ def test_log_proxy_service_tier_trace_disabled(monkeypatch, caplog):
     assert "proxy_service_tier_trace" not in caplog.text
 
 
+def test_service_tier_mismatch_metric_records_without_trace_logging(monkeypatch, caplog):
+    counter = _ObservedCounter()
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "service_tier_mismatch_total", counter)
+
+    caplog.set_level(logging.WARNING)
+    proxy_service._maybe_log_proxy_service_tier_trace(
+        "stream",
+        requested_service_tier="ultrafast",
+        actual_service_tier="default",
+    )
+
+    assert "proxy_service_tier_trace" not in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"kind": "stream", "requested_tier": "ultrafast", "actual_tier": "default"},
+            "value": 1.0,
+        }
+    ]
+
+
+def test_service_tier_mismatch_metric_skips_matching_tiers(monkeypatch):
+    counter = _ObservedCounter()
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "service_tier_mismatch_total", counter)
+
+    proxy_service._maybe_log_proxy_service_tier_trace(
+        "compact",
+        requested_service_tier="priority",
+        actual_service_tier="priority",
+    )
+
+    assert counter.samples == []
+
+
 def test_log_upstream_request_trace(monkeypatch, caplog):
     class Settings:
         log_upstream_request_summary = True

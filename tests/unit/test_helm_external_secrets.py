@@ -552,3 +552,24 @@ def test_network_policy_allows_internal_bridge_handoff_egress_between_pods() -> 
 
     assert "# Allow pod-to-pod bridge owner handoff egress" in rendered
     assert "port: 3456" in rendered.split("# Allow pod-to-pod bridge owner handoff egress", 1)[1]
+
+
+def test_prometheus_rule_covers_greenfield_runtime_signals() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/prometheusrule.yaml",
+        "--set",
+        "metrics.prometheusRule.enabled=true",
+    )
+
+    assert "CodexLBHighNonSuccessRate" in rendered
+    assert "CodexLBHighP95Latency" in rendered
+    assert "CodexLBUpstreamTimeoutOrIncomplete" in rendered
+    assert "CodexLBSqliteLockPressure" in rendered
+    assert "codex_lb_sqlite_lock_retries_total" in rendered
+    assert "CodexLBBridgeContinuityErrors" in rendered
+    assert "codex_lb_continuity_fail_closed_total" in rendered
+    assert "CodexLBServiceTierMismatch" in rendered
+    assert "codex_lb_service_tier_mismatch_total" in rendered
+    assert "CodexLBContainerRestarting" in rendered
+    assert "CodexLBContainerOOMKilled" in rendered

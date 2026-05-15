@@ -91,6 +91,7 @@ from app.core.metrics.prometheus import (
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
     failover_total,
+    service_tier_mismatch_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
@@ -10155,6 +10156,11 @@ def _maybe_log_proxy_service_tier_trace(
     requested_service_tier: str | None,
     actual_service_tier: str | None,
 ) -> None:
+    _record_service_tier_mismatch(
+        kind,
+        requested_service_tier=requested_service_tier,
+        actual_service_tier=actual_service_tier,
+    )
     settings = get_settings()
     if not settings.log_proxy_service_tier_trace:
         return
@@ -10166,6 +10172,34 @@ def _maybe_log_proxy_service_tier_trace(
         requested_service_tier,
         actual_service_tier,
     )
+
+
+def _record_service_tier_mismatch(
+    kind: str,
+    *,
+    requested_service_tier: str | None,
+    actual_service_tier: str | None,
+) -> None:
+    requested_tier = _service_tier_metric_label(requested_service_tier)
+    actual_tier = _service_tier_metric_label(actual_service_tier)
+    if requested_tier == "none" or actual_tier == "none" or requested_tier == actual_tier:
+        return
+    if PROMETHEUS_AVAILABLE and service_tier_mismatch_total is not None:
+        service_tier_mismatch_total.labels(
+            kind=kind,
+            requested_tier=requested_tier,
+            actual_tier=actual_tier,
+        ).inc()
+
+
+def _service_tier_metric_label(value: str | None) -> str:
+    normalized = _normalize_service_tier_value(value)
+    if normalized is None:
+        return "none"
+    label = normalized.lower()
+    if label in {"auto", "default", "priority", "flex", "ultrafast"}:
+        return label
+    return "other"
 
 
 def _hash_identifier_or_none(value: str | None) -> str | None:

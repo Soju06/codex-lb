@@ -15,6 +15,7 @@ services:
     ports:
       - "2455:2455"
       - "1455:1455"
+      - "9090:9090"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     healthcheck:

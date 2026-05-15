@@ -40,6 +40,7 @@ _FOLLOWER_DISABLED_SETTINGS = {
     "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED": "false",
     "CODEX_LB_USAGE_REFRESH_ENABLED": "false",
 }
+_DOWNSTREAM_DISCONNECT_ERRORS = (aiohttp.ClientConnectionResetError, ConnectionResetError, BrokenPipeError)
 
 
 @dataclass(frozen=True)
@@ -257,9 +258,12 @@ class _BridgeFrontProxy:
                 headers=_forward_response_headers(upstream.headers),
             )
             await response.prepare(request)
-            async for chunk in upstream.content.iter_chunked(64 * 1024):
-                await response.write(chunk)
-            await response.write_eof()
+            try:
+                async for chunk in upstream.content.iter_chunked(64 * 1024):
+                    await response.write(chunk)
+                await response.write_eof()
+            except _DOWNSTREAM_DISCONNECT_ERRORS:
+                return response
             return response
 
     async def _handle_websocket(self, request: web.Request, worker: BridgeWorkerConfig) -> web.StreamResponse:
@@ -320,6 +324,10 @@ def _forward_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
 def _forward_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() not in _HOP_BY_HOP_HEADERS}
+
+
+def _is_downstream_disconnect(exc: BaseException) -> bool:
+    return isinstance(exc, _DOWNSTREAM_DISCONNECT_ERRORS)
 
 
 def build_worker_env(worker: BridgeWorkerConfig, *, base_env: Mapping[str, str] | None = None) -> dict[str, str]:

@@ -10,6 +10,8 @@ from typing import TypeVar, cast
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, sqlite_lock_retries_total
+
 _T = TypeVar("_T")
 
 SQLITE_LOCK_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.05, 0.1, 0.2)
@@ -101,6 +103,7 @@ async def _run_retryable_attempt(
         if not is_sqlite_lock_error(exc):
             raise
         if attempt_index == attempts - 1:
+            _record_sqlite_lock_retry(operation_name, outcome="exhausted")
             if logger is not None:
                 logger.error(
                     "SQLite write lock retry exhausted operation=%s attempts=%s",
@@ -111,6 +114,7 @@ async def _run_retryable_attempt(
         if on_retry is not None:
             await on_retry()
         delay = delays_seconds[attempt_index]
+        _record_sqlite_lock_retry(operation_name, outcome="retry")
         if logger is not None:
             logger.warning(
                 "retrying SQLite write after lock operation=%s attempt=%s/%s delay_seconds=%.3f",
@@ -159,3 +163,8 @@ def session_uses_sqlite(session: AsyncSession) -> bool:
 
 def _has_sqlite_lock_marker(message: str) -> bool:
     return any(marker in message for marker in _SQLITE_LOCK_MARKERS)
+
+
+def _record_sqlite_lock_retry(operation_name: str, *, outcome: str) -> None:
+    if PROMETHEUS_AVAILABLE and sqlite_lock_retries_total is not None:
+        sqlite_lock_retries_total.labels(operation=operation_name, outcome=outcome).inc()

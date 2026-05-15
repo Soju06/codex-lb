@@ -110,6 +110,9 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authe
 model = "gpt-5.3-codex"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
+# Optional: keep whichever service tier you already selected.
+# For an ultrafast Codex setup, leave this as ultrafast.
+service_tier = "ultrafast"
 
 [model_providers.codex-lb]
 name = "OpenAI"  # required — enables remote /responses/compact
@@ -143,6 +146,17 @@ These flags are experimental and do not replace `wire_api = "responses"`.
 If upstream websocket handshakes must use environment proxies in your deployment, set
 `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=true`. By default websocket handshakes connect directly to
 match Codex CLI's native transport.
+
+**Verify requested vs actual service tier**
+
+Keep the Codex CLI `service_tier` setting you already use. To prove codex-lb is receiving the requested tier and to compare it with the upstream actual tier without printing prompts, bearer tokens, or auth headers, run:
+
+```bash
+rg -n "service_tier|model_provider|base_url|wire_api" ~/.codex/config.toml
+uv run python scripts/codex_lb_live_snapshot.py --container codex-lb --minutes 15
+```
+
+In the snapshot output, check `request_logs.service_tier_counts` and `request_logs.tier_mismatches`. A requested `ultrafast` row with actual `default` or `auto` means upstream returned a different served tier; it is visible without changing the Codex CLI preference.
 
 **With [API key auth](#api-key-authentication):**
 
@@ -410,6 +424,23 @@ docker compose --profile postgres up --build
 ```
 
 Use this profile for sustained concurrent traffic or multi-worker serving. The app remains on port `2455`, and the OAuth callback remains on port `1455`.
+
+**Greenfield sustained baseline**
+
+For a new always-on codex-lb gateway, start from the production Compose file or packaged image entrypoint, keep the standard `2455` API port and `1455` OAuth callback port, and enable metrics:
+
+```bash
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@db.example.com:5432/codex_lb
+CODEX_LB_UVICORN_WORKERS=2
+CODEX_LB_METRICS_ENABLED=true
+CODEX_LB_METRICS_PORT=9090
+
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+When the HTTP Responses session bridge remains enabled, use the packaged image entrypoint or `python -m app.cli` so `CODEX_LB_UVICORN_WORKERS>1` starts the addressable bridge worker pool. Plain Uvicorn multi-worker serving is only suitable when `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED=false`.
+
+The minimum greenfield observability bundle is `/health/ready`, the Prometheus `/metrics` endpoint, and alerting for request success rate, p95 latency, upstream timeout or `stream_incomplete` spikes, SQLite lock pressure, bridge continuity errors, service-tier mismatches, and container restart/OOM signals. The Helm chart ships a `PrometheusRule` for those signals; for Docker or bare-metal installs, copy the rule expressions from `deploy/helm/codex-lb/templates/prometheusrule.yaml`.
 
 **Authelia / trusted header**
 

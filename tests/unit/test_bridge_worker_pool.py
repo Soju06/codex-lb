@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import aiohttp
 import pytest
 
-from app.core.runtime.bridge_worker_pool import build_worker_configs, build_worker_env
+from app.core.runtime.bridge_worker_pool import _is_downstream_disconnect, build_worker_configs, build_worker_env
 
 pytestmark = pytest.mark.unit
 
@@ -67,3 +68,10 @@ def test_build_worker_env_disables_shared_background_loops_for_followers():
     assert env["CODEX_LB_MODEL_REGISTRY_ENABLED"] == "true"
     assert env["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] == "false"
     assert env["CODEX_LB_USAGE_REFRESH_ENABLED"] == "false"
+
+
+def test_downstream_disconnect_guard_classifies_benign_client_resets():
+    assert _is_downstream_disconnect(aiohttp.ClientConnectionResetError("Cannot write to closing transport"))
+    assert _is_downstream_disconnect(ConnectionResetError("connection reset by peer"))
+    assert _is_downstream_disconnect(BrokenPipeError("broken pipe"))
+    assert not _is_downstream_disconnect(RuntimeError("upstream failed"))

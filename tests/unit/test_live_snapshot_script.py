@@ -45,7 +45,8 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 cached_input_tokens INTEGER,
-                reasoning_tokens INTEGER
+                reasoning_tokens INTEGER,
+                cost_usd REAL
             )
             """
         )
@@ -67,7 +68,8 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
-                reasoning_tokens
+                reasoning_tokens,
+                cost_usd
             )
             VALUES (
                 datetime('now', '-5 minutes'),
@@ -85,7 +87,8 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
                 1000,
                 100,
                 0,
-                0
+                0,
+                0.01
             )
             """
         )
@@ -107,7 +110,8 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
-                reasoning_tokens
+                reasoning_tokens,
+                cost_usd
             )
             VALUES (
                 datetime('now', '-4 minutes'),
@@ -122,6 +126,7 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
                 'ultrafast',
                 NULL,
                 'low',
+                NULL,
                 NULL,
                 NULL,
                 NULL,
@@ -175,6 +180,9 @@ def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Pa
     assert snapshot["slowest_requests"][0]["error_code"] == "upstream_unavailable"
     assert snapshot["recent_requests"][0]["error_code"] == "upstream_unavailable"
     assert snapshot["recent_errors"][0]["message"] == "Request to upstream timed out"
+    assert snapshot["runtime_correlation"]["response_id_column"] == "request_id"
+    assert snapshot["runtime_correlation"]["groups"][0]["model"] == "gpt-5.5"
+    assert "cost_usd" in snapshot["runtime_correlation"]["recent_requests"][0]
 
 
 def test_request_logs_uses_container_postgres_when_live_env_is_postgres(monkeypatch: pytest.MonkeyPatch) -> None:

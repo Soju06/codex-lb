@@ -38,7 +38,8 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 cached_input_tokens INTEGER,
-                reasoning_tokens INTEGER
+                reasoning_tokens INTEGER,
+                cost_usd REAL
             )
             """
         )
@@ -60,11 +61,12 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
-                reasoning_tokens
+                reasoning_tokens,
+                cost_usd
             )
             VALUES (
                 datetime('now', ?),
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -85,6 +87,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     100,
                     0,
                     0,
+                    0.01,
                 ),
                 (
                     "-2 minutes",
@@ -103,6 +106,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     3200,
                     1000,
                     500,
+                    0.32,
                 ),
                 (
                     "-3 minutes",
@@ -117,6 +121,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     "ultrafast",
                     None,
                     "low",
+                    None,
                     None,
                     None,
                     None,
@@ -136,3 +141,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
     assert snapshot["slowest_requests"][0]["output_tokens"] == 3200
     assert snapshot["output_token_buckets"][0]["bucket"] == "3000-6000"
     assert snapshot["recent_errors"][0]["error_code"] == "stream_incomplete"
+    assert snapshot["runtime_correlation"]["groups"][0]["model"] == "gpt-5.5"
+    assert any(
+        row["error_code"] == "stream_incomplete" for row in snapshot["runtime_correlation"]["recent_requests"]
+    )

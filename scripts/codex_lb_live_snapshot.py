@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
@@ -207,7 +207,8 @@ def _request_logs_from_sqlite(db_path: Path, minutes: int, *, source: dict[str, 
         def execute(sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
             return [_normalize_row(dict(row)) for row in conn.execute(sql, params).fetchall()]
 
-        rows = _fetch_request_log_rows(execute, "sqlite", minutes)
+        columns = _sqlite_request_log_columns(conn)
+        rows = _fetch_request_log_rows(execute, "sqlite", minutes, columns=columns)
     return _build_request_logs_snapshot(rows, minutes, source=source)
 
 
@@ -219,21 +220,33 @@ def _request_logs_from_postgres_url(database_url: str, minutes: int) -> dict[str
         return {"error": f"psycopg unavailable for PostgreSQL request-log snapshot: {exc}"}
 
     try:
-        with psycopg.connect(_postgres_sync_url(database_url), row_factory=dict_row, connect_timeout=5) as conn:
+        with psycopg.connect(
+            _postgres_sync_url(database_url),
+            row_factory=cast(Any, dict_row),
+            connect_timeout=5,
+        ) as conn:
 
             def execute(sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
                 with conn.cursor() as cursor:
-                    cursor.execute(sql, params)
+                    cursor.execute(cast(Any, sql), params)
                     return [_normalize_row(dict(row)) for row in cursor.fetchall()]
 
-            rows = _fetch_request_log_rows(execute, "postgresql", minutes)
+            columns = _postgres_request_log_columns(execute)
+            rows = _fetch_request_log_rows(execute, "postgresql", minutes, columns=columns)
     except Exception as exc:  # pragma: no cover - live diagnostic path
         return {"error": f"PostgreSQL request-log query failed: {exc}"}
     return _build_request_logs_snapshot(rows, minutes, source={"backend": "postgresql", "source": "database_url"})
 
 
 def _request_logs_from_container_postgres(container: str, minutes: int) -> dict[str, Any]:
-    rows_or_error = _fetch_postgres_rows_in_container(container, _request_log_queries("postgresql", minutes))
+    columns_or_error = _fetch_postgres_rows_in_container(container, _postgres_request_log_column_query())
+    if isinstance(columns_or_error, str):
+        return {"error": columns_or_error}
+    columns = _request_log_columns_from_rows(columns_or_error["request_log_columns"])
+    rows_or_error = _fetch_postgres_rows_in_container(
+        container,
+        _request_log_queries("postgresql", minutes, columns=columns),
+    )
     if isinstance(rows_or_error, str):
         return {"error": rows_or_error}
     return _build_request_logs_snapshot(
@@ -245,22 +258,69 @@ def _request_logs_from_container_postgres(container: str, minutes: int) -> dict[
 
 RequestLogDialect = Literal["sqlite", "postgresql"]
 
+_POSTGRES_REQUEST_LOG_COLUMNS_SQL = """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name = 'request_logs'
+ORDER BY ordinal_position
+"""
+
+
+def _sqlite_request_log_columns(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute("PRAGMA table_info(request_logs)").fetchall()
+    return frozenset(str(row["name"]) for row in rows)
+
+
+def _postgres_request_log_column_query() -> dict[str, tuple[str, Sequence[Any]]]:
+    return {"request_log_columns": (_POSTGRES_REQUEST_LOG_COLUMNS_SQL, ())}
+
+
+def _postgres_request_log_columns(
+    execute: Callable[[str, Sequence[Any]], list[dict[str, Any]]],
+) -> frozenset[str]:
+    return _request_log_columns_from_rows(execute(_POSTGRES_REQUEST_LOG_COLUMNS_SQL, ()))
+
+
+def _request_log_columns_from_rows(rows: list[dict[str, Any]]) -> frozenset[str]:
+    names: list[str] = []
+    for row in rows:
+        name = row.get("column_name") or row.get("name")
+        if isinstance(name, str):
+            names.append(name)
+    return frozenset(names)
+
 
 def _fetch_request_log_rows(
     execute: Callable[[str, Sequence[Any]], list[dict[str, Any]]],
     dialect: RequestLogDialect,
     minutes: int,
+    *,
+    columns: frozenset[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    return {name: execute(sql, params) for name, (sql, params) in _request_log_queries(dialect, minutes).items()}
+    return {
+        name: execute(sql, params)
+        for name, (sql, params) in _request_log_queries(dialect, minutes, columns=columns).items()
+    }
 
 
-def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, tuple[str, Sequence[Any]]]:
+def _request_log_queries(
+    dialect: RequestLogDialect,
+    minutes: int,
+    *,
+    columns: frozenset[str] | None = None,
+) -> dict[str, tuple[str, Sequence[Any]]]:
     if dialect == "sqlite":
         window_expr = "datetime('now', ?)"
         params: Sequence[Any] = (f"-{minutes} minutes",)
     else:
         window_expr = "(timezone('utc', now()) - (%s * interval '1 minute'))"
         params = (minutes,)
+
+    has_cost_usd = columns is None or "cost_usd" in columns
+    has_request_id = columns is None or "request_id" in columns
+    runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0)), 6) AS cost_usd" if has_cost_usd else "0.0 AS cost_usd"
+    request_cost_usd_expr = "cost_usd" if has_cost_usd else "NULL AS cost_usd"
+    response_id_expr = "request_id AS response_id" if has_request_id else "NULL AS response_id"
 
     return {
         "status_rows": (
@@ -455,7 +515,7 @@ def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, 
                 round(avg(latency_first_token_ms), 1) AS avg_latency_first_token_ms,
                 round(avg(input_tokens), 1) AS avg_input_tokens,
                 round(avg(output_tokens), 1) AS avg_output_tokens,
-                round(sum(coalesce(cost_usd, 0.0)), 6) AS cost_usd
+                {runtime_cost_usd_expr}
             FROM request_logs
             WHERE requested_at >= {window_expr}
             GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
@@ -468,7 +528,7 @@ def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, 
             f"""
             SELECT
                 requested_at,
-                request_id AS response_id,
+                {response_id_expr},
                 status,
                 model,
                 transport,
@@ -480,7 +540,7 @@ def _request_log_queries(dialect: RequestLogDialect, minutes: int) -> dict[str, 
                 output_tokens,
                 cached_input_tokens,
                 reasoning_tokens,
-                cost_usd,
+                {request_cost_usd_expr},
                 latency_ms,
                 latency_first_token_ms,
                 error_code

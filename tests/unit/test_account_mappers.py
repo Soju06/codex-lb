@@ -25,7 +25,7 @@ def _make_account(*, routing_policy: str | None, status: AccountStatus | None = 
         status=status,
     )
     if routing_policy is not None:
-        account.routing_policy = routing_policy
+        setattr(account, "routing_policy", routing_policy)
     return account
 
 

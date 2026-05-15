@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
@@ -46,9 +46,7 @@ def parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     loaded = json.loads(raw)
     if not isinstance(loaded, dict):
         return {}
-    return normalize_additional_quota_routing_policy_overrides(
-        {str(key): str(value) for key, value in loaded.items()}
-    )
+    return normalize_additional_quota_routing_policy_overrides({str(key): str(value) for key, value in loaded.items()})
 
 
 class SettingsService:

@@ -1,0 +1,4 @@
+- [x] 1. Update OpenSpec requirements for fixed alert delivery, payload shape, and failure suppression.
+- [x] 2. Add failing tests for fixed target URL, client version payload, and one-hour failure suppression.
+- [x] 3. Implement fixed alert delivery and client-version propagation.
+- [x] 4. Run focused tests, OpenSpec validation, and relevant static checks.

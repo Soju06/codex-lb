@@ -49,6 +49,8 @@ COPY --from=frontend-build /app/app/static app/static
 RUN chmod +x /app/scripts/docker-entrypoint.sh
 
 USER app
-EXPOSE 2455 1455
+EXPOSE 2455 1455 9090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD python -c "import os, urllib.request; port = os.getenv('PORT', '2455'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health/ready', timeout=4).read()"
 
 CMD ["/app/scripts/docker-entrypoint.sh"]

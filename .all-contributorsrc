@@ -445,6 +445,47 @@
         "test",
         "review"
       ]
+    },
+    {
+      "login": "klaascommerce",
+      "name": "klaascommerce",
+      "avatar_url": "https://avatars.githubusercontent.com/u/264425820?v=4",
+      "profile": "https://github.com/klaascommerce",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "ozpool",
+      "name": "ozpool",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151670776?v=4",
+      "profile": "https://github.com/ozpool",
+      "contributions": [
+        "ideas",
+        "doc",
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mgwals",
+      "name": "Manu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/155856544?v=4",
+      "profile": "https://github.com/mgwals",
+      "contributions": [
+        "test",
+        "review"
+      ]
+    },
+    {
+      "login": "jumski",
+      "name": "Wojtek Majewski",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9126?v=4",
+      "profile": "https://pgflow.dev",
+      "contributions": [
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

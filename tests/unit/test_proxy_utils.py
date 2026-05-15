@@ -5444,6 +5444,69 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
     assert fresh_input[-1] == new_input
 
 
+@pytest.mark.asyncio
+async def test_prepare_websocket_full_replay_retry_text_disables_oversized_unslimmable_retry(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_trim_replay_too_large",
+        name="ws-trim-replay-too-large",
+        key_prefix="sk-ws-trim-large",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "H" * 5000}]},
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_trim_too_large"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    assert prepared.request_state.fresh_upstream_request_text is None
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+
+
 def test_websocket_continuity_state_reuses_codex_session_scope():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
 
@@ -5468,6 +5531,55 @@ def test_websocket_continuity_state_reuses_codex_session_scope():
     assert second is first
     assert second.last_completed_response_id == "resp_cached"
     assert unscoped is not first
+
+
+def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=2,
+        last_completed_response_id="resp_old",
+        last_completed_input_prefix_fingerprint="old-fingerprint",
+    )
+    incomplete_state = proxy_service._WebSocketRequestState(
+        request_id="ws_incomplete_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=3,
+        input_full_fingerprint=None,
+    )
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=incomplete_state,
+        response_id="resp_new_without_fingerprint",
+    )
+
+    assert continuity_state.last_completed_response_id is None
+    assert continuity_state.last_completed_input_count == 0
+    assert continuity_state.last_completed_input_prefix_fingerprint is None
+
+    complete_state = proxy_service._WebSocketRequestState(
+        request_id="ws_complete_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=3,
+        input_full_fingerprint="new-fingerprint",
+    )
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=complete_state,
+        response_id="resp_new",
+    )
+
+    assert continuity_state.last_completed_response_id == "resp_new"
+    assert continuity_state.last_completed_input_count == 3
+    assert continuity_state.last_completed_input_prefix_fingerprint == "new-fingerprint"
 
 
 @pytest.mark.asyncio

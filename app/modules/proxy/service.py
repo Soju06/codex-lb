@@ -307,7 +307,7 @@ def _response_create_text_with_size_guard(
     client_metadata: Mapping[str, JsonValue] | None,
     request_state: "_WebSocketRequestState",
     transport: str,
-) -> str:
+) -> str | None:
     upstream_payload = dict(payload.to_payload())
     upstream_payload.pop("stream", None)
     upstream_payload.pop("background", None)
@@ -318,6 +318,7 @@ def _response_create_text_with_size_guard(
     text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
     payload_size = len(text_data.encode("utf-8"))
     if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+        original_payload_size = payload_size
         slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
             upstream_payload,
             max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
@@ -325,6 +326,7 @@ def _response_create_text_with_size_guard(
         if slim_summary is not None:
             upstream_payload = slimmed_payload
             text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+            payload_size = len(text_data.encode("utf-8"))
             logger.warning(
                 (
                     "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
@@ -334,11 +336,24 @@ def _response_create_text_with_size_guard(
                 request_state.request_id,
                 request_state.request_log_id,
                 transport,
+                original_payload_size,
                 payload_size,
-                len(text_data.encode("utf-8")),
                 slim_summary["historical_tool_outputs_slimmed"],
                 slim_summary["historical_images_slimmed"],
             )
+        if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+            logger.warning(
+                (
+                    "Skipping oversized response.create retry body request_id=%s request_log_id=%s "
+                    "transport=%s bytes=%s max_bytes=%s"
+                ),
+                request_state.request_id,
+                request_state.request_log_id,
+                transport,
+                payload_size,
+                _UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
+            )
+            return None
     return text_data
 
 
@@ -4270,6 +4285,24 @@ class ProxyService:
                                                 owner_check_applied=True,
                                             )
                                             force_durable_takeover = True
+                                    elif _http_bridge_endpoint_matches_current_instance(owner_endpoint, settings):
+                                        if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                                            bridge_durable_recover_total.labels(path="restart_takeover").inc()
+                                        _log_http_bridge_event(
+                                            "owner_mismatch_local_recover",
+                                            key,
+                                            account_id=None,
+                                            model=request_model,
+                                            detail=(
+                                                "expected_instance="
+                                                f"{owner_instance}, current_instance={current_instance}, "
+                                                "outcome=local_recover_same_endpoint"
+                                            ),
+                                            cache_key_family=key.affinity_kind,
+                                            model_class=_extract_model_class(request_model) if request_model else None,
+                                            owner_check_applied=True,
+                                        )
+                                        force_durable_takeover = True
                                     else:
                                         owner_forward = _HTTPBridgeOwnerForward(
                                             owner_instance=owner_instance,
@@ -8818,11 +8851,14 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
-    if response_id is not None:
-        continuity_state.last_completed_response_id = response_id
-    if request_state.input_item_count > 0:
-        continuity_state.last_completed_input_count = request_state.input_item_count
-        continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    if response_id is None or request_state.input_item_count <= 0 or request_state.input_full_fingerprint is None:
+        continuity_state.last_completed_response_id = None
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
+        return
+    continuity_state.last_completed_response_id = response_id
+    continuity_state.last_completed_input_count = request_state.input_item_count
+    continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
 
 
 async def _wait_for_websocket_continuity_gap(
@@ -10888,6 +10924,13 @@ def _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor(
     if ring[0] != current_instance:
         return False
     return owner_instance not in ring
+
+
+def _http_bridge_endpoint_matches_current_instance(owner_endpoint: str, settings: Settings) -> bool:
+    current_endpoint = settings.http_responses_session_bridge_advertise_base_url
+    if current_endpoint is None:
+        return False
+    return owner_endpoint.strip().rstrip("/") == current_endpoint.strip().rstrip("/")
 
 
 def _http_bridge_can_recover_during_drain(

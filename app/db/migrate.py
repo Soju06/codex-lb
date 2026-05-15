@@ -71,6 +71,7 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
     "request_logs": frozenset(
         {
             "idx_logs_requested_at_id",
+            "idx_logs_deleted_at_requested_at_id",
             "idx_logs_requested_at_model_tier",
             "idx_logs_model_effort_time",
             "idx_logs_status_error_time",

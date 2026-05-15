@@ -486,6 +486,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
             request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
             request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
+            assert "deleted_at" in request_log_columns
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             legacy_plan_type = (
@@ -568,10 +569,18 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             request_log_index_rows = (await session.execute(text("PRAGMA index_list(request_logs)"))).fetchall()
             request_log_index_names = {str(row[1]) for row in request_log_index_rows if len(row) > 1}
             assert "idx_logs_requested_at_id" in request_log_index_names
+            assert "idx_logs_deleted_at_requested_at_id" in request_log_index_names
             assert "idx_logs_requested_at_model_tier" in request_log_index_names
             assert "idx_logs_model_effort_time" in request_log_index_names
             assert "idx_logs_status_error_time" in request_log_index_names
             assert "idx_logs_api_key_time" in request_log_index_names
+            request_log_fk_rows = (await session.execute(text("PRAGMA foreign_key_list(request_logs)"))).fetchall()
+            request_log_fk_actions = {
+                (str(row[2]).lower(), str(row[3]).lower(), str(row[4]).lower(), str(row[6]).lower())
+                for row in request_log_fk_rows
+                if len(row) > 6
+            }
+            assert ("accounts", "account_id", "id", "set null") in request_log_fk_actions
             api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names
@@ -606,6 +615,19 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert usage_count == 1
             assert logs_count == 1
             assert sticky_count == 2
+
+            await session.execute(text("DELETE FROM usage_history WHERE account_id='acc_legacy'"))
+            await session.execute(text("DELETE FROM sticky_sessions WHERE account_id='acc_legacy'"))
+            await session.execute(text("DELETE FROM accounts WHERE id='acc_legacy'"))
+            await session.commit()
+
+            remaining_log = (
+                await session.execute(
+                    text("SELECT account_id, deleted_at FROM request_logs WHERE id=1")
+                )
+            ).one()
+            assert remaining_log[0] is None
+            assert remaining_log[1] is None
     finally:
         await engine.dispose()
 

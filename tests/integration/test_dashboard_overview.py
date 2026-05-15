@@ -103,6 +103,40 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_metrics_keep_soft_deleted_request_logs(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_dash_deleted", "dash-deleted@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_dash_deleted",
+            request_id="req_dash_deleted_1",
+            model="gpt-5.1",
+            input_tokens=40,
+            output_tokens=10,
+            latency_ms=40,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=2),
+        )
+
+    delete_response = await async_client.delete("/api/accounts/acc_dash_deleted")
+    assert delete_response.status_code == 200
+
+    overview = await async_client.get("/api/dashboard/overview")
+    assert overview.status_code == 200
+    payload = overview.json()
+
+    assert payload["accounts"] == []
+    assert payload["summary"]["metrics"]["requests"] == 1
+    assert payload["summary"]["metrics"]["tokens"] == 50
+    request_values = [point["v"] for point in payload["trends"]["requests"]]
+    assert any(value > 0 for value in request_values)
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

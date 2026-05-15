@@ -36,7 +36,7 @@ def test_select_account_picks_lowest_used_percent():
     assert result.account.account_id == "b"
 
 
-def test_select_account_prefers_earlier_primary_reset_before_secondary():
+def test_select_account_can_prefer_earlier_primary_reset_before_secondary():
     now = time.time()
     states = [
         AccountState(
@@ -56,7 +56,13 @@ def test_select_account_prefers_earlier_primary_reset_before_secondary():
             secondary_reset_at=int(now + 7 * 24 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
     assert result.account is not None
     assert result.account.account_id == "b"
 
@@ -84,7 +90,7 @@ def test_select_account_falls_back_to_secondary_reset_when_primary_missing():
     assert result.account.account_id == "b"
 
 
-def test_select_account_can_prefer_secondary_reset_window():
+def test_select_account_defaults_to_secondary_reset_window():
     now = time.time()
     states = [
         AccountState(
@@ -109,7 +115,6 @@ def test_select_account_can_prefer_secondary_reset_window():
         states,
         now=now,
         prefer_earlier_reset=True,
-        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
     )
 
@@ -1228,7 +1233,7 @@ def test_select_account_capacity_weighted_three_tiers_distribution_matches_capac
     assert pro_ratio > plus_ratio > free_ratio
 
 
-def test_select_account_capacity_weighted_prefers_earlier_primary_reset_bucket():
+def test_select_account_capacity_weighted_can_prefer_earlier_primary_reset_bucket():
     random.seed(55)
     now = time.time()
     early = AccountState(
@@ -1257,6 +1262,7 @@ def test_select_account_capacity_weighted_prefers_earlier_primary_reset_bucket()
             [early, late],
             now=now,
             prefer_earlier_reset=True,
+            prefer_earlier_reset_window="primary",
             routing_strategy="capacity_weighted",
         )
         assert result.account is not None

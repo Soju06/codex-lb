@@ -8253,7 +8253,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        prefer_earlier_reset_window: ResetPreferenceWindow = "primary",
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
@@ -9781,7 +9781,7 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
 
 
 def _prefer_earlier_reset_window(settings: DashboardSettings) -> ResetPreferenceWindow:
-    value = getattr(settings, "prefer_earlier_reset_window", "primary")
+    value = getattr(settings, "prefer_earlier_reset_window", "secondary")
     return "secondary" if value == "secondary" else "primary"
 
 

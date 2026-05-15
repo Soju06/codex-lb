@@ -214,8 +214,8 @@ class DashboardSettings(Base):
     )
     prefer_earlier_reset_window: Mapped[str] = mapped_column(
         String,
-        default="primary",
-        server_default=text("'primary'"),
+        default="secondary",
+        server_default=text("'secondary'"),
         nullable=False,
     )
     routing_strategy: Mapped[str] = mapped_column(

@@ -25,6 +25,11 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["additionalQuotaRoutingPolicies"] == {}
+    assert any(
+        policy["quotaKey"] == "codex_spark" and policy["routingPolicy"] == "burn_first"
+        for policy in payload["additionalQuotaPolicies"]
+    )
 
     response = await async_client.put(
         "/api/settings",
@@ -42,6 +47,7 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "additionalQuotaRoutingPolicies": {"codex_spark": "inherit"},
         },
     )
     assert response.status_code == 200
@@ -61,6 +67,11 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["additionalQuotaRoutingPolicies"] == {"codex_spark": "inherit"}
+    assert any(
+        policy["quotaKey"] == "codex_spark" and policy["routingPolicy"] == "inherit"
+        for policy in updated["additionalQuotaPolicies"]
+    )
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -80,3 +91,49 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["additionalQuotaRoutingPolicies"] == {"codex_spark": "inherit"}
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_unknown_additional_quota_routing_policy_key(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "additionalQuotaRoutingPolicies": {"ghost_quota": "preserve"},
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_additional_quota_routing_policies"
+    assert "unknown quota keys: ghost_quota" in payload["error"]["message"]
+    assert "valid quota keys:" in payload["error"]["message"]
+    assert "valid routing policies:" in payload["error"]["message"]
+
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    assert settings.json()["additionalQuotaRoutingPolicies"] == {}
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_unknown_additional_quota_routing_policy_value(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "additionalQuotaRoutingPolicies": {"codex_spark": "spend_fast"},
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_additional_quota_routing_policies"
+    assert "invalid routing policies: codex_spark=spend_fast" in payload["error"]["message"]
+    assert "valid routing policies: burn_first, inherit, normal, preserve" in payload["error"]["message"]
+
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    assert settings.json()["additionalQuotaRoutingPolicies"] == {}

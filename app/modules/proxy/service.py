@@ -238,16 +238,6 @@ _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
 _COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
 _STREAM_MAX_ACCOUNT_ATTEMPTS = 3
 _WEBSOCKET_MAX_ACCOUNT_ATTEMPTS = 3
-_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
-    {
-        "rate_limit_exceeded",
-        "usage_limit_reached",
-        "insufficient_quota",
-        "usage_not_included",
-        "quota_exceeded",
-    }
-)
-_WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS = (
@@ -264,6 +254,16 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
+    {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "usage_not_included",
+        "quota_exceeded",
+    }
+)
+_WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -6524,43 +6524,6 @@ class ProxyService:
                 request_state=request_state,
             )
             retry_error_code = None
-        if retry_error_code is not None:
-            if retry_is_previous_response_not_found:
-                if not (
-                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-                ):
-                    # A short continuation depends entirely on the upstream
-                    # anchor. Replaying the same lost previous_response_id on a
-                    # new websocket just re-surfaces the raw upstream 400; only
-                    # full-resend payloads with a prepared fresh body can be
-                    # transparently retried.
-                    retry_error_code = None
-                else:
-                    upstream_control.reconnect_requested = True
-                    request_state.request_text = request_state.fresh_upstream_request_text
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
-                    request_state.fresh_upstream_request_is_retry_safe = False
-                    request_state.replay_count += 1
-                    request_state.awaiting_response_created = True
-                    request_state.response_id = None
-                    upstream_control.suppress_downstream_event = True
-                    upstream_control.replay_request_state = request_state
-            else:
-                upstream_control.reconnect_requested = True
-                request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
-                upstream_control.suppress_downstream_event = True
-                upstream_control.replay_request_state = request_state
-                await self._handle_stream_error(
-                    account,
-                    {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
-                    retry_error_code,
-                )
-            if retry_error_code is not None:
-                return downstream_text
-
         if request_state is not None and event_type in {"response.failed", "error"}:
             if event_type == "error":
                 error = event.error if event else None
@@ -6623,6 +6586,42 @@ class ProxyService:
                         ]
                         upstream_control.replay_request_state = request_state
                         return downstream_text
+        if retry_error_code is not None:
+            if retry_is_previous_response_not_found:
+                if not (
+                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
+                ):
+                    # A short continuation depends entirely on the upstream
+                    # anchor. Replaying the same lost previous_response_id on a
+                    # new websocket just re-surfaces the raw upstream 400; only
+                    # full-resend payloads with a prepared fresh body can be
+                    # transparently retried.
+                    retry_error_code = None
+                else:
+                    upstream_control.reconnect_requested = True
+                    request_state.request_text = request_state.fresh_upstream_request_text
+                    request_state.previous_response_id = None
+                    request_state.proxy_injected_previous_response_id = False
+                    request_state.fresh_upstream_request_is_retry_safe = False
+                    request_state.replay_count += 1
+                    request_state.awaiting_response_created = True
+                    request_state.response_id = None
+                    upstream_control.suppress_downstream_event = True
+                    upstream_control.replay_request_state = request_state
+            else:
+                upstream_control.reconnect_requested = True
+                request_state.replay_count += 1
+                request_state.awaiting_response_created = True
+                request_state.response_id = None
+                upstream_control.suppress_downstream_event = True
+                upstream_control.replay_request_state = request_state
+                await self._handle_stream_error(
+                    account,
+                    {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                    retry_error_code,
+                )
+            if retry_error_code is not None:
+                return downstream_text
 
         await self._finalize_websocket_request_state(
             request_state,

@@ -9913,8 +9913,7 @@ class ProxyService:
                         continue
                     await self._handle_stream_error(account, exc.error, exc.code)
                     last_retryable_stream_error = exc
-                    if exc.exclude_account:
-                        excluded_account_ids.add(account.id)
+                    excluded_account_ids.add(account.id)
                     continue
                 except _TerminalStreamError as exc:
                     if _should_penalize_stream_error(exc.code):

@@ -6,7 +6,9 @@ import {
   buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
+  buildWeeklyCreditPace,
   sumRemaining,
+  weeklyCreditPaceStatus,
   type RemainingItem,
 } from "@/features/dashboard/utils";
 import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
@@ -22,6 +24,10 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
+    windowMinutesPrimary: overrides.windowMinutesPrimary ?? null,
+    windowMinutesSecondary: overrides.windowMinutesSecondary ?? null,
+    capacityCreditsSecondary: overrides.capacityCreditsSecondary ?? null,
+    remainingCreditsSecondary: overrides.remainingCreditsSecondary ?? null,
     auth: overrides.auth ?? null,
     additionalQuotas: overrides.additionalQuotas ?? [],
   };
@@ -289,6 +295,276 @@ describe("sumRemaining", () => {
       remainingItem({ accountId: "b", value: -20 }),
     ];
     expect(sumRemaining(items)).toBe(0);
+  });
+});
+
+describe("buildWeeklyCreditPace", () => {
+  const now = new Date("2026-01-07T12:00:00Z");
+
+  type WeeklyAccountOverrides = Partial<AccountSummary> & {
+    accountId: string;
+    fullCredits?: number | null;
+    remainingCredits?: number | null;
+    timeLeftPercent?: number;
+  };
+
+  function weeklyAccount(overrides: WeeklyAccountOverrides): AccountSummary {
+    const { accountId, fullCredits, remainingCredits, timeLeftPercent: timeLeftOverride, ...accountOverrides } = overrides;
+    const windowMinutes = 10_080;
+    const timeLeftPercent = timeLeftOverride ?? 50;
+    const resetAt = new Date(now.getTime() + windowMinutes * 60_000 * (timeLeftPercent / 100)).toISOString();
+    const fullCreditBudget = fullCredits !== undefined ? fullCredits : accountOverrides.capacityCreditsSecondary ?? 100_000;
+    const remainingCreditBudget =
+      remainingCredits !== undefined ? remainingCredits : accountOverrides.remainingCreditsSecondary ?? 50_000;
+    return account({
+      ...accountOverrides,
+      accountId,
+      email: `${accountId}@example.com`,
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent:
+          fullCreditBudget && remainingCreditBudget != null
+            ? (remainingCreditBudget / fullCreditBudget) * 100
+            : null,
+      },
+      resetAtSecondary: accountOverrides.resetAtSecondary !== undefined ? accountOverrides.resetAtSecondary : resetAt,
+      windowMinutesSecondary: accountOverrides.windowMinutesSecondary !== undefined
+        ? accountOverrides.windowMinutesSecondary
+        : windowMinutes,
+      capacityCreditsSecondary: fullCreditBudget,
+      remainingCreditsSecondary: remainingCreditBudget,
+    });
+  }
+
+  it("marks over-schedule weekly usage as ahead before hard shortfall states", () => {
+    expect(weeklyCreditPaceStatus(6, 0)).toBe("ahead");
+    expect(weeklyCreditPaceStatus(6, 1)).toBe("danger");
+  });
+
+  it("treats a 99% used account at 99% elapsed as on pace", () => {
+    const pace = buildWeeklyCreditPace(
+      [weeklyAccount({ accountId: "acc-close", fullCredits: 100_000, remainingCredits: 1_000, timeLeftPercent: 1 })],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(1_000);
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.deltaPercent).toBeCloseTo(0);
+    expect(pace?.pauseForBreakEvenHours).toBeNull();
+    expect(pace?.paceMultiplier).toBeNull();
+    expect(pace?.throttleToPercent).toBeNull();
+    expect(pace?.reduceByPercent).toBeNull();
+    expect(pace?.proAccountsToCoverOverPlan).toBeNull();
+    expect(pace?.status).toBe("on_track");
+  });
+
+  it("does not report a shortfall when the weekly reset replenishes a sustainable account", () => {
+    const pace = buildWeeklyCreditPace(
+      [weeklyAccount({ accountId: "acc-sustainable", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 50 })],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.projectedDepletionHours).toBeNull();
+    expect(pace?.pauseForBreakEvenHours).toBeNull();
+    expect(pace?.status).toBe("on_track");
+  });
+
+  it("aggregates credit budgets instead of averaging account percentages", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "acc-small", fullCredits: 100_000, remainingCredits: 1_000, timeLeftPercent: 1 }),
+        weeklyAccount({ accountId: "acc-large", fullCredits: 900_000, remainingCredits: 800_000, timeLeftPercent: 80 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.accountCount).toBe(2);
+    expect(pace?.totalActualRemainingCredits).toBeCloseTo(801_000);
+    expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(721_000);
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.actualUsedPercent).toBeCloseTo(19.9);
+    expect(pace?.scheduledUsedPercent).toBeCloseTo(27.9);
+    expect(pace?.pauseForBreakEvenHours).toBeNull();
+    expect(pace?.paceMultiplier).toBeNull();
+    expect(pace?.proAccountsToCoverOverPlan).toBeNull();
+    expect(pace?.status).toBe("behind");
+  });
+
+  it("marks a large account depleted too early as danger", () => {
+    const pace = buildWeeklyCreditPace(
+      [weeklyAccount({ accountId: "acc-early", fullCredits: 1_000_000, remainingCredits: 10_000, timeLeftPercent: 80 })],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(800_000);
+    expect(pace?.overPlanCredits).toBeCloseTo(3_950_000);
+    expect(pace?.deltaPercent).toBeCloseTo(79);
+    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(134.06);
+    expect(pace?.paceMultiplier).toBeCloseTo(4.95);
+    expect(pace?.throttleToPercent).toBeCloseTo(0.25);
+    expect(pace?.reduceByPercent).toBeCloseTo(99.75);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(78.37);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(79);
+    expect(pace?.projectedDepletionHours).toBeCloseTo(0.34);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("uses each account reset time before summing credits", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "acc-near", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 10 }),
+        weeklyAccount({ accountId: "acc-far", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 90 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(100_000);
+    expect(pace?.scheduledUsedPercent).toBeCloseTo(50);
+    expect(pace?.actualUsedPercent).toBeCloseTo(50);
+    expect(pace?.overPlanCredits).toBeGreaterThan(0);
+    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(90.72);
+    expect(pace?.paceMultiplier).toBeCloseTo(1);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(6);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("expires unused account credits at reset instead of carrying them forward", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "unused-near-reset", fullCredits: 1_000, remainingCredits: 1_000, timeLeftPercent: 10 }),
+        weeklyAccount({ accountId: "empty-later-reset", fullCredits: 1_000, remainingCredits: 0, timeLeftPercent: 90 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(0);
+  });
+
+  it("does not let a tiny near reset hide depletion before the next meaningful reset", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "tiny-reset", fullCredits: 2, remainingCredits: 0, timeLeftPercent: 1 }),
+        weeklyAccount({ accountId: "large-later", fullCredits: 100_000, remainingCredits: 20_000, timeLeftPercent: 50 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(59_999.01);
+    expect(pace?.projectedDepletionHours).toBeLessThan(40);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(1);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(2);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("computes break-even pause across different reset deadlines", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "acc-near", fullCredits: 100_000, remainingCredits: 0, timeLeftPercent: 10 }),
+        weeklyAccount({ accountId: "acc-far", fullCredits: 100_000, remainingCredits: 0, timeLeftPercent: 90 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(111_111.11);
+    expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
+    expect(pace?.paceMultiplier).toBeCloseTo(2);
+    expect(pace?.throttleToPercent).toBeCloseTo(0);
+    expect(pace?.reduceByPercent).toBeCloseTo(100);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(2.2);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(3);
+    expect(pace?.projectedDepletionHours).toBeCloseTo(0);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("shows recovery pressure when per-account weekly burn exceeds staggered resets", () => {
+    const liveLikeNow = new Date("2026-05-03T19:19:35Z");
+    const pace = buildWeeklyCreditPace(
+      [
+        account({
+          accountId: "old-pro-1",
+          email: "old-pro-1@example.com",
+          planType: "pro",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 1_008,
+          resetAtSecondary: "2026-05-05T05:34:05Z",
+          windowMinutesSecondary: 10_080,
+        }),
+        account({
+          accountId: "old-pro-2",
+          email: "old-pro-2@example.com",
+          planType: "pro",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 1_512,
+          resetAtSecondary: "2026-05-05T05:51:53Z",
+          windowMinutesSecondary: 10_080,
+        }),
+        account({
+          accountId: "team-1",
+          email: "team-1@example.com",
+          planType: "team",
+          capacityCreditsSecondary: 7_560,
+          remainingCreditsSecondary: 1_587.6,
+          resetAtSecondary: "2026-05-05T13:31:20Z",
+          windowMinutesSecondary: 10_080,
+        }),
+        account({
+          accountId: "team-2",
+          email: "team-2@example.com",
+          planType: "team",
+          capacityCreditsSecondary: 7_560,
+          remainingCreditsSecondary: 5_443.2,
+          resetAtSecondary: "2026-05-06T14:45:02Z",
+          windowMinutesSecondary: 10_080,
+        }),
+        account({
+          accountId: "new-pro",
+          email: "new-pro@example.com",
+          planType: "pro",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 48_888,
+          resetAtSecondary: "2026-05-10T18:19:10Z",
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+      liveLikeNow,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.accountCount).toBe(5);
+    expect(pace?.totalActualRemainingCredits).toBeCloseTo(58_438.8);
+    expect(pace?.overPlanCredits).toBeCloseTo(20_510.96);
+    expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
+    expect(pace?.paceMultiplier).toBeGreaterThan(1);
+    expect(pace?.throttleToPercent).toBeGreaterThanOrEqual(0);
+    expect(pace?.reduceByPercent).toBeGreaterThan(0);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(1);
+    expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(0);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("skips accounts without complete weekly credit timing data", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "missing-full", fullCredits: null, remainingCredits: 1_000, timeLeftPercent: 50 }),
+        weeklyAccount({ accountId: "missing-reset", fullCredits: 100_000, remainingCredits: 50_000, resetAtSecondary: null }),
+        weeklyAccount({ accountId: "missing-window", fullCredits: 100_000, remainingCredits: 50_000, windowMinutesSecondary: null }),
+      ],
+      now,
+    );
+
+    expect(pace).toBeNull();
   });
 });
 

@@ -85,7 +85,9 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
-    const tokenLimitInput = screen.getByDisplayValue(String(apiKey.limits[0].maxValue));
+    const tokenLimitInput = screen.getByDisplayValue(
+      String(apiKey.limits[0].maxValue),
+    );
     await user.clear(tokenLimitInput);
     await user.type(tokenLimitInput, "999999");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -130,7 +132,9 @@ describe("ApiKeyEditDialog", () => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
     expect(onOpenChange).not.toHaveBeenCalled();
-    expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Edit API key" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toHaveValue("Renamed key");
   });
 
@@ -148,9 +152,15 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "All accounts" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
+    await user.click(
+      await screen.findByRole("button", { name: "All accounts" }),
+    );
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }),
+    );
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }),
+    );
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -159,7 +169,38 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.assignedAccountIds).toEqual([
+      "acc_primary",
+      "acc_secondary",
+    ]);
+  });
+
+  it("submits traffic class", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ trafficClass: "opportunistic" })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Traffic class" }),
+    ).toHaveTextContent("Opportunistic");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.trafficClass).toBe("opportunistic");
   });
 
   it("omits assigned accounts when editing an unrelated field", async () => {
@@ -204,8 +245,12 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: "All accounts" }));
+    await user.click(
+      await screen.findByRole("button", { name: "1 account selected" }),
+    );
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: "All accounts" }),
+    );
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -252,8 +297,18 @@ describe("ApiKeyEditDialog", () => {
 describe("hasLimitRuleChanges", () => {
   it("treats reordered identical rule sets as unchanged", () => {
     const initial: LimitRuleCreate[] = [
-      { limitType: "total_tokens", limitWindow: "weekly", maxValue: 1000, modelFilter: null },
-      { limitType: "cost_usd", limitWindow: "monthly", maxValue: 1_500_000, modelFilter: "gpt-5.1" },
+      {
+        limitType: "total_tokens",
+        limitWindow: "weekly",
+        maxValue: 1000,
+        modelFilter: null,
+      },
+      {
+        limitType: "cost_usd",
+        limitWindow: "monthly",
+        maxValue: 1_500_000,
+        modelFilter: "gpt-5.1",
+      },
     ];
     const reordered: LimitRuleCreate[] = [initial[1], initial[0]];
 

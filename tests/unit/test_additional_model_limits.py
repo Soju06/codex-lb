@@ -13,6 +13,7 @@ from app.modules.proxy.additional_model_limits import (
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     clear_additional_quota_registry_cache,
+    get_additional_quota_routing_policy,
     reload_additional_quota_registry,
 )
 
@@ -55,6 +56,14 @@ def test_canonicalize_additional_quota_key_accepts_known_upstream_aliases() -> N
 def test_canonicalize_additional_quota_key_normalizes_unknown_aliases() -> None:
     assert canonicalize_additional_quota_key(limit_name="O-Pro") == "o_pro"
     assert canonicalize_additional_quota_key(metered_feature="Deep Research") == "deep_research"
+
+
+def test_additional_quota_routing_policy_resolves_limit_name_alias() -> None:
+    assert get_additional_quota_routing_policy("codex_other") == "burn_first"
+
+
+def test_additional_quota_routing_policy_overrides_resolve_limit_name_alias() -> None:
+    assert get_additional_quota_routing_policy("codex_other", overrides={"codex_other": "preserve"}) == "preserve"
 
 
 def test_registry_normalizes_configured_quota_key(monkeypatch, tmp_path: Path) -> None:

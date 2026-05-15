@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from app.modules.settings.repository import SettingsRepository
+from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,18 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+
+
+def parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
+    if raw is None or raw.strip() == "":
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return normalize_additional_quota_routing_policy_overrides({str(key): str(value) for key, value in loaded.items()})
 
 
 class SettingsService:

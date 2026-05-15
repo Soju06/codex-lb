@@ -44,7 +44,7 @@ spec:
       {{- if .Values.postgresql.enabled }}
       initContainers:
         - name: wait-for-db
-          image: {{ printf "%s/library/postgres:16-alpine" (.Values.global.imageRegistry | default "docker.io") }}
+          image: {{ printf "%s/library/postgres:18-alpine" (.Values.global.imageRegistry | default "docker.io") }}
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

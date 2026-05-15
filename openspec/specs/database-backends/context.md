@@ -19,6 +19,8 @@ For higher concurrency or infrastructure-managed deployments, PostgreSQL support
 - PostgreSQL example URL: `postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb`
 - Pool controls (`database_pool_size`, `database_max_overflow`, `database_pool_timeout_seconds`) apply to non-memory SQLite and PostgreSQL engine creation.
 - Background/request-adjacent DB pool controls (`database_background_pool_size`, `database_background_max_overflow`) default to the main pool settings, and can be lowered explicitly for deployments that want a smaller auxiliary pool.
+- Local Compose and CI PostgreSQL coverage tracks PostgreSQL 18. For Dockerized PostgreSQL 18, mount persistent data at `/var/lib/postgresql`; the image's internal `PGDATA` lives below that path.
+- Enable `pg_stat_statements` on sustained PostgreSQL deployments when query-level tuning is needed; it requires `shared_preload_libraries=pg_stat_statements`, a PostgreSQL restart, and `CREATE EXTENSION IF NOT EXISTS pg_stat_statements` in the application database.
 - SQLite remains the local/smoke path. If SQLite lock retries or exhausted retry metrics rise during sustained serving, move the deployment to PostgreSQL rather than relying on unconstrained multi-worker SQLite.
 
 ## Example

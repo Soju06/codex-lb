@@ -32,7 +32,7 @@ spec:
       {{- end }}
       containers:
         - name: db-init
-          image: {{ printf "%s/bitnami/postgresql:16" (.Values.global.imageRegistry | default "docker.io") }}
+          image: {{ printf "%s/bitnami/postgresql:18" (.Values.global.imageRegistry | default "docker.io") }}
           imagePullPolicy: IfNotPresent
           {{- with .Values.containerSecurityContext }}
           securityContext:

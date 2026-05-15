@@ -59,7 +59,7 @@ services:
           path: ./frontend/bun.lock
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     profiles: ["postgres"]
     environment:
       POSTGRES_USER: codex_lb
@@ -67,13 +67,21 @@ services:
       POSTGRES_DB: codex_lb
     ports:
       - "5432:5432"
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=all
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codex_lb -d codex_lb"]
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
-      - codex-lb-postgres-data:/var/lib/postgresql/data
+      - codex-lb-postgres-data:/var/lib/postgresql
     restart: unless-stopped
 
 volumes:

@@ -72,6 +72,7 @@ def mark_duplicate_tool_call_downstream_event(
     *,
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None],
     response_id: str | None,
+    scope_side_effects_by_response_id: bool = True,
 ) -> bool:
     if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
         return False
@@ -108,6 +109,7 @@ def mark_duplicate_tool_call_downstream_event(
             argument_value,
             seen_tool_call_keys=seen_tool_call_keys,
             response_id=response_id,
+            scope_side_effects_by_response_id=scope_side_effects_by_response_id,
         )
     # Same-response replays have shown distinct call_ids for byte-identical shell/edit requests.
     # For local side-effect tools, running the same payload twice is worse than dropping a duplicate-looking call_id.
@@ -116,7 +118,8 @@ def mark_duplicate_tool_call_downstream_event(
         argument_key = canonical_side_effect_argument_key(item_name, argument_value)
     else:
         argument_key = argument_value
-    key = (response_id or "", str(item_type), item_name, dedupe_call_id, argument_key)
+    dedupe_response_id = response_id if scope_side_effects_by_response_id or not is_side_effect_tool_call else None
+    key = (dedupe_response_id or "", str(item_type), item_name, dedupe_call_id, argument_key)
     if key in seen_tool_call_keys:
         logger.warning(
             "Suppressed duplicate downstream tool call response_id=%s item_type=%s name=%s",
@@ -137,6 +140,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
     *,
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None],
     response_id: str | None,
+    scope_side_effects_by_response_id: bool,
 ) -> bool:
     argument = json_object_from_argument(argument_value)
     if argument is None:
@@ -155,8 +159,9 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
         if not isinstance(recipient_name, str) or recipient_name not in _PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES:
             kept_tool_uses.append(cast(JsonValue, tool_use))
             continue
+        dedupe_response_id = response_id if scope_side_effects_by_response_id else None
         key = (
-            response_id or "",
+            dedupe_response_id or "",
             "parallel_tool_use",
             recipient_name,
             None,

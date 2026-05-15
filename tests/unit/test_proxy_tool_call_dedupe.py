@@ -470,6 +470,90 @@ def test_mark_duplicate_tool_call_downstream_event_trims_overlapping_parallel_re
     ]
 
 
+def test_mark_duplicate_tool_call_downstream_event_can_trim_parallel_replay_across_response_ids():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+                },
+                {
+                    "recipient_name": "functions.write_stdin",
+                    "parameters": {"session_id": 1, "chars": ""},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
+    replay_arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+                },
+                {
+                    "recipient_name": "github.read_file",
+                    "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_first",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": first_arguments,
+            "call_id": "call_first",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_replay",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": replay_arguments,
+            "call_id": "call_replayed",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_first",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_parallel_replay",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    replay_item = replay_payload["item"]
+    assert isinstance(replay_item, dict)
+    replay_item_arguments = replay_item["arguments"]
+    assert isinstance(replay_item_arguments, str)
+    rewritten_replay_arguments = json.loads(replay_item_arguments)
+    assert rewritten_replay_arguments["tool_uses"] == [
+        {
+            "recipient_name": "github.read_file",
+            "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+        }
+    ]
+
+
 def test_mark_duplicate_tool_call_downstream_event_keeps_read_only_parallel_wrapper_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     arguments = json.dumps(
@@ -641,6 +725,47 @@ def test_mark_duplicate_tool_call_downstream_event_scopes_by_response_id():
             response_id=tool_call_dedupe.response_id_from_payload(replay_payload),
         )
         is False
+    )
+
+
+def test_mark_duplicate_tool_call_downstream_event_can_suppress_one_stream_replay_across_response_ids():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_first",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_replay",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=tool_call_dedupe.response_id_from_payload(first_payload),
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=tool_call_dedupe.response_id_from_payload(replay_payload),
+            scope_side_effects_by_response_id=False,
+        )
+        is True
     )
 
 

@@ -162,6 +162,7 @@ from app.modules.proxy.ring_membership import (
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
     mark_duplicate_tool_call_downstream_event,
+    response_id_from_payload,
     rewrite_parallel_tool_call_sse_line,
     rewrite_parallel_tool_call_text,
 )
@@ -254,10 +255,10 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "quota_exceeded",
     }
 )
-_WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
+_WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -3034,7 +3035,7 @@ class ProxyService:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
         deduped_replayed_tool_call_count = 0
-        if isinstance(payload.input, list):
+        if payload.previous_response_id is not None and isinstance(payload.input, list):
             replayed_input_items = cast(list[JsonValue], payload.input)
             deduped_input_items, deduped_replayed_tool_call_count = dedupe_replayed_side_effect_input_items(
                 replayed_input_items
@@ -5691,7 +5692,7 @@ class ProxyService:
                     matched_request_state.service_tier = actual_service_tier
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
-                    seen_tool_call_keys=session.upstream_control.seen_tool_call_keys,
+                    seen_tool_call_keys=session.seen_tool_call_keys,
                     response_id=response_id or matched_request_state.response_id or matched_request_state.request_id,
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
@@ -5783,6 +5784,28 @@ class ProxyService:
             session.upstream_control.reconnect_requested = True
             return
 
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.suppressed_duplicate_tool_call
+        ):
+            session.upstream_control.reconnect_requested = True
+            session.closed = True
+            try:
+                await session.upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream after suppressed duplicate tool call", exc_info=True)
+            terminal_request_state.error_http_status_override = 502
+            (
+                event,
+                payload,
+                event_type,
+                rewritten_text,
+            ) = _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
+                request_state=terminal_request_state,
+            )
+            event_block = f"data: {rewritten_text}\n\n"
+
         if status_request_state is not None and is_missing_tool_output_event:
             status_request_state.error_http_status_override = 502
             event, payload, event_type, rewritten_text = _rewrite_websocket_continuity_corruption_event(
@@ -5809,28 +5832,6 @@ class ProxyService:
                 event_type=event_type,
                 upstream_control=session.upstream_control,
                 original_text=text,
-            )
-            event_block = f"data: {rewritten_text}\n\n"
-
-        if (
-            event_type == "response.completed"
-            and terminal_request_state is not None
-            and terminal_request_state.suppressed_duplicate_tool_call
-        ):
-            session.upstream_control.reconnect_requested = True
-            session.closed = True
-            try:
-                await session.upstream.close()
-            except Exception:
-                logger.debug("Failed to close HTTP bridge upstream after suppressed duplicate tool call", exc_info=True)
-            terminal_request_state.error_http_status_override = 502
-            (
-                event,
-                payload,
-                event_type,
-                rewritten_text,
-            ) = _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
-                request_state=terminal_request_state,
             )
             event_block = f"data: {rewritten_text}\n\n"
 
@@ -8163,7 +8164,9 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     first_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=_websocket_response_id(event, first_payload) or response_id,
+                    response_id=response_id_from_payload(first_payload)
+                    or _websocket_response_id(event, first_payload)
+                    or response_id,
                 ):
                     suppressed_duplicate_tool_call = True
                 else:
@@ -8267,7 +8270,9 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=_websocket_response_id(event, event_payload) or response_id,
+                    response_id=response_id_from_payload(event_payload)
+                    or _websocket_response_id(event, event_payload)
+                    or response_id,
                 ):
                     suppressed_duplicate_tool_call = True
                     continue
@@ -8959,6 +8964,7 @@ class _HTTPBridgeSession:
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False
+    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -4357,7 +4357,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_suppresses_replayed_side_effect_tool_calls_across_response_ids(monkeypatch):
+async def test_stream_responses_keeps_distinct_side_effect_tool_calls_across_response_ids(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4408,7 +4408,7 @@ async def test_stream_responses_suppresses_replayed_side_effect_tool_calls_acros
         if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
             tool_chunks.append(chunk_payload)
 
-    assert tool_chunks == [tool_payload]
+    assert tool_chunks == [tool_payload, replayed_tool_payload]
 
 
 @pytest.mark.asyncio
@@ -11168,7 +11168,7 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
 
-def test_prepare_response_bridge_request_state_dedupes_replayed_tool_calls_before_serializing():
+def test_prepare_response_bridge_request_state_dedupes_replayed_previous_response_tool_calls_before_serializing():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     input_items: list[JsonValue] = [
@@ -11195,7 +11195,9 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_tool_calls_befor
             "output": "Process exited with code 0",
         },
     ]
-    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": input_items})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
 
     request_state, text_data = service._prepare_response_bridge_request_state(
         payload,
@@ -11216,6 +11218,115 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_tool_calls_befor
     assert upstream_input[1]["output"] == "Process running with session ID 75180"
     assert upstream_input[2]["role"] == "assistant"
     assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
+
+
+def test_prepare_response_bridge_request_state_keeps_repeated_first_attempt_tool_calls():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "Process running with session ID 75180",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 1000}),
+            "call_id": "call_repeat",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_repeat",
+            "output": "Still running",
+        },
+    ]
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": input_items})
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 4
+    assert len(upstream_input) == 4
+    assert upstream_input[2]["call_id"] == "call_repeat"
+    assert upstream_input[3]["call_id"] == "call_repeat"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_tool_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_bridge_tool_replay",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_tool_replay"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    first_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_bridge_tool_replay",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+    }
+    replay_payload = {
+        **first_payload,
+        "item": {
+            **first_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(first_payload, separators=(",", ":")))
+    session.upstream_control = proxy_service._WebSocketUpstreamControl()
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_payload, separators=(",", ":")))
+
+    assert request_state.suppressed_duplicate_tool_call is True
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    forwarded = await event_queue.get()
+    assert forwarded is not None
+    assert proxy_service.parse_sse_data_json(forwarded) == first_payload
+    assert event_queue.empty()
 
 
 @pytest.mark.asyncio

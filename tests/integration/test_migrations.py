@@ -370,7 +370,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     """
                     CREATE TABLE request_logs (
                         id INTEGER PRIMARY KEY,
-                        account_id VARCHAR NOT NULL REFERENCES accounts(id),
+                        account_id VARCHAR NOT NULL,
                         request_id VARCHAR NOT NULL,
                         requested_at DATETIME NOT NULL,
                         model VARCHAR NOT NULL,
@@ -382,7 +382,9 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                         latency_ms INTEGER,
                         status VARCHAR NOT NULL,
                         error_code VARCHAR,
-                        error_message TEXT
+                        error_message TEXT,
+                        CONSTRAINT request_logs_account_id_fkey
+                            FOREIGN KEY(account_id) REFERENCES accounts(id)
                     )
                     """
                 )
@@ -622,9 +624,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.commit()
 
             remaining_log = (
-                await session.execute(
-                    text("SELECT account_id, deleted_at FROM request_logs WHERE id=1")
-                )
+                await session.execute(text("SELECT account_id, deleted_at FROM request_logs WHERE id=1"))
             ).one()
             assert remaining_log[0] is None
             assert remaining_log[1] is None

@@ -72,6 +72,7 @@ from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     enforce_strict_text_format,
@@ -2193,7 +2194,15 @@ async def _opportunistic_admission_denial(
     selection = await context.service.check_opportunistic_admission(api_key=api_key, model=model)
     if selection.account is not None:
         return None
+    error_code = selection.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED
     message = selection.error_message or "opportunistic burn window closed"
+    if error_code != OPPORTUNISTIC_BURN_WINDOW_CLOSED:
+        status_code = 503 if error_code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
+        return _logged_error_json_response(
+            request,
+            status_code,
+            openai_error(error_code, message, error_type="server_error"),
+        )
     if not message.startswith("opportunistic burn window closed"):
         message = f"opportunistic burn window closed: {message}"
     return _logged_error_json_response(

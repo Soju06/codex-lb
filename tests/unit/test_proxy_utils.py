@@ -38,7 +38,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED, AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -469,9 +469,9 @@ async def test_compact_responses_applies_opportunistic_admission_before_limits(m
         api_key=api_key,
     )
 
-    assert response.status_code == 429
+    assert response.status_code == 503
     body = json.loads(bytes(response.body))
-    assert body["error"]["code"] == "rate_limit_exceeded"
+    assert body["error"]["code"] == "no_additional_quota_eligible_accounts"
     enforce_limits.assert_not_awaited()
     context.service.compact_responses.assert_not_awaited()
 
@@ -528,9 +528,68 @@ async def test_chat_completions_applies_opportunistic_admission_before_limits(mo
         api_key=api_key,
     )
 
-    assert response.status_code == 429
+    assert response.status_code == 503
     body = json.loads(bytes(response.body))
-    assert body["error"]["code"] == "rate_limit_exceeded"
+    assert body["error"]["code"] == "no_additional_quota_eligible_accounts"
+    enforce_limits.assert_not_awaited()
+    context.service.stream_responses.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_preserves_non_burn_window_opportunistic_admission_failure(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="Additional quota usage data is unavailable",
+                    error_code="additional_quota_data_unavailable",
+                )
+            ),
+            stream_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = proxy_api.ChatCompletionsRequest.model_validate(
+        {"model": "gpt-5.1", "messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    response = await proxy_api.v1_chat_completions(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "additional_quota_data_unavailable"
     enforce_limits.assert_not_awaited()
     context.service.stream_responses.assert_not_called()
 
@@ -4773,7 +4832,7 @@ async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_maps_opportunistic_denial_to_rate_limit(monkeypatch):
+async def test_connect_proxy_websocket_preserves_non_burn_window_opportunistic_denial(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     select_account = AsyncMock(
@@ -4781,6 +4840,69 @@ async def test_connect_proxy_websocket_maps_opportunistic_denial_to_rate_limit(m
             account=None,
             error_message="No accounts with available additional quota",
             error_code="no_additional_quota_eligible_accounts",
+        )
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_opportunistic_closed",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 503
+    assert sent_payload["error"]["code"] == "no_additional_quota_eligible_accounts"
+    assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_maps_opportunistic_burn_window_to_rate_limit(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="preserve floor or stale usage data blocks opportunistic burn",
+            error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
         )
     )
     api_key = proxy_service.ApiKeyData(

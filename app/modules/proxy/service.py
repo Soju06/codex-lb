@@ -151,7 +151,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeOwnerClient,
     OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED, AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
@@ -3276,26 +3276,6 @@ class ProxyService:
             return account
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
-            message = error_message
-            if not message.startswith("opportunistic burn window closed"):
-                message = f"opportunistic burn window closed: {message}"
-            await self._emit_websocket_connect_failure(
-                websocket,
-                client_send_lock=client_send_lock,
-                account_id=None,
-                api_key=api_key,
-                request_state=request_state,
-                status_code=429,
-                payload=openai_error(
-                    "rate_limit_exceeded",
-                    message,
-                    error_type="rate_limit_error",
-                ),
-                error_code="rate_limit_exceeded",
-                error_message=message,
-            )
-            return None
         if require_preferred_account and preferred_account_id is not None:
             message = "Previous response owner account is unavailable; retry later."
             _record_continuity_fail_closed(
@@ -3318,6 +3298,30 @@ class ProxyService:
                     error_type="server_error",
                 ),
                 error_code="upstream_unavailable",
+                error_message=message,
+            )
+            return None
+        if (
+            api_key is not None
+            and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+            and error_code == OPPORTUNISTIC_BURN_WINDOW_CLOSED
+        ):
+            message = error_message
+            if not message.startswith("opportunistic burn window closed"):
+                message = f"opportunistic burn window closed: {message}"
+            await self._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                status_code=429,
+                payload=openai_error(
+                    "rate_limit_exceeded",
+                    message,
+                    error_type="rate_limit_error",
+                ),
+                error_code="rate_limit_exceeded",
                 error_message=message,
             )
             return None
@@ -8283,9 +8287,9 @@ class ProxyService:
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
-        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -8354,7 +8358,11 @@ class ProxyService:
                         error_message="No active accounts available",
                         error_code="no_accounts",
                     )
-                if selection.account is None and effective_traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+                if (
+                    selection.account is None
+                    and effective_traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                    and selection.error_code == OPPORTUNISTIC_BURN_WINDOW_CLOSED
+                ):
                     message = selection.error_message or "opportunistic burn window closed"
                     if not message.startswith("opportunistic burn window closed"):
                         message = f"opportunistic burn window closed: {message}"

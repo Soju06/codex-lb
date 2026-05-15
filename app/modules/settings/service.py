@@ -43,7 +43,10 @@ class DashboardSettingsUpdateData:
 def parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     if raw is None or raw.strip() == "":
         return {}
-    loaded = json.loads(raw)
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
     if not isinstance(loaded, dict):
         return {}
     return normalize_additional_quota_routing_policy_overrides({str(key): str(value) for key, value in loaded.items()})

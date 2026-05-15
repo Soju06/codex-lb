@@ -8,7 +8,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, UsageHistory
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
@@ -96,14 +96,12 @@ def _account_to_summary(
         secondary_used_percent,
         capacity_secondary,
     )
-    status = account.status if account.status is not None else AccountStatus.ACTIVE
     return AccountSummary(
         account_id=account.id,
         email=account.email,
         display_name=account.email,
         plan_type=plan_type,
-        status=status.value,
-        routing_policy=_normalize_account_routing_policy(getattr(account, "routing_policy", None)),
+        status=account.status.value,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
@@ -121,6 +119,7 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+        routing_policy=_normalize_account_routing_policy(getattr(account, "routing_policy", None)),
     )
 
 

@@ -51,15 +51,3 @@ def test_account_summary_preserves_known_routing_policy() -> None:
     )
 
     assert summaries[0].routing_policy == "preserve"
-
-
-def test_build_account_summaries_defaults_missing_status_to_active() -> None:
-    summaries = build_account_summaries(
-        accounts=[_make_account(routing_policy="normal", status=None)],
-        primary_usage={},
-        secondary_usage={},
-        encryptor=TokenEncryptor(),
-        include_auth=False,
-    )
-
-    assert summaries[0].status == AccountStatus.ACTIVE.value

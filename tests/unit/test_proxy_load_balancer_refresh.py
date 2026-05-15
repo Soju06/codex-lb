@@ -2336,6 +2336,26 @@ async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_reque
 
 
 @pytest.mark.asyncio
+async def test_select_account_empty_pool_preserves_no_accounts_for_opportunistic_request(monkeypatch) -> None:
+    accounts_repo = StubAccountsRepository([])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex", traffic_class="opportunistic")
+
+    assert selection.account is None
+    assert selection.error_code is None
+    assert selection.error_message is not None
+    assert "No available accounts" in selection.error_message
+
+
+@pytest.mark.asyncio
 async def test_select_account_retries_no_accounts_after_runtime_recovery(monkeypatch) -> None:
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())

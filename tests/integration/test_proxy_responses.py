@@ -43,10 +43,39 @@ def _make_auth_json(account_id: str, email: str) -> dict:
 
 
 def _extract_first_event(lines: list[str]) -> dict:
-    for line in lines:
-        if line.startswith("data: "):
-            return json.loads(line[6:])
+    """Return the first standard SSE event payload, ignoring the synthetic
+    ``response.created`` that ``_normalize_public_responses_stream`` may
+    prepend when the upstream stream's first standard event is not
+    ``response.created`` (see change
+    ``normalize-v1-responses-openai-sdk-stream``). Callers that want to
+    assert on the *original* first upstream event (e.g. ``response.failed``)
+    should keep using this helper unchanged; callers that want to assert on
+    the new synthetic created should use ``_extract_first_raw_event`` below.
+    """
+    for event in _iter_sse_events(lines):
+        if event.get("type") == "response.created":
+            response = event.get("response")
+            if isinstance(response, dict) and response.get("status") == "in_progress" \
+                    and response.get("output") == []:
+                # Likely the synthesized created envelope — skip and return
+                # whatever the upstream actually started with.
+                continue
+        return event
     raise AssertionError("No SSE data event found")
+
+
+def _extract_first_raw_event(lines: list[str]) -> dict:
+    """Return the literal first SSE data event, including any synthesized
+    ``response.created`` the public-stream normalizer prepended."""
+    for event in _iter_sse_events(lines):
+        return event
+    raise AssertionError("No SSE data event found")
+
+
+def _iter_sse_events(lines: list[str]):
+    for line in lines:
+        if line.startswith("data: ") and not line.startswith("data: [DONE]"):
+            yield json.loads(line[6:])
 
 
 class _FakeUpstreamWebSocket:

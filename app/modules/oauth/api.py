@@ -45,9 +45,10 @@ async def start_oauth(
 
 @router.get("/status", response_model=OauthStatusResponse)
 async def oauth_status(
+    flow_id: str | None = None,
     context: OauthContext = Depends(get_oauth_context),
 ) -> OauthStatusResponse | JSONResponse:
-    return await context.service.oauth_status()
+    return await context.service.oauth_status(flow_id=flow_id)
 
 
 @router.post("/complete", response_model=OauthCompleteResponse)
@@ -70,7 +71,7 @@ async def manual_callback(
     context: OauthContext = Depends(get_oauth_context),
 ) -> ManualCallbackResponse | JSONResponse:
     try:
-        return await context.service.manual_callback(request.callback_url)
+        return await context.service.manual_callback(request.callback_url, flow_id=request.flow_id)
     except Exception as exc:
         return JSONResponse(
             status_code=500,

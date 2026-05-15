@@ -21,6 +21,7 @@ describe("useOauth", () => {
 
   it("starts device polling immediately after device OAuth start", async () => {
     startOauthMock.mockResolvedValue({
+      flowId: "flow-device",
       method: "device",
       authorizationUrl: null,
       callbackUrl: null,
@@ -40,6 +41,7 @@ describe("useOauth", () => {
 
     expect(completeOauthMock).toHaveBeenCalledTimes(1);
     expect(completeOauthMock).toHaveBeenCalledWith({
+      flowId: "flow-device",
       deviceAuthId: "device-auth-id",
       userCode: "ABCD-1234",
     });
@@ -47,6 +49,7 @@ describe("useOauth", () => {
 
   it("does not trigger device completion for browser OAuth start", async () => {
     startOauthMock.mockResolvedValue({
+      flowId: "flow-browser",
       method: "browser",
       authorizationUrl: "https://auth.example.com/authorize",
       callbackUrl: "http://127.0.0.1:1455/auth/callback",
@@ -67,6 +70,17 @@ describe("useOauth", () => {
   });
 
   it("updates state to success after a successful manual callback", async () => {
+    startOauthMock.mockResolvedValue({
+      flowId: "flow-browser",
+      method: "browser",
+      authorizationUrl: "https://auth.example.com/authorize",
+      callbackUrl: "http://127.0.0.1:1455/auth/callback",
+      verificationUrl: null,
+      userCode: null,
+      deviceAuthId: null,
+      intervalSeconds: null,
+      expiresInSeconds: null,
+    });
     submitManualOauthCallbackMock.mockResolvedValue({
       status: "success",
       errorMessage: null,
@@ -75,23 +89,43 @@ describe("useOauth", () => {
     const { result } = renderHook(() => useOauth());
 
     await act(async () => {
+      await result.current.start("browser");
+    });
+
+    await act(async () => {
       await result.current.manualCallback("http://localhost:1455/auth/callback?code=ok&state=state");
     });
 
     expect(submitManualOauthCallbackMock).toHaveBeenCalledWith({
       callbackUrl: "http://localhost:1455/auth/callback?code=ok&state=state",
+      flowId: "flow-browser",
     });
     expect(result.current.state.status).toBe("success");
     expect(result.current.state.errorMessage).toBeNull();
   });
 
   it("updates state with the backend error after a failed manual callback", async () => {
+    startOauthMock.mockResolvedValue({
+      flowId: "flow-browser",
+      method: "browser",
+      authorizationUrl: "https://auth.example.com/authorize",
+      callbackUrl: "http://127.0.0.1:1455/auth/callback",
+      verificationUrl: null,
+      userCode: null,
+      deviceAuthId: null,
+      intervalSeconds: null,
+      expiresInSeconds: null,
+    });
     submitManualOauthCallbackMock.mockResolvedValue({
       status: "error",
       errorMessage: "Invalid OAuth callback: state mismatch or missing code.",
     });
 
     const { result } = renderHook(() => useOauth());
+
+    await act(async () => {
+      await result.current.start("browser");
+    });
 
     await act(async () => {
       await result.current.manualCallback("http://localhost:1455/auth/callback?code=bad&state=wrong");

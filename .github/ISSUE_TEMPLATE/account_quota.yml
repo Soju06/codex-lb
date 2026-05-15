@@ -4,7 +4,6 @@ description: |
   recovery, or the dashboard view of accounts. Use the Bug Report form instead
   if the issue is about proxy/request behavior.
 title: "bug(accounts): <one-line summary>"
-type: Bug
 labels: ["bug", "triage"]
 body:
   - type: markdown

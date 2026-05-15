@@ -1,7 +1,6 @@
 name: ✨ Feature Request
 description: Propose a new feature, enhancement, or behavior change.
 title: "feat: <one-line summary of the proposed feature>"
-type: Feature
 labels: ["enhancement", "triage"]
 body:
   - type: markdown

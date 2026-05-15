@@ -1,7 +1,6 @@
 name: 🐛 Bug Report
 description: Report a reproducible bug, crash, or unexpected behavior in codex-lb.
 title: "bug: <one-line summary of what's broken>"
-type: Bug
 labels: ["bug", "triage"]
 body:
   - type: markdown

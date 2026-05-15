@@ -13,7 +13,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyThreadsEnabled"] is True
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["preferEarlierResetAccounts"] is True
-    assert payload["preferEarlierResetWindow"] == "primary"
+    assert payload["preferEarlierResetWindow"] == "secondary"
     assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 43200

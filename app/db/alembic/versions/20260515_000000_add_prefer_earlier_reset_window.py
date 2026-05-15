@@ -30,7 +30,7 @@ def upgrade() -> None:
                     "prefer_earlier_reset_window",
                     sa.String(),
                     nullable=False,
-                    server_default=sa.text("'primary'"),
+                    server_default=sa.text("'secondary'"),
                 )
             )
 

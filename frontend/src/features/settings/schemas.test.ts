@@ -11,7 +11,7 @@ describe("DashboardSettingsSchema", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
-      preferEarlierResetWindow: "primary",
+      preferEarlierResetWindow: "secondary",
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
@@ -23,7 +23,7 @@ describe("DashboardSettingsSchema", () => {
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("default");
-    expect(parsed.preferEarlierResetWindow).toBe("primary");
+    expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);

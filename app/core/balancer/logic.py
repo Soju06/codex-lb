@@ -125,7 +125,7 @@ def select_account(
     now: float | None = None,
     *,
     prefer_earlier_reset: bool = False,
-    prefer_earlier_reset_window: ResetPreferenceWindow = "primary",
+    prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,

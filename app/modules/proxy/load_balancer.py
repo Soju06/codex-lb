@@ -142,6 +142,7 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
         budget_threshold_pct: float = 95.0,
         secondary_budget_threshold_pct: float = 100.0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
@@ -155,6 +156,27 @@ class LoadBalancer:
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
+            if require_security_work_authorized and selection_inputs.accounts:
+                authorized_accounts = [
+                    account for account in selection_inputs.accounts if bool(account.security_work_authorized)
+                ]
+                if not authorized_accounts:
+                    return _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        runtime_accounts=selection_inputs.runtime_accounts,
+                        error_message="No accounts marked as authorized for security work",
+                        error_code="no_security_work_authorized_accounts",
+                    )
+                selection_inputs = _SelectionInputs(
+                    accounts=authorized_accounts,
+                    latest_primary=selection_inputs.latest_primary,
+                    latest_secondary=selection_inputs.latest_secondary,
+                    runtime_accounts=selection_inputs.runtime_accounts,
+                    error_message=selection_inputs.error_message,
+                    error_code=selection_inputs.error_code,
+                )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(
                     accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],

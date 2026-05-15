@@ -7,6 +7,7 @@ export const RoutingStrategySchema = z.enum([
   "relative_availability",
 ]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
+export const PreferEarlierResetWindowSchema = z.enum(["primary", "secondary"]);
 export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"]);
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
@@ -15,6 +16,7 @@ export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
   preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetWindow: PreferEarlierResetWindowSchema.optional().default("secondary"),
   routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
   relativeAvailabilityPower: z.number().positive().optional().default(2),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
@@ -36,6 +38,7 @@ export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
   preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetWindow: PreferEarlierResetWindowSchema.optional(),
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),

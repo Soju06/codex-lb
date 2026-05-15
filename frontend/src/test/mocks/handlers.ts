@@ -79,16 +79,17 @@ const AccountAliasPayloadSchema = z.object({
 const SettingsPayloadSchema = z
 	.object({
 		stickyThreadsEnabled: z.boolean().optional(),
-		upstreamStreamTransport: z
-			.enum(["default", "auto", "http", "websocket"])
-			.optional(),
-		preferEarlierResetAccounts: z.boolean().optional(),
-		routingStrategy: z
-			.enum(["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"])
-			.optional(),
-		relativeAvailabilityPower: z.number().positive().optional(),
-		relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
-		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
+	upstreamStreamTransport: z
+		.enum(["default", "auto", "http", "websocket"])
+		.optional(),
+	preferEarlierResetAccounts: z.boolean().optional(),
+	preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
+	routingStrategy: z
+		.enum(["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"])
+		.optional(),
+	relativeAvailabilityPower: z.number().positive().optional(),
+	relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
+	openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),
 		totpConfigured: z.boolean().optional(),

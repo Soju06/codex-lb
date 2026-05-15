@@ -18,6 +18,7 @@ const BASE_SETTINGS: DashboardSettings = {
   stickyThreadsEnabled: false,
   upstreamStreamTransport: "default",
   preferEarlierResetAccounts: true,
+  preferEarlierResetWindow: "primary",
   routingStrategy: "usage_weighted",
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
@@ -47,6 +48,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "primary",
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
@@ -73,6 +75,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "primary",
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
@@ -104,6 +107,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "primary",
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
@@ -197,6 +201,7 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
@@ -211,5 +216,36 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves the reset preference window", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: () => false,
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => undefined,
+    });
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Reset preference window" }));
+    await user.click(await screen.findByText("Weekly quota"));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
   });
 });

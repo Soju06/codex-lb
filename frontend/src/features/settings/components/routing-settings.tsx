@@ -233,10 +233,10 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             />
           </div>
 
-          <div className="flex items-center justify-between p-3">
+          <div className="flex items-center justify-between gap-4 p-3">
             <div>
               <p className="text-sm font-medium">Prefer earlier reset</p>
-              <p className="text-xs text-muted-foreground">Bias traffic to accounts with earlier quota reset.</p>
+              <p className="text-xs text-muted-foreground">Bias traffic to accounts whose selected quota window resets sooner.</p>
             </div>
             <Switch
               aria-label="Prefer earlier reset accounts"
@@ -244,6 +244,29 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div>
+              <p className="text-sm font-medium">Reset preference window</p>
+              <p className="text-xs text-muted-foreground">Choose which quota window drives earlier-reset routing.</p>
+            </div>
+            <Select
+              value={settings.preferEarlierResetWindow}
+              onValueChange={(value) => save({ preferEarlierResetWindow: value as "primary" | "secondary" })}
+            >
+              <SelectTrigger
+                aria-label="Reset preference window"
+                className="h-8 w-44 text-xs"
+                disabled={busy || !settings.preferEarlierResetAccounts}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="primary">5h quota</SelectItem>
+                <SelectItem value="secondary">Weekly quota</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-3 p-3">

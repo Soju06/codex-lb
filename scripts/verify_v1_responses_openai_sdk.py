@@ -179,9 +179,18 @@ async def case_error_stream(client: openai.AsyncOpenAI, model: str) -> CaseResul
             ) as stream:
                 async for event in stream:
                     events.append(event.type)
-        except openai.APIError:
-            # Acceptable: upstream may reject pre-stream as HTTP error.
-            return CaseResult("error_stream", True, "pre-stream HTTP error (acceptable)")
+        except openai.APIStatusError as e:
+            # Acceptable: upstream may reject pre-stream as an HTTP 4xx (the
+            # invalid schema is a client error). 5xx / auth / config errors
+            # are NOT a pass — those mean the proxy or upstream is broken,
+            # not that we successfully surfaced a client validation failure.
+            status = getattr(e, "status_code", None)
+            if isinstance(status, int) and 400 <= status < 500 and status not in (401, 403):
+                return CaseResult("error_stream", True, f"pre-stream HTTP {status} (acceptable client error)")
+            return CaseResult("error_stream", False, f"unexpected HTTP {status}: {type(e).__name__}: {e}")
+        except openai.APIConnectionError as e:
+            # Transport-level failure — never a pass.
+            return CaseResult("error_stream", False, f"connection error: {e}")
         codex_events = [e for e in events if e.startswith("codex.")]
         if codex_events:
             return CaseResult("error_stream", False, f"codex.* leaked: {codex_events}")

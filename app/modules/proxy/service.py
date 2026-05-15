@@ -5712,7 +5712,32 @@ class ProxyService:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
-        if retry_error_code is not None and not is_previous_response_not_found_event:
+        owner_pinned_quota_error = _websocket_owner_pinned_quota_error_code(
+            status_request_state,
+            event_type=event_type,
+            payload=payload,
+        )
+        if owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
+            await self._handle_stream_error(
+                session.account,
+                {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                owner_pinned_quota_error,
+            )
+            if (
+                status_request_state is not None
+                and status_request_state.previous_response_id is not None
+                and status_request_state.preferred_account_id is not None
+            ):
+                status_request_state.error_http_status_override = 502
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                event, payload, event_type, rewritten_text = (
+                    _rewrite_websocket_previous_response_owner_unavailable_event(
+                        request_state=status_request_state,
+                    )
+                )
+                event_block = f"data: {rewritten_text}\n\n"
+        elif retry_error_code is not None and not is_previous_response_not_found_event:
             await self._handle_stream_error(
                 session.account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
@@ -5740,20 +5765,6 @@ class ProxyService:
                     payload,
                     event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
-            elif (
-                status_request_state is not None
-                and status_request_state.previous_response_id is not None
-                and status_request_state.preferred_account_id is not None
-            ):
-                status_request_state.error_http_status_override = 502
-                session.upstream_control.reconnect_requested = True
-                session.upstream_control.retire_after_drain = True
-                event, payload, event_type, rewritten_text = (
-                    _rewrite_websocket_previous_response_owner_unavailable_event(
-                        request_state=status_request_state,
-                    )
-                )
-                event_block = f"data: {rewritten_text}\n\n"
 
         if event_type == "response.completed" and terminal_request_state is not None:
             # Record the completed response id regardless of input shape so
@@ -8920,6 +8931,34 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
     ):
         return "stream_incomplete"
+    if error_code not in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
+        return None
+    return error_code
+
+
+def _websocket_owner_pinned_quota_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> str | None:
+    if request_state is None:
+        return None
+    if request_state.previous_response_id is None or request_state.preferred_account_id is None:
+        return None
+    if request_state.response_id is not None:
+        return None
+    if not request_state.awaiting_response_created:
+        return None
+    if not request_state.request_text:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
     if error_code not in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code

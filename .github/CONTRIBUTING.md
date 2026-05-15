@@ -18,9 +18,10 @@ that's the easiest first contribution.
 5. [Workflow: OpenSpec-first](#workflow-openspec-first)
 6. [Coding conventions](#coding-conventions)
 7. [Commit & PR conventions](#commit--pr-conventions)
-8. [Tests](#tests)
-9. [Release process](#release-process)
-10. [Security issues](#security-issues)
+8. [Merge gates and collaborator rules](#merge-gates-and-collaborator-rules)
+9. [Tests](#tests)
+10. [Release process](#release-process)
+11. [Security issues](#security-issues)
 
 ---
 
@@ -189,6 +190,89 @@ PR titles must follow the same format — that's the title release-please reads.
    pushing follow-up commits — no force-pushing during active review.
 6. Once approved and CI is green, a maintainer squash-merges with a clean
    Conventional Commits title.
+
+## Merge gates and collaborator rules
+
+These rules apply to **every PR**, regardless of author (external
+contributor, project owner, or collaborator). They formalize the review
+bar that has produced the current proxy / continuity-recovery / OpenSpec
+quality so far.
+
+### Merge gates
+
+Before a PR is squash-merged into `main`:
+
+1. **CI must be all-green** on the merge-target head. "UNSTABLE, looks
+   fine" is not a green CI; rerun, fix, or wait. The Helm / migration /
+   PostgreSQL test jobs are part of the gate, not optional.
+2. **`@codex review` must be clean — or its findings addressed — on the
+   merge-target head.** Every PR triggers `@codex review` at least once
+   against the head that's about to be merged. Local `codex review
+   --base origin/main` runs are encouraged but don't substitute for the
+   cloud review (the cloud `@codex review` reliably catches things the
+   local run misses).
+   - **P1 findings**: fix in the PR, or justify in-thread with a short
+     write-up of why the finding doesn't apply. No silent skipping.
+   - **P2 findings**: fix in the PR, or open a follow-up issue and link
+     it in the PR thread before merging.
+3. **`mergeable` must be `CLEAN`** in the GitHub API — no merge
+   conflicts, no requested-changes review still outstanding, no missing
+   required status check.
+4. **OpenSpec change folder for behavior changes** (see
+   [Workflow: OpenSpec-first](#workflow-openspec-first)). Pure
+   refactors, docs-only edits, dev-tool changes, and test stabilization
+   PRs are exempt; everything else needs an `openspec/changes/<slug>/`
+   entry.
+5. **`Fixes #N` / `Closes #N` in the PR body** for anything that
+   resolves an issue, so the issue close stays automatic and the merge
+   stays traceable. Use `Refs #N` / `Related to #N` for partial cover.
+
+### Collaborator rules
+
+Collaborators (write-access contributors) follow two additional rules on
+top of the merge gates above:
+
+1. **No self-merge by default.** A collaborator's own PR is merged by
+   another maintainer (or, until the project has more collaborators,
+   by the project owner). Review independence matters more than
+   turnaround.
+2. **Large PRs get split.** Roughly:
+   - If a PR is a stack tip pulling in unrelated commits from sibling
+     branches, split it so each merged PR is a single scoped change.
+   - If a single PR is over **~800 net lines** and spans multiple
+     concerns, split it into reviewable pieces. A single 1500-line
+     change scoped to one capability is fine; a 400-line change that
+     touches the proxy hot path *and* the dashboard *and* the OAuth
+     flow is not.
+
+### Bus factor escape hatch
+
+To keep the project unblocked if the owner is unavailable, the following
+self-merge escape hatch applies:
+
+- If a collaborator's PR has been waiting on a maintainer merge for
+  **more than 14 days** with **all merge gates met** (CI green,
+  `@codex review` clean or findings addressed, `mergeable=CLEAN`, no
+  outstanding requested-changes review, no objection from any other
+  active collaborator in the thread), the PR author may self-merge.
+- Self-merge under this clause **must** include a comment on the PR
+  explicitly invoking the clause and linking to the date the merge
+  gates first went green. Audit trail must stay clean.
+- The clause is a safety valve, not a default path. If you're tempted to
+  invoke it on a PR you opened less than two weeks ago, the merge gates
+  probably aren't actually all green yet.
+
+### What this is not
+
+These rules are intentionally lightweight. They don't require:
+
+- A second human reviewer in addition to `@codex review` for every PR.
+  Codex review + the PR author + a maintainer merge is the baseline.
+- Squash-merge commit message rewriting beyond the Conventional Commits
+  title. The PR description ends up in the body; that's enough.
+- A formal escalation process for disagreements. If a P1 finding is
+  disputed, work it out in-thread; if it can't be resolved, leave the
+  PR open and ping the owner.
 
 ## Tests
 

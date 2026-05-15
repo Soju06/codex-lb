@@ -23,7 +23,7 @@ class SettingsRepository:
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
             prefer_earlier_reset_accounts=True,
-            prefer_earlier_reset_window="primary",
+            prefer_earlier_reset_window="secondary",
             routing_strategy="capacity_weighted",
             relative_availability_power=2.0,
             relative_availability_top_k=5,

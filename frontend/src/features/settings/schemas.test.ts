@@ -12,7 +12,7 @@ describe("DashboardSettingsSchema", () => {
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
       routingStrategy: "relative_availability",
-      preferEarlierResetWindow: "primary",
+      preferEarlierResetWindow: "secondary",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -32,7 +32,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("relative_availability");
-    expect(parsed.preferEarlierResetWindow).toBe("primary");
+    expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.relativeAvailabilityPower).toBe(2);
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);

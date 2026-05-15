@@ -16,6 +16,9 @@ describe("DashboardSettingsSchema", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 90,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -35,6 +38,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
+    expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
+    expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(false);
@@ -74,6 +79,9 @@ describe("SettingsUpdateRequestSchema", () => {
       relativeAvailabilityTopK: 7,
       openaiCacheAffinityMaxAgeSeconds: 120,
       dashboardSessionTtlSeconds: 7200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 90,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
@@ -87,6 +95,8 @@ describe("SettingsUpdateRequestSchema", () => {
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
     expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
+    expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
+    expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("relative_availability");

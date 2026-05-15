@@ -11777,7 +11777,16 @@ class ProxyService:
                         model=model,
                         additional_limit_name=additional_limit_name,
                         account_ids={preferred_account_id},
-                        budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                        budget_threshold_pct=getattr(
+                            settings,
+                            "sticky_reallocation_primary_budget_threshold_pct",
+                            settings.sticky_reallocation_budget_threshold_pct,
+                        ),
+                        secondary_budget_threshold_pct=getattr(
+                            settings,
+                            "sticky_reallocation_secondary_budget_threshold_pct",
+                            100.0,
+                        ),
                         lease_kind=lease_kind,
                         estimated_lease_tokens=estimated_lease_tokens,
                     )
@@ -11805,7 +11814,16 @@ class ProxyService:
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     exclude_account_ids=excluded_account_ids_set,
-                    budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                    budget_threshold_pct=getattr(
+                        settings,
+                        "sticky_reallocation_primary_budget_threshold_pct",
+                        settings.sticky_reallocation_budget_threshold_pct,
+                    ),
+                    secondary_budget_threshold_pct=getattr(
+                        settings,
+                        "sticky_reallocation_secondary_budget_threshold_pct",
+                        100.0,
+                    ),
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
                 )

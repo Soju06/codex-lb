@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    REAL,
     BigInteger,
     Boolean,
     DateTime,
@@ -76,6 +77,12 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    routing_policy: Mapped[str] = mapped_column(
+        String,
+        default="normal",
+        server_default=text("'normal'"),
+        nullable=False,
+    )
     security_work_authorized: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -152,6 +159,7 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    slim_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
@@ -276,15 +284,21 @@ class DashboardSettings(Base):
         nullable=False,
     )
     sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
-        Float,
+        REAL,
         default=95.0,
         server_default=text("95.0"),
         nullable=False,
     )
     sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
-        Float,
+        REAL,
         default=100.0,
         server_default=text("100.0"),
+        nullable=False,
+    )
+    additional_quota_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

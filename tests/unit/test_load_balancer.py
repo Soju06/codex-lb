@@ -16,8 +16,11 @@ from app.core.balancer import (
 )
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.proxy import load_balancer as load_balancer_module
 from app.modules.proxy.load_balancer import (
+    LoadBalancer,
     RuntimeState,
+    SelectionInputs,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -1594,6 +1597,46 @@ def test_error_backoff_expired_account_does_not_immediately_relock():
     result2 = select_account([state], now=now + 2)
     assert result2.account is not None
     assert result2.account.account_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_select_account_preserves_additional_quota_metadata_after_security_filter(monkeypatch):
+    regular = _make_test_account("regular-security-additional")
+    authorized = _make_test_account("authorized-security-additional", status=AccountStatus.QUOTA_EXCEEDED)
+    authorized.security_work_authorized = True
+    authorized.routing_policy = "normal"
+    captured: dict[str, object] = {}
+
+    async def fake_load_selection_inputs(**kwargs):
+        del kwargs
+        return SelectionInputs(
+            accounts=[regular, authorized],
+            latest_primary={authorized.id: _make_test_usage(authorized.id, used_percent=100.0)},
+            latest_secondary={},
+            ignore_standard_quota_status=True,
+            routing_policy_override="burn_first",
+        )
+
+    real_select = load_balancer_module._select_account_preferring_budget_safe
+
+    def spy_select(states, **kwargs):
+        captured["ignore_standard_quota"] = kwargs.get("ignore_standard_quota")
+        captured["routing_policies"] = [state.routing_policy for state in states]
+        return real_select(states, **kwargs)
+
+    balancer = LoadBalancer(repo_factory=lambda: None)
+    monkeypatch.setattr(balancer, "_load_selection_inputs", fake_load_selection_inputs)
+    monkeypatch.setattr(load_balancer_module, "_select_account_preferring_budget_safe", spy_select)
+
+    result = await balancer.select_account(
+        require_security_work_authorized=True,
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.id == authorized.id
+    assert captured["ignore_standard_quota"] is True
+    assert captured["routing_policies"] == ["burn_first"]
 
 
 @pytest.mark.asyncio

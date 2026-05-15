@@ -176,6 +176,8 @@ class LoadBalancer:
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
+                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+                    routing_policy_override=selection_inputs.routing_policy_override,
                 )
             if excluded_ids and selection_inputs.accounts:
                 selection_inputs = _SelectionInputs(

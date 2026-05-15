@@ -7888,6 +7888,7 @@ class ProxyService:
                         last_security_work_retry_error = exc
                         continue
                     await self._handle_stream_error(account, exc.error, exc.code)
+                    excluded_account_ids.add(account.id)
                     continue
                 except _TerminalStreamError as exc:
                     if _should_penalize_stream_error(exc.code):

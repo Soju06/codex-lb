@@ -442,7 +442,9 @@
       "profile": "https://github.com/ozpool",
       "contributions": [
         "ideas",
-        "doc"
+        "doc",
+        "code",
+        "test"
       ]
     }
   ],

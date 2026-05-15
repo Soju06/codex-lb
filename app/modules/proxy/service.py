@@ -582,7 +582,7 @@ class ProxyService:
                 )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
-            trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
+            trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
@@ -8661,6 +8661,33 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(resets_in, int | float):
         error_detail["resets_in_seconds"] = resets_in
     return envelope
+
+
+def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    first_non_output_index = next(
+        (index for index, item in enumerate(input_items) if not _is_http_bridge_previous_response_output_item(item)),
+        len(input_items),
+    )
+    if first_non_output_index == 0:
+        return input_items
+    return input_items[first_non_output_index:]
+
+
+def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
+    item_type = _http_bridge_input_item_type(item)
+    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+        return True
+    if item_type != "message" or not isinstance(item, dict):
+        return False
+    role = item.get("role")
+    return role == "assistant"
+
+
+def _http_bridge_input_item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
 
 
 def _normalize_http_bridge_error_event(

@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey, RequestLog
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -96,42 +96,3 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["tokens"] == 300
     assert older["cachedInputTokens"] is None
     assert older["transport"] == "http"
-
-
-@pytest.mark.asyncio
-async def test_request_logs_api_hides_deleted_account_rows(async_client, db_setup):
-    now = utcnow()
-    async with SessionLocal() as session:
-        accounts_repo = AccountsRepository(session)
-        logs_repo = RequestLogsRepository(session)
-        await accounts_repo.upsert(_make_account("acc_visible_logs", "visible@example.com"))
-        await logs_repo.add_log(
-            account_id="acc_visible_logs",
-            request_id="req_visible_account",
-            model="gpt-5.1",
-            input_tokens=10,
-            output_tokens=20,
-            latency_ms=100,
-            status="success",
-            error_code=None,
-            requested_at=now,
-        )
-        session.add(
-            RequestLog(
-                account_id=None,
-                account_deleted=True,
-                request_id="req_deleted_account_hidden",
-                requested_at=now - timedelta(minutes=1),
-                model="gpt-5.1",
-                status="success",
-                input_tokens=30,
-                output_tokens=40,
-            )
-        )
-        await session.commit()
-
-    response = await async_client.get("/api/request-logs?limit=10")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total"] == 1
-    assert [row["requestId"] for row in body["requests"]] == ["req_visible_account"]

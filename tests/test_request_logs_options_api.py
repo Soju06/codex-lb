@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey, RequestLog
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -74,46 +74,6 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
     assert payload["statuses"] == ["ok", "rate_limit"]
 
 
-@pytest.mark.asyncio
-async def test_request_logs_options_hides_deleted_account_rows(async_client, db_setup):
-    now = utcnow()
-    async with SessionLocal() as session:
-        accounts_repo = AccountsRepository(session)
-        logs_repo = RequestLogsRepository(session)
-        await accounts_repo.upsert(_make_account("acc_opt_visible", "visible-options@example.com"))
-
-        await logs_repo.add_log(
-            account_id="acc_opt_visible",
-            request_id="req_opt_visible",
-            model="gpt-5.1",
-            input_tokens=10,
-            output_tokens=10,
-            latency_ms=100,
-            status="success",
-            error_code=None,
-            requested_at=now,
-        )
-        session.add(
-            RequestLog(
-                account_id=None,
-                account_deleted=True,
-                request_id="req_opt_deleted",
-                requested_at=now - timedelta(minutes=1),
-                model="gpt-deleted-only",
-                status="error",
-                error_code="deleted_only",
-                input_tokens=10,
-                output_tokens=10,
-            )
-        )
-        await session.commit()
-
-    response = await async_client.get("/api/request-logs/options")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["accountIds"] == ["acc_opt_visible"]
-    assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
-    assert payload["statuses"] == ["ok"]
 
 
 @pytest.mark.asyncio

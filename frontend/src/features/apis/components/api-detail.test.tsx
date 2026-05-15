@@ -152,33 +152,6 @@ describe("ApiDetail", () => {
 		expect(screen.getByTestId("api-account-cost-legend-2")).toHaveTextContent("$99.00");
 	});
 
-	it("keeps deleted and unknown account cost buckets distinct", () => {
-		renderApiDetail({
-			accountUsage7Day: createApiKeyAccountUsage7Day({
-				accounts: [
-					{
-						accountId: null,
-						displayName: "Deleted Accounts",
-						totalCostUsd: 4.5,
-						totalTokens: 4500,
-						totalRequests: 12,
-					},
-					{
-						accountId: null,
-						displayName: "Unknown Account",
-						totalCostUsd: 2.25,
-						totalTokens: 2250,
-						totalRequests: 6,
-					},
-				],
-			}),
-		});
-
-		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("Deleted Accounts");
-		expect(screen.getByTestId("api-account-cost-legend-0")).toHaveTextContent("$4.50");
-		expect(screen.getByTestId("api-account-cost-legend-1")).toHaveTextContent("Unknown Account");
-		expect(screen.getByTestId("api-account-cost-legend-1")).toHaveTextContent("$2.25");
-	});
 
 	it("limits the account cost legend to three rows", () => {
 		renderApiDetail({

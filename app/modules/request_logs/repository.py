@@ -293,7 +293,6 @@ class RequestLogsRepository:
         total_col = func.count().over().label("_total")
         stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
-        stmt = stmt.where(RequestLog.account_deleted.is_(False))
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))
         if offset:
@@ -311,7 +310,6 @@ class RequestLogsRepository:
     async def _count_recent(self, filters: _RequestLogFilters) -> int:
         count_stmt = select(func.count(RequestLog.id)).select_from(RequestLog)
         count_stmt = self._apply_related_search_joins(count_stmt, filters.needs_related_search_joins)
-        count_stmt = count_stmt.where(RequestLog.account_deleted.is_(False))
         if filters.conditions:
             count_stmt = count_stmt.where(and_(*filters.conditions))
         result = await self._session.execute(count_stmt)
@@ -358,22 +356,15 @@ class RequestLogsRepository:
             error_codes_excluding=None,
         )
 
-        visible_clause = RequestLog.account_deleted.is_(False)
-        account_stmt = (
-            select(RequestLog.account_id).where(visible_clause).distinct().order_by(RequestLog.account_id.asc())
-        )
+        account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
         model_stmt = (
             select(RequestLog.model, RequestLog.reasoning_effort)
-            .where(visible_clause)
             .distinct()
             .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
         )
-        api_key_stmt = (
-            select(RequestLog.api_key_id).where(visible_clause).distinct().order_by(RequestLog.api_key_id.asc())
-        )
+        api_key_stmt = select(RequestLog.api_key_id).distinct().order_by(RequestLog.api_key_id.asc())
         status_stmt = (
             select(RequestLog.status, RequestLog.error_code)
-            .where(visible_clause)
             .distinct()
             .order_by(RequestLog.status.asc(), RequestLog.error_code.asc())
         )

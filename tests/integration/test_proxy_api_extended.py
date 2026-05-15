@@ -63,8 +63,7 @@ def _extract_first_event(lines: list[str]) -> dict:
         event = json.loads(line[6:])
         if event.get("type") == "response.created":
             response = event.get("response")
-            if isinstance(response, dict) and response.get("status") == "in_progress" \
-                    and response.get("output") == []:
+            if isinstance(response, dict) and response.get("status") == "in_progress" and response.get("output") == []:
                 continue
         return event
     raise AssertionError("No SSE data event found")

@@ -84,7 +84,7 @@ async def test_normalize_public_responses_stream_normalizes_unknown_terminal_out
                     'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1",'
                     '"object":"response",'
                     '"status":"completed","output":[{"id":"fa_1","type":"final_answer","text":"normalized"}]}}\n\n'
-                )
+                ),
             )
         )
     ]
@@ -170,7 +170,7 @@ async def test_normalize_public_responses_stream_synthesizes_delta_from_complete
                     '"object":"response",'
                     '"status":"completed","output":[{"id":"msg_1","type":"message",'
                     '"content":[{"type":"output_text","text":"terminal text"}]}]}}\n\n'
-                )
+                ),
             )
         )
     ]

@@ -55,8 +55,7 @@ def _extract_first_event(lines: list[str]) -> dict:
     for event in _iter_sse_events(lines):
         if event.get("type") == "response.created":
             response = event.get("response")
-            if isinstance(response, dict) and response.get("status") == "in_progress" \
-                    and response.get("output") == []:
+            if isinstance(response, dict) and response.get("status") == "in_progress" and response.get("output") == []:
                 # Likely the synthesized created envelope — skip and return
                 # whatever the upstream actually started with.
                 continue

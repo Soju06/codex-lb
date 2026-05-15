@@ -26,6 +26,7 @@ Or against the public deployment after the fix is deployed:
 Exits 0 on full pass, non-zero on any failure (with a per-case PASS/FAIL
 summary printed before exit).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,10 +48,10 @@ class CaseResult:
 
 async def case_plain_streaming(client: openai.AsyncOpenAI, model: str) -> CaseResult:
     """Plain text streaming. Asserts:
-      - SDK parser does NOT raise
-      - response.created is the first event
-      - codex.* events do NOT appear
-      - get_final_response().output is non-empty
+    - SDK parser does NOT raise
+    - response.created is the first event
+    - codex.* events do NOT appear
+    - get_final_response().output is non-empty
     """
     try:
         events: list[str] = []
@@ -64,19 +65,14 @@ async def case_plain_streaming(client: openai.AsyncOpenAI, model: str) -> CaseRe
             final = await stream.get_final_response()
         codex_events = [e for e in events if e.startswith("codex.")]
         if codex_events:
-            return CaseResult("plain_streaming", False,
-                              f"codex.* events leaked: {codex_events}")
+            return CaseResult("plain_streaming", False, f"codex.* events leaked: {codex_events}")
         if "response.created" not in events:
-            return CaseResult("plain_streaming", False,
-                              f"response.created missing; events={events[:5]}")
+            return CaseResult("plain_streaming", False, f"response.created missing; events={events[:5]}")
         if not final.output:
-            return CaseResult("plain_streaming", False,
-                              "get_final_response().output is empty")
-        return CaseResult("plain_streaming", True,
-                          f"output_len={len(final.output)} events={len(events)}")
+            return CaseResult("plain_streaming", False, "get_final_response().output is empty")
+        return CaseResult("plain_streaming", True, f"output_len={len(final.output)} events={len(events)}")
     except Exception as e:
-        return CaseResult("plain_streaming", False,
-                          f"{type(e).__name__}: {e}")
+        return CaseResult("plain_streaming", False, f"{type(e).__name__}: {e}")
 
 
 async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> CaseResult:
@@ -103,8 +99,7 @@ async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> Ca
         events: list[str] = []
         async with client.responses.stream(
             model=model,
-            input=[{"role": "user",
-                     "content": "What is the weather in Seoul? Use the get_weather tool."}],
+            input=[{"role": "user", "content": "What is the weather in Seoul? Use the get_weather tool."}],
             tools=tools,
             max_output_tokens=200,
         ) as stream:
@@ -115,25 +110,21 @@ async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> Ca
             return CaseResult("tool_call_streaming", False, "output empty")
         fc_items = [it for it in final.output if it.type == "function_call"]
         if not fc_items:
-            return CaseResult("tool_call_streaming", False,
-                              f"no function_call in output: "
-                              f"{[it.type for it in final.output]}")
+            return CaseResult(
+                "tool_call_streaming", False, f"no function_call in output: {[it.type for it in final.output]}"
+            )
         fc = fc_items[0]
         fc_args = getattr(fc, "arguments", None)
         fc_name = getattr(fc, "name", None)
         if not isinstance(fc_args, str) or not isinstance(fc_name, str):
-            return CaseResult("tool_call_streaming", False,
-                              f"function_call missing name/arguments: {fc!r}")
+            return CaseResult("tool_call_streaming", False, f"function_call missing name/arguments: {fc!r}")
         try:
             args = json.loads(fc_args)
         except Exception as e:
-            return CaseResult("tool_call_streaming", False,
-                              f"function_call.arguments not JSON: {e}")
-        return CaseResult("tool_call_streaming", True,
-                          f"name={fc_name} args={args}")
+            return CaseResult("tool_call_streaming", False, f"function_call.arguments not JSON: {e}")
+        return CaseResult("tool_call_streaming", True, f"name={fc_name} args={args}")
     except Exception as e:
-        return CaseResult("tool_call_streaming", False,
-                          f"{type(e).__name__}: {e}")
+        return CaseResult("tool_call_streaming", False, f"{type(e).__name__}: {e}")
 
 
 async def case_structured_output_streaming(client: openai.AsyncOpenAI, model: str) -> CaseResult:
@@ -141,8 +132,7 @@ async def case_structured_output_streaming(client: openai.AsyncOpenAI, model: st
     try:
         async with client.responses.stream(
             model=model,
-            input=[{"role": "user",
-                     "content": "Return json with a 'city' field set to Seoul."}],
+            input=[{"role": "user", "content": "Return json with a 'city' field set to Seoul."}],
             text={"format": {"type": "json_object"}},
             max_output_tokens=100,
         ) as stream:
@@ -153,28 +143,24 @@ async def case_structured_output_streaming(client: openai.AsyncOpenAI, model: st
             return CaseResult("structured_output_streaming", False, "output empty")
         msg_items = [it for it in final.output if it.type == "message"]
         if not msg_items:
-            return CaseResult("structured_output_streaming", False,
-                              f"no message in output: {[it.type for it in final.output]}")
+            return CaseResult(
+                "structured_output_streaming", False, f"no message in output: {[it.type for it in final.output]}"
+            )
         msg = msg_items[0]
         content = getattr(msg, "content", None)
         if not content:
-            return CaseResult("structured_output_streaming", False,
-                              f"message has no content: {msg!r}")
+            return CaseResult("structured_output_streaming", False, f"message has no content: {msg!r}")
         first_part = content[0]
         text = getattr(first_part, "text", None)
         if not isinstance(text, str):
-            return CaseResult("structured_output_streaming", False,
-                              f"first content part has no text: {first_part!r}")
+            return CaseResult("structured_output_streaming", False, f"first content part has no text: {first_part!r}")
         try:
             json.loads(text)
         except Exception as e:
-            return CaseResult("structured_output_streaming", False,
-                              f"output text not JSON: {e}: {text[:80]}")
-        return CaseResult("structured_output_streaming", True,
-                          f"text={text[:60]}")
+            return CaseResult("structured_output_streaming", False, f"output text not JSON: {e}: {text[:80]}")
+        return CaseResult("structured_output_streaming", True, f"text={text[:60]}")
     except Exception as e:
-        return CaseResult("structured_output_streaming", False,
-                          f"{type(e).__name__}: {e}")
+        return CaseResult("structured_output_streaming", False, f"{type(e).__name__}: {e}")
 
 
 async def case_error_stream(client: openai.AsyncOpenAI, model: str) -> CaseResult:
@@ -188,8 +174,7 @@ async def case_error_stream(client: openai.AsyncOpenAI, model: str) -> CaseResul
             async with client.responses.stream(
                 model=model,
                 input=[{"role": "user", "content": "hi"}],
-                text={"format": {"type": "json_schema", "name": "x",
-                                    "schema": {"type": "INVALID_TYPE"}}},
+                text={"format": {"type": "json_schema", "name": "x", "schema": {"type": "INVALID_TYPE"}}},
                 max_output_tokens=50,
             ) as stream:
                 async for event in stream:
@@ -199,11 +184,9 @@ async def case_error_stream(client: openai.AsyncOpenAI, model: str) -> CaseResul
             return CaseResult("error_stream", True, "pre-stream HTTP error (acceptable)")
         codex_events = [e for e in events if e.startswith("codex.")]
         if codex_events:
-            return CaseResult("error_stream", False,
-                              f"codex.* leaked: {codex_events}")
+            return CaseResult("error_stream", False, f"codex.* leaked: {codex_events}")
         if events and events[0] != "response.created":
-            return CaseResult("error_stream", False,
-                              f"first event was {events[0]!r}, expected response.created")
+            return CaseResult("error_stream", False, f"first event was {events[0]!r}, expected response.created")
         return CaseResult("error_stream", True, f"events={events}")
     except RuntimeError as e:
         return CaseResult("error_stream", False, f"SDK parser raised: {e}")
@@ -223,23 +206,17 @@ async def case_non_streaming(client: openai.AsyncOpenAI, model: str) -> CaseResu
         )
         if not response.output:
             return CaseResult("non_streaming", False, "output empty")
-        return CaseResult("non_streaming", True,
-                          f"output_len={len(response.output)} "
-                          f"status={response.status}")
+        return CaseResult("non_streaming", True, f"output_len={len(response.output)} status={response.status}")
     except Exception as e:
-        return CaseResult("non_streaming", False,
-                          f"{type(e).__name__}: {e}")
+        return CaseResult("non_streaming", False, f"{type(e).__name__}: {e}")
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", required=True,
-                        help="codex-lb /v1 base URL (e.g. http://127.0.0.1:2455/v1)")
-    parser.add_argument("--api-key", required=True,
-                        help="codex-lb API key (sk-clb-...)")
+    parser.add_argument("--base-url", required=True, help="codex-lb /v1 base URL (e.g. http://127.0.0.1:2455/v1)")
+    parser.add_argument("--api-key", required=True, help="codex-lb API key (sk-clb-...)")
     parser.add_argument("--model", default="gpt-5.5")
-    parser.add_argument("--skip", default="",
-                        help="comma-separated case names to skip")
+    parser.add_argument("--skip", default="", help="comma-separated case names to skip")
     args = parser.parse_args()
 
     client = openai.AsyncOpenAI(api_key=args.api_key, base_url=args.base_url)
@@ -267,7 +244,7 @@ async def main() -> int:
     await client.close()
     failed = [r for r in results if not r.passed]
     print()
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Summary: {len(results) - len(failed)}/{len(results)} passed")
     if failed:
         print("Failures:")

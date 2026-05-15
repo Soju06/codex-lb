@@ -2343,7 +2343,8 @@ async def _normalize_public_responses_stream(
         if (
             enforce_openai_sdk_contract
             and isinstance(raw_event_type, str)
-            and raw_event_type in (
+            and raw_event_type
+            in (
                 "response.completed",
                 "response.incomplete",
             )
@@ -2422,11 +2423,7 @@ def _normalize_public_stream_payload(
     # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
     # consume these events and pass ``enforce_openai_sdk_contract=False`` so
     # they continue to forward unchanged.
-    if (
-        enforce_openai_sdk_contract
-        and isinstance(event_type, str)
-        and event_type.startswith("codex.")
-    ):
+    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
     if event_type == "error":
         parsed_error = _parse_event_error_envelope(payload)

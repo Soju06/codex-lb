@@ -48,12 +48,12 @@ async def test_codex_style_responses_payload_is_accepted(async_client):
     assert event["type"] == "response.created"
     # The terminal event (somewhere after response.created) should be one of
     # the known terminal types.
-    terminal_types = {"response.completed", "response.incomplete",
-                       "response.failed", "error"}
+    terminal_types = {"response.completed", "response.incomplete", "response.failed", "error"}
     terminal_events = [
         json.loads(line[6:])
         for line in lines
-        if line.startswith("data: ") and not line.startswith("data: [DONE]")
+        if line.startswith("data: ")
+        and not line.startswith("data: [DONE]")
         and json.loads(line[6:]).get("type") in terminal_types
     ]
     assert terminal_events, "Expected at least one terminal event in the stream"

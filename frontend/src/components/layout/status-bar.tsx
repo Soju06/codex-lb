@@ -7,19 +7,25 @@ import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
-function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_weighted", sticky: boolean, preferEarlier: boolean): string {
+function getRoutingLabel(
+  strategy: "usage_weighted" | "round_robin" | "capacity_weighted",
+  sticky: boolean,
+  preferEarlier: boolean,
+  preferEarlierWindow: "primary" | "secondary",
+): string {
+  const earlyResetLabel = preferEarlierWindow === "secondary" ? "Early weekly reset" : "Early 5h reset";
   if (strategy === "round_robin") {
     return sticky ? "Round robin + Sticky threads" : "Round robin";
   }
   if (strategy === "capacity_weighted") {
-    if (sticky && preferEarlier) return "Capacity weighted + Sticky + Early reset";
+    if (sticky && preferEarlier) return `Capacity weighted + Sticky + ${earlyResetLabel}`;
     if (sticky) return "Capacity weighted + Sticky threads";
-    if (preferEarlier) return "Capacity weighted + Early reset";
+    if (preferEarlier) return `Capacity weighted + ${earlyResetLabel}`;
     return "Capacity weighted";
   }
-  if (sticky && preferEarlier) return "Sticky + Early reset";
+  if (sticky && preferEarlier) return `Sticky + ${earlyResetLabel}`;
   if (sticky) return "Sticky threads";
-  if (preferEarlier) return "Early reset preferred";
+  if (preferEarlier) return `${earlyResetLabel} preferred`;
   return "Usage weighted";
 }
 
@@ -48,7 +54,12 @@ export function StatusBar() {
   }, [lastSyncAt]);
 
   const routingLabel = settings
-    ? getRoutingLabel(settings.routingStrategy, settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
+    ? getRoutingLabel(
+        settings.routingStrategy,
+        settings.stickyThreadsEnabled,
+        settings.preferEarlierResetAccounts,
+        settings.preferEarlierResetWindow,
+      )
     : "—";
 
   return (

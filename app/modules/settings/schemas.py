@@ -9,6 +9,7 @@ class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
@@ -28,6 +29,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         pattern=r"^(default|auto|http|websocket)$",
     )
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(default=None, pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)

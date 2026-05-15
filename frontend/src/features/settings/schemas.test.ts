@@ -11,6 +11,7 @@ describe("DashboardSettingsSchema", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
+      preferEarlierResetWindow: "primary",
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
@@ -22,6 +23,7 @@ describe("DashboardSettingsSchema", () => {
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.preferEarlierResetWindow).toBe("primary");
     expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
@@ -36,6 +38,7 @@ describe("SettingsUpdateRequestSchema", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "websocket",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 120,
       dashboardSessionTtlSeconds: 7200,
@@ -47,6 +50,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
     expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
     expect(parsed.upstreamStreamTransport).toBe("websocket");
+    expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.totpRequiredOnLogin).toBe(true);

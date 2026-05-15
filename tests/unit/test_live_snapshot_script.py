@@ -23,6 +23,18 @@ def test_latency_summary_reports_nearest_rank_percentiles() -> None:
     }
 
 
+def test_postgres_runtime_correlation_cost_query_casts_before_rounding() -> None:
+    queries = snapshot._request_log_queries(
+        "postgresql",
+        5,
+        columns=frozenset({"cost_usd", "request_id"}),
+    )
+
+    sql, _ = queries["runtime_correlation_rows"]
+
+    assert "round(sum(coalesce(cost_usd, 0.0))::numeric, 6) AS cost_usd" in sql
+
+
 def test_request_logs_snapshot_includes_latency_transport_and_tiers(tmp_path: Path) -> None:
     db_path = tmp_path / "store.db"
     with sqlite3.connect(db_path) as conn:

@@ -318,7 +318,12 @@ def _request_log_queries(
 
     has_cost_usd = columns is None or "cost_usd" in columns
     has_request_id = columns is None or "request_id" in columns
-    runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0)), 6) AS cost_usd" if has_cost_usd else "0.0 AS cost_usd"
+    if has_cost_usd and dialect == "postgresql":
+        runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0))::numeric, 6) AS cost_usd"
+    elif has_cost_usd:
+        runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0)), 6) AS cost_usd"
+    else:
+        runtime_cost_usd_expr = "0.0 AS cost_usd"
     request_cost_usd_expr = "cost_usd" if has_cost_usd else "NULL AS cost_usd"
     response_id_expr = "request_id AS response_id" if has_request_id else "NULL AS response_id"
 

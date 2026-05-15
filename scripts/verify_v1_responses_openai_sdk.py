@@ -82,17 +82,30 @@ async def case_plain_streaming(client: openai.AsyncOpenAI, model: str) -> CaseRe
 async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> CaseResult:
     """Tool-call streaming. Asserts get_final_response() carries a
     function_call output item with parseable arguments."""
+    # ``Iterable[FunctionToolParam]`` is a ``TypedDict`` union; build the
+    # dict explicitly typed so ty/pyright accept the overload.
+    from openai.types.responses import FunctionToolParam
+
+    tools: list[FunctionToolParam] = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        }
+    ]
     try:
         events: list[str] = []
         async with client.responses.stream(
             model=model,
             input=[{"role": "user",
                      "content": "What is the weather in Seoul? Use the get_weather tool."}],
-            tools=[{"type": "function", "name": "get_weather",
-                     "description": "Get current weather for a city",
-                     "parameters": {"type": "object",
-                                      "properties": {"city": {"type": "string"}},
-                                      "required": ["city"]}}],
+            tools=tools,
             max_output_tokens=200,
         ) as stream:
             async for event in stream:
@@ -106,13 +119,18 @@ async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> Ca
                               f"no function_call in output: "
                               f"{[it.type for it in final.output]}")
         fc = fc_items[0]
+        fc_args = getattr(fc, "arguments", None)
+        fc_name = getattr(fc, "name", None)
+        if not isinstance(fc_args, str) or not isinstance(fc_name, str):
+            return CaseResult("tool_call_streaming", False,
+                              f"function_call missing name/arguments: {fc!r}")
         try:
-            args = json.loads(fc.arguments)
+            args = json.loads(fc_args)
         except Exception as e:
             return CaseResult("tool_call_streaming", False,
                               f"function_call.arguments not JSON: {e}")
         return CaseResult("tool_call_streaming", True,
-                          f"name={fc.name} args={args}")
+                          f"name={fc_name} args={args}")
     except Exception as e:
         return CaseResult("tool_call_streaming", False,
                           f"{type(e).__name__}: {e}")
@@ -137,7 +155,16 @@ async def case_structured_output_streaming(client: openai.AsyncOpenAI, model: st
         if not msg_items:
             return CaseResult("structured_output_streaming", False,
                               f"no message in output: {[it.type for it in final.output]}")
-        text = msg_items[0].content[0].text
+        msg = msg_items[0]
+        content = getattr(msg, "content", None)
+        if not content:
+            return CaseResult("structured_output_streaming", False,
+                              f"message has no content: {msg!r}")
+        first_part = content[0]
+        text = getattr(first_part, "text", None)
+        if not isinstance(text, str):
+            return CaseResult("structured_output_streaming", False,
+                              f"first content part has no text: {first_part!r}")
         try:
             json.loads(text)
         except Exception as e:

@@ -23,18 +23,14 @@ See change ``normalize-v1-responses-openai-sdk-stream`` for the audit and design
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 
 import openai
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 import app.modules.proxy.service as proxy_module
-import app.modules.proxy.api as proxy_api_module
-from app.main import create_app
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
-
 
 pytestmark = pytest.mark.e2e
 

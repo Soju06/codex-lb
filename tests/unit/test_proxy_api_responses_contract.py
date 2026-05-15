@@ -81,7 +81,8 @@ async def test_normalize_public_responses_stream_normalizes_unknown_terminal_out
                     '"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n'
                 ),
                 (
-                    'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response",'
+                    'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1",'
+                    '"object":"response",'
                     '"status":"completed","output":[{"id":"fa_1","type":"final_answer","text":"normalized"}]}}\n\n'
                 )
             )
@@ -131,7 +132,8 @@ async def test_normalize_public_responses_stream_synthesizes_delta_from_done_mes
                     '"content":[{"type":"output_text","text":"visible text"}]}}\n\n'
                 ),
                 (
-                    'data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","object":"response",'
+                    'data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_1",'
+                    '"object":"response",'
                     '"status":"completed","output":[]}}\n\n'
                 ),
             )
@@ -164,7 +166,8 @@ async def test_normalize_public_responses_stream_synthesizes_delta_from_complete
                     '"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n'
                 ),
                 (
-                    'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response",'
+                    'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1",'
+                    '"object":"response",'
                     '"status":"completed","output":[{"id":"msg_1","type":"message",'
                     '"content":[{"type":"output_text","text":"terminal text"}]}]}}\n\n'
                 )
@@ -195,14 +198,16 @@ async def test_normalize_public_responses_stream_does_not_duplicate_existing_del
                     'data: {"type":"response.created","sequence_number":0,'
                     '"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n'
                 ),
-                'data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","delta":"already visible"}\n\n',
+                'data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1",'
+                '"delta":"already visible"}\n\n',
                 (
                     'data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,'
                     '"item":{"id":"msg_1","type":"message","role":"assistant",'
                     '"content":[{"type":"output_text","text":"already visible"}]}}\n\n'
                 ),
                 (
-                    'data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","object":"response",'
+                    'data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1",'
+                    '"object":"response",'
                     '"status":"completed","output":[]}}\n\n'
                 ),
             )

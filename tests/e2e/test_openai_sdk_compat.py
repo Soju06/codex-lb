@@ -34,23 +34,20 @@ import io
 import json
 import struct
 import wave
-from collections.abc import AsyncIterator
 from typing import Any
 
 import openai
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from pydantic import BaseModel
 
 import app.modules.proxy.service as proxy_module
-import app.modules.proxy.api as proxy_api_module
 from app.core.openai.model_registry import (
     ReasoningLevel,
     UpstreamModel,
     get_model_registry,
 )
-
 
 pytestmark = pytest.mark.e2e
 

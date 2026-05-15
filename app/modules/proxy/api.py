@@ -1631,7 +1631,10 @@ async def _stream_responses(
         if reservation is not None and owns_reservation:
             await _release_reservation(reservation)
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
-    stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream), enforce_openai_sdk_contract=enforce_openai_sdk_contract)
+    stream = _normalize_public_responses_stream(
+        _stream_proxy_errors_as_response_failed(stream),
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,

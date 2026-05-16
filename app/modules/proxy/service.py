@@ -6765,6 +6765,8 @@ class ProxyService:
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 owner_pinned_quota_error,
             )
+            if status_request_state is not None:
+                status_request_state.account_health_error_handled = True
             if (
                 status_request_state is not None
                 and status_request_state.previous_response_id is not None
@@ -6785,6 +6787,8 @@ class ProxyService:
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 retry_error_code,
             )
+            if status_request_state is not None:
+                status_request_state.account_health_error_handled = True
             if status_request_state is not None and status_request_state.previous_response_id is None:
                 async with session.pending_lock:
                     if status_request_state not in session.pending_requests:
@@ -7932,6 +7936,8 @@ class ProxyService:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
+        if request_state.account_health_error_handled:
+            settlement.account_health_error = False
         if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
             settlement.account_health_error = False
         if (
@@ -10337,6 +10343,7 @@ class _WebSocketRequestState:
     error_type_override: str | None = None
     error_param_override: str | None = None
     error_http_status_override: int | None = None
+    account_health_error_handled: bool = False
     response_event_count: int = 0
     previous_response_not_found_rewritten: bool = False
     response_create_gate_acquired: bool = False

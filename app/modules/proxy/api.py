@@ -188,6 +188,14 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 }
 
 
+def _is_openai_sdk_request(request: Request) -> bool:
+    for header_name in request.headers:
+        if header_name.lower().startswith("x-stainless-"):
+            return True
+    user_agent = request.headers.get("user-agent", "").lower()
+    return "openai" in user_agent
+
+
 @router.post(
     "/responses",
     responses={
@@ -223,6 +231,10 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        # The Codex CLI consumes codex.* vendor events and the upstream's
+        # native event ordering, while OpenAI SDK clients pointed at this
+        # compatibility route need the same SSE contract enforcement as /v1.
+        enforce_openai_sdk_contract=_is_openai_sdk_request(request),
     )
 
 
@@ -344,6 +356,17 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
+        # output, synthesize ``response.created``) MUST be applied by the
+        # origin instance — the one that actually responds to the client — so
+        # they can honour the original route's ``enforce_openai_sdk_contract``
+        # decision. This handler runs on the owner instance after the origin
+        # forwarded the request via the internal bridge; if we re-applied them
+        # here, a forwarded ``/backend-api/codex/responses`` request would
+        # lose ``codex.*`` events (and gain a synthetic ``response.created``)
+        # before the origin ever sees the stream. Forward verbatim and let
+        # the origin run its own normalization.
+        enforce_openai_sdk_contract=False,
     )
 
 
@@ -1567,6 +1590,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -1634,7 +1658,10 @@ async def _stream_responses(
         if reservation is not None and owns_reservation:
             await _release_reservation(reservation)
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
-    stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream))
+    stream = _normalize_public_responses_stream(
+        _stream_proxy_errors_as_response_failed(stream),
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,
@@ -1707,16 +1734,17 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code = _status_for_error(error_payload.error)
+            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -1727,7 +1755,7 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
-    status_code = _status_for_error(response_payload.error)
+    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
@@ -1815,9 +1843,10 @@ async def _compact_responses(
         )
     except ProxyResponseError as exc:
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
@@ -2285,10 +2314,47 @@ def _merge_collected_output_items(
     return merged
 
 
-async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _normalize_public_responses_stream(
+    stream: AsyncIterator[str],
+    *,
+    enforce_openai_sdk_contract: bool = True,
+) -> AsyncIterator[str]:
+    """Normalize the upstream SSE event stream for the public /v1 surface.
+
+    Args:
+        stream: the upstream SSE event blocks (post-error-conversion).
+        enforce_openai_sdk_contract: when True (the default, used for /v1),
+            apply OpenAI Responses SSE contract enforcement: drop Codex
+            vendor events (codex.*), backfill terminal output from streamed
+            item events, and synthesize a leading response.created event
+            when the upstream stream's first standard event is not
+            response.created. When False (used for /backend-api/codex/*,
+            which feeds the Codex CLI), all events including codex.* are
+            forwarded verbatim and no synthesis happens — the Codex CLI
+            relies on the upstream's native event shape.
+    """
     terminal_seen = False
     contract_violation_kind: str | None = None
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
+    # Collect output items from streamed ``response.output_item.added`` /
+    # ``response.output_item.done`` events so the terminal
+    # ``response.completed`` / ``response.incomplete`` payload can be
+    # backfilled when the upstream Codex backend leaves ``response.output``
+    # empty. This mirrors the existing non-streaming behavior in
+    # ``_collect_responses_payload`` so OpenAI SDK consumers calling
+    # ``stream.get_final_response().output`` see the same items the
+    # non-streaming endpoint returns.
+    output_items: dict[int, dict[str, JsonValue]] = {}
+    # Track whether the first standard ``response.*`` event the public stream
+    # emits is ``response.created``. The OpenAI Responses SSE contract requires
+    # ``response.created`` to be the first event. The upstream Codex backend
+    # sometimes drops straight to a terminal event (e.g. ``response.failed``
+    # when upstream rejects the request mid-stream) without emitting
+    # ``response.created`` first, which makes the OpenAI SDK's
+    # ``_create_initial_response`` raise ``RuntimeError``. When that happens
+    # we synthesize a ``response.created`` snapshot from the terminal event's
+    # ``response`` envelope so the SDK parser can complete the stream.
+    created_emitted = False
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
             if terminal_seen:
@@ -2299,7 +2365,29 @@ async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> Asyn
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
-        normalized_payload, violation_kind = _normalize_public_stream_payload(payload)
+        _collect_output_item_event(payload, output_items)
+        raw_event_type = payload.get("type")
+        if (
+            enforce_openai_sdk_contract
+            and isinstance(raw_event_type, str)
+            and raw_event_type
+            in (
+                "response.completed",
+                "response.incomplete",
+            )
+        ):
+            response_obj = payload.get("response")
+            if is_json_mapping(response_obj):
+                existing_output = response_obj.get("output")
+                needs_backfill = not (isinstance(existing_output, list) and existing_output)
+                if needs_backfill and output_items:
+                    merged_response = _merge_collected_output_items(response_obj, output_items)
+                    payload = dict(payload)
+                    payload["response"] = merged_response
+        normalized_payload, violation_kind = _normalize_public_stream_payload(
+            payload,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
         if violation_kind is not None:
             contract_violation_kind = contract_violation_kind or violation_kind
         if normalized_payload is None:
@@ -2307,6 +2395,25 @@ async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> Asyn
         event_type = normalized_payload.get("type")
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
+        # Ensure the public stream always starts with ``response.created``.
+        # When the upstream stream jumps straight to a non-created event
+        # (terminal failure, or any other ordering quirk), synthesize a
+        # ``response.created`` envelope from whatever ``response`` envelope is
+        # available on the current event so the OpenAI SDK parser can begin.
+        # Only enforced on the OpenAI SDK contract path; the Codex CLI route
+        # forwards the upstream sequence verbatim.
+        if (
+            enforce_openai_sdk_contract
+            and not created_emitted
+            and isinstance(event_type, str)
+            and event_type != "response.created"
+        ):
+            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
+            if synthetic_created is not None:
+                yield format_sse_event(synthetic_created)
+                created_emitted = True
+        if event_type == "response.created":
+            created_emitted = True
         for synthetic_payload in _synthetic_text_delta_events(normalized_payload, seen_text_delta_keys):
             yield format_sse_event(synthetic_payload)
         if isinstance(event_type, str) and event_type in {
@@ -2330,9 +2437,20 @@ async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> Asyn
 
 def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
+    *,
+    enforce_openai_sdk_contract: bool = True,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
-    if isinstance(event_type, str) and event_type.startswith("codex."):
+    # Drop Codex-internal vendor events on the public /v1 surface only. The
+    # upstream Codex backend emits non-standard events (notably
+    # ``codex.rate_limits``, which is throttled per rate-limit window and so
+    # leaks intermittently before ``response.created``). The OpenAI Responses
+    # SSE contract does not define any ``codex.*`` event type, and the OpenAI
+    # SDK's stream parser raises ``RuntimeError`` if any other event arrives
+    # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
+    # consume these events and pass ``enforce_openai_sdk_contract=False`` so
+    # they continue to forward unchanged.
+    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
     if event_type == "error":
         parsed_error = _parse_event_error_envelope(payload)
@@ -2392,6 +2510,40 @@ def _normalize_public_stream_payload(
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
+
+
+def _synthetic_response_created_envelope(
+    payload: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    """Synthesize a ``response.created`` SSE payload from a non-created event.
+
+    Used by ``_normalize_public_responses_stream`` when the upstream's first
+    standard event is not ``response.created`` (for example, the Codex backend
+    sometimes jumps straight to ``response.failed`` when upstream rejects the
+    request mid-stream). The OpenAI Responses SSE contract requires
+    ``response.created`` to be the first event the stream emits — the OpenAI
+    Python SDK's ``ResponseStreamState._create_initial_response`` raises
+    ``RuntimeError`` otherwise.
+
+    Returns ``None`` when no ``response`` envelope is available on the source
+    event (in that case the caller forwards the event verbatim; the SDK
+    consumer will still see a parser error, but the stream contract is at
+    least not silently violated by our synthesis logic).
+    """
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return None
+    created_envelope: dict[str, JsonValue] = dict(response)
+    created_envelope["status"] = "in_progress"
+    created_envelope["output"] = []
+    synthetic: dict[str, JsonValue] = {
+        "type": "response.created",
+        "response": created_envelope,
+    }
+    sequence_number = payload.get("sequence_number")
+    if isinstance(sequence_number, int):
+        synthetic["sequence_number"] = sequence_number
+    return synthetic
 
 
 def _synthetic_text_delta_events(

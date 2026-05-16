@@ -249,6 +249,58 @@ async def test_opportunistic_admission_requires_model_without_enforced_model():
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_admission_preserves_no_account_denial_without_burn_window():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No available accounts",
+                    error_code=None,
+                )
+            )
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/backend-api/codex/opportunistic/admission",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model="gpt-5.1",
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    assert "Retry-After" not in response.headers
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "no_accounts"
+    context.service.check_opportunistic_admission.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_files_create_preserves_retry_after_from_proxy_selection(monkeypatch):
     async def skip_limits(*args, **kwargs):
         del args, kwargs

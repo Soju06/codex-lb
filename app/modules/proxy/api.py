@@ -2194,8 +2194,13 @@ async def _opportunistic_admission_denial(
     selection = await context.service.check_opportunistic_admission(api_key=api_key, model=model)
     if selection.account is not None:
         return None
-    error_code = selection.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED
     message = selection.error_message or "opportunistic burn window closed"
+    if selection.error_code is not None:
+        error_code = selection.error_code
+    elif message.startswith("opportunistic burn window closed"):
+        error_code = OPPORTUNISTIC_BURN_WINDOW_CLOSED
+    else:
+        error_code = "no_accounts"
     if error_code != OPPORTUNISTIC_BURN_WINDOW_CLOSED:
         status_code = 503 if error_code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
         return _logged_error_json_response(

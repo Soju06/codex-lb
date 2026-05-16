@@ -614,10 +614,16 @@ class LoadBalancer:
             ignore_standard_quota=selection_inputs.ignore_standard_quota_status,
         )
         if result.account is None:
+            error_message = result.error_message or "No available accounts"
+            error_code = (
+                OPPORTUNISTIC_BURN_WINDOW_CLOSED
+                if error_message.startswith("opportunistic burn window closed")
+                else "no_accounts"
+            )
             return AccountSelection(
                 account=None,
-                error_message=result.error_message,
-                error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+                error_message=error_message,
+                error_code=error_code,
             )
         account = account_map.get(result.account.account_id)
         if account is None:

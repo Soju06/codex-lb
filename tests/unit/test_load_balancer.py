@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.balancer import (
+    HEALTH_TIER_DRAINING,
+    HEALTH_TIER_HEALTHY,
     AccountState,
     handle_permanent_failure,
     handle_quota_exceeded,
@@ -161,6 +163,30 @@ def test_select_account_prefers_burn_first_policy_before_usage():
 
     assert result.account is not None
     assert result.account.account_id == "temp"
+
+
+def test_select_account_prefers_healthy_normal_over_draining_burn_first():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            health_tier=HEALTH_TIER_HEALTHY,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "temp",
+            AccountStatus.ACTIVE,
+            used_percent=80.0,
+            health_tier=HEALTH_TIER_DRAINING,
+            routing_policy="burn_first",
+        ),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
 
 
 def test_select_account_preserves_accounts_until_no_others_are_available():

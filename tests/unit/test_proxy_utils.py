@@ -1559,6 +1559,8 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
         sticky_reallocation_budget_threshold_pct=95.0,
+        sticky_reallocation_primary_budget_threshold_pct=95.0,
+        sticky_reallocation_secondary_budget_threshold_pct=100.0,
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
@@ -4759,6 +4761,27 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
     assert request_logs.calls[0]["error_code"] == "additional_quota_data_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_uses_split_sticky_budget_thresholds(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sticky_reallocation_budget_threshold_pct = 90.0
+    settings.sticky_reallocation_primary_budget_threshold_pct = 85.0
+    settings.sticky_reallocation_secondary_budget_threshold_pct = 98.0
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    admission = AsyncMock(return_value=AccountSelection(account=_make_account("acc_opportunistic"), error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "check_opportunistic_admission", admission)
+
+    await service.check_opportunistic_admission(api_key=None, model="gpt-5.1")
+
+    admission.assert_awaited_once()
+    await_args = admission.await_args
+    assert await_args is not None
+    assert await_args.kwargs["budget_threshold_pct"] == 85.0
+    assert await_args.kwargs["secondary_budget_threshold_pct"] == 98.0
 
 
 @pytest.mark.asyncio

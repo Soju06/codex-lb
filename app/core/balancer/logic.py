@@ -453,15 +453,15 @@ def select_account(
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
 
-    burn_first = [s for s in available if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
-    normal = [s for s in available if _routing_policy(s) == ROUTING_POLICY_NORMAL]
-    preserve = [s for s in available if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
-    policy_pool = burn_first or normal or preserve or available
+    healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
+    probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
+    draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
+    tier_pool = healthy or probing or draining or available
 
-    healthy = [s for s in policy_pool if s.health_tier == HEALTH_TIER_HEALTHY]
-    probing = [s for s in policy_pool if s.health_tier == HEALTH_TIER_PROBING]
-    draining = [s for s in policy_pool if s.health_tier == HEALTH_TIER_DRAINING]
-    effective_pool = healthy or probing or draining or policy_pool
+    burn_first = [s for s in tier_pool if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
+    normal = [s for s in tier_pool if _routing_policy(s) == ROUTING_POLICY_NORMAL]
+    preserve = [s for s in tier_pool if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
+    effective_pool = burn_first or normal or preserve or tier_pool
 
     if routing_strategy == "round_robin":
         selected = min(effective_pool, key=_round_robin_sort_key)

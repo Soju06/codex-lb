@@ -8415,7 +8415,16 @@ class ProxyService:
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
-            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_primary_budget_threshold_pct",
+                settings.sticky_reallocation_budget_threshold_pct,
+            ),
+            secondary_budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_secondary_budget_threshold_pct",
+                100.0,
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

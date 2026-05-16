@@ -66,6 +66,7 @@ def test_trim_http_bridge_previous_response_input_items_preserves_context_assist
 
 def test_trim_http_bridge_previous_response_input_items_trims_marked_replay_outputs() -> None:
     items: list[proxy_service.JsonValue] = [
+        {"id": "rs_replay", "type": "reasoning", "summary": []},
         {
             "id": "msg_replay",
             "type": "message",
@@ -73,12 +74,29 @@ def test_trim_http_bridge_previous_response_input_items_trims_marked_replay_outp
             "status": "completed",
             "content": [{"type": "output_text", "text": "prior"}],
         },
+        {
+            "id": "fc_replay",
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items[3:]
+
+
+def test_trim_http_bridge_previous_response_input_items_preserves_unmarked_call_context() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "local context"}]},
         {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
         {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
         {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
     ]
 
-    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items[2:]
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items
 
 
 @pytest.mark.asyncio
@@ -887,13 +905,16 @@ async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previo
             "instructions": "hi",
             "previous_response_id": "resp_prev_tool_call",
             "input": [
-                {"type": "reasoning", "summary": []},
+                {"id": "rs_repeat", "type": "reasoning", "summary": []},
                 {
+                    "id": "msg_repeat",
                     "type": "message",
                     "role": "assistant",
+                    "status": "completed",
                     "content": [{"type": "output_text", "text": "running command"}],
                 },
                 {
+                    "id": "fc_repeat",
                     "type": "function_call",
                     "call_id": "call_repeat",
                     "name": "exec_command",

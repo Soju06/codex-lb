@@ -535,6 +535,7 @@ class ProxyService:
             logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
             durable_lookup = None
         effective_payload = payload
+        untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
         fresh_upstream_request_text: str | None = None
         previous_response_trimmed_input_count: int | None = None
@@ -1030,7 +1031,7 @@ class ProxyService:
                     error_message="Upstream websocket closed before response.completed",
                 )
                 recovery_path = "context_overflow_fresh_turn"
-                retry_payload = _http_bridge_payload_without_previous_response_id(effective_payload)
+                retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
                 retry_previous_response_id = None
                 retry_request_stage = "context_overflow_recover"
                 retry_preferred_account_id = None
@@ -8683,11 +8684,21 @@ def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]
 def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
     item_type = _http_bridge_input_item_type(item)
     if item_type in {"reasoning", "function_call", "custom_tool_call"}:
-        return True
+        return _has_http_bridge_response_output_marker(item)
     if item_type != "message" or not isinstance(item, dict):
         return False
     role = item.get("role")
-    return role == "assistant"
+    return role == "assistant" and _has_http_bridge_response_output_marker(item)
+
+
+def _has_http_bridge_response_output_marker(item: JsonValue) -> bool:
+    if not isinstance(item, dict):
+        return False
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.strip():
+        return True
+    status = item.get("status")
+    return status in {"completed", "in_progress"}
 
 
 def _http_bridge_input_item_type(item: JsonValue) -> str | None:

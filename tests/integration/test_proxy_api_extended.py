@@ -278,6 +278,20 @@ async def test_thread_goal_get_rejects_malformed_json(async_client):
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_get_rejects_malformed_utf8_json(async_client):
+    await _import_account(async_client, "acc_goal_bad_utf8", "goal-bad-utf8@example.com")
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        content=b'{"threadId":"\xff"}',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "thread goal payload must be valid JSON"
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_get_propagates_selection_failures(async_client, monkeypatch):
     async def fake_select(*_args, **_kwargs):
         return AccountSelection(

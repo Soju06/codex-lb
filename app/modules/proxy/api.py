@@ -212,7 +212,7 @@ async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonV
         return {key: value for key, value in request.query_params.multi_items()}
     try:
         raw = await request.json()
-    except JSONDecodeError as exc:
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="thread goal payload must be valid JSON") from exc
     if raw is None:
         return {}

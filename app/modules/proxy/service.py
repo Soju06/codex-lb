@@ -6825,6 +6825,7 @@ class ProxyService:
                     request_id,
                     exc_info=True,
                 )
+                return last_touch_at
         return now
 
     async def _maybe_touch_request_state_api_key_reservation(

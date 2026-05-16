@@ -680,7 +680,8 @@ class LoadBalancer:
                 # the session is skating on the edge of exhaustion.
                 now = time.time()
                 budget_pressured = (
-                    sticky_kind in (
+                    sticky_kind
+                    in (
                         StickySessionKind.PROMPT_CACHE,
                         StickySessionKind.CODEX_SESSION,
                         StickySessionKind.STICKY_THREAD,

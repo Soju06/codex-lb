@@ -5458,7 +5458,7 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
     assert timeout.error_message == "Proxy request budget exhausted"
 
 
-def test_websocket_receive_timeout_clamps_idle_when_equal_to_full_budget(monkeypatch):
+def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
@@ -5468,7 +5468,7 @@ def test_websocket_receive_timeout_clamps_idle_when_equal_to_full_budget(monkeyp
     )
 
     assert timeout is not None
-    assert timeout.timeout_seconds == 120.0
+    assert timeout.timeout_seconds == 600.0
     assert timeout.error_code == "stream_idle_timeout"
     assert timeout.error_message == "Upstream stream idle timeout"
 
@@ -5604,6 +5604,46 @@ async def test_fail_pending_websocket_requests_does_not_penalize_rejected_input_
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_rejected"
     assert request_logs.calls[0]["error_code"] == "upstream_rejected_input"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_logs_even_when_penalty_fails(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_penalty_fail")
+
+    async def fail_health_penalty(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("state store down")
+
+    monkeypatch.setattr(service, "_handle_stream_error", fail_health_penalty)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_penalty_fail",
+        response_id="resp_ws_penalty_fail",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert list(pending_requests) == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_ws_penalty_fail"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

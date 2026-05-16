@@ -6845,7 +6845,15 @@ class ProxyService:
             and isinstance(account, Account)
             and penalty_code is not None
         ):
-            await self._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
+            try:
+                await self._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
+            except Exception:
+                logger.warning(
+                    "Failed to record websocket pending-request health penalty account_id=%s error_code=%s",
+                    account_id_value,
+                    penalty_code,
+                    exc_info=True,
+                )
 
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):
@@ -9977,8 +9985,6 @@ def _websocket_receive_timeout_for_pending_requests(
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
     remaining_budget = _remaining_budget_seconds(oldest_started_at + proxy_request_budget_seconds)
-    if remaining_budget > 1.0 and idle_timeout_seconds >= remaining_budget:
-        idle_timeout_seconds = max(0.001, min(120.0, remaining_budget / 5.0))
 
     if remaining_budget <= 0:
         return _WebSocketReceiveTimeout(

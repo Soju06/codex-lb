@@ -274,7 +274,7 @@ async def _codex_control_proxy(
             path,
             method=request.method,
             payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
-            query_params={key: value for key, value in request.query_params.multi_items()},
+            query_params=list(request.query_params.multi_items()),
             headers=request.headers,
             codex_session_affinity=True,
             api_key=api_key,

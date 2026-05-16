@@ -556,6 +556,98 @@ def test_archive_service_lookup_requests_adjacent_hours(monkeypatch, tmp_path):
     ]
 
 
+def test_archive_service_lookup_request_id_searches_beyond_adjacent_hours(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+
+    _write_gzip_record(
+        tmp_path / "2026-04-29T10.jsonl.gz",
+        {
+            "timestamp": "2026-04-29T10:59:45+00:00",
+            "request_id": "req_span",
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": "http",
+            "payload": {"input": "near"},
+        },
+    )
+    _write_gzip_record(
+        tmp_path / "2026-04-29T11.jsonl.gz",
+        {
+            "timestamp": "2026-04-29T11:00:15+00:00",
+            "request_id": "req_other",
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": "http",
+            "payload": {"input": "near"},
+        },
+    )
+    _write_gzip_record(
+        tmp_path / "2026-04-29T12.jsonl.gz",
+        {
+            "timestamp": "2026-04-29T12:01:05+00:00",
+            "request_id": "req_span",
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": "http",
+            "payload": {"input": "later"},
+        },
+    )
+
+    page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="req_span",
+        requested_at=datetime.fromisoformat("2026-04-29T10:30:00+00:00"),
+    )
+
+    assert page.total == 2
+    assert [record["request_id"] for record in page.records] == ["req_span", "req_span"]
+    assert [record["_archive_file"] for record in page.records] == [
+        "2026-04-29T10.jsonl.gz",
+        "2026-04-29T12.jsonl.gz",
+    ]
+
+
+def test_archive_service_lookup_request_id_includes_adjacent_day_legacy_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+
+    (tmp_path / "2026-04-29.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-29T23:59:58+00:00",
+                "request_id": "req_midnight",
+                "direction": "server_to_codex",
+                "kind": "responses",
+                "transport": "http",
+                "payload": {"input": "end_of_day"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        request_id="req_midnight",
+        requested_at=datetime.fromisoformat("2026-04-30T00:10:00+00:00"),
+    )
+
+    assert page.total == 1
+    assert page.records[0]["request_id"] == "req_midnight"
+    assert page.records[0]["_archive_file"] == "2026-04-29.jsonl"
+
+
 def test_archive_service_expands_user_home(monkeypatch, tmp_path):
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()

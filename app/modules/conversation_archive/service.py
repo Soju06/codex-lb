@@ -70,7 +70,7 @@ def read_archive_records(
     request_id: str | None = None,
     requested_at: datetime | None = None,
 ) -> ConversationArchivePage:
-    paths = _archive_paths_for_lookup(filename=filename, requested_at=requested_at)
+    paths = _archive_paths_for_lookup(filename=filename, requested_at=requested_at, request_id=request_id)
     records: list[dict[str, Any]] = []
     total = 0
     end = offset + limit
@@ -96,16 +96,28 @@ def read_archive_records(
     )
 
 
-def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | None) -> list[Path]:
+def _archive_paths_for_lookup(
+    *,
+    filename: str | None,
+    requested_at: datetime | None,
+    request_id: str | None,
+) -> list[Path]:
     if filename:
         return [_resolve_archive_file(filename)]
     directory = _archive_dir()
     if requested_at is None:
         return list(_iter_archive_paths(directory))
 
+    if request_id is not None:
+        return sorted(path for path in _iter_archive_paths(directory) if path.exists() and path.is_file())
+
     requested_at_utc = requested_at.astimezone(UTC)
     hourly_stems = [(requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)]
-    daily_stem = requested_at_utc.strftime("%Y-%m-%d")
+    daily_stems = {
+        requested_at_utc.strftime("%Y-%m-%d"),
+        (requested_at_utc.date() - timedelta(days=1)).strftime("%Y-%m-%d"),
+        (requested_at_utc.date() + timedelta(days=1)).strftime("%Y-%m-%d"),
+    }
     candidates: list[Path] = []
     for stem in hourly_stems:
         candidates.extend(
@@ -114,12 +126,13 @@ def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | 
                 directory / f"{stem}{_JSONL_SUFFIX}",
             )
         )
-    candidates.extend(
-        (
-            directory / f"{daily_stem}{_GZIP_JSONL_SUFFIX}",
-            directory / f"{daily_stem}{_JSONL_SUFFIX}",
+    for stem in daily_stems:
+        candidates.extend(
+            (
+                directory / f"{stem}{_GZIP_JSONL_SUFFIX}",
+                directory / f"{stem}{_JSONL_SUFFIX}",
+            )
         )
-    )
     return [path for path in candidates if path.exists() and path.is_file()]
 
 

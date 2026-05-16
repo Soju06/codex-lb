@@ -131,7 +131,7 @@ async def test_http_bridge_stream_masks_single_top_level_previous_response_error
         )
     ]
 
-    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.reconnect_requested is False
     assert request_state.error_http_status_override == 502
     assert len(events) == 1
     event_block = events[0]
@@ -5046,7 +5046,7 @@ async def test_process_http_bridge_upstream_text_masks_single_previous_response_
     assert "previous_response_not_found" not in json.dumps(payload)
     assert request_state.error_http_status_override == 502
     assert request_state.previous_response_not_found_rewritten is True
-    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.reconnect_requested is False
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0
 

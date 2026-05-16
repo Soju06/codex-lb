@@ -1631,7 +1631,13 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
-    stream, startup_error = await _probe_stream_startup_error(stream)
+    stream, startup_error = await _probe_stream_startup_error(
+        stream,
+        convert_event_errors=bridge_active,
+        timeout_seconds=(
+            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+        ),
+    )
     if startup_error is not None:
         if owns_reservation:
             await _release_reservation(reservation)

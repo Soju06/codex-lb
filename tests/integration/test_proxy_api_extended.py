@@ -6,13 +6,13 @@ import json
 import pytest
 from sqlalchemy import select
 
+import app.modules.proxy.load_balancer as proxy_load_balancer
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients import proxy as core_proxy
 from app.core.clients.proxy import ProxyResponseError
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
-from app.modules.proxy.load_balancer import AccountSelection
 
 pytestmark = pytest.mark.integration
 
@@ -337,7 +337,7 @@ async def test_thread_goal_get_rejects_malformed_utf8_json(async_client):
 @pytest.mark.asyncio
 async def test_thread_goal_get_propagates_selection_failures(async_client, monkeypatch):
     async def fake_select(*_args, **_kwargs):
-        return AccountSelection(
+        return proxy_load_balancer.AccountSelection(
             account=None,
             error_message="No scoped accounts are available",
             error_code="no_accounts",
@@ -417,7 +417,11 @@ async def test_thread_goal_set_uses_active_account_when_budget_selection_is_empt
     calls = []
 
     async def fake_select(*_args, **_kwargs):
-        return AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts")
+        return proxy_load_balancer.AccountSelection(
+            account=None,
+            error_message="No active accounts available",
+            error_code="no_accounts",
+        )
 
     async def fake_thread_goal(
         operation,

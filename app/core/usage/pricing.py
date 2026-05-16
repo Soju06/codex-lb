@@ -70,6 +70,23 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    "gpt-5.5": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=0.5,
+        output_per_1m=30.0,
+        flex_input_per_1m=2.5,
+        flex_cached_input_per_1m=0.25,
+        flex_output_per_1m=15.0,
+        priority_input_per_1m=12.5,
+        priority_cached_input_per_1m=1.25,
+        priority_output_per_1m=75.0,
+    ),
+    "gpt-5.5-pro": ModelPrice(
+        input_per_1m=30.0,
+        output_per_1m=180.0,
+        flex_input_per_1m=15.0,
+        flex_output_per_1m=90.0,
+    ),
     "gpt-5.4": ModelPrice(
         input_per_1m=2.5,
         cached_input_per_1m=0.25,
@@ -207,9 +224,44 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         priority_cached_input_per_1m=0.25,
         priority_output_per_1m=20.0,
     ),
+    # OpenAI Images token-based pricing (per 1M tokens, USD).
+    # gpt-image-2 (April 2026):
+    #   text input  $5.00, image input $8.00, image cached input $2.00,
+    #   image output $30.00.
+    # The current ``ModelPrice`` shape carries a single input rate, so we
+    # use the text-input rate as the dominant input cost (text dominates
+    # the input side for typical prompts) and the image-output rate as
+    # the output cost. Cached input maps to the image-cached rate.
+    # The legacy gpt-image-1.5 / gpt-image-1 / gpt-image-1-mini entries
+    # mirror gpt-image-2 today; they will be split out once OpenAI
+    # publishes per-model deltas. Without these entries cost-based API
+    # key quotas would resolve every /v1/images/* call to $0 and the
+    # quota would never bite.
+    "gpt-image-2": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
+    "gpt-image-1.5": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
+    "gpt-image-1": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
+    "gpt-image-1-mini": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
+    "gpt-5.5-pro*": "gpt-5.5-pro",
+    "gpt-5.5*": "gpt-5.5",
     "gpt-5.4-pro*": "gpt-5.4-pro",
     "gpt-5.4-mini*": "gpt-5.4-mini",
     "gpt-5.4-nano*": "gpt-5.4-nano",
@@ -228,6 +280,10 @@ DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.1-codex-mini*": "gpt-5.1-codex-mini",
     "gpt-5.1-codex*": "gpt-5.1-codex",
     "gpt-5-codex*": "gpt-5-codex",
+    "gpt-image-2*": "gpt-image-2",
+    "gpt-image-1.5*": "gpt-image-1.5",
+    "gpt-image-1-mini*": "gpt-image-1-mini",
+    "gpt-image-1*": "gpt-image-1",
 }
 
 

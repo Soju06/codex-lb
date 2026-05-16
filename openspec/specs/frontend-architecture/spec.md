@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define dashboard surface contracts so settings, account management, and operational views stay coherent across the SPA.
 
 ## Requirements
 ### Requirement: Settings page

@@ -11,6 +11,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
     ResponsesTextControls,
     ResponsesTextFormat,
+    normalize_reasoning_aliases,
     normalize_tool_type,
     validate_tool_types,
 )
@@ -133,6 +134,7 @@ class ChatCompletionsRequest(BaseModel):
         reasoning_effort = data.pop("reasoning_effort", None)
         if reasoning_effort is not None and "reasoning" not in data:
             data["reasoning"] = {"effort": reasoning_effort}
+        normalize_reasoning_aliases(data)
         if response_format is not None:
             _apply_response_format(data, response_format)
         if isinstance(stream_options, Mapping):

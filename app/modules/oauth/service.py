@@ -165,22 +165,10 @@ class OauthService:
                 return OauthCompleteResponse(status="success")
             if state.method != "device":
                 return OauthCompleteResponse(status="pending")
-            if state.poll_task and not state.poll_task.done():
-                return OauthCompleteResponse(status="pending")
-            if not state.device_auth_id or not state.user_code or not state.expires_at:
+            if not self._ensure_device_poll_task_locked(state):
                 state.status = "error"
                 state.error_message = "Device code flow is not initialized."
                 return OauthCompleteResponse(status="error")
-
-            interval = state.interval_seconds if state.interval_seconds is not None else 0
-            interval = max(interval, 0)
-            poll_context = DevicePollContext(
-                device_auth_id=state.device_auth_id,
-                user_code=state.user_code,
-                interval_seconds=interval,
-                expires_at=state.expires_at,
-            )
-            state.poll_task = asyncio.create_task(self._poll_device_tokens(poll_context))
             return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self) -> OauthStartResponse:
@@ -232,14 +220,23 @@ class OauthService:
         code = params.get("code", [None])[0]
         state = params.get("state", [None])[0]
 
+        async with self._store.lock:
+            current_status = self._store.state.status
+            expected_state = self._store.state.state_token
+            verifier = self._store.state.code_verifier
+
+        # Idempotent return only when this manual-callback corresponds to the
+        # same OAuth attempt that already succeeded (state token matches the
+        # current attempt). This avoids reporting success for stale callback
+        # URLs from a different/previous attempt, which would skip state/code
+        # validation and token persistence.
+        if current_status == "success" and state and expected_state and state == expected_state:
+            return ManualCallbackResponse(status="success")
+
         if error:
             message = f"OAuth error: {error}"
             await self._set_error(message)
             return ManualCallbackResponse(status="error", error_message=message)
-
-        async with self._store.lock:
-            expected_state = self._store.state.state_token
-            verifier = self._store.state.code_verifier
 
         if not code or not state or state != expected_state or not verifier:
             message = "Invalid OAuth callback: state mismatch or missing code."
@@ -281,6 +278,7 @@ class OauthService:
             state.interval_seconds = device.interval_seconds
             state.expires_at = time.time() + device.expires_in_seconds
             state.error_message = None
+            self._ensure_device_poll_task_locked(state)
 
         return OauthStartResponse(
             method="device",
@@ -346,6 +344,22 @@ class OauthService:
                 current = asyncio.current_task()
                 if self._store.state.poll_task is current:
                     self._store.state.poll_task = None
+
+    def _ensure_device_poll_task_locked(self, state: OAuthState) -> bool:
+        if state.poll_task and not state.poll_task.done():
+            return True
+        if not state.device_auth_id or not state.user_code or not state.expires_at:
+            return False
+
+        interval = state.interval_seconds if state.interval_seconds is not None else 0
+        poll_context = DevicePollContext(
+            device_auth_id=state.device_auth_id,
+            user_code=state.user_code,
+            interval_seconds=max(interval, 0),
+            expires_at=state.expires_at,
+        )
+        state.poll_task = asyncio.create_task(self._poll_device_tokens(poll_context))
+        return True
 
     async def _persist_tokens(self, tokens: OAuthTokens) -> None:
         claims = extract_id_token_claims(tokens.id_token)

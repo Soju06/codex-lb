@@ -1,0 +1,5 @@
+- [x] 1. Add OpenSpec requirements for Pro Lite capacity handling.
+- [x] 2. Recognize `prolite` as an account plan and map it to Plus x5 capacities.
+- [x] 3. Treat `prolite` as Pro-equivalent for model plan eligibility in proxy account selection.
+- [x] 4. Add focused regression tests for plan normalization, dashboard/usage capacity summaries, and proxy selection.
+- [x] 5. Run targeted backend tests and available OpenSpec validation.

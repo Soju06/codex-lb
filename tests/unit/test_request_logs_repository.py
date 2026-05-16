@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from sqlalchemy.exc import ResourceClosedError
 
@@ -34,3 +37,124 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
 
         assert log.request_id == "req"
         assert log.cost_usd is not None
+
+
+@pytest.mark.asyncio
+async def test_find_latest_account_id_for_response_id_prefers_session_then_falls_back_to_api_key_scope() -> None:
+    session = AsyncMock()
+    repo = RequestLogsRepository(session)
+    executed_sql: list[str] = []
+    returned_values = iter(
+        [
+            "acc_latest",
+            "acc_scoped",
+            "acc_session",
+            None,
+            "acc_scoped",
+            None,
+        ]
+    )
+
+    async def _execute(statement):
+        executed_sql.append(str(statement))
+        value = next(returned_values)
+        return SimpleNamespace(scalar_one_or_none=lambda: value)
+
+    session.execute.side_effect = _execute
+
+    owner_any = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id=None,
+    )
+    owner_scoped = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id="api_key_1",
+    )
+    owner_session = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id="api_key_1",
+        session_id="sid_terminal_a",
+    )
+    owner_session_fallback = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id="api_key_1",
+        session_id="sid_terminal_b",
+    )
+    owner_missing = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_missing_owner",
+        api_key_id=None,
+    )
+
+    assert owner_any == "acc_latest"
+    assert owner_scoped == "acc_scoped"
+    assert owner_session == "acc_session"
+    assert owner_session_fallback == "acc_scoped"
+    assert owner_missing is None
+    assert "request_logs.api_key_id = :api_key_id_1" not in executed_sql[0]
+    assert "request_logs.api_key_id = :api_key_id_1" in executed_sql[1]
+    assert "request_logs.session_id = :session_id_1" in executed_sql[2]
+    assert "request_logs.session_id = :session_id_1" in executed_sql[3]
+    assert "request_logs.session_id = :session_id_1" not in executed_sql[4]
+
+
+@pytest.mark.asyncio
+async def test_find_latest_account_id_for_response_id_ignores_blank_response_id() -> None:
+    session = AsyncMock()
+    repo = RequestLogsRepository(session)
+
+    owner = await repo.find_latest_account_id_for_response_id(
+        response_id="   ",
+        api_key_id="api_key_1",
+        session_id="sid_terminal_a",
+    )
+
+    assert owner is None
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_find_latest_account_id_for_response_id_ignores_blank_session_id_scope() -> None:
+    session = AsyncMock()
+    repo = RequestLogsRepository(session)
+    executed_sql: list[str] = []
+
+    async def _execute(statement):
+        executed_sql.append(str(statement))
+        return SimpleNamespace(scalar_one_or_none=lambda: "acc_scoped")
+
+    session.execute.side_effect = _execute
+
+    owner = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id="api_key_1",
+        session_id="   ",
+    )
+
+    assert owner == "acc_scoped"
+    assert len(executed_sql) == 1
+    assert "request_logs.session_id = :session_id_1" not in executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_find_latest_account_id_for_response_id_falls_back_when_session_scope_owner_is_blank() -> None:
+    session = AsyncMock()
+    repo = RequestLogsRepository(session)
+    executed_sql: list[str] = []
+    returned_values = iter(["   ", "acc_fallback"])
+
+    async def _execute(statement):
+        executed_sql.append(str(statement))
+        return SimpleNamespace(scalar_one_or_none=lambda: next(returned_values))
+
+    session.execute.side_effect = _execute
+
+    owner = await repo.find_latest_account_id_for_response_id(
+        response_id="resp_lookup_owner",
+        api_key_id="api_key_1",
+        session_id="sid_terminal_a",
+    )
+
+    assert owner == "acc_fallback"
+    assert len(executed_sql) == 2
+    assert "request_logs.session_id = :session_id_1" in executed_sql[0]
+    assert "request_logs.session_id = :session_id_1" not in executed_sql[1]

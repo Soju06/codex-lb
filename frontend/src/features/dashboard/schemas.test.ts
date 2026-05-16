@@ -7,6 +7,7 @@ import {
   DashboardOverviewSchema,
   DepletionSchema,
   parseOverviewTimeframe,
+  RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
   UsageWindowSchema,
 } from "@/features/dashboard/schemas";
@@ -134,7 +135,9 @@ describe("RequestLogsResponseSchema", () => {
         {
           requestedAt: ISO,
           accountId: "acc-1",
+          planType: "plus",
           apiKeyName: "Key A",
+          apiKeyId: "key-1",
           requestId: "req-1",
           model: "gpt-5.1",
           transport: "websocket",
@@ -153,7 +156,21 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
+    expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+
+  it("parses request-log filter options including API keys", () => {
+    const parsed = RequestLogFilterOptionsSchema.parse({
+      accountIds: ["acc-1"],
+      apiKeys: [{ id: "key-1", name: "Key A", keyPrefix: "sk-key-a" }],
+      modelOptions: [{ model: "gpt-5.1", reasoningEffort: null }],
+      statuses: ["ok"],
+    });
+
+    expect(parsed.apiKeys[0]?.id).toBe("key-1");
+    expect(parsed.apiKeys[0]?.keyPrefix).toBe("sk-key-a");
   });
 });
 

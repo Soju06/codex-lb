@@ -21,6 +21,21 @@ def test_settings_rejects_invalid_firewall_trusted_proxy_cidr(monkeypatch):
         Settings()
 
 
+def test_settings_parses_proxy_unauthenticated_client_cidrs_from_csv(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS", "192.168.65.1/32, 172.17.0.0/16")
+
+    settings = Settings()
+
+    assert settings.proxy_unauthenticated_client_cidrs == ["192.168.65.1/32", "172.17.0.0/16"]
+
+
+def test_settings_rejects_invalid_proxy_unauthenticated_client_cidr(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS", "not-a-cidr")
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_settings_parses_http_bridge_instance_ring_from_csv(monkeypatch):
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "instance-b")
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING", "instance-a, instance-b")

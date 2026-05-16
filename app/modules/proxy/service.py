@@ -5995,7 +5995,7 @@ class ProxyService:
                         wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
                         if wait_timeout is not None and wait_timeout <= 0:
                             raise asyncio.TimeoutError()
-                        keepalive_interval = get_settings().sse_keepalive_interval_seconds
+                        keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
                         if keepalive_interval > 0:
                             wait_timeout = (
                                 keepalive_interval if wait_timeout is None else min(wait_timeout, keepalive_interval)
@@ -7545,6 +7545,8 @@ class ProxyService:
                                     code,
                                     http_status=tex.status_code,
                                 )
+                                if propagate_http_errors:
+                                    raise
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
@@ -7956,7 +7958,7 @@ class ProxyService:
                     settlement.account_health_error = _should_penalize_stream_error(code)
                     if allow_retry and _should_retry_stream_error(code):
                         raise _RetryableStreamError(code, settlement.error)
-                    if allow_transient_retry and code in _TRANSIENT_RETRY_CODES:
+                    if allow_transient_retry and code in _TRANSIENT_RETRY_CODES and code != "stream_idle_timeout":
                         raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -7977,7 +7979,7 @@ class ProxyService:
                 if event.type == "response.incomplete":
                     status = "error"
 
-            if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
+            if event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
             if not _should_suppress_text_done_event(
                 event_type=event_type,
@@ -7999,7 +8001,7 @@ class ProxyService:
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
-                if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
+                if event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(
                     event_type=event_type,
@@ -8058,7 +8060,9 @@ class ProxyService:
                             error_message = error.message if error else None
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            settlement.account_health_error = _should_penalize_stream_error(error_code)
+                            settlement.account_health_error = (
+                                _should_penalize_stream_error(error_code) and not saw_text_delta
+                            )
                     if event_type in ("response.completed", "response.incomplete"):
                         response = event.response if event is not None else None
                         usage = response.usage if response else None

@@ -1631,6 +1631,15 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
+    stream, startup_error = await _probe_stream_startup_error(stream)
+    if startup_error is not None:
+        if owns_reservation:
+            await _release_reservation(reservation)
+        return _stream_startup_error_response(
+            request,
+            startup_error,
+            headers={**turn_state_headers, **rate_limit_headers},
+        )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,

@@ -267,7 +267,7 @@ async def v1_responses(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
-        enforce_strict_function_tools_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload.tools)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -1488,12 +1488,21 @@ async def v1_chat_completions(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
+        # Validate strict function tool schemas against the *original* request
+        # ``tools`` list before ``to_responses_request()`` runs. The chat
+        # normalizer (``_normalize_chat_tools``) silently drops invalid
+        # entries (non-dict tools, function tools with missing/empty
+        # ``name``), so validating the normalized output would surface
+        # ``tools[i].function.parameters`` with an ``i`` that no longer maps
+        # to the client's inbound payload. Using ``payload.tools`` keeps the
+        # error envelope's ``param`` aligned with what the client sent.
+        enforce_strict_function_tools_format(
+            payload.tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
-        enforce_strict_function_tools_format(
-            responses_payload,
-            param_template="tools[{index}].function.parameters",
-        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)

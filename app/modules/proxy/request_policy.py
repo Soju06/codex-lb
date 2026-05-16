@@ -197,7 +197,7 @@ def normalize_responses_request_payload(
     else:
         responses = ResponsesRequest.model_validate(payload)
     enforce_strict_text_format(responses)
-    enforce_strict_function_tools_format(responses)
+    enforce_strict_function_tools_format(responses.tools)
     return responses
 
 
@@ -235,9 +235,10 @@ def enforce_strict_text_format(request: ResponsesRequest) -> None:
 
 
 def enforce_strict_function_tools_format(
-    request: ResponsesRequest,
+    tools: list[JsonValue] | None,
     *,
     param_template: str = "tools[{index}].parameters",
+    nested: bool = False,
 ) -> None:
     """Reject strict-mode function tools whose parameter schemas violate OpenAI rules.
 
@@ -251,23 +252,45 @@ def enforce_strict_function_tools_format(
 
     ``param_template`` controls how the rejected parameter is named in
     the error envelope: native ``/v1/responses`` callers see
-    ``tools[<i>].parameters``; the chat-completions handler passes
+    ``tools[<i>].parameters``; chat-completions callers pass
     ``"tools[{index}].function.parameters"`` to mirror the inbound
     shape.
+
+    ``nested`` selects the shape of an inbound function tool:
+
+    * ``False`` (default) — flat ``{"type": "function", "name": ...,
+      "parameters": ..., "strict": ...}``. This is the
+      ``/v1/responses`` request shape (and the shape produced by
+      ``_normalize_chat_tools``).
+    * ``True`` — chat-completions shape with the function payload
+      wrapped under ``"function"``:
+      ``{"type": "function", "function": {"name": ..., "parameters":
+      ..., "strict": ...}}``. The chat handler MUST pass ``True`` and
+      hand in the *original* request payload's ``tools`` list (not the
+      list returned by ``ChatCompletionsRequest.to_responses_request``,
+      which may drop or reorder entries) so the ``{index}`` slot in
+      ``param_template`` lines up with the inbound payload.
     """
-    if not request.tools:
+    if not tools:
         return
-    for index, tool in enumerate(request.tools):
+    for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
             continue
         if tool.get("type") != "function":
             continue
-        if tool.get("strict") is not True:
+        if nested:
+            function_value = tool.get("function")
+            if not isinstance(function_value, dict):
+                continue
+            descriptor = function_value
+        else:
+            descriptor = tool
+        if descriptor.get("strict") is not True:
             continue
-        parameters = tool.get("parameters")
+        parameters = descriptor.get("parameters")
         if parameters is None:
             continue
-        raw_name = tool.get("name")
+        raw_name = descriptor.get("name")
         name = raw_name if isinstance(raw_name, str) else None
         violation = validate_strict_function_tool_schema(
             parameters,

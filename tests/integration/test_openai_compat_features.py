@@ -543,7 +543,54 @@ async def test_v1_chat_completions_rejects_strict_function_tool_violation(async_
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["param"] == "tools[0].function.parameters"
     assert "get_weather" in body["error"]["message"]
-    assert "additionalProperties" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_strict_violation_param_uses_original_index(async_client):
+    """Regression: when ``_normalize_chat_tools`` drops earlier entries,
+    the strict-validator's ``param`` must still point at the *inbound*
+    index so clients can map the error back to their payload.
+
+    Index 0 is an invalid function tool (no ``name``) — the normalizer
+    will drop it. Index 1 is the real strict violation. The error
+    envelope must surface ``tools[1].function.parameters``, not
+    ``tools[0].function.parameters``.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            # Index 0: dropped by ``_normalize_chat_tools`` (missing name).
+            {
+                "type": "function",
+                "function": {
+                    "description": "no name → dropped",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            # Index 1: strict violation (missing additionalProperties).
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": True,
+                },
+            },
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[1].function.parameters"
+    assert "get_weather" in body["error"]["message"]
 
 
 @pytest.mark.asyncio

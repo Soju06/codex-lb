@@ -508,26 +508,31 @@ def test_enforce_strict_function_tools_accepts_compliant_schema():
 
 
 def test_enforce_strict_function_tools_param_template_for_chat():
-    tools: list[JsonValue] = [
+    # Chat handler now validates the *raw* request payload's ``tools`` list
+    # (before ``_normalize_chat_tools`` drops any entries), so the helper is
+    # called with the chat shape directly — wrapped under ``"function"`` —
+    # and ``nested=True`` to extract ``parameters``/``strict`` from there.
+    chat_tools: list[JsonValue] = [
         {
             "type": "function",
-            "name": "get_weather",
-            "description": "x",
-            "parameters": {
-                "type": "object",
-                "properties": {"city": {"type": "string"}},
-                "required": ["city"],
+            "function": {
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "strict": True,
             },
-            "strict": True,
         }
     ]
-    # Build the request without triggering the default-template enforcement so
-    # we can call the helper with the chat-style param template directly.
-    from app.core.openai.requests import ResponsesRequest
-
-    request = ResponsesRequest.model_validate(_responses_payload_with_tools(tools))
     with pytest.raises(ClientPayloadError) as exc_info:
-        enforce_strict_function_tools_format(request, param_template="tools[{index}].function.parameters")
+        enforce_strict_function_tools_format(
+            chat_tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
     assert exc_info.value.param == "tools[0].function.parameters"
 
 
@@ -560,10 +565,12 @@ def test_chat_function_tool_strict_true_preserved_in_coercion():
     request = ChatCompletionsRequest.model_validate(payload)
     responses_request = request.to_responses_request()
     assert responses_request.tools[0]["strict"] is True  # type: ignore[index]
-    # Compliant schema passes the strict pre-validator.
+    # Compliant schema passes the strict pre-validator (chat path validates
+    # the raw payload tools, before ``_normalize_chat_tools`` runs).
     enforce_strict_function_tools_format(
-        responses_request,
+        request.tools,
         param_template="tools[{index}].function.parameters",
+        nested=True,
     )
 
 
@@ -589,11 +596,11 @@ def test_chat_function_tool_strict_true_violation_pre_validates():
         ],
     }
     request = ChatCompletionsRequest.model_validate(payload)
-    responses_request = request.to_responses_request()
     with pytest.raises(ClientPayloadError) as exc_info:
         enforce_strict_function_tools_format(
-            responses_request,
+            request.tools,
             param_template="tools[{index}].function.parameters",
+            nested=True,
         )
     err = exc_info.value
     assert err.code == "invalid_function_parameters"
@@ -649,3 +656,99 @@ def test_chat_function_tool_without_strict_has_no_strict_key():
     tool = responses_request.tools[0]
     assert isinstance(tool, dict)
     assert "strict" not in tool
+
+
+# ---------------------------------------------------------------------------
+# Chat strict enforcement: error ``param`` uses the original payload index
+# (regression for codex review feedback on PR #658).
+# ---------------------------------------------------------------------------
+
+
+def test_chat_strict_violation_param_uses_original_index_when_normalizer_drops():
+    """``_normalize_chat_tools`` silently drops entries it cannot coerce
+    (non-dict tools, function tools with missing/empty ``name``). The chat
+    strict pre-validator must report the violation index against the
+    *inbound* ``tools`` list — not the normalized output — so clients can
+    map ``param`` back to what they sent.
+
+    Scenario: original index 0 is an invalid function tool with no
+    ``name`` (dropped by the normalizer); original index 1 is a real
+    function tool whose ``strict: true`` schema is missing
+    ``additionalProperties: false``. The error must surface
+    ``tools[1].function.parameters`` — not ``tools[0]``.
+    """
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            # Index 0: invalid (no ``name``) → ``_normalize_chat_tools`` drops it.
+            {
+                "type": "function",
+                "function": {
+                    "description": "no name",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            # Index 1: strict violation (missing ``additionalProperties``).
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": True,
+                },
+            },
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    with pytest.raises(ClientPayloadError) as exc_info:
+        enforce_strict_function_tools_format(
+            request.tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
+    err = exc_info.value
+    assert err.code == "invalid_function_parameters"
+    # Index 1 here is the inbound-payload index, not the normalized one.
+    # Validating ``responses_request.tools`` instead would surface
+    # ``tools[0]`` and break the client's ability to locate the bad entry.
+    assert err.param == "tools[1].function.parameters"
+
+
+def test_chat_strict_enforcement_runs_against_raw_payload_in_handler_path():
+    """End-to-end-shaped check at the function level: confirm the chat
+    handler's enforcement target is the raw ``payload.tools`` (the same
+    structure the FastAPI handler sees) by validating directly against it
+    without going through ``to_responses_request()`` first."""
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            },
+        ],
+    }
+    request = ChatCompletionsRequest.model_validate(payload)
+    # Compliant payload — no exception even before coercion runs.
+    enforce_strict_function_tools_format(
+        request.tools,
+        param_template="tools[{index}].function.parameters",
+        nested=True,
+    )

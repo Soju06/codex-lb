@@ -8068,9 +8068,9 @@ class ProxyService:
         usage = None
         saw_text_delta = False
         latency_first_token_ms: int | None = None
-        response_create_lease = AdmissionLease(None)
         tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
+        response_create_lease = AdmissionLease(None)
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
@@ -8203,6 +8203,8 @@ class ProxyService:
 
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
+                event = parse_sse_event(line)
+                event_type = _event_type_from_payload(event, event_payload)
                 line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
                 event_service_tier = _service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
@@ -8926,11 +8928,11 @@ class _WebSocketRequestState:
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
-    input_item_count: int = 0
-    input_full_fingerprint: str | None = None
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    input_item_count: int = 0
+    input_full_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

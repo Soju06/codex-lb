@@ -104,9 +104,7 @@ def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | 
         return list(_iter_archive_paths(directory))
 
     requested_at_utc = requested_at.astimezone(UTC)
-    hourly_stems = [
-        (requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)
-    ]
+    hourly_stems = [(requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)]
     daily_stem = requested_at_utc.strftime("%Y-%m-%d")
     candidates: list[Path] = []
     for stem in hourly_stems:

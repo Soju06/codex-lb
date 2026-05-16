@@ -644,8 +644,11 @@ class ProxyService:
             logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
             durable_lookup = None
         effective_payload = payload
+        untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
         fresh_upstream_request_text: str | None = None
+        previous_response_trimmed_input_count: int | None = None
+        previous_response_trimmed_input_fingerprint: str | None = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -687,6 +690,13 @@ class ProxyService:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+        if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
+            previous_response_input_items = cast(list[JsonValue], effective_payload.input)
+            trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
+            if len(trimmed_input_items) != len(previous_response_input_items):
+                previous_response_trimmed_input_count = len(previous_response_input_items)
+                previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
+                effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
         request_state, text_data = self._prepare_http_bridge_request(
             effective_payload,
             headers,
@@ -696,6 +706,19 @@ class ProxyService:
         )
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
+        if previous_response_trimmed_input_count is not None:
+            request_state.input_item_count = previous_response_trimmed_input_count
+            request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
+            logger.info(
+                "http_bridge_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                "previous_response_id=%s",
+                request_state.request_id,
+                previous_response_trimmed_input_count,
+                len(cast(list[JsonValue], effective_payload.input))
+                if isinstance(effective_payload.input, list)
+                else None,
+                effective_payload.previous_response_id,
+            )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         request_state.request_stage = _http_bridge_request_stage(
             headers=headers,
@@ -1117,7 +1140,7 @@ class ProxyService:
                     error_message="Upstream websocket closed before response.completed",
                 )
                 recovery_path = "context_overflow_fresh_turn"
-                retry_payload = _http_bridge_payload_without_previous_response_id(effective_payload)
+                retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
                 retry_previous_response_id = None
                 retry_request_stage = "context_overflow_recover"
                 retry_preferred_account_id = None
@@ -9295,6 +9318,50 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(resets_in, int | float):
         error_detail["resets_in_seconds"] = resets_in
     return envelope
+
+
+def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    first_output_index = next(
+        (
+            index
+            for index, item in enumerate(input_items)
+            if _http_bridge_input_item_type(item) in {"function_call_output", "custom_tool_call_output"}
+        ),
+        None,
+    )
+    if first_output_index is None or first_output_index == 0:
+        return input_items
+    prefix = input_items[:first_output_index]
+    if not all(_is_http_bridge_previous_response_output_item(item) for item in prefix):
+        return input_items
+    return input_items[first_output_index:]
+
+
+def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
+    item_type = _http_bridge_input_item_type(item)
+    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+        return _has_http_bridge_response_output_marker(item)
+    if item_type != "message" or not isinstance(item, dict):
+        return False
+    role = item.get("role")
+    return role == "assistant" and _has_http_bridge_response_output_marker(item)
+
+
+def _has_http_bridge_response_output_marker(item: JsonValue) -> bool:
+    if not isinstance(item, dict):
+        return False
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.strip():
+        return True
+    status = item.get("status")
+    return status in {"completed", "in_progress"}
+
+
+def _http_bridge_input_item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
 
 
 def _normalize_http_bridge_error_event(

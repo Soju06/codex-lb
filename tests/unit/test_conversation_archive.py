@@ -9,8 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from app.core import conversation_archive
 from app.core.utils.request_id import reset_request_id, set_request_id
+from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.conversation_archive import service as conversation_archive_service
 
 
@@ -126,7 +129,7 @@ def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
 
     class FakeThread:
         def join(self, timeout: float | None = None) -> None:
-            assert timeout == 1
+            assert timeout is None
             events.append("thread.join")
 
     monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", FakeQueue())
@@ -135,6 +138,32 @@ def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
     conversation_archive._stop_writer()
 
     assert events == ["queue.join", "queue.put_sentinel", "thread.join"]
+
+
+@pytest.mark.asyncio
+async def test_archive_file_listing_runs_in_threadpool(monkeypatch):
+    called: list[object] = []
+    modified_at = datetime.fromisoformat("2026-05-16T00:00:00+00:00")
+    archive_file = conversation_archive_service.ConversationArchiveFile(
+        name="2026-05-16T00.jsonl.gz",
+        date="2026-05-16T00",
+        size_bytes=123,
+        compressed=True,
+        modified_at=modified_at,
+    )
+
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        called.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(conversation_archive_api, "run_in_threadpool", fake_run_in_threadpool)
+    monkeypatch.setattr(conversation_archive_api.service, "list_archive_files", lambda: [archive_file])
+
+    [response] = await conversation_archive_api.list_conversation_archive_files()
+
+    assert called == [conversation_archive_api.service.list_archive_files]
+    assert response.name == "2026-05-16T00.jsonl.gz"
+    assert response.modified_at == modified_at
 
 
 def test_archive_appends_complete_gzip_members(monkeypatch, tmp_path):
@@ -230,6 +259,23 @@ def test_archive_recovery_check_runs_once_per_file(monkeypatch, tmp_path):
     conversation_archive._append_record(path, {"request_id": "req_new_2"})
 
     assert calls == 1
+
+
+def test_archive_write_failure_forgets_prior_recovery_check(monkeypatch, tmp_path):
+    path = tmp_path / "2026-04-30T12.jsonl.gz"
+    path.write_bytes(gzip.compress(json.dumps({"request_id": "req_ok"}).encode("utf-8") + b"\n"))
+    conversation_archive._RECOVERY_CHECKED_PATHS.discard(path.resolve())
+
+    conversation_archive._append_record(path, {"request_id": "req_new_1"})
+    assert path.resolve() in conversation_archive._RECOVERY_CHECKED_PATHS
+
+    def fail_write(_path: Path, _data: bytes) -> None:
+        raise OSError("simulated partial archive write")
+
+    monkeypatch.setattr(conversation_archive, "_write_gzip_member", fail_write)
+    conversation_archive._append_record(path, {"request_id": "req_new_2"})
+
+    assert path.resolve() not in conversation_archive._RECOVERY_CHECKED_PATHS
 
 
 def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp_path, caplog):

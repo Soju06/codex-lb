@@ -216,6 +216,7 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
             _recover_corrupt_gzip_archive(path)
             _write_gzip_member(path, data)
     except Exception as exc:
+        _RECOVERY_CHECKED_PATHS.discard(path.resolve())
         if _is_disk_pressure_error(exc):
             _pause_archive_for_disk_pressure(path, exc)
             return
@@ -274,11 +275,11 @@ def _recover_corrupt_gzip_archive(path: Path) -> None:
     resolved_path = path.resolve()
     if resolved_path in _RECOVERY_CHECKED_PATHS:
         return
-    _RECOVERY_CHECKED_PATHS.add(resolved_path)
 
     if not path.exists() or path.stat().st_size == 0:
         return
     if _gzip_archive_is_readable(path):
+        _RECOVERY_CHECKED_PATHS.add(resolved_path)
         return
 
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -298,6 +299,7 @@ def _recover_corrupt_gzip_archive(path: Path) -> None:
                 recovered_count += 1
         path.replace(backup)
         recovered.replace(path)
+        _RECOVERY_CHECKED_PATHS.add(resolved_path)
         logger.warning(
             "Recovered readable conversation archive prefix from corrupt gzip file",
             extra={
@@ -327,7 +329,7 @@ def _stop_writer() -> None:
         return
     _WRITE_QUEUE.join()
     _WRITE_QUEUE.put(None)
-    thread.join(timeout=1)
+    thread.join()
 
 
 def _redact_header_value(key: str, value: object) -> str:

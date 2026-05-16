@@ -620,55 +620,59 @@ class ApiKeysRepository:
         cutoff: datetime,
         batch_size: int = _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE,
     ) -> int:
-        result = await self._session.execute(
-            select(ApiKeyUsageReservation)
-            .options(selectinload(ApiKeyUsageReservation.items))
-            .where(ApiKeyUsageReservation.status == "reserved")
-            .where(ApiKeyUsageReservation.updated_at < cutoff)
-            .order_by(ApiKeyUsageReservation.updated_at.asc())
-            .limit(batch_size)
-        )
-        rows = list(result.scalars().unique().all())
         released_count = 0
 
         try:
-            for row in rows:
-                claimed = await self._session.execute(
-                    update(ApiKeyUsageReservation)
-                    .where(ApiKeyUsageReservation.id == row.id)
+            while True:
+                result = await self._session.execute(
+                    select(ApiKeyUsageReservation)
+                    .options(selectinload(ApiKeyUsageReservation.items))
                     .where(ApiKeyUsageReservation.status == "reserved")
                     .where(ApiKeyUsageReservation.updated_at < cutoff)
-                    .values(
-                        status="released",
-                        input_tokens=None,
-                        output_tokens=None,
-                        cached_input_tokens=None,
-                        cost_microdollars=None,
-                    )
-                    .returning(ApiKeyUsageReservation.id)
+                    .order_by(ApiKeyUsageReservation.updated_at.asc())
+                    .limit(batch_size)
                 )
-                if claimed.scalar_one_or_none() is None:
-                    continue
+                rows = list(result.scalars().unique().all())
+                if not rows:
+                    break
 
-                for item in row.items:
-                    await self.adjust_reserved_usage(
-                        item.limit_id,
-                        delta=-item.reserved_delta,
-                        expected_reset_at=item.expected_reset_at,
+                for row in rows:
+                    claimed = await self._session.execute(
+                        update(ApiKeyUsageReservation)
+                        .where(ApiKeyUsageReservation.id == row.id)
+                        .where(ApiKeyUsageReservation.status == "reserved")
+                        .where(ApiKeyUsageReservation.updated_at < cutoff)
+                        .values(
+                            status="released",
+                            input_tokens=None,
+                            output_tokens=None,
+                            cached_input_tokens=None,
+                            cost_microdollars=None,
+                        )
+                        .returning(ApiKeyUsageReservation.id)
                     )
-                    await self.upsert_reservation_item_actual(
-                        row.id,
-                        item=UsageReservationItemData(
-                            limit_id=item.limit_id,
-                            limit_type=LimitType(item.limit_type),
-                            reserved_delta=item.reserved_delta,
+                    if claimed.scalar_one_or_none() is None:
+                        continue
+
+                    for item in row.items:
+                        await self.adjust_reserved_usage(
+                            item.limit_id,
+                            delta=-item.reserved_delta,
                             expected_reset_at=item.expected_reset_at,
-                            actual_delta=item.actual_delta,
-                        ),
-                        actual_delta=0,
-                    )
-                released_count += 1
-            await self._session.commit()
+                        )
+                        await self.upsert_reservation_item_actual(
+                            row.id,
+                            item=UsageReservationItemData(
+                                limit_id=item.limit_id,
+                                limit_type=LimitType(item.limit_type),
+                                reserved_delta=item.reserved_delta,
+                                expected_reset_at=item.expected_reset_at,
+                                actual_delta=item.actual_delta,
+                            ),
+                            actual_delta=0,
+                        )
+                    released_count += 1
+                await self._session.commit()
         except Exception:
             await self._session.rollback()
             raise

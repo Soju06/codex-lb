@@ -2132,10 +2132,11 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
             )
         )
         stale = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        stale_second = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         await session.execute(
             update(ApiKeyUsageReservation)
-            .where(ApiKeyUsageReservation.id == stale.reservation_id)
+            .where(ApiKeyUsageReservation.id.in_([stale.reservation_id, stale_second.reservation_id]))
             .values(created_at=now - timedelta(hours=7), updated_at=now - timedelta(hours=7))
         )
         await session.execute(
@@ -2147,16 +2148,20 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
-        released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6))
-        assert released_count == 1
+        released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
+        assert released_count == 2
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         stale_reservation = await repo.get_usage_reservation(stale.reservation_id)
+        stale_second_reservation = await repo.get_usage_reservation(stale_second.reservation_id)
         fresh_reservation = await repo.get_usage_reservation(fresh.reservation_id)
         assert stale_reservation is not None
         assert stale_reservation.status == "released"
         assert stale_reservation.items[0].actual_delta == 0
+        assert stale_second_reservation is not None
+        assert stale_second_reservation.status == "released"
+        assert stale_second_reservation.items[0].actual_delta == 0
         assert fresh_reservation is not None
         assert fresh_reservation.status == "reserved"
 

@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
@@ -608,3 +609,38 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
     assert remaining == {"cleanup-durable"}
     assert bridge_remaining == {"active-stale-session", "closed-fresh-session"}
     assert alias_remaining == {"active-stale-session", "closed-fresh-session"}
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_closed_session_purge_drains_multiple_batches(db_setup):
+    for index in range(3):
+        await _insert_http_bridge_session(
+            session_id=f"closed-batched-session-{index}",
+            state="closed",
+            last_seen_offset_seconds=600,
+        )
+    await _insert_http_bridge_session(
+        session_id="active-batched-session",
+        state="active",
+        last_seen_offset_seconds=600,
+    )
+
+    async with SessionLocal() as session:
+        repo = DurableBridgeRepository(session)
+        deleted = await repo.purge_closed_before(utcnow() - timedelta(seconds=60), batch_size=2)
+
+    async with SessionLocal() as session:
+        bridge_remaining = {
+            row[0]
+            for row in (await session.execute(text("SELECT id FROM http_bridge_sessions ORDER BY id"))).fetchall()
+        }
+        alias_remaining = {
+            row[0]
+            for row in (
+                await session.execute(text("SELECT session_id FROM http_bridge_session_aliases ORDER BY session_id"))
+            ).fetchall()
+        }
+
+    assert deleted == 3
+    assert bridge_remaining == {"active-batched-session"}
+    assert alias_remaining == {"active-batched-session"}

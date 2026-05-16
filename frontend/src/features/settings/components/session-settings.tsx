@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { TimerReset } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +25,7 @@ function formatStoredHours(ttlSeconds: number): string {
 }
 
 export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps) {
+  const { t } = useTranslation();
   const [sessionHours, setSessionHours] = useState(formatStoredHours(settings.dashboardSessionTtlSeconds));
 
   const trimmed = sessionHours.trim();
@@ -47,9 +49,9 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
               <TimerReset className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">Session</h3>
+              <h3 className="text-sm font-semibold">{t("settings.session.title")}</h3>
               <p className="text-xs text-muted-foreground">
-                Control how long newly issued password-backed dashboard sessions stay signed in.
+                {t("settings.session.description")}
               </p>
             </div>
           </div>
@@ -57,9 +59,9 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
 
         <div className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-sm font-medium">Dashboard session lifetime</p>
+            <p className="text-sm font-medium">{t("settings.session.lifetime.label")}</p>
             <p className="text-xs text-muted-foreground">
-              Absolute lifetime in hours for new password sessions. Existing sessions keep their original expiry.
+              {t("settings.session.lifetime.description")}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -77,9 +79,9 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
                 }
               }}
               className="h-8 w-24 text-xs"
-              aria-label="Dashboard session lifetime"
+              aria-label={t("settings.session.lifetime.ariaLabel")}
             />
-            <span className="text-xs text-muted-foreground">hours</span>
+            <span className="text-xs text-muted-foreground">{t("settings.session.lifetime.hoursSuffix")}</span>
             <Button
               type="button"
               size="sm"
@@ -88,20 +90,19 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
               disabled={busy || !changed}
               onClick={save}
             >
-              Save lifetime
+              {t("settings.session.lifetime.save")}
             </Button>
           </div>
         </div>
 
         {showInvalidInputWarning ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
-            Enter a whole number of hours (1 or more). Decimals such as <code>1.5</code> are not accepted.
+            <Trans i18nKey="settings.session.lifetime.invalid" components={[<code key="0" />]} />
           </div>
         ) : null}
         {showLongSessionWarning ? (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground">
-            Lifetimes over 30 days keep admin sessions valid for a long time. That may be acceptable on a personal
-            laptop, but it increases the impact of a leaked browser profile or stolen cookie.
+            {t("settings.session.lifetime.longWarning")}
           </div>
         ) : null}
       </div>

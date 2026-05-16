@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from collections.abc import Mapping
+from typing import cast
 
 import pytest
 from sqlalchemy import select
@@ -89,7 +90,9 @@ async def test_export_account_opencode_auth_json(async_client) -> None:
     assert auth_json["openai"] == {
         "type": "oauth",
         "refresh": "refresh-token",
-        "access": _make_auth_json(raw_account_id, email, access_exp=access_exp)["tokens"]["accessToken"],
+        "access": cast(dict[str, str], _make_auth_json(raw_account_id, email, access_exp=access_exp)["tokens"])[
+            "accessToken"
+        ],
         "expires": access_exp * 1000,
         "accountId": raw_account_id,
     }

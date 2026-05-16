@@ -44,6 +44,28 @@ export interface SafeLineView {
   riskLevel: "safe" | "warning" | "danger" | "critical";
 }
 
+export type WeeklyCreditPaceStatus = "behind" | "on_track" | "ahead" | "danger";
+
+export type WeeklyCreditPace = {
+  totalFullCredits: number;
+  totalActualRemainingCredits: number;
+  totalExpectedRemainingCredits: number;
+  actualUsedPercent: number;
+  scheduledUsedPercent: number;
+  deltaPercent: number;
+  overPlanCredits: number;
+  pauseForBreakEvenHours: number | null;
+  paceMultiplier: number | null;
+  throttleToPercent: number | null;
+  reduceByPercent: number | null;
+  proAccountEquivalentToCoverOverPlan: number | null;
+  proAccountsToCoverOverPlan: number | null;
+  projectedDepletionHours: number | null;
+  projectedMinimumRemainingCredits: number | null;
+  status: WeeklyCreditPaceStatus;
+  accountCount: number;
+};
+
 export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
@@ -55,6 +77,7 @@ export type DashboardView = {
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
+  weeklyCreditPace: WeeklyCreditPace | null;
 };
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
@@ -163,6 +186,7 @@ function avgPerUnit(total: number, units: number): number {
 }
 
 const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
+const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
@@ -171,6 +195,309 @@ function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
 /** Sum the `value` fields of remaining items (clamped to >= 0). */
 export function sumRemaining(items: RemainingItem[]): number {
   return items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+export function weeklyCreditPaceStatus(deltaPercent: number, projectedShortfallCredits: number): WeeklyCreditPaceStatus {
+  if (projectedShortfallCredits > 0) return "danger";
+  if (deltaPercent < -5) return "behind";
+  if (deltaPercent > 5) return "ahead";
+  return "on_track";
+}
+
+type WeeklyPoolAccount = {
+  fullCredits: number;
+  remainingCredits: number;
+  resetAtMs: number;
+  windowMs: number;
+};
+
+type WeeklyPoolSimulationAccount = WeeklyPoolAccount & {
+  balanceCredits: number;
+};
+
+type WeeklyPoolProjection = {
+  burnRateCreditsPerMs: number;
+  projectedShortfallCredits: number;
+  projectedDepletionHours: number | null;
+  projectedMinimumRemainingCredits: number;
+  firstReplenishmentWaitMs: number | null;
+};
+
+type WeeklyResetEvent = {
+  fullCredits: number;
+  balanceCredits: number;
+  resetAtMs: number;
+  windowMs: number;
+};
+
+function totalWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[]): number {
+  return accounts.reduce((sum, account) => sum + account.balanceCredits, 0);
+}
+
+function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], amountCredits: number): void {
+  let remainingToConsume = amountCredits;
+  const spendOrder = [...accounts].sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  for (const account of spendOrder) {
+    if (remainingToConsume <= 0) {
+      return;
+    }
+
+    const consumed = Math.min(account.balanceCredits, remainingToConsume);
+    account.balanceCredits -= consumed;
+    remainingToConsume -= consumed;
+  }
+}
+
+function buildEmptyWeeklyPoolProjection(
+  accounts: WeeklyPoolAccount[],
+  burnRateCreditsPerMs: number,
+  nowMs: number,
+): WeeklyPoolProjection {
+  const resetEvents = accounts
+    .filter((account) => account.resetAtMs > nowMs)
+    .map((account) => ({
+      fullCredits: account.fullCredits,
+      resetAtMs: account.resetAtMs,
+    }))
+    .sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  if (resetEvents.length === 0) {
+    return {
+      burnRateCreditsPerMs,
+      projectedShortfallCredits: 0,
+      projectedDepletionHours: 0,
+      projectedMinimumRemainingCredits: 0,
+      firstReplenishmentWaitMs: 0,
+    };
+  }
+
+  let cursorMs = nowMs;
+  let balanceCredits = 0;
+  let minimumRemainingCredits = 0;
+  let minimumRemainingAtMs = resetEvents[0].resetAtMs;
+
+  for (const event of resetEvents) {
+    const intervalMs = event.resetAtMs - cursorMs;
+    balanceCredits -= burnRateCreditsPerMs * intervalMs;
+    if (balanceCredits < minimumRemainingCredits) {
+      minimumRemainingCredits = balanceCredits;
+      minimumRemainingAtMs = event.resetAtMs;
+    }
+    balanceCredits += event.fullCredits;
+    cursorMs = event.resetAtMs;
+  }
+
+  return {
+    burnRateCreditsPerMs,
+    projectedShortfallCredits: Math.max(0, -minimumRemainingCredits),
+    projectedDepletionHours: 0,
+    projectedMinimumRemainingCredits: 0,
+    firstReplenishmentWaitMs: Math.max(0, minimumRemainingAtMs - nowMs),
+  };
+}
+
+function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number): WeeklyPoolProjection | null {
+  const totalRemainingCredits = accounts.reduce((sum, account) => sum + account.remainingCredits, 0);
+  const burnRateCreditsPerMs = accounts.reduce((sum, account) => {
+    const usedCredits = Math.max(0, account.fullCredits - account.remainingCredits);
+    const windowStartMs = account.resetAtMs - account.windowMs;
+    const elapsedMs = nowMs - windowStartMs;
+    if (usedCredits <= 0 || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+      return sum;
+    }
+    return sum + usedCredits / elapsedMs;
+  }, 0);
+  if (burnRateCreditsPerMs <= 0) {
+    return null;
+  }
+
+  if (totalRemainingCredits <= 0) {
+    return buildEmptyWeeklyPoolProjection(accounts, burnRateCreditsPerMs, nowMs);
+  }
+
+  const hasFutureReset = accounts.some((account) => account.resetAtMs > nowMs);
+  if (!hasFutureReset) {
+    return {
+      burnRateCreditsPerMs,
+      projectedShortfallCredits: 0,
+      projectedDepletionHours: null,
+      projectedMinimumRemainingCredits: totalRemainingCredits,
+      firstReplenishmentWaitMs: null,
+    };
+  }
+
+  const simulationAccounts: WeeklyPoolSimulationAccount[] = accounts.map((account) => ({
+    ...account,
+    balanceCredits: account.remainingCredits,
+  }));
+  const resetEvents: WeeklyResetEvent[] = simulationAccounts.filter((account) => account.resetAtMs > nowMs);
+
+  let cursorMs = nowMs;
+  let balanceCredits = totalRemainingCredits;
+  let minimumRemainingCredits = totalRemainingCredits;
+  const longestWindowMs = Math.max(...accounts.map((account) => account.windowMs));
+  const horizonMs = nowMs + longestWindowMs * 2;
+
+  while (cursorMs < horizonMs) {
+    resetEvents.sort((a, b) => a.resetAtMs - b.resetAtMs);
+    const event = resetEvents[0];
+    const nextEventAtMs = Math.min(event.resetAtMs, horizonMs);
+    const intervalMs = nextEventAtMs - cursorMs;
+    const intervalBurnCredits = burnRateCreditsPerMs * intervalMs;
+    if (intervalBurnCredits > balanceCredits) {
+      const projectedShortfallCredits = intervalBurnCredits - balanceCredits;
+      return {
+        burnRateCreditsPerMs,
+        projectedShortfallCredits,
+        projectedDepletionHours: (cursorMs - nowMs + balanceCredits / burnRateCreditsPerMs) / 3_600_000,
+        projectedMinimumRemainingCredits: 0,
+        firstReplenishmentWaitMs: nextEventAtMs - nowMs,
+      };
+    }
+
+    consumeWeeklyBalanceCredits(simulationAccounts, intervalBurnCredits);
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
+    minimumRemainingCredits = Math.min(minimumRemainingCredits, balanceCredits);
+    cursorMs = nextEventAtMs;
+    if (cursorMs >= horizonMs) {
+      break;
+    }
+
+    event.balanceCredits = event.fullCredits;
+    event.resetAtMs += event.windowMs;
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
+  }
+
+  return {
+    burnRateCreditsPerMs,
+    projectedShortfallCredits: 0,
+    projectedDepletionHours: null,
+    projectedMinimumRemainingCredits: minimumRemainingCredits,
+    firstReplenishmentWaitMs: null,
+  };
+}
+
+function advanceWeeklyResetAt(resetAtMs: number, windowMs: number, nowMs: number): number {
+  if (!Number.isFinite(resetAtMs) || !isPositiveFinite(windowMs) || !Number.isFinite(nowMs)) {
+    return resetAtMs;
+  }
+  if (resetAtMs > nowMs) {
+    return resetAtMs;
+  }
+  const missedWindows = Math.floor((nowMs - resetAtMs) / windowMs) + 1;
+  return resetAtMs + missedWindows * windowMs;
+}
+
+export function buildWeeklyCreditPace(
+  accounts: AccountSummary[],
+  now: Date = new Date(),
+): WeeklyCreditPace | null {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    return null;
+  }
+
+  let totalFullCredits = 0;
+  let totalActualRemainingCredits = 0;
+  let totalExpectedRemainingCredits = 0;
+  let accountCount = 0;
+  const weeklyAccounts: WeeklyPoolAccount[] = [];
+
+  for (const account of accounts) {
+    const fullCredits = account.capacityCreditsSecondary;
+    const remainingCredits = account.remainingCreditsSecondary;
+    const resetAtMs = account.resetAtSecondary ? Date.parse(account.resetAtSecondary) : Number.NaN;
+    const windowMinutes = account.windowMinutesSecondary;
+
+    if (
+      !isPositiveFinite(fullCredits) ||
+      !isNonNegativeFinite(remainingCredits) ||
+      !Number.isFinite(resetAtMs) ||
+      !isPositiveFinite(windowMinutes)
+    ) {
+      continue;
+    }
+
+    const windowMs = windowMinutes * 60_000;
+    const effectiveResetAtMs = advanceWeeklyResetAt(resetAtMs, windowMs, nowMs);
+    const timeLeftMs = clamp(effectiveResetAtMs - nowMs, 0, windowMs);
+    const expectedRemainingCredits = fullCredits * (timeLeftMs / windowMs);
+    const actualRemainingCredits = clamp(remainingCredits, 0, fullCredits);
+
+    totalFullCredits += fullCredits;
+    totalActualRemainingCredits += actualRemainingCredits;
+    totalExpectedRemainingCredits += expectedRemainingCredits;
+    accountCount += 1;
+    weeklyAccounts.push({
+      fullCredits,
+      remainingCredits: actualRemainingCredits,
+      resetAtMs: effectiveResetAtMs,
+      windowMs,
+    });
+  }
+
+  if (accountCount === 0 || totalFullCredits <= 0) {
+    return null;
+  }
+
+  const actualUsedPercent = (100 * (totalFullCredits - totalActualRemainingCredits)) / totalFullCredits;
+  const scheduledUsedPercent = (100 * (totalFullCredits - totalExpectedRemainingCredits)) / totalFullCredits;
+  const deltaPercent = actualUsedPercent - scheduledUsedPercent;
+  const projection = buildWeeklyPoolProjection(weeklyAccounts, nowMs);
+  const overPlanCredits = projection?.projectedShortfallCredits ?? 0;
+  const pauseForBreakEvenHours =
+    projection && overPlanCredits > 0 && projection.burnRateCreditsPerMs > 0
+      ? overPlanCredits / projection.burnRateCreditsPerMs / 3_600_000
+      : null;
+  const paceMultiplier = overPlanCredits > 0 && scheduledUsedPercent > 0 ? actualUsedPercent / scheduledUsedPercent : null;
+  const throttleToPercent =
+    projection && overPlanCredits > 0 && projection.firstReplenishmentWaitMs && projection.burnRateCreditsPerMs > 0
+      ? clamp(
+          ((projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs - overPlanCredits) /
+            (projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs)) *
+            100,
+          0,
+          100,
+        )
+      : null;
+  const reduceByPercent = throttleToPercent != null ? 100 - throttleToPercent : null;
+  const proAccountEquivalentToCoverOverPlan =
+    overPlanCredits > 0 ? overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS : null;
+  const proAccountsToCoverOverPlan =
+    overPlanCredits > 0 ? Math.ceil(overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null;
+
+  return {
+    totalFullCredits,
+    totalActualRemainingCredits,
+    totalExpectedRemainingCredits,
+    actualUsedPercent,
+    scheduledUsedPercent,
+    deltaPercent,
+    overPlanCredits,
+    pauseForBreakEvenHours,
+    paceMultiplier,
+    throttleToPercent,
+    reduceByPercent,
+    proAccountEquivalentToCoverOverPlan,
+    proAccountsToCoverOverPlan,
+    projectedDepletionHours: projection?.projectedDepletionHours ?? null,
+    projectedMinimumRemainingCredits: projection?.projectedMinimumRemainingCredits ?? null,
+    status: weeklyCreditPaceStatus(deltaPercent, overPlanCredits),
+    accountCount,
+  };
 }
 
 export function buildDashboardView(
@@ -192,10 +519,14 @@ export function buildDashboardView(
     timeframeHours <= 24
       ? `Avg/hr ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours)))}`
       : `Avg/day ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays)))}`;
-  const costMeta =
+  const costAverage =
     timeframeHours <= 24
       ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
       : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
+  const costMeta =
+    metrics?.cachedInputTokens && metrics.cachedInputTokens > 0
+      ? `${costAverage} · API estimate, ${formatCompactNumber(metrics.cachedInputTokens)} cached`
+      : `${costAverage} · API estimate`;
   const trends = overview.trends;
 
   const stats: DashboardStat[] = [
@@ -216,7 +547,7 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[1],
     },
     {
-      label: `Cost (${timeframeLabel})`,
+      label: `Est. API Cost (${timeframeLabel})`,
       value: formatCurrency(cost),
       meta: costMeta,
       icon: DollarSign,
@@ -250,5 +581,6 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),
+    weeklyCreditPace: buildWeeklyCreditPace(overview.accounts),
   };
 }

@@ -2906,6 +2906,7 @@ class ProxyService:
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
             raise
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -2919,7 +2920,6 @@ class ProxyService:
                 else None,
                 responses_payload.previous_response_id,
             )
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
             headers,

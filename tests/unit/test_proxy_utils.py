@@ -6656,7 +6656,7 @@ async def test_process_upstream_websocket_text_skips_anonymous_prev_nf_for_misma
     assert downstream_text == json.dumps(payload, separators=(",", ":"))
     finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request]
 
 

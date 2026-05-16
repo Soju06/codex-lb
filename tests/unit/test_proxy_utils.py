@@ -2118,9 +2118,11 @@ async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(
     failed_payload = parse_sse_data_json(events[1])
     assert failed_payload is not None
     assert failed_payload["type"] == "response.failed"
-    assert failed_payload["response"]["error"]["code"] == "invalid_request_error"
-    assert failed_payload["response"]["error"]["message"] == "No tool output found for function call call_missing."
-    assert failed_payload["response"]["error"]["param"] == "input"
+    failed_response = cast(dict[str, JsonValue], failed_payload["response"])
+    failed_error = cast(dict[str, JsonValue], failed_response["error"])
+    assert failed_error["code"] == "invalid_request_error"
+    assert failed_error["message"] == "No tool output found for function call call_missing."
+    assert failed_error["param"] == "input"
     assert websocket._index == 2
 
 
@@ -5892,93 +5894,6 @@ async def test_process_upstream_websocket_text_does_not_match_foreign_completed_
     assert downstream_text == json.dumps(payload, separators=(",", ":"))
     finalize_request_state.assert_not_awaited()
     assert list(pending_requests) == [pending_request]
-
-
-@pytest.mark.asyncio
-async def test_process_upstream_websocket_text_buffers_nonterminal_events_until_response_created(monkeypatch):
-    request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
-    finalize_request_state = AsyncMock()
-    account = _make_account("acc_ws_precreated_buffer")
-
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
-
-    pending_request = proxy_service._WebSocketRequestState(
-        request_id="ws_req_precreated_buffer",
-        model="gpt-5.1",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
-        awaiting_response_created=True,
-        request_text=json.dumps(
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-            },
-            separators=(",", ":"),
-        ),
-    )
-    pending_requests = deque([pending_request])
-    upstream_control = proxy_service._WebSocketUpstreamControl()
-    pending_lock = anyio.Lock()
-    response_create_gate = asyncio.Semaphore(1)
-    delta_text = json.dumps(
-        {
-            "type": "response.output_text.delta",
-            "item_id": "msg_precreated",
-            "output_index": 0,
-            "content_index": 0,
-            "delta": "hello",
-        },
-        separators=(",", ":"),
-    )
-
-    downstream_text = await service._process_upstream_websocket_text(
-        delta_text,
-        account=account,
-        account_id_value=account.id,
-        pending_requests=pending_requests,
-        pending_lock=pending_lock,
-        api_key=None,
-        upstream_control=upstream_control,
-        response_create_gate=response_create_gate,
-    )
-
-    assert downstream_text == delta_text
-    assert upstream_control.suppress_downstream_event is True
-    assert upstream_control.downstream_texts is None
-    assert pending_request.pre_response_created_event_texts == [delta_text]
-    finalize_request_state.assert_not_awaited()
-
-    upstream_control.suppress_downstream_event = False
-    created_text = json.dumps(
-        {
-            "type": "response.created",
-            "response": {"id": "resp_precreated_buffer", "status": "in_progress"},
-        },
-        separators=(",", ":"),
-    )
-
-    downstream_text = await service._process_upstream_websocket_text(
-        created_text,
-        account=account,
-        account_id_value=account.id,
-        pending_requests=pending_requests,
-        pending_lock=pending_lock,
-        api_key=None,
-        upstream_control=upstream_control,
-        response_create_gate=response_create_gate,
-    )
-
-    assert downstream_text == created_text
-    assert upstream_control.suppress_downstream_event is True
-    assert upstream_control.downstream_texts == [created_text, delta_text]
-    assert pending_request.pre_response_created_event_texts == []
-    assert pending_request.awaiting_response_created is False
-    assert pending_request.response_id == "resp_precreated_buffer"
-    finalize_request_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

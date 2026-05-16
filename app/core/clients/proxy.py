@@ -935,18 +935,21 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
         for key in ("plan_type", "resets_at", "resets_in_seconds"):
             if key in detail:
                 event["response"]["error"][key] = detail[key]
-        return event
+        return cast(dict[str, JsonValue], event)
     if event_type == "error":
         message = _extract_upstream_message(payload) or "Upstream websocket error"
         code = payload.get("code")
         error_type = payload.get("error_type") or payload.get("type")
-        return response_failed_event(
-            _normalize_error_code(
-                code if isinstance(code, str) else None, error_type if isinstance(error_type, str) else None
+        return cast(
+            dict[str, JsonValue],
+            response_failed_event(
+                _normalize_error_code(
+                    code if isinstance(code, str) else None, error_type if isinstance(error_type, str) else None
+                ),
+                message,
+                error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
+                response_id=get_request_id(),
             ),
-            message,
-            error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
-            response_id=get_request_id(),
         )
     return payload
 

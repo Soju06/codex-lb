@@ -14,15 +14,26 @@ export type SessionSettingsProps = {
 
 const MIN_TTL_SECONDS = 3600;
 const WARNING_THRESHOLD_SECONDS = 30 * 24 * 60 * 60;
+const INTEGER_HOURS_PATTERN = /^\d+$/;
+
+function formatStoredHours(ttlSeconds: number): string {
+  const hours = ttlSeconds / 3600;
+  // Preserve sub-hour TTLs without silently rounding them when the backend
+  // already accepts any value >= MIN_TTL_SECONDS.
+  return Number.isInteger(hours) ? String(hours) : hours.toFixed(2);
+}
 
 export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps) {
-  const [sessionHours, setSessionHours] = useState(String(settings.dashboardSessionTtlSeconds / 3600));
+  const [sessionHours, setSessionHours] = useState(formatStoredHours(settings.dashboardSessionTtlSeconds));
 
-  const parsedHours = Number.parseInt(sessionHours, 10);
+  const trimmed = sessionHours.trim();
+  const isInteger = INTEGER_HOURS_PATTERN.test(trimmed);
+  const parsedHours = isInteger ? Number.parseInt(trimmed, 10) : Number.NaN;
   const parsedSeconds = parsedHours * 3600;
-  const valid = Number.isInteger(parsedHours) && parsedHours > 0 && parsedSeconds >= MIN_TTL_SECONDS;
+  const valid = isInteger && Number.isFinite(parsedHours) && parsedHours > 0 && parsedSeconds >= MIN_TTL_SECONDS;
   const changed = valid && parsedSeconds !== settings.dashboardSessionTtlSeconds;
   const showLongSessionWarning = valid && parsedSeconds > WARNING_THRESHOLD_SECONDS;
+  const showInvalidInputWarning = trimmed !== "" && !valid;
 
   const save = () =>
     void onSave(buildSettingsUpdateRequest(settings, { dashboardSessionTtlSeconds: parsedSeconds }));
@@ -82,6 +93,11 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
           </div>
         </div>
 
+        {showInvalidInputWarning ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            Enter a whole number of hours (1 or more). Decimals such as <code>1.5</code> are not accepted.
+          </div>
+        ) : null}
         {showLongSessionWarning ? (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground">
             Lifetimes over 30 days keep admin sessions valid for a long time. That may be acceptable on a personal

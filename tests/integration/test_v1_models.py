@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
+from app.core.types import JsonValue
 
 pytestmark = pytest.mark.integration
 
@@ -12,8 +13,13 @@ def _make_upstream_model(
     *,
     supported_in_api: bool = True,
     base_instructions: str = "",
-    raw: dict | None = None,
+    raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
+    default_raw: dict[str, JsonValue] = {
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "availability_nux": None,
+    }
     return UpstreamModel(
         slug=slug,
         display_name=slug,
@@ -32,12 +38,7 @@ def _make_upstream_model(
         priority=0,
         available_in_plans=frozenset({"plus", "pro"}),
         base_instructions=base_instructions,
-        raw=raw
-        or {
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "availability_nux": None,
-        },
+        raw=raw or default_raw,
     )
 
 

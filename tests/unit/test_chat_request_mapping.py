@@ -30,6 +30,104 @@ def test_chat_messages_require_objects():
         ChatCompletionsRequest.model_validate(payload)
 
 
+def test_chat_unknown_message_keys_are_dropped():
+    """Unknown keys on a message object must not reach the Responses input.
+
+    OpenAI's own /v1/chat/completions parses the known chat-message fields
+    and ignores everything else on the message object — it never forwards
+    arbitrary client-supplied keys. codex-lb must match that: a Responses
+    API input message item only has `role` + `content`, and forwarding any
+    other key makes the upstream Responses API reject the whole request
+    with an `unknown_parameter` error (which then poisons every later
+    request that replays the same message history).
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi", "_client_marker": True, "extra": 1},
+            {"role": "assistant", "content": "(empty)", "_client_marker": True},
+            {"role": "user", "content": "continue", "_client_marker": True},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "(empty)"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+    items = responses.input
+    assert isinstance(items, list)
+    for item in items:
+        assert isinstance(item, dict)
+        assert set(item.keys()) == {"role", "content"}
+
+
+def test_chat_message_name_field_is_dropped():
+    """The standard chat `name` field has no Responses input-item equivalent.
+
+    `name` is a documented optional field on OpenAI chat messages, but the
+    Responses API input message item does not accept it. It must be dropped
+    during coercion rather than forwarded (forwarding it triggers an
+    upstream `unknown_parameter` rejection).
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "hi", "name": "alice"},
+            {"role": "assistant", "content": "hello", "name": "bot"},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "hello"}]},
+    ]
+
+
+def test_chat_assistant_tool_call_message_drops_unknown_keys():
+    """The message item emitted alongside decomposed tool calls is also clean.
+
+    When an assistant message carries both content and tool_calls, the
+    content half is emitted as a separate input message item. That item
+    must carry only `role` + `content`, same as any other message item.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check",
+                "name": "bot",
+                "_client_marker": True,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    items = responses.input
+    assert isinstance(items, list)
+    assert items[1] == {
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Let me check"}],
+    }
+    assert items[2] == {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{}",
+    }
+
+
 def test_chat_system_message_rejects_non_text_content():
     payload = {
         "model": "gpt-5.2",
@@ -78,17 +176,19 @@ def test_chat_max_tokens_are_stripped():
     assert "max_completion_tokens" not in dumped
 
 
-def test_chat_temperature_is_stripped_for_upstream_compat():
+def test_temperature_and_top_p_are_stripped_for_upstream_compat():
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "hi"}],
         "temperature": 0.2,
+        "top_p": 0.9,
         "safety_identifier": "safe_123",
     }
     req = ChatCompletionsRequest.model_validate(payload)
     responses = req.to_responses_request()
     dumped = responses.to_payload()
     assert "temperature" not in dumped
+    assert "top_p" not in dumped
     assert "safety_identifier" not in dumped
 
 

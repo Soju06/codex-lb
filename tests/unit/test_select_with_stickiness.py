@@ -21,8 +21,17 @@ from app.modules.proxy.load_balancer import LoadBalancer
 pytestmark = pytest.mark.unit
 
 
-def _active(account_id: str, used_percent: float = 10.0) -> AccountState:
-    return AccountState(account_id, AccountStatus.ACTIVE, used_percent=used_percent)
+def _active(
+    account_id: str,
+    used_percent: float = 10.0,
+    secondary_used_percent: float | None = None,
+) -> AccountState:
+    return AccountState(
+        account_id,
+        AccountStatus.ACTIVE,
+        used_percent=used_percent,
+        secondary_used_percent=secondary_used_percent,
+    )
 
 
 def _rate_limited(
@@ -767,6 +776,7 @@ async def test_budget_threshold_reallocates_sticky_thread_affinity():
     PROMPT_CACHE / CODEX_SESSION)."""
     acc_a = _active("a", used_percent=96.0)
     acc_b = _active("b", used_percent=50.0)
+
     repo = _make_sticky_repo(existing_account_id="a")
 
     result = await _invoke_stickiness(
@@ -786,12 +796,35 @@ async def test_budget_threshold_reallocates_sticky_thread_affinity():
 
 
 @pytest.mark.asyncio
+async def test_budget_threshold_reallocates_to_primary_safe_secondary_pressured_candidate():
+    acc_a = _active("a", used_percent=99.0, secondary_used_percent=1.0)
+    acc_b = _active("b", used_percent=10.0, secondary_used_percent=99.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
 async def test_sticky_thread_preserves_pinned_when_pool_also_above_threshold():
     """When every candidate is above the budget threshold, STICKY_THREAD
     must stay pinned to avoid thrashing (parity with the existing
     capacity-weighted budget-pressure tests)."""
     acc_a = _active("a", used_percent=99.0)
     acc_b = _active("b", used_percent=96.0)
+
     repo = _make_sticky_repo(existing_account_id="a")
 
     result = await _invoke_stickiness(
@@ -807,6 +840,28 @@ async def test_sticky_thread_preserves_pinned_when_pool_also_above_threshold():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_preserves_sticky_when_every_candidate_secondary_pressured():
+    acc_a = _active("a", used_percent=10.0, secondary_used_percent=99.0)
+    acc_b = _active("b", used_percent=20.0, secondary_used_percent=99.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio

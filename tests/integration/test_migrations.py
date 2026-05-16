@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from anyio import to_thread
 from sqlalchemy import text
@@ -33,9 +35,11 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
 try:
-    from app.db.migrate import check_migration_policy
+    from app.db.migrate import check_migration_policy as _check_migration_policy
 except ImportError:
-    check_migration_policy = None  # type: ignore[assignment]
+    check_migration_policy: Callable[[str], tuple[str, ...]] | None = None
+else:
+    check_migration_policy = _check_migration_policy
 pytestmark = pytest.mark.integration
 _DATABASE_URL = get_settings().database_url
 _HEAD_REVISION = inspect_migration_state(_DATABASE_URL).head_revision
@@ -567,6 +571,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "idx_logs_requested_at_model_tier" in request_log_index_names
             assert "idx_logs_model_effort_time" in request_log_index_names
             assert "idx_logs_status_error_time" in request_log_index_names
+            assert "idx_logs_api_key_time" in request_log_index_names
             api_key_index_rows = (await session.execute(text("PRAGMA index_list(api_keys)"))).fetchall()
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names

@@ -47,6 +47,35 @@ describe("SessionSettings", () => {
     });
   });
 
+  it("shows existing non-integer hour TTLs without rounding them down", () => {
+    render(
+      <SessionSettings
+        settings={{ ...baseSettings, dashboardSessionTtlSeconds: 5400 }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByDisplayValue("1.50")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save lifetime" })).toBeDisabled();
+  });
+
+  it("rejects decimal hour input without silently truncating it", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<SessionSettings settings={baseSettings} busy={false} onSave={onSave} />);
+
+    const input = screen.getByLabelText("Dashboard session lifetime");
+    await user.clear(input);
+    await user.type(input, "1.5");
+
+    expect(screen.getByRole("button", { name: "Save lifetime" })).toBeDisabled();
+    expect(
+      screen.getByText(/Enter a whole number of hours/i),
+    ).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("shows a warning for lifetimes over 30 days and still allows saving", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

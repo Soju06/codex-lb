@@ -6634,7 +6634,6 @@ class ProxyService:
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 retry_error_code,
             )
-            request_state.account_health_error_handled = True
             event, payload, event_type, downstream_text = _rewrite_websocket_previous_response_owner_unavailable_event(
                 request_state=request_state,
             )
@@ -6673,7 +6672,6 @@ class ProxyService:
                     {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                     retry_error_code,
                 )
-                request_state.account_health_error_handled = True
             if retry_error_code is not None:
                 return downstream_text
 
@@ -6852,8 +6850,6 @@ class ProxyService:
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
         if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
-            settlement.account_health_error = False
-        if request_state.account_health_error_handled:
             settlement.account_health_error = False
         if (
             error_code == "stream_incomplete"
@@ -8966,7 +8962,6 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
-    account_health_error_handled: bool = False
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None

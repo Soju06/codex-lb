@@ -6626,13 +6626,17 @@ class ProxyService:
             remaining = list(pending_requests)
             pending_requests.clear()
 
-        if (
-            remaining
-            and account is not None
-            and isinstance(account, Account)
-            and (error_code in _TRANSIENT_RETRY_CODES or _should_penalize_stream_error(error_code))
-        ):
-            await self._handle_stream_error(account, {"message": error_message}, error_code)
+        penalty_code: str | None = None
+        penalty_message: str | None = None
+        for request_state in remaining:
+            request_error_code = request_state.error_code_override or error_code
+            if request_error_code in _TRANSIENT_RETRY_CODES or _should_penalize_stream_error(request_error_code):
+                penalty_code = request_error_code
+                penalty_message = request_state.error_message_override or error_message
+                break
+
+        if remaining and account is not None and isinstance(account, Account) and penalty_code is not None:
+            await self._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
 
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):

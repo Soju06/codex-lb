@@ -6848,7 +6848,11 @@ class ProxyService:
         if event_type in {"response.failed", "response.incomplete", "error"}:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
-            settlement.account_health_error = _should_penalize_stream_error(error_code)
+            settlement.account_health_error = _should_penalize_stream_error(error_code) and not getattr(
+                request_state,
+                "account_health_error_handled",
+                False,
+            )
         if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
             settlement.account_health_error = False
         if (

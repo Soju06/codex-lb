@@ -73,7 +73,22 @@ async def test_v1_responses_forwards_input_file_url(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_rejects_input_file_id(async_client):
+async def test_v1_responses_forwards_input_file_id(async_client, monkeypatch):
+    """`input_file.file_id` was previously rejected because uploads via
+    `POST /backend-api/files` were not supported. With the file upload
+    protocol in place, the proxy now forwards these references verbatim
+    so callers can attach pre-uploaded files (bypassing the 16 MiB
+    websocket ceiling on `/responses`)."""
+    await _import_account(async_client, "acc_input_file_id", "input-file-id@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_input_file_id")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "input": [
@@ -87,11 +102,9 @@ async def test_v1_responses_rejects_input_file_id(async_client):
         ],
     }
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
-    payload = resp.json()
-    assert payload["error"]["type"] == "invalid_request_error"
-    assert payload["error"]["message"] == "Invalid request payload"
-    assert payload["error"]["param"] == "input"
+    assert resp.status_code == 200
+    forwarded_input = seen["payload"].input  # type: ignore[attr-defined]
+    assert forwarded_input == payload["input"]
 
 
 @pytest.mark.asyncio
@@ -439,7 +452,12 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
             "type": "json_schema",
             "json_schema": {
                 "name": "result_schema",
-                "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
                 "strict": True,
             },
         },
@@ -451,6 +469,41 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
     assert text.format is not None
     assert text.format.type == "json_schema"
     assert text.format.name == "result_schema"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_rejects_strict_schema_violation(async_client):
+    """Strict-mode schema violations are rejected locally with 400.
+
+    Mirrors the OpenAI ``invalid_json_schema`` error so callers (Graphiti,
+    raw SDK clients) see actionable diagnostics instead of a generic
+    ``stream_incomplete`` 502 from upstream.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Return JSON."}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "result_schema",
+                "strict": True,
+                # No additionalProperties: false → strict-mode violation.
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            },
+        },
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_json_schema"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "text.format.schema"
+    assert "additionalProperties" in body["error"]["message"]
+    assert "result_schema" in body["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -658,6 +711,29 @@ async def test_v1_chat_completions_maps_reasoning_effort(async_client, monkeypat
     assert resp.status_code == 200
     assert seen["payload"].reasoning is not None
     assert seen["payload"].reasoning.effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_normalizes_enable_thinking(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_enable_thinking", "chat-enable-thinking@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_chat_enable_thinking")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Think."}],
+        "enable_thinking": True,
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["reasoning"] == {"effort": "medium"}
+    assert "enable_thinking" not in seen["payload"]
 
 
 @pytest.mark.asyncio

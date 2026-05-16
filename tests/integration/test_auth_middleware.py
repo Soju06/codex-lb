@@ -423,7 +423,9 @@ async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(a
 async def test_totp_only_mode_accepts_totp_verified_session(async_client):
     await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(password_verified=False, totp_verified=True)
+    session_id = get_dashboard_session_store().create(
+        password_verified=False, totp_verified=True, ttl_seconds=12 * 60 * 60
+    )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     allowed = await async_client.get("/api/settings")
@@ -434,7 +436,9 @@ async def test_totp_only_mode_accepts_totp_verified_session(async_client):
 async def test_totp_only_mode_rejects_missing_totp_verification(async_client):
     await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=False)
+    session_id = get_dashboard_session_store().create(
+        password_verified=True, totp_verified=False, ttl_seconds=12 * 60 * 60
+    )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     blocked = await async_client.get("/api/settings")

@@ -455,6 +455,21 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.status).toBe("danger");
   });
 
+  it("bases throttle advice on the full time until the replenishing reset", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "acc-near", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 10 }),
+        weeklyAccount({ accountId: "acc-far", fullCredits: 100_000, remainingCredits: 50_000, timeLeftPercent: 90 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.projectedDepletionHours).toBeCloseTo(60.48);
+    expect(pace?.throttleToPercent).toBeCloseTo(40);
+    expect(pace?.reduceByPercent).toBeCloseTo(60);
+  });
+
   it("expires unused account credits at reset instead of carrying them forward", () => {
     const pace = buildWeeklyCreditPace(
       [

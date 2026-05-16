@@ -322,9 +322,9 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
       return {
         burnRateCreditsPerMs,
         projectedShortfallCredits,
-        projectedDepletionHours: balanceCredits / burnRateCreditsPerMs / 3_600_000,
+        projectedDepletionHours: (cursorMs - nowMs + balanceCredits / burnRateCreditsPerMs) / 3_600_000,
         projectedMinimumRemainingCredits: 0,
-        firstReplenishmentWaitMs: nextEventAtMs - cursorMs,
+        firstReplenishmentWaitMs: nextEventAtMs - nowMs,
       };
     }
 

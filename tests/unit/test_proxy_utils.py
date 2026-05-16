@@ -59,6 +59,26 @@ def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
     return exc.payload["error"].get("message")
 
 
+def test_trim_websocket_previous_response_input_items_accepts_untyped_assistant_replay() -> None:
+    items: list[JsonValue] = [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+        {"type": "custom_tool_call", "call_id": "call_custom", "name": "shell", "input": "pwd"},
+        {"type": "custom_tool_call_output", "call_id": "call_custom", "output": "/tmp"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_websocket_previous_response_input_items(items) == items[2:]
+
+
+def test_trim_websocket_previous_response_input_items_keeps_non_replay_prefix() -> None:
+    items: list[JsonValue] = [
+        {"role": "system", "content": [{"type": "input_text", "text": "local context"}]},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+    ]
+
+    assert proxy_service._trim_websocket_previous_response_input_items(items) == items
+
+
 def test_filter_inbound_headers_strips_auth_and_account():
     headers = {
         "Authorization": "Bearer x",

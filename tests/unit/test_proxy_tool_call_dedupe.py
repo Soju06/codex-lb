@@ -867,7 +867,7 @@ def test_mark_duplicate_tool_call_downstream_event_resets_after_non_side_effect_
     )
 
 
-def test_mark_duplicate_tool_call_downstream_event_resets_after_intervening_side_effect():
+def test_mark_duplicate_tool_call_downstream_event_retains_intervening_side_effects():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     exec_payload: dict[str, JsonValue] = {
         "type": "response.output_item.done",
@@ -921,8 +921,70 @@ def test_mark_duplicate_tool_call_downstream_event_resets_after_intervening_side
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_chain",
         )
-        is False
+        is True
     )
+
+
+def test_mark_duplicate_tool_call_downstream_event_suppresses_side_effect_replay_bursts_across_response_ids():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    exec_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_first",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"pytest","yield_time_ms":1000}',
+            "call_id": "call_exec_a",
+        },
+    }
+    write_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_first",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_write_a",
+        },
+    }
+    exec_replay_payload: dict[str, JsonValue] = {
+        **exec_payload,
+        "response_id": "resp_replay",
+        "item": {
+            **cast(dict[str, JsonValue], exec_payload["item"]),
+            "call_id": "call_exec_b",
+        },
+    }
+    write_replay_payload: dict[str, JsonValue] = {
+        **write_payload,
+        "response_id": "resp_replay",
+        "item": {
+            **cast(dict[str, JsonValue], write_payload["item"]),
+            "call_id": "call_write_b",
+        },
+    }
+
+    for payload in (exec_payload, write_payload):
+        assert (
+            tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+                payload,
+                seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+                response_id=tool_call_dedupe.response_id_from_payload(payload),
+                scope_side_effects_by_response_id=False,
+            )
+            is False
+        )
+
+    for payload in (exec_replay_payload, write_replay_payload):
+        assert (
+            tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+                payload,
+                seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+                response_id=tool_call_dedupe.response_id_from_payload(payload),
+                scope_side_effects_by_response_id=False,
+            )
+            is True
+        )
 
 
 def test_mark_duplicate_tool_call_downstream_event_suppresses_apply_patch_call_replay():
@@ -1044,7 +1106,7 @@ def test_mark_duplicate_tool_call_downstream_event_can_suppress_one_stream_repla
     )
 
 
-def test_mark_duplicate_tool_call_downstream_event_keeps_only_active_side_effect_block():
+def test_mark_duplicate_tool_call_downstream_event_bounds_side_effect_history():
     upstream_control = proxy_service._WebSocketUpstreamControl()
 
     for index in range(tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT + 3):
@@ -1065,7 +1127,7 @@ def test_mark_duplicate_tool_call_downstream_event_keeps_only_active_side_effect
             is False
         )
 
-    assert len(upstream_control.seen_tool_call_keys) == 1
+    assert len(upstream_control.seen_tool_call_keys) == tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT
 
 
 def test_dedupe_replayed_side_effect_input_items_removes_duplicate_call_but_preserves_outputs():

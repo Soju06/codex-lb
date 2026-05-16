@@ -144,8 +144,6 @@ def mark_duplicate_tool_call_downstream_event(
             item_name,
         )
         return True
-    if seen_tool_call_keys:
-        seen_tool_call_keys.clear()
     seen_tool_call_keys[key] = None
     while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
         seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))
@@ -184,9 +182,6 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
                 canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),
             )
         )
-    if candidate_keys and seen_tool_call_keys and not any(key in seen_tool_call_keys for key in candidate_keys):
-        seen_tool_call_keys.clear()
-
     kept_tool_uses: list[JsonValue] = []
     removed_count = 0
     for tool_use in tool_uses:

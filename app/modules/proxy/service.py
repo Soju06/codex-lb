@@ -165,6 +165,9 @@ from app.modules.proxy.tool_call_dedupe import (
     rewrite_parallel_tool_call_sse_line,
     rewrite_parallel_tool_call_text,
 )
+from app.modules.proxy.tool_call_dedupe import (
+    response_id_from_payload as tool_call_response_id_from_payload,
+)
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     RateLimitStatusDetailsData,
@@ -5698,7 +5701,8 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=session.seen_tool_call_keys,
-                    response_id=matched_request_state.request_id,
+                    response_id=tool_call_response_id_from_payload(payload) or matched_request_state.request_id,
+                    scope_side_effects_by_response_id=False,
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
@@ -5739,11 +5743,6 @@ class ProxyService:
                             _matching_websocket_request_states_for_missing_tool_output_error(
                                 session.pending_requests,
                             ),
-                        )
-                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
-                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
-                            session.pending_requests,
-                            _all_pending_websocket_followup_requests(session.pending_requests),
                         )
                     if grouped_previous_response_request_states:
                         session.queued_request_count = max(
@@ -6477,7 +6476,8 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=request_state.seen_tool_call_keys,
-                    response_id=request_state.request_id,
+                    response_id=tool_call_response_id_from_payload(payload) or request_state.request_id,
+                    scope_side_effects_by_response_id=False,
                 ):
                     request_state.suppressed_duplicate_tool_call = True
                     upstream_control.suppress_downstream_event = True
@@ -6518,11 +6518,6 @@ class ProxyService:
                             _matching_websocket_request_states_for_missing_tool_output_error(
                                 pending_requests,
                             ),
-                        )
-                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
-                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
-                            pending_requests,
-                            _all_pending_websocket_followup_requests(pending_requests),
                         )
                 if (
                     request_state is None
@@ -6598,7 +6593,7 @@ class ProxyService:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
-            if is_previous_response_not_found_event:
+            if is_previous_response_not_found_event or is_missing_tool_output_event:
                 upstream_control.suppress_downstream_event = True
             return text
 
@@ -8227,7 +8222,8 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     first_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=request_id,
+                    response_id=tool_call_response_id_from_payload(first_payload) or request_id,
+                    scope_side_effects_by_response_id=False,
                 ):
                     suppressed_duplicate_tool_call = True
                 else:
@@ -8333,7 +8329,8 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=request_id,
+                    response_id=tool_call_response_id_from_payload(event_payload) or request_id,
+                    scope_side_effects_by_response_id=False,
                 ):
                     suppressed_duplicate_tool_call = True
                     continue
@@ -9804,12 +9801,6 @@ def _matching_websocket_request_states_for_missing_tool_output_error(
     if len(unique_previous_response_ids) == 1:
         return unresolved_followups
     return []
-
-
-def _all_pending_websocket_followup_requests(
-    pending_requests: deque[_WebSocketRequestState],
-) -> list[_WebSocketRequestState]:
-    return [request_state for request_state in pending_requests if request_state.previous_response_id is not None]
 
 
 def _pop_matching_websocket_request_states(

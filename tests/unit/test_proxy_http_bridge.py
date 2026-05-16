@@ -5200,6 +5200,84 @@ async def test_process_http_bridge_upstream_text_masks_unmatched_missing_tool_ou
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_does_not_mask_unmatched_missing_tool_output_across_chains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    request_state_a = proxy_service._WebSocketRequestState(
+        request_id="req-missing-tool-a",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_missing_tool_a",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state_b = proxy_service._WebSocketRequestState(
+        request_id="req-missing-tool-b",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_missing_tool_b",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+        headers={"x-codex-session-id": "sid-123"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-123",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state_a, request_state_b]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(2),
+        queued_request_count=2,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "No tool output found for function call call_missing_output.",
+                    "param": "input",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert session.pending_requests == deque([request_state_a, request_state_b])
+    assert session.queued_request_count == 2
+    assert finalize_request_state.await_count == 0
+    for request_state in (request_state_a, request_state_b):
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        assert event_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_request_on_fresh_upstream_refuses_to_resend_previous_response_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

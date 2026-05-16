@@ -13,7 +13,7 @@ from app.modules.proxy import tool_call_dedupe
 pytestmark = pytest.mark.unit
 
 
-def test_mark_duplicate_tool_call_downstream_event_suppresses_distinct_call_ids_with_same_arguments():
+def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_call_ids_with_same_arguments():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
         "type": "response.output_item.done",
@@ -60,7 +60,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_distinct_call_ids_
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_dupe",
         )
-        is True
+        is False
     )
     assert (
         tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
@@ -91,7 +91,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_with_
             "type": "function_call",
             "name": "exec_command",
             "arguments": '{"max_output_tokens":9000,"cmd":"echo hi","yield_time_ms":30000}',
-            "call_id": "call_b",
+            "call_id": "call_a",
         },
     }
 
@@ -132,7 +132,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_direct_wait_agent_
             "type": "function_call",
             "name": "wait_agent",
             "arguments": '{"targets":["agent_a","agent_b"],"timeout_ms":60000}',
-            "call_id": "call_b",
+            "call_id": "call_a",
         },
     }
 
@@ -173,7 +173,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_write_s
             "type": "function_call",
             "name": "write_stdin",
             "arguments": '{"session_id":17,"chars":"","yield_time_ms":1000,"max_output_tokens":24000}',
-            "call_id": "call_b",
+            "call_id": "call_a",
         },
     }
 
@@ -214,7 +214,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_write_stdin_with_v
             "type": "function_call",
             "name": "write_stdin",
             "arguments": '{"session_id":17,"chars":"","yield_time_ms":30000,"max_output_tokens":24000}',
-            "call_id": "call_b",
+            "call_id": "call_a",
         },
     }
 
@@ -921,7 +921,7 @@ def test_mark_duplicate_tool_call_downstream_event_retains_intervening_side_effe
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_chain",
         )
-        is True
+        is False
     )
 
 
@@ -1022,7 +1022,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_apply_patch_call_r
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_dupe",
         )
-        is True
+        is False
     )
 
 

@@ -4503,7 +4503,7 @@ async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_suppresses_same_response_http_tool_call_replay(monkeypatch):
+async def test_stream_responses_keeps_same_response_http_tool_calls_with_distinct_call_ids(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4554,15 +4554,11 @@ async def test_stream_responses_suppresses_same_response_http_tool_call_replay(m
         if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
             tool_chunks.append(chunk_payload)
 
-    assert tool_chunks == [tool_payload]
+    assert tool_chunks == [tool_payload, replayed_tool_payload]
     terminal_payload = parse_sse_data_json(chunks[-1])
     assert isinstance(terminal_payload, dict)
-    assert terminal_payload["type"] == "response.failed"
-    terminal_response = cast(dict[str, object], terminal_payload["response"])
-    terminal_error = cast(dict[str, object], terminal_response["error"])
-    assert terminal_error["code"] == "stream_incomplete"
-    assert request_logs.calls[0]["status"] == "error"
-    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert terminal_payload["type"] == "response.completed"
+    assert request_logs.calls[0]["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -7142,7 +7138,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_output_for_followups(
+async def test_process_upstream_websocket_text_suppresses_unmatched_missing_tool_output_for_distinct_followups(
     monkeypatch,
 ):
     request_logs = _RequestLogsRecorder()
@@ -7198,20 +7194,13 @@ async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_outp
         response_create_gate=asyncio.Semaphore(2),
     )
 
-    assert "No tool output found" not in downstream_text
+    assert "No tool output found" in downstream_text
     assert upstream_control.suppress_downstream_event is True
-    assert upstream_control.reconnect_requested is True
-    assert upstream_control.downstream_texts is not None
-    assert len(upstream_control.downstream_texts) == 2
-    for emitted_text in upstream_control.downstream_texts:
-        assert '"type":"response.failed"' in emitted_text
-        assert '"code":"stream_incomplete"' in emitted_text
-        assert "call_missing_output" not in emitted_text
-    assert finalize_request_state.await_count == 2
-    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
-    assert finalized_requests == [followup_request_a, followup_request_b]
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.downstream_texts is None
+    finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
-    assert list(pending_requests) == []
+    assert list(pending_requests) == [followup_request_a, followup_request_b]
 
 
 @pytest.mark.asyncio
@@ -9193,7 +9182,7 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_across_reconnect(monkeypatch):
+async def test_process_upstream_websocket_text_keeps_same_response_distinct_tool_call_ids(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -9255,8 +9244,8 @@ async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_acros
 
     assert '"call_id":"call_first"' in first_text
     assert '"call_id":"call_replayed"' in replay_text
-    assert replay_control.suppress_downstream_event is True
-    assert pending_request.suppressed_duplicate_tool_call is True
+    assert replay_control.suppress_downstream_event is False
+    assert pending_request.suppressed_duplicate_tool_call is False
     finalize_request_state.assert_not_awaited()
     assert list(pending_requests) == [pending_request]
 

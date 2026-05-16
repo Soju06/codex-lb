@@ -126,16 +126,13 @@ def mark_duplicate_tool_call_downstream_event(
             response_id=response_id,
             scope_side_effects_by_response_id=scope_side_effects_by_response_id,
         )
-    # Same-response replays have shown distinct call_ids for byte-identical shell/edit requests.
-    # For local side-effect tools, running the same payload twice is worse than dropping a duplicate-looking call_id.
-    dedupe_call_id = None if is_side_effect_tool_call else call_id
     if is_side_effect_tool_call:
         item_name = normalize_tool_call_name(item_name)
         argument_key = canonical_downstream_side_effect_argument_key(item_name, argument_value)
     else:
         argument_key = argument_value
-    dedupe_response_id = response_id if scope_side_effects_by_response_id or not is_side_effect_tool_call else None
-    key = (dedupe_response_id or "", str(item_type), item_name, dedupe_call_id, argument_key)
+    dedupe_response_id = response_id if response_id is not None else ""
+    key = (dedupe_response_id, str(item_type), item_name, call_id, argument_key)
     if key in seen_tool_call_keys:
         logger.warning(
             "Suppressed duplicate downstream tool call response_id=%s item_type=%s name=%s",
@@ -144,7 +141,26 @@ def mark_duplicate_tool_call_downstream_event(
             item_name,
         )
         return True
+    if is_side_effect_tool_call:
+        same_response_argument_key = (dedupe_response_id, str(item_type), item_name, None, argument_key)
+        cross_response_argument_key = ("", str(item_type), item_name, None, argument_key)
+        if (
+            not scope_side_effects_by_response_id
+            and cross_response_argument_key in seen_tool_call_keys
+            and same_response_argument_key not in seen_tool_call_keys
+        ):
+            logger.warning(
+                "Suppressed duplicate downstream side-effect replay response_id=%s item_type=%s name=%s",
+                response_id,
+                item_type,
+                item_name,
+            )
+            return True
     seen_tool_call_keys[key] = None
+    if is_side_effect_tool_call:
+        seen_tool_call_keys[same_response_argument_key] = None
+        if not scope_side_effects_by_response_id:
+            seen_tool_call_keys[cross_response_argument_key] = None
     while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
         seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))
     return False

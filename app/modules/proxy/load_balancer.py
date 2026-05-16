@@ -117,8 +117,8 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
-        budget_threshold_pct: float = 95.0,
         secondary_budget_threshold_pct: float = 100.0,
+        budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -176,8 +176,8 @@ class LoadBalancer:
                     states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
-                    budget_threshold_pct=budget_threshold_pct,
                     secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                    budget_threshold_pct=budget_threshold_pct,
                 )
 
                 selected_account_map = account_map
@@ -310,11 +310,11 @@ class LoadBalancer:
                         sticky_kind=sticky_kind,
                         reallocate_sticky=reallocate_sticky,
                         sticky_max_age_seconds=sticky_max_age_seconds,
-                        budget_threshold_pct=budget_threshold_pct,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         sticky_repo=repos.sticky_sessions,
                         secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                        budget_threshold_pct=budget_threshold_pct,
                     )
                     selected_account_map = account_map
                     selected_states = []
@@ -644,8 +644,8 @@ class LoadBalancer:
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
-        budget_threshold_pct: float = 95.0,
         secondary_budget_threshold_pct: float = 100.0,
+        budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -655,8 +655,8 @@ class LoadBalancer:
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
-                budget_threshold_pct=budget_threshold_pct,
                 secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                budget_threshold_pct=budget_threshold_pct,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -722,8 +722,8 @@ class LoadBalancer:
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             deterministic_probe=True,
-                            budget_threshold_pct=budget_threshold_pct,
                             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            budget_threshold_pct=budget_threshold_pct,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
@@ -797,8 +797,8 @@ class LoadBalancer:
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
-            budget_threshold_pct=budget_threshold_pct,
             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            budget_threshold_pct=budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)

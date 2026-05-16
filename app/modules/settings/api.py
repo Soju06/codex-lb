@@ -21,6 +21,26 @@ from app.modules.settings.service import DashboardSettingsUpdateData
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 
+def _settings_response(settings) -> DashboardSettingsResponse:
+    return DashboardSettingsResponse(
+        sticky_threads_enabled=settings.sticky_threads_enabled,
+        upstream_stream_transport=settings.upstream_stream_transport,
+        prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+        routing_strategy=settings.routing_strategy,
+        openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
+        sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
+        sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
+        sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+        import_without_overwrite=settings.import_without_overwrite,
+        totp_required_on_login=settings.totp_required_on_login,
+        totp_configured=settings.totp_configured,
+        api_key_auth_enabled=settings.api_key_auth_enabled,
+    )
+
+
 def _is_non_loopback_ipv4(value: str | None) -> bool:
     if not value:
         return False
@@ -75,23 +95,7 @@ async def get_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings()
-    return DashboardSettingsResponse(
-        sticky_threads_enabled=settings.sticky_threads_enabled,
-        upstream_stream_transport=settings.upstream_stream_transport,
-        prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-        routing_strategy=settings.routing_strategy,
-        openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
-        dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
-        http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
-        sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
-        sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
-        sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
-        import_without_overwrite=settings.import_without_overwrite,
-        totp_required_on_login=settings.totp_required_on_login,
-        totp_configured=settings.totp_configured,
-        api_key_auth_enabled=settings.api_key_auth_enabled,
-    )
+    return _settings_response(settings)
 
 
 @router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
@@ -214,20 +218,4 @@ async def update_settings(
         actor_ip=request.client.host if request.client else None,
         details={"changed_fields": changed_fields},
     )
-    return DashboardSettingsResponse(
-        sticky_threads_enabled=updated.sticky_threads_enabled,
-        upstream_stream_transport=updated.upstream_stream_transport,
-        prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
-        routing_strategy=updated.routing_strategy,
-        openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
-        dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
-        http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,
-        sticky_reallocation_budget_threshold_pct=updated.sticky_reallocation_budget_threshold_pct,
-        sticky_reallocation_primary_budget_threshold_pct=updated.sticky_reallocation_primary_budget_threshold_pct,
-        sticky_reallocation_secondary_budget_threshold_pct=updated.sticky_reallocation_secondary_budget_threshold_pct,
-        import_without_overwrite=updated.import_without_overwrite,
-        totp_required_on_login=updated.totp_required_on_login,
-        totp_configured=updated.totp_configured,
-        api_key_auth_enabled=updated.api_key_auth_enabled,
-    )
+    return _settings_response(updated)

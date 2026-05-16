@@ -171,6 +171,18 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    continuity_owner_resolution_total = Counter(
+        "codex_lb_continuity_owner_resolution_total",
+        "Total continuity owner resolution outcomes by surface and source",
+        ["surface", "source", "outcome"],
+        registry=REGISTRY,
+    )
+    continuity_fail_closed_total = Counter(
+        "codex_lb_continuity_fail_closed_total",
+        "Total continuity fail-closed or masked retryable outcomes by surface and reason",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -211,6 +223,8 @@ else:
     bridge_local_rebind_total: CounterLike | None = None
     bridge_forward_latency_seconds: HistogramLike | None = None
     bridge_public_contract_error_total: CounterLike | None = None
+    continuity_owner_resolution_total: CounterLike | None = None
+    continuity_fail_closed_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -239,6 +253,8 @@ __all__ = [
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
+    "continuity_fail_closed_total",
+    "continuity_owner_resolution_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",

@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
+    database_background_pool_size: int | None = Field(default=None, gt=0)
+    database_background_max_overflow: int | None = Field(default=None, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
@@ -134,8 +136,14 @@ class Settings(BaseSettings):
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
+    sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
-    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Applies to both upstream SSE event buffering and upstream websocket message
+    # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
+    # large built-in tool payloads (for example image_generation outputs) do not
+    # fail locally with a 1009 before upstream completion.
+    max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
+    upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_originator: str = "codex_chatgpt_desktop"
@@ -176,6 +184,19 @@ class Settings(BaseSettings):
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # OpenAI Images API compatibility (POST /v1/images/{generations,edits})
+    # ``images_host_model`` is the internal Responses model used to invoke the
+    # built-in ``image_generation`` tool. It is never echoed to clients.
+    # ``images_default_model`` is the public model returned to clients when
+    # they omit ``model``; it must remain in the ``gpt-image-*`` family.
+    images_host_model: str = "gpt-5.5"
+    images_default_model: str = "gpt-image-2"
+    images_max_partial_images: int = Field(default=3, ge=0, le=3)
+    # NOTE: there is intentionally no ``images_max_n`` setting. The
+    # upstream ``image_generation`` tool path accepts only a single
+    # image per call and codex-lb does not yet implement client-side
+    # fan-out, so ``n > 1`` is hard-rejected at the API boundary. The
+    # cap is lifted in the same change that introduces fan-out.
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
@@ -218,16 +239,17 @@ class Settings(BaseSettings):
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
-    bulkhead_proxy_limit: int = Field(default=200, ge=0)
+    bulkhead_proxy_limit: int = Field(default=512, ge=0)
     bulkhead_proxy_http_limit: int | None = Field(default=None, ge=0)
     bulkhead_proxy_websocket_limit: int | None = Field(default=None, ge=0)
     bulkhead_proxy_compact_limit: int | None = Field(default=None, ge=0)
     bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
-    proxy_token_refresh_limit: int = Field(default=32, ge=0)
-    proxy_upstream_websocket_connect_limit: int = Field(default=64, ge=0)
-    proxy_response_create_limit: int = Field(default=64, ge=0)
-    proxy_compact_response_create_limit: int = Field(default=16, ge=0)
+    proxy_token_refresh_limit: int = Field(default=64, ge=0)
+    proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
+    proxy_response_create_limit: int = Field(default=256, ge=0)
+    proxy_compact_response_create_limit: int = Field(default=64, ge=0)
+    proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 

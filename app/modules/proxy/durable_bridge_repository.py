@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 
-from sqlalchemy import select, text
+from sqlalchemy import case, delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -95,6 +95,54 @@ class DurableBridgeRepository:
         row = result.scalar_one_or_none()
         return _to_snapshot(row)
 
+    async def find_session_by_latest_turn_state(
+        self,
+        *,
+        turn_state: str,
+        api_key_scope: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        statement = (
+            select(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.latest_turn_state == turn_state,
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                HttpBridgeSessionRecord.state.in_((HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING)),
+            )
+            .order_by(
+                case((HttpBridgeSessionRecord.state == HttpBridgeSessionState.ACTIVE, 0), else_=1),
+                HttpBridgeSessionRecord.last_seen_at.desc(),
+                HttpBridgeSessionRecord.updated_at.desc(),
+            )
+            .limit(1)
+        )
+        result = await self._session.execute(statement)
+        row = result.scalar_one_or_none()
+        return _to_snapshot(row)
+
+    async def find_session_by_latest_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_scope: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        statement = (
+            select(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.latest_response_id == response_id,
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                HttpBridgeSessionRecord.state.in_((HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING)),
+            )
+            .order_by(
+                case((HttpBridgeSessionRecord.state == HttpBridgeSessionState.ACTIVE, 0), else_=1),
+                HttpBridgeSessionRecord.last_seen_at.desc(),
+                HttpBridgeSessionRecord.updated_at.desc(),
+            )
+            .limit(1)
+        )
+        result = await self._session.execute(statement)
+        row = result.scalar_one_or_none()
+        return _to_snapshot(row)
+
     async def claim_session(
         self,
         *,
@@ -158,6 +206,7 @@ class DurableBridgeRepository:
                 HttpBridgeSessionState.CLOSED,
             }
             previous_state = existing.state
+            account_changed = existing.account_id != account_id
             owner_changed = existing.owner_instance_id != instance_id
             if not owner_changed:
                 next_epoch = existing.owner_epoch
@@ -171,10 +220,15 @@ class DurableBridgeRepository:
             existing.owner_epoch = next_epoch
             existing.lease_expires_at = lease_expires_at
             existing.state = HttpBridgeSessionState.ACTIVE
+            if account_changed:
+                await self._clear_aliases_for_session(existing.id)
             existing.account_id = account_id
             existing.model = model
             existing.service_tier = service_tier
-            if owner_changed:
+            if account_changed:
+                existing.latest_turn_state = latest_turn_state
+                existing.latest_response_id = latest_response_id
+            elif owner_changed:
                 if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
                     existing.latest_turn_state = latest_turn_state
                 if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
@@ -312,6 +366,11 @@ class DurableBridgeRepository:
             raise RuntimeError(f"DurableBridgeRepository alias upsert unsupported for dialect={dialect!r}")
         await self._session.execute(statement)
         await self._session.commit()
+
+    async def _clear_aliases_for_session(self, session_id: str) -> None:
+        await self._session.execute(
+            delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id == session_id)
+        )
 
 
 async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...]:

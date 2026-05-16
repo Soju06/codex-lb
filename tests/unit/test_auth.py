@@ -74,6 +74,26 @@ def test_parse_auth_json_accepts_latest_codex_export_format():
     assert auth.last_refresh_at.isoformat() == "2024-01-02T03:04:05+00:00"
 
 
+def test_claims_from_auth_preserves_prolite_plan_type():
+    payload = {
+        "email": "user@example.com",
+        "chatgpt_account_id": "acc_payload",
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "prolite"},
+    }
+    token = _encode_jwt(payload)
+    auth_json = {
+        "tokens": {
+            "idToken": token,
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": "acc_explicit",
+        },
+    }
+    auth = parse_auth_json(json.dumps(auth_json).encode("utf-8"))
+    claims = claims_from_auth(auth)
+    assert claims.plan_type == "prolite"
+
+
 def test_key_file_permissions_and_reuse(temp_key_file):
     first = get_or_create_key()
     second = get_or_create_key()

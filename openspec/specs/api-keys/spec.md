@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define API key lifecycle, enforcement, accounting, and dashboard management contracts for downstream clients.
 
 ## Requirements
 
@@ -180,7 +180,7 @@ The system SHALL atomically increment `weekly_tokens_used` on the API key record
 
 ### Requirement: Weekly token usage reset
 
-The system SHALL reset `weekly_tokens_used` to 0 using a lazy on-read strategy. When validating an API key, if `weekly_reset_at < now()`, the system MUST reset the counter and advance `weekly_reset_at` by 7-day intervals until it is in the future.
+The system SHALL keep the existing lazy on-read reset strategy for API key usage limits. When validating an API key, if a limit `reset_at < now()`, the system MUST reset the counter and advance `reset_at` by whole window intervals until it is in the future. The system MUST also run an hourly background fallback sweep that repairs expired API key limit usage even when no validation request arrives.
 
 #### Scenario: Weekly reset triggered on validation
 
@@ -191,6 +191,11 @@ The system SHALL reset `weekly_tokens_used` to 0 using a lazy on-read strategy. 
 
 - **WHEN** an API key is validated and `weekly_reset_at` is in the future
 - **THEN** no reset occurs; `weekly_tokens_used` retains its current value
+
+#### Scenario: Hourly fallback resets expired usage without a read
+
+- **WHEN** an API key usage limit is expired and no validation request occurs
+- **THEN** the hourly background fallback resets `current_value` to 0 and advances `reset_at` into the future
 
 ### Requirement: RequestLog API key reference
 

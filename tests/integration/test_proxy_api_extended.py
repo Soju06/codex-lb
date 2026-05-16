@@ -52,9 +52,20 @@ def _sse_event(payload: dict) -> str:
 
 
 def _extract_first_event(lines: list[str]) -> dict:
+    """Return the first non-synthesized SSE event payload. Skips the
+    synthesized ``response.created`` envelope that the public-stream
+    normalizer prepends when the upstream stream's first standard event is
+    not ``response.created`` (see change
+    ``normalize-v1-responses-openai-sdk-stream``)."""
     for line in lines:
-        if line.startswith("data: "):
-            return json.loads(line[6:])
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        event = json.loads(line[6:])
+        if event.get("type") == "response.created":
+            response = event.get("response")
+            if isinstance(response, dict) and response.get("status") == "in_progress" and response.get("output") == []:
+                continue
+        return event
     raise AssertionError("No SSE data event found")
 
 
@@ -134,7 +145,7 @@ async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, mo
         )
         log = result.scalars().first()
         assert log is not None
-        assert log.request_id == request_id
+        assert log.request_id == "resp_1"
         assert log.input_tokens == 10
         assert log.output_tokens == 5
         assert log.cached_input_tokens == 3

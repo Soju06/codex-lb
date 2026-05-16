@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import anyio
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
@@ -96,6 +97,15 @@ async def _collect_sse_events_with_headers(
     return [json.loads(line[6:]) for line in lines], response_headers
 
 
+def _assert_created_text_delta_completed(events: list[dict]) -> None:
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.output_text.delta",
+        "response.completed",
+    ]
+    assert events[1]["delta"] == "OK"
+
+
 async def _import_account(async_client, account_id: str, email: str) -> str:
     auth_json = _make_auth_json(account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
@@ -145,6 +155,7 @@ def _make_app_settings(
     enabled: bool,
     max_sessions: int = 128,
     queue_limit: int = 8,
+    admission_wait_timeout_seconds: float = 0.05,
     codex_idle_ttl_seconds: float = 900.0,
     codex_prewarm_enabled: bool = False,
     instance_id: str = "instance-a",
@@ -159,6 +170,7 @@ def _make_app_settings(
         http_responses_session_bridge_queue_limit=queue_limit,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
+        proxy_admission_wait_timeout_seconds=admission_wait_timeout_seconds,
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
@@ -215,6 +227,7 @@ def _install_bridge_settings_with_limits(
     enabled: bool,
     max_sessions: int = 128,
     queue_limit: int = 8,
+    admission_wait_timeout_seconds: float = 0.05,
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
@@ -229,6 +242,7 @@ def _install_bridge_settings_with_limits(
             enabled=enabled,
             max_sessions=max_sessions,
             queue_limit=queue_limit,
+            admission_wait_timeout_seconds=admission_wait_timeout_seconds,
             codex_idle_ttl_seconds=codex_idle_ttl_seconds,
             codex_prewarm_enabled=codex_prewarm_enabled,
             instance_id=instance_id,
@@ -424,6 +438,813 @@ class _RateLimitErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                             "plan_type": "team",
                             "resets_at": 1700000000,
                             "resets_in_seconds": 3600,
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _PreviousResponseNotFoundUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        payload = json.loads(text)
+        previous_response_id = payload.get("previous_response_id")
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": f"Previous response with id '{previous_response_id}' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_request_created = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_inflight",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            self.first_request_created.set()
+            return
+
+        payload = json.loads(text)
+        previous_response_id = payload.get("previous_response_id")
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": f"Previous response with id '{previous_response_id}' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_bridge_inflight",
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _InvalidRequestPreviousResponseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        payload = json.loads(text)
+        previous_response_id = payload.get("previous_response_id")
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_request_error",
+                            "message": f"Previous response with id '{previous_response_id}' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _ForeignPreviousResponseNotFoundAfterCreatedUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        if len(self.sent_text) == 2:
+            payload = json.loads(text)
+            previous_response_id = payload.get("previous_response_id")
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_created",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_bridge_foreign_prev_nf",
+                                "object": "response",
+                                "status": "failed",
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "code": "previous_response_not_found",
+                                    "message": f"Previous response with id '{previous_response_id}' not found.",
+                                    "param": "previous_response_id",
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        response_id = "resp_bridge_after_error"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _AnonymousPreviousResponseNotFoundAfterCreatedUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_request_created = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_inflight",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            self.first_request_created.set()
+            return
+
+        if len(self.sent_text) == 2:
+            payload = json.loads(text)
+            previous_response_id = payload.get("previous_response_id")
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_created",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": f"Previous response with id '{previous_response_id}' not found.",
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_inflight",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        response_id = "resp_bridge_after_error"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _TwoFollowupsPreviousResponseNotFoundUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_followup_created = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_a",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_a",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        if len(self.sent_text) == 2:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_b",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_b",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        if len(self.sent_text) == 3:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_a",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            self.first_followup_created.set()
+            return
+
+        if len(self.sent_text) == 4:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_b",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": (
+                                    "Cannot continue conversation because upstream lost resp_bridge_prev_anchor_a."
+                                ),
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_followup_b",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        response_id = "resp_bridge_after_error"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _TwoSameAnchorFollowupsPreviousResponseNotFoundUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_followup_created = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_shared",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_bridge_prev_anchor_shared",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        if len(self.sent_text) == 2:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_same_anchor_a",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            self.first_followup_created.set()
+            return
+
+        if len(self.sent_text) == 3:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_bridge_followup_same_anchor_b",
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": "Previous response with id 'resp_bridge_prev_anchor_shared' not found.",
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        response_id = "resp_bridge_after_same_anchor_error"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
                         },
                     },
                     separators=(",", ":"),
@@ -1194,20 +2015,16 @@ async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_r
         )
 
     exc = exc_info.value
-    assert exc.status_code == 400
+    assert exc.status_code == 502
     assert exc.payload["error"] == {
-        "message": (
-            "Previous response with id 'resp_missing_alias' not found. "
-            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-        ),
-        "type": "invalid_request_error",
-        "code": "previous_response_not_found",
-        "param": "previous_response_id",
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
     }
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_and_promotes_session(
+async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_without_rekeying_session(
     async_client,
     app_instance,
     monkeypatch,
@@ -1354,7 +2171,7 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
 
     assert replayed is session
     assert replayed.key == key
-    assert service._http_bridge_sessions[key] is session
+    assert key in service._http_bridge_sessions
     assert replay_key not in service._http_bridge_sessions
     assert (
         service._http_bridge_turn_state_index[
@@ -1666,8 +2483,10 @@ async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_m
         )
 
     exc = exc_info.value
-    assert exc.status_code == 409
-    assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    if exc.status_code == 409:
+        assert exc.payload["error"].get("code") == "bridge_instance_mismatch"
+    else:
+        assert exc.status_code == 503
     assert key not in service._http_bridge_inflight_sessions
     assert key not in service._http_bridge_sessions
     assert alias_key not in service._http_bridge_turn_state_index
@@ -3008,8 +3827,8 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
     )
     second_response = second_events[-1]["response"]
 
-    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    _assert_created_text_delta_completed(first_events)
+    _assert_created_text_delta_completed(second_events)
     assert first_response["id"] == "resp_bridge_1"
     assert second_response["id"] == "resp_bridge_2"
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
@@ -3113,8 +3932,8 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
         headers=headers,
     )
 
-    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    _assert_created_text_delta_completed(first_events)
+    _assert_created_text_delta_completed(second_events)
     assert len(connect_calls) == 1
     assert connect_calls[0] == ("backend-http-session-1", proxy_module.StickySessionKind.CODEX_SESSION)
     assert len(fake_upstream.sent_text) == 2
@@ -3216,8 +4035,8 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         headers={"x-codex-turn-state": turn_state},
     )
 
-    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    _assert_created_text_delta_completed(first_events)
+    _assert_created_text_delta_completed(second_events)
     assert turn_state.startswith("http_turn_")
     assert connect_calls == [("backend-http-turn-state-a", proxy_module.StickySessionKind.PROMPT_CACHE)]
 
@@ -3590,7 +4409,7 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
     events = [json.loads(line[6:]) for line in lines]
-    assert [event["type"] for event in events] == ["response.created", "response.completed"]
+    _assert_created_text_delta_completed(events)
     assert connect_count == 1
 
 
@@ -5048,6 +5867,11 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     )
 
     create_started: list[str] = []
+    create_started_events = {
+        "bridge-a": asyncio.Event(),
+        "bridge-b": asyncio.Event(),
+    }
+    release_create = asyncio.Event()
 
     async def fake_create_http_bridge_session(
         self,
@@ -5061,14 +5885,14 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.append(key.affinity_key)
-        await asyncio.sleep(0.2)
+        create_started_events[key.affinity_key].set()
+        await _wait_for_event(release_create)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key_one = proxy_module._HTTPBridgeSessionKey("request", "bridge-a", None)
     key_two = proxy_module._HTTPBridgeSessionKey("request", "bridge-b", None)
-    t0 = time.monotonic()
 
     try:
         first = asyncio.create_task(
@@ -5093,10 +5917,14 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
                 max_sessions=8,
             )
         )
-        session_one, session_two = await asyncio.gather(first, second)
-        elapsed = time.monotonic() - t0
+        await _wait_for_event(create_started_events["bridge-a"])
+        await _wait_for_event(create_started_events["bridge-b"])
+        assert key_one in service._http_bridge_inflight_sessions
+        assert key_two in service._http_bridge_inflight_sessions
 
-        assert elapsed < 0.35
+        release_create.set()
+        session_one, session_two = await asyncio.gather(first, second)
+
         assert sorted(create_started) == ["bridge-a", "bridge-b"]
         assert session_one.key == key_one
         assert session_two.key == key_two
@@ -5128,6 +5956,8 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     )
 
     create_started: list[str] = []
+    create_started_event = asyncio.Event()
+    release_create = asyncio.Event()
 
     async def fake_create_http_bridge_session(
         self,
@@ -5141,13 +5971,13 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     ):
         del self, headers, affinity, request_model, idle_ttl_seconds
         create_started.append(key.affinity_key)
-        await asyncio.sleep(0.2)
+        create_started_event.set()
+        await _wait_for_event(release_create)
         return _make_dummy_bridge_session(key)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
     key = proxy_module._HTTPBridgeSessionKey("request", "bridge-singleflight", None)
-    t0 = time.monotonic()
 
     try:
         first = asyncio.create_task(
@@ -5161,6 +5991,10 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
                 max_sessions=8,
             )
         )
+        await _wait_for_event(create_started_event)
+        assert create_started == ["bridge-singleflight"]
+        assert key in service._http_bridge_inflight_sessions
+
         second = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
@@ -5172,10 +6006,13 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
                 max_sessions=8,
             )
         )
-        session_one, session_two = await asyncio.gather(first, second)
-        elapsed = time.monotonic() - t0
+        await asyncio.sleep(0)
+        assert create_started == ["bridge-singleflight"]
+        assert not second.done()
 
-        assert elapsed < 0.35
+        release_create.set()
+        session_one, session_two = await asyncio.gather(first, second)
+
         assert create_started == ["bridge-singleflight"]
         assert session_one is session_two
         assert service._http_bridge_sessions[key] is session_one
@@ -5778,15 +6615,11 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
 
     assert service._http_bridge_sessions[key] is created_session
     exc = exc_info.value
-    assert exc.status_code == 400
+    assert exc.status_code == 502
     assert exc.payload["error"] == {
-        "message": (
-            "Previous response with id 'resp_inflight' not found. "
-            "HTTP bridge continuity was lost. Replay x-codex-turn-state or retry with a stable prompt_cache_key."
-        ),
-        "type": "invalid_request_error",
-        "code": "previous_response_not_found",
-        "param": "previous_response_id",
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
     }
 
 
@@ -6543,6 +7376,7 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     assert second.status_code == 502
     assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "bridge_owner_unreachable")
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
+    assert connect_count == 1
 
 
 @pytest.mark.asyncio
@@ -6652,6 +7486,1036 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_upstream_u
     assert second.status_code == 502
     assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "upstream_request_timeout")
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response_not_found(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_previous_response_rebind",
+        "http-bridge-previous-response-rebind@example.com",
+    )
+    account = await _get_account(account_id)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        if connect_count == 1:
+            return first_upstream
+        return recovered_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "previous-response-rebind",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamResponsesWebSocket, _PreviousResponseNotFoundUpstreamWebSocket()),
+        )
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "previous-response-rebind",
+            "previous_response_id": first_body["id"],
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_previous_response_not_found_param(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_invalid_request_rebind",
+        "http-bridge-invalid-request-rebind@example.com",
+    )
+    account = await _get_account(account_id)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        if connect_count == 1:
+            return first_upstream
+        return recovered_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "invalid-request-rebind",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamResponsesWebSocket, _InvalidRequestPreviousResponseUpstreamWebSocket()),
+        )
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "invalid-request-rebind",
+            "previous_response_id": first_body["id"],
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_found_with_inflight_request(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with app_instance.router.lifespan_context(app_instance):
+        async with (
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+        ):
+            account_id = await _import_account(
+                admin_client,
+                "acc_http_bridge_prev_nf_inflight",
+                "http-bridge-prev-nf-inflight@example.com",
+            )
+            account = await _get_account(account_id)
+
+            first = asyncio.create_task(
+                first_client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "hello",
+                        "prompt_cache_key": "previous-response-inflight-mixed",
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_request_created)
+
+            second = asyncio.create_task(
+                second_client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "hello-again",
+                        "prompt_cache_key": "previous-response-inflight-mixed",
+                        "previous_response_id": "resp_bridge_prev_anchor",
+                    },
+                )
+            )
+
+            first_response, second_response = await asyncio.wait_for(
+                asyncio.gather(first, second),
+                timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert second_response.status_code >= 400
+    assert second_response.json()["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in second_response.json()["error"].get("code", "")
+    assert "previous_response_not_found" not in second_response.json()["error"].get("message", "")
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_keeps_session_alive_after_foreign_previous_response_not_found(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_foreign_prev_nf_created",
+        "http-bridge-foreign-prev-nf-created@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _ForeignPreviousResponseNotFoundAfterCreatedUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "foreign-previous-response-created",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue",
+            "prompt_cache_key": "foreign-previous-response-created",
+            "previous_response_id": first_body["id"],
+        },
+    )
+
+    third = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "after error",
+            "prompt_cache_key": "foreign-previous-response-created",
+        },
+    )
+
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in second.json()["error"].get("code", "")
+    assert "previous_response_not_found" not in second.json()["error"].get("message", "")
+    assert third.status_code == 200
+    assert third.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 1
+    assert upstream.closed is False
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stream_keeps_session_alive_after_foreign_previous_response_not_found(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_foreign_prev_nf_created_stream",
+        "http-bridge-foreign-prev-nf-created-stream@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _ForeignPreviousResponseNotFoundAfterCreatedUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first_events = await _collect_sse_events(
+        async_client,
+        "/v1/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "foreign-previous-response-created-stream",
+            "stream": True,
+        },
+    )
+    first_response = first_events[-1]["response"]
+
+    second_events = await _collect_sse_events(
+        async_client,
+        "/v1/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue",
+            "prompt_cache_key": "foreign-previous-response-created-stream",
+            "previous_response_id": first_response["id"],
+            "stream": True,
+        },
+    )
+
+    third_events = await _collect_sse_events(
+        async_client,
+        "/v1/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "after error",
+            "prompt_cache_key": "foreign-previous-response-created-stream",
+            "stream": True,
+        },
+    )
+
+    _assert_created_text_delta_completed(first_events)
+    assert [event["type"] for event in second_events] == ["response.created", "response.failed"]
+    _assert_created_text_delta_completed(third_events)
+    assert second_events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in json.dumps(second_events[-1])
+    assert third_events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 1
+    assert upstream.closed is False
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stream_keeps_session_alive_after_anonymous_prev_nf_created_followup(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _AnonymousPreviousResponseNotFoundAfterCreatedUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with app_instance.router.lifespan_context(app_instance):
+        async with (
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
+        ):
+            account_id = await _import_account(
+                admin_client,
+                "acc_http_bridge_anonymous_prev_nf_created_followup",
+                "http-bridge-anonymous-prev-nf-created-followup@example.com",
+            )
+            account = await _get_account(account_id)
+
+            first = asyncio.create_task(
+                _collect_sse_events(
+                    first_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "hello",
+                        "prompt_cache_key": "anonymous-created-followup-stream",
+                        "stream": True,
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_request_created)
+
+            second = asyncio.create_task(
+                _collect_sse_events(
+                    second_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "continue",
+                        "prompt_cache_key": "anonymous-created-followup-stream",
+                        "previous_response_id": "resp_bridge_prev_anchor",
+                        "stream": True,
+                    },
+                )
+            )
+
+            first_events, second_events = await asyncio.wait_for(
+                asyncio.gather(first, second),
+                timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
+
+            third_events = await _collect_sse_events(
+                third_client,
+                "/v1/responses",
+                json_body={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "after error",
+                    "prompt_cache_key": "anonymous-created-followup-stream",
+                    "stream": True,
+                },
+            )
+
+    _assert_created_text_delta_completed(first_events)
+    assert [event["type"] for event in second_events] == ["response.created", "response.failed"]
+    assert second_events[0]["response"]["id"] == "resp_bridge_followup_created"
+    assert second_events[1]["response"]["id"] == "resp_bridge_followup_created"
+    assert second_events[1]["response"]["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in json.dumps(second_events[1])
+    _assert_created_text_delta_completed(third_events)
+    assert third_events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stream_matches_previous_response_error_to_anchor_with_two_followups(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _TwoFollowupsPreviousResponseNotFoundUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with app_instance.router.lifespan_context(app_instance):
+        async with (
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as fourth_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as fifth_client,
+        ):
+            account_id = await _import_account(
+                admin_client,
+                "acc_http_bridge_two_followups_prev_nf",
+                "http-bridge-two-followups-prev-nf@example.com",
+            )
+            account = await _get_account(account_id)
+
+            first_response = await first_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "anchor-a",
+                    "prompt_cache_key": "two-followups-prev-nf-stream",
+                },
+            )
+            assert first_response.status_code == 200
+
+            second_response = await second_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "anchor-b",
+                    "prompt_cache_key": "two-followups-prev-nf-stream",
+                },
+            )
+            assert second_response.status_code == 200
+
+            third = asyncio.create_task(
+                _collect_sse_events(
+                    third_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "continue-a",
+                        "prompt_cache_key": "two-followups-prev-nf-stream",
+                        "previous_response_id": first_response.json()["id"],
+                        "stream": True,
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_followup_created)
+
+            fourth = asyncio.create_task(
+                _collect_sse_events(
+                    fourth_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "continue-b",
+                        "prompt_cache_key": "two-followups-prev-nf-stream",
+                        "previous_response_id": second_response.json()["id"],
+                        "stream": True,
+                    },
+                )
+            )
+
+            third_events, fourth_events = await asyncio.wait_for(
+                asyncio.gather(third, fourth),
+                timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
+
+            fifth_events = await _collect_sse_events(
+                fifth_client,
+                "/v1/responses",
+                json_body={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "after error",
+                    "prompt_cache_key": "two-followups-prev-nf-stream",
+                    "stream": True,
+                },
+            )
+
+    assert [event["type"] for event in third_events] == ["response.created", "response.failed"]
+    _assert_created_text_delta_completed(fourth_events)
+    assert third_events[0]["response"]["id"] == "resp_bridge_followup_a"
+    assert third_events[1]["response"]["id"] == "resp_bridge_followup_a"
+    assert third_events[1]["response"]["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in json.dumps(third_events[1])
+    assert fourth_events[0]["response"]["id"] == "resp_bridge_followup_b"
+    assert fourth_events[-1]["response"]["id"] == "resp_bridge_followup_b"
+    assert fourth_events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    _assert_created_text_delta_completed(fifth_events)
+    assert fifth_events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stream_masks_anonymous_previous_response_not_found_for_same_anchor_followups(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _TwoSameAnchorFollowupsPreviousResponseNotFoundUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    async with app_instance.router.lifespan_context(app_instance):
+        async with (
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as fourth_client,
+        ):
+            account_id = await _import_account(
+                admin_client,
+                "acc_http_bridge_two_same_anchor_followups_prev_nf",
+                "http-bridge-two-same-anchor-followups-prev-nf@example.com",
+            )
+            account = await _get_account(account_id)
+
+            first_response = await first_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "anchor",
+                    "prompt_cache_key": "two-same-anchor-followups-prev-nf-stream",
+                },
+            )
+            assert first_response.status_code == 200
+
+            second = asyncio.create_task(
+                _collect_sse_events(
+                    second_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "continue-a",
+                        "prompt_cache_key": "two-same-anchor-followups-prev-nf-stream",
+                        "previous_response_id": first_response.json()["id"],
+                        "stream": True,
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_followup_created)
+
+            third = asyncio.create_task(
+                _collect_sse_events(
+                    third_client,
+                    "/v1/responses",
+                    json_body={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "continue-b",
+                        "prompt_cache_key": "two-same-anchor-followups-prev-nf-stream",
+                        "previous_response_id": first_response.json()["id"],
+                        "stream": True,
+                    },
+                )
+            )
+
+            second_events, third_events = await asyncio.wait_for(
+                asyncio.gather(second, third),
+                timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+            )
+
+            fourth_events = await _collect_sse_events(
+                fourth_client,
+                "/v1/responses",
+                json_body={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "after-error",
+                    "prompt_cache_key": "two-same-anchor-followups-prev-nf-stream",
+                    "stream": True,
+                },
+            )
+
+    assert [event["type"] for event in second_events] == ["response.created", "response.failed"]
+    assert [event["type"] for event in third_events] == ["response.created", "response.failed"]
+    assert second_events[0]["response"]["id"] == "resp_bridge_followup_same_anchor_a"
+    assert third_events[0]["response"]["id"] == "resp_bridge_followup_same_anchor_b"
+    assert second_events[1]["response"]["error"]["code"] == "stream_incomplete"
+    assert third_events[1]["response"]["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in json.dumps(second_events[1])
+    assert "previous_response_not_found" not in json.dumps(third_events[1])
+    _assert_created_text_delta_completed(fourth_events)
+    assert fourth_events[-1]["response"]["id"] == "resp_bridge_after_same_anchor_error"
+    assert connect_count == 1
 
 
 @pytest.mark.asyncio

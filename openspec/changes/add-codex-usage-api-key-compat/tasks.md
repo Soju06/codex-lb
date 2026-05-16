@@ -1,0 +1,4 @@
+- [ ] 1. Update `/api/codex/usage` auth to accept API-key callers without `chatgpt-account-id`.
+- [ ] 2. Map API-key self-usage data into the existing `RateLimitStatusPayload` schema.
+- [ ] 3. Add integration coverage for API-key callers while preserving existing ChatGPT identity tests.
+- [ ] 4. Validate targeted tests and prepare a separate PR.

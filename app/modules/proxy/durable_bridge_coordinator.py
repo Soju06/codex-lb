@@ -78,6 +78,17 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
             )
             if snapshot is None:
+                if turn_state is not None:
+                    snapshot = await repository.find_session_by_latest_turn_state(
+                        turn_state=turn_state,
+                        api_key_scope=api_key_scope,
+                    )
+                if snapshot is None and previous_response_id is not None:
+                    snapshot = await repository.find_session_by_latest_response_id(
+                        response_id=previous_response_id,
+                        api_key_scope=api_key_scope,
+                    )
+            if snapshot is None:
                 return None
             return _to_lookup(snapshot)
 

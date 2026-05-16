@@ -146,7 +146,8 @@ class StubUsageRepository(UsageRepository):
 
 class StubStickySessionsRepository(StickySessionsRepository):
     def __init__(self) -> None:
-        pass
+        self.upserts: list[StickySession] = []
+        self.deletes: list[tuple[str, StickySessionKind | None]] = []
 
     async def get_account_id(
         self,
@@ -158,9 +159,12 @@ class StubStickySessionsRepository(StickySessionsRepository):
         return None
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        return self._build_row(key, account_id, kind)
+        row = self._build_row(key, account_id, kind)
+        self.upserts.append(row)
+        return row
 
     async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
+        self.deletes.append((key, kind))
         return False
 
     @staticmethod
@@ -309,6 +313,256 @@ async def test_select_account_reads_cached_usage_once_per_window() -> None:
     assert selection.account.id == account.id
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_select_account_prefers_budget_safe_account_when_any_exist() -> None:
+    safe_account = _make_account("acc-safe", "safe@example.com")
+    pressured_account = _make_account("acc-pressured", "pressured@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        safe_account.id: UsageHistory(
+            id=1,
+            account_id=safe_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        pressured_account.id: UsageHistory(
+            id=2,
+            account_id=pressured_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=99.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        safe_account.id: UsageHistory(
+            id=3,
+            account_id=safe_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=99.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        pressured_account.id: UsageHistory(
+            id=4,
+            account_id=pressured_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=5.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([safe_account, pressured_account])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == safe_account.id
+
+
+@pytest.mark.asyncio
+async def test_budget_safe_filter_ignores_secondary_only_pressure_when_primary_safe() -> None:
+    weekly_pressured_account = _make_account("acc-weekly-pressured", "weekly-pressured@example.com")
+    primary_pressured_account = _make_account("acc-primary-pressured", "primary-pressured@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        weekly_pressured_account.id: UsageHistory(
+            id=1,
+            account_id=weekly_pressured_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=20.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        primary_pressured_account.id: UsageHistory(
+            id=2,
+            account_id=primary_pressured_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=99.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        weekly_pressured_account.id: UsageHistory(
+            id=3,
+            account_id=weekly_pressured_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=99.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        primary_pressured_account.id: UsageHistory(
+            id=4,
+            account_id=primary_pressured_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=1.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([weekly_pressured_account, primary_pressured_account])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == weekly_pressured_account.id
+
+
+@pytest.mark.asyncio
+async def test_budget_safe_fallback_does_not_pick_near_exhausted_primary_under_usage_weighted() -> None:
+    nearly_exhausted_account = _make_account("acc-nearly-exhausted", "nearly-exhausted@example.com")
+    less_pressured_account = _make_account("acc-less-pressured", "less-pressured@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        nearly_exhausted_account.id: UsageHistory(
+            id=1,
+            account_id=nearly_exhausted_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=99.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        less_pressured_account.id: UsageHistory(
+            id=2,
+            account_id=less_pressured_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=96.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        nearly_exhausted_account.id: UsageHistory(
+            id=3,
+            account_id=nearly_exhausted_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=1.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        less_pressured_account.id: UsageHistory(
+            id=4,
+            account_id=less_pressured_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=99.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([nearly_exhausted_account, less_pressured_account])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == less_pressured_account.id
+
+
+@pytest.mark.asyncio
+async def test_budget_safe_fallback_still_skips_unavailable_accounts() -> None:
+    blocked_account = _make_account("acc-blocked", "blocked@example.com")
+    available_account = _make_account("acc-available", "available@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    blocked_account.status = AccountStatus.QUOTA_EXCEEDED
+    blocked_account.reset_at = now_epoch + 300
+
+    primary = {
+        blocked_account.id: UsageHistory(
+            id=1,
+            account_id=blocked_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=96.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        available_account.id: UsageHistory(
+            id=2,
+            account_id=available_account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=99.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        blocked_account.id: UsageHistory(
+            id=3,
+            account_id=blocked_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=100.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        available_account.id: UsageHistory(
+            id=4,
+            account_id=available_account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=99.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([blocked_account, available_account])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == available_account.id
 
 
 @pytest.mark.asyncio
@@ -1109,9 +1363,9 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
             accounts=accounts_repo,
             usage=usage_repo,
             additional_usage=StubAdditionalUsageRepository(),
-            request_logs=object(),  # type: ignore[arg-type]
+            request_logs=cast(RequestLogsRepository, object()),
             sticky_sessions=sticky_repo,
-            api_keys=object(),  # type: ignore[arg-type]
+            api_keys=cast(ApiKeysRepository, object()),
         )
 
     balancer = LoadBalancer(repo_factory)
@@ -1697,6 +1951,90 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
 
 
 @pytest.mark.asyncio
+async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(monkeypatch) -> None:
+    paused_team = _make_account("acc-team-paused", "shared@example.com")
+    paused_team.plan_type = "team"
+    paused_team.status = AccountStatus.PAUSED
+    active_free = _make_account("acc-free-active", "shared@example.com")
+    active_free.plan_type = "free"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary = {
+        paused_team.id: UsageHistory(
+            id=1,
+            account_id=paused_team.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        active_free.id: UsageHistory(
+            id=2,
+            account_id=active_free.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=15.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        paused_team.id: UsageHistory(
+            id=3,
+            account_id=paused_team.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        active_free.id: UsageHistory(
+            id=4,
+            account_id=active_free.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=15.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([paused_team, active_free])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    async def pinned_account_id(
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> str | None:
+        del key, kind, max_age_seconds
+        return paused_team.id
+
+    monkeypatch.setattr(sticky_repo, "get_account_id", pinned_account_id)
+
+    selection_inputs = await balancer._load_selection_inputs(model=None)
+    selection = await balancer.select_account(
+        sticky_key="sticky-session-paused-team",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+    )
+
+    assert [account.id for account in selection_inputs.accounts] == [active_free.id]
+    assert {account.id for account in selection_inputs.runtime_accounts or []} == {
+        paused_team.id,
+        active_free.id,
+    }
+    assert selection.account is not None
+    assert selection.account.id == active_free.id
+    assert sticky_repo.deletes == [("sticky-session-paused-team", StickySessionKind.CODEX_SESSION)]
+    assert all(row.account_id != paused_team.id for row in sticky_repo.upserts)
+    assert sticky_repo.upserts[-1].account_id == active_free.id
+
+
+@pytest.mark.asyncio
 async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
     now = utcnow()
@@ -1807,6 +2145,47 @@ async def test_select_account_respects_registry_plan_filter_for_mapped_model(mon
 
 
 @pytest.mark.asyncio
+async def test_select_account_treats_prolite_as_pro_for_registry_plan_filter(monkeypatch) -> None:
+    account = _make_account("acc-prolite-plan-filtered", "prolite-plan-filtered@example.com")
+    account.plan_type = "prolite"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    secondary_entry = UsageHistory(
+        id=2,
+        account_id=account.id,
+        recorded_at=now,
+        window="secondary",
+        used_percent=5.0,
+        reset_at=now_epoch + 604800,
+        window_minutes=10080,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={account.id: secondary_entry})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.4")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_returns_plan_support_error_for_ungated_model(monkeypatch) -> None:
     account = _make_account("acc-ungated-plan-filtered", "ungated-plan-filtered@example.com")
     now = utcnow()
@@ -1826,7 +2205,15 @@ async def test_select_account_returns_plan_support_error_for_ungated_model(monke
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
     )
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
@@ -1835,6 +2222,45 @@ async def test_select_account_returns_plan_support_error_for_ungated_model(monke
     assert selection.account is None
     assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
     assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_model(monkeypatch) -> None:
+    account = _make_account("acc-partial-registry", "partial-registry@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: ModelRegistrySnapshot(
+                models={},
+                model_plans={"gpt-5.3-codex": frozenset({"pro"})},
+                plan_models={"pro": frozenset({"gpt-5.3-codex"})},
+                fetched_at=0.0,
+            ),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.5")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
 
 
 @pytest.mark.asyncio

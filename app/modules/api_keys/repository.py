@@ -637,6 +637,7 @@ class ApiKeysRepository:
                     update(ApiKeyUsageReservation)
                     .where(ApiKeyUsageReservation.id == row.id)
                     .where(ApiKeyUsageReservation.status == "reserved")
+                    .where(ApiKeyUsageReservation.updated_at < cutoff)
                     .values(
                         status="released",
                         input_tokens=None,

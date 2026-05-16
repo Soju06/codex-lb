@@ -270,20 +270,38 @@ def enforce_strict_function_tools_format(
       list returned by ``ChatCompletionsRequest.to_responses_request``,
       which may drop or reorder entries) so the ``{index}`` slot in
       ``param_template`` lines up with the inbound payload.
+
+      A tool is treated as a function tool whenever ``tool["function"]``
+      is a dict — the same rule ``_normalize_chat_tools`` uses, where
+      missing or other ``type`` values get coerced to ``"function"``
+      (``"type": tool_type or "function"``). Anchoring on the wrapper
+      key keeps pre-validation in lockstep with normalization; otherwise
+      a payload like ``{"function": {"strict": true, "parameters":
+      <invalid>}}`` (no top-level ``type``) bypasses the local 400 and
+      surfaces as a misleading upstream 5xx.
     """
     if not tools:
         return
     for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
             continue
-        if tool.get("type") != "function":
-            continue
         if nested:
+            # Chat path: detect function tools the same way
+            # ``_normalize_chat_tools`` does — presence of a ``"function"``
+            # dict is the signal, not a strict ``"type" == "function"``
+            # check. The normalizer coerces missing or other ``type``
+            # values to ``"function"`` whenever ``tool["function"]`` is a
+            # dict (`"type": tool_type or "function"`), so pre-validation
+            # must mirror that or strict violations on type-omitted
+            # nested tools bypass the local 400 and surface as upstream
+            # 5xx instead.
             function_value = tool.get("function")
             if not isinstance(function_value, dict):
                 continue
             descriptor = function_value
         else:
+            if tool.get("type") != "function":
+                continue
             descriptor = tool
         if descriptor.get("strict") is not True:
             continue

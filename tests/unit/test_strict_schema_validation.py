@@ -752,3 +752,102 @@ def test_chat_strict_enforcement_runs_against_raw_payload_in_handler_path():
         param_template="tools[{index}].function.parameters",
         nested=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Chat strict enforcement detects function tools by the wrapper key, not by
+# ``type`` — mirroring ``_normalize_chat_tools`` (regression for second codex
+# review pass on PR #658).
+# ---------------------------------------------------------------------------
+
+
+def test_chat_strict_violation_when_type_omitted_but_function_dict_present():
+    """``_normalize_chat_tools`` coerces a tool with ``"function": {...}``
+    into a function tool even when the top-level ``"type"`` is omitted
+    (``"type": tool_type or "function"`` at chat_requests.py:198). The
+    strict pre-validator MUST anchor on the same signal (presence of a
+    ``"function"`` dict), otherwise the violation slips through and the
+    upstream Codex backend surfaces a 5xx instead of the local 400.
+    """
+    chat_tools: list[JsonValue] = [
+        {
+            # No top-level ``"type"``.
+            "function": {
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    # No additionalProperties → strict violation.
+                },
+                "strict": True,
+            },
+        }
+    ]
+    with pytest.raises(ClientPayloadError) as exc_info:
+        enforce_strict_function_tools_format(
+            chat_tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
+    err = exc_info.value
+    assert err.code == "invalid_function_parameters"
+    assert err.param == "tools[0].function.parameters"
+    assert "get_weather" in str(err)
+
+
+def test_chat_strict_skips_tool_without_function_wrapper_even_with_type():
+    """Symmetric guardrail: if ``tool["function"]`` isn't a dict, the
+    chat pre-validator skips the entry regardless of ``"type"``. The
+    flat shape (``{"type": "function", "name": ..., "parameters": ...}``)
+    is what ``/v1/responses`` callers send; ``_normalize_chat_tools``
+    leaves it alone (fallthrough branch), strict is not preserved, and
+    pre-validation here would be a false positive.
+    """
+    chat_tools: list[JsonValue] = [
+        {
+            "type": "function",
+            # No ``"function"`` wrapper — this is the /v1/responses
+            # shape leaked into a chat-completions payload.
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        }
+    ]
+    # Must not raise — there is no ``function`` dict to inspect, and the
+    # chat normalizer won't promote strict on this shape anyway.
+    enforce_strict_function_tools_format(
+        chat_tools,
+        param_template="tools[{index}].function.parameters",
+        nested=True,
+    )
+
+
+def test_responses_path_still_requires_type_function():
+    """Defensive symmetry check: native /v1/responses validation (the
+    default flat shape, ``nested=False``) keeps requiring an explicit
+    ``"type": "function"``. The responses request model enforces this
+    elsewhere, so the helper does not need to extend coverage there.
+    """
+    tools: list[JsonValue] = [
+        {
+            # No ``"type"`` field — would never reach this helper in the
+            # /v1/responses path (model validation rejects it), but the
+            # helper's own behavior should still skip it cleanly.
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        }
+    ]
+    # Must not raise — the flat-shape branch requires explicit
+    # ``"type" == "function"``.
+    enforce_strict_function_tools_format(tools)

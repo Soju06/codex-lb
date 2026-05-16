@@ -594,6 +594,48 @@ async def test_v1_chat_completions_strict_violation_param_uses_original_index(as
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_strict_violation_when_type_omitted_in_chat_tool(async_client):
+    """Regression for the second codex review pass on PR #658.
+
+    ``_normalize_chat_tools`` coerces a tool with ``"function": {...}``
+    into a function tool even when the top-level ``"type"`` is omitted
+    (``"type": tool_type or "function"`` at chat_requests.py:198). The
+    strict pre-validator must mirror that detection rule — anchoring on
+    the presence of the ``function`` wrapper dict, not on a strict
+    ``type == "function"`` check — otherwise type-omitted strict
+    violations bypass the local 400 and surface as upstream 5xx.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                # No top-level ``"type"`` — the chat normalizer still
+                # treats this as a function tool.
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        # No additionalProperties → strict violation.
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].function.parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_rejects_strict_function_tool_violation(async_client):
     """Same as the chat-completions case, but on the native /v1/responses endpoint.
 

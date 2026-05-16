@@ -3955,32 +3955,18 @@ class ProxyService:
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
         )
-        async with self._repo_factory() as repos:
-            accounts = [
-                account
-                for account in await repos.accounts.list_accounts()
-                if account.status == AccountStatus.ACTIVE
-                and (scoped_account_ids is None or account.id in scoped_account_ids)
-            ]
-            if not accounts:
-                return None
-
-            account_by_id = {account.id: account for account in accounts}
-            if affinity.key is not None and affinity.kind is not None:
-                sticky_account_id = await repos.sticky_sessions.get_account_id(
-                    affinity.key,
-                    kind=affinity.kind,
-                    max_age_seconds=affinity.max_age_seconds,
-                )
-                if sticky_account_id is not None:
-                    sticky_account = account_by_id.get(sticky_account_id)
-                    if sticky_account is not None:
-                        return _detached_account_copy(sticky_account)
-
-            selected = accounts[0]
-            if affinity.key is not None and affinity.kind is not None:
-                await repos.sticky_sessions.upsert(affinity.key, selected.id, kind=affinity.kind)
-            return _detached_account_copy(selected)
+        settings = await get_settings_cache().get()
+        selection = await self._load_balancer.select_account(
+            sticky_key=affinity.key,
+            sticky_kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            sticky_max_age_seconds=affinity.max_age_seconds,
+            account_ids=scoped_account_ids,
+            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+        )
+        if selection.account is None:
+            return None
+        return _detached_account_copy(selection.account)
 
     async def _create_http_bridge_session_compatible(
         self,

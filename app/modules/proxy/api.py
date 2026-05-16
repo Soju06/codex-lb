@@ -244,7 +244,10 @@ async def _thread_goal_proxy(
 
 _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
     {
+        "cache-control",
         "content-type",
+        "etag",
+        "last-modified",
         "location",
         "openai-processing-ms",
         "request-id",

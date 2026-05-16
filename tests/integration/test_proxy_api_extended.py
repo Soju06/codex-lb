@@ -600,7 +600,12 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
         return CodexControlResponse(
             status_code=200,
             body=b'{"keys":[]}',
-            headers={"content-type": "application/json"},
+            headers={
+                "cache-control": "public, max-age=3600",
+                "content-type": "application/json",
+                "etag": '"jwks-v1"',
+                "last-modified": "Sat, 16 May 2026 19:00:00 GMT",
+            },
         )
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
@@ -609,6 +614,9 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
 
     assert response.status_code == 200
     assert response.json() == {"keys": []}
+    assert response.headers["cache-control"] == "public, max-age=3600"
+    assert response.headers["etag"] == '"jwks-v1"'
+    assert response.headers["last-modified"] == "Sat, 16 May 2026 19:00:00 GMT"
     assert calls[0][:6] == (upstream_path, "GET", None, {"kid": "test"}, "access-token", "acc_codex_jwks")
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0

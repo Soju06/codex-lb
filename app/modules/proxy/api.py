@@ -1677,16 +1677,24 @@ async def _stream_responses(
     stream, startup_error = await _probe_stream_startup_error(
         stream,
         convert_event_errors=bridge_active,
-        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
-        if prefer_http_bridge
-        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+        timeout_seconds=(
+            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+        ),
     )
     if startup_error is not None:
         if owns_reservation:
             await _release_reservation(reservation)
-        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
+        return _stream_startup_error_response(
+            request,
+            startup_error,
+            headers=rate_limit_headers,
+        )
     stream = _normalize_public_responses_stream(
-        _stream_proxy_errors_as_response_failed(stream),
+        _stream_response_error_events(
+            stream,
+            owns_reservation=owns_reservation,
+            reservation=reservation,
+        ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
     return StreamingResponse(
@@ -1988,10 +1996,25 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
+        yield line
+
+
+async def _stream_response_error_events(
+    stream: AsyncIterator[str],
+    *,
+    owns_reservation: bool,
+    reservation: ApiKeyUsageReservationData | None,
+) -> AsyncIterator[str]:
     try:
         async for line in stream:
             yield line
     except ProxyResponseError as exc:
+        if owns_reservation:
+            try:
+                await _release_reservation(reservation)
+            except Exception:
+                logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
@@ -2876,11 +2899,12 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     if error_value.code == "previous_response_not_found":
         return True
     message = error_value.message or ""
+    normalized_message = " ".join(message.lower().split())
     return (
         error_value.code == "invalid_request_error"
         and error_value.param == "previous_response_id"
-        and "previous response" in message.lower()
-        and "not found" in message.lower()
+        and "previous response" in normalized_message
+        and "not found" in normalized_message
     )
 
 

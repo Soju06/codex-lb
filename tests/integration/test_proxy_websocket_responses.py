@@ -262,7 +262,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["output_tokens"] == 5
 
 
-def test_backend_responses_websocket_fails_completion_after_suppressed_duplicate_tool_call(
+def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
     app_instance,
     monkeypatch,
 ):
@@ -401,18 +401,18 @@ def test_backend_responses_websocket_fails_completion_after_suppressed_duplicate
             websocket.send_text(json.dumps(request_payload))
             created_event = json.loads(websocket.receive_text())
             tool_event = json.loads(websocket.receive_text())
+            replay_tool_event = json.loads(websocket.receive_text())
             terminal_event = json.loads(websocket.receive_text())
 
     assert created_event["type"] == "response.created"
     assert tool_event["type"] == "response.output_item.done"
     assert tool_event["item"]["call_id"] == "call_first"
-    assert terminal_event["type"] == "response.failed"
+    assert replay_tool_event["type"] == "response.output_item.done"
+    assert replay_tool_event["item"]["call_id"] == "call_replay"
+    assert terminal_event["type"] == "response.completed"
     assert terminal_event["response"]["id"] == "resp_ws_duplicate_tool"
-    assert terminal_event["response"]["error"]["code"] == "stream_incomplete"
-    assert "call_replay" not in json.dumps([created_event, tool_event, terminal_event])
     assert len(log_calls) == 1
-    assert log_calls[0]["status"] == "error"
-    assert log_calls[0]["error_code"] == "stream_incomplete"
+    assert log_calls[0]["status"] == "success"
 
 
 def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):

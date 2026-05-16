@@ -145,7 +145,7 @@ describe("DonutChart", () => {
     expect(legendRow).toHaveAttribute("data-active", "true");
   });
 
-  it("limits the legend list to four visible rows before scrolling", () => {
+  it("limits the legend list to five visible rows before scrolling", () => {
     render(
       <DonutChart
         title="Many Legends"
@@ -159,7 +159,7 @@ describe("DonutChart", () => {
     );
 
     expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
-      maxHeight: "calc(4 * 1.75rem + 0.375rem)",
+      maxHeight: "calc(5 * 1.75rem)",
     });
   });
 

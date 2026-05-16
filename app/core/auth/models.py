@@ -35,7 +35,7 @@ class DeviceCodePayload(BaseModel):
 
     @field_validator("interval", mode="before")
     @classmethod
-    def _parse_interval(cls, value: object) -> int | None:
+    def _parse_interval(cls, value: int | str | None) -> int | None:
         if value is None:
             return None
         if isinstance(value, int):

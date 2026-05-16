@@ -53,6 +53,16 @@ async def test_register_and_list_active(ring_service: RingMembershipService) -> 
 
 
 @pytest.mark.asyncio
+async def test_list_active_can_require_advertised_endpoint(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.12:8080")
+    await ring_service.register("pod-b", endpoint_base_url=None)
+
+    active = await ring_service.list_active(require_endpoint=True)
+
+    assert active == ["pod-a"]
+
+
+@pytest.mark.asyncio
 async def test_unregister(ring_service: RingMembershipService) -> None:
     """Register then unregister, list_active() returns empty."""
     await ring_service.register("pod-1")
@@ -160,3 +170,40 @@ async def test_heartbeat_updates_timestamp(ring_service: RingMembershipService) 
         updated_hb = member2.last_heartbeat_at
 
     assert updated_hb > initial_hb
+
+
+@pytest.mark.asyncio
+async def test_resolve_endpoint_returns_advertised_base_url(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-endpoint", endpoint_base_url="http://10.0.0.12:8080")
+
+    endpoint = await ring_service.resolve_endpoint("pod-endpoint")
+
+    assert endpoint == "http://10.0.0.12:8080"
+
+
+@pytest.mark.asyncio
+async def test_resolve_endpoint_ignores_stale_member_metadata(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-stale-endpoint", endpoint_base_url="http://10.0.0.14:8080")
+    await ring_service.mark_stale(
+        "pod-stale-endpoint",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=0,
+    )
+
+    endpoint = await ring_service.resolve_endpoint("pod-stale-endpoint", stale_threshold_seconds=1)
+
+    assert endpoint is None
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_preserves_endpoint_within_grace_window(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-grace-endpoint", endpoint_base_url="http://10.0.0.15:8080")
+    await ring_service.mark_stale(
+        "pod-grace-endpoint",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=RING_STALE_GRACE_SECONDS,
+    )
+
+    endpoint = await ring_service.resolve_endpoint("pod-grace-endpoint")
+
+    assert endpoint == "http://10.0.0.15:8080"

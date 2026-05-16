@@ -54,6 +54,13 @@ install_bundled() {
     --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy=IfNotPresent \
     --set postgresql.auth.password="${DB_PASSWORD}" \
+    --set config.sessionBridgeCodexPrewarmEnabled=false \
+    --set ingress.enabled=true \
+    --set ingress.ingressClassName=nginx \
+    --set ingress.nginx.enabled=true \
+    --set-string 'ingress.hosts[0].host=codex-lb.localtest.me' \
+    --set-string 'ingress.hosts[0].paths[0].path=/' \
+    --set-string 'ingress.hosts[0].paths[0].pathType=Prefix' \
     --wait \
     --timeout 10m
 

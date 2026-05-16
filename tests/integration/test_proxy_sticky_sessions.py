@@ -104,8 +104,15 @@ def _install_proxy_settings_cache(
         log_proxy_service_tier_trace=False,
         http_responses_session_bridge_enabled=False,
         http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
         http_responses_session_bridge_queue_limit=8,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        proxy_token_refresh_limit=32,
+        proxy_upstream_websocket_connect_limit=64,
+        proxy_response_create_limit=64,
+        proxy_compact_response_create_limit=16,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
@@ -429,6 +436,93 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
     assert stream_seen == ["acc_sid_a", "acc_sid_a"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_codex_session_id_reallocates_when_pinned_budget_exhausted(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    acc_a_id = await _import_account(async_client, "acc_sid_budget_a", "sid_budget_a@example.com")
+    acc_b_id = await _import_account(async_client, "acc_sid_budget_b", "sid_budget_b@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    stream_seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        stream_seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_session_budget"}}\n\n'
+
+    compact_seen: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        compact_seen.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    headers = {"session_id": "codex-thread-budget"}
+    stream_payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_sid_budget_a"]
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=99.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    compact_payload = {
+        "model": "gpt-5.1",
+        "instructions": "summarize",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+    }
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=compact_payload,
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert compact_seen == ["acc_sid_budget_b"]
+
+    response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
+    assert response.status_code == 200
+    assert stream_seen == ["acc_sid_budget_a", "acc_sid_budget_b"]
 
 
 @pytest.mark.asyncio

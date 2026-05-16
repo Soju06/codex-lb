@@ -1,8 +1,8 @@
-# Sticky Session Operations Specification
+# sticky-session-operations Specification
 
 ## Purpose
 
-Define how sticky-session mappings are typed, managed, and cleaned up so bounded prompt-cache affinity remains operationally controllable without affecting durable routing modes.
+Define sticky-session operation contracts so durable sessions, dashboard affinity, and prompt-cache affinity stay distinct.
 
 ## Requirements
 ### Requirement: Sticky sessions are explicitly typed

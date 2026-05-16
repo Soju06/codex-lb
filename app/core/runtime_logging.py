@@ -12,6 +12,7 @@ from fastapi import Request
 from uvicorn.config import LOGGING_CONFIG
 from uvicorn.logging import AccessFormatter, DefaultFormatter
 
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
 
 
@@ -92,7 +93,7 @@ class JsonFormatter(logging.Formatter):
 
 class JsonAccessFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        log_entry: dict[str, object] = {
+        log_entry: dict[str, JsonValue] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname,
             "logger": record.name,

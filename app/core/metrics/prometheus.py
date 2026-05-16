@@ -2,7 +2,29 @@ from __future__ import annotations
 
 import os
 from importlib import import_module
-from typing import Any
+from typing import Protocol
+
+
+class CollectorRegistryLike(Protocol):
+    pass
+
+
+class CounterLike(Protocol):
+    def inc(self, amount: float = 1) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "CounterLike": ...
+
+
+class GaugeLike(Protocol):
+    def inc(self, amount: float = 1) -> None: ...
+    def dec(self, amount: float = 1) -> None: ...
+    def set(self, value: float) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "GaugeLike": ...
+
+
+class HistogramLike(Protocol):
+    def observe(self, amount: float) -> None: ...
+    def labels(self, *args: str, **kwargs: str) -> "HistogramLike": ...
+
 
 try:
     prometheus_client = import_module("prometheus_client")
@@ -46,7 +68,7 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
     )
 
-    _gauge_kwargs: dict[str, Any] = {}
+    _gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         _gauge_kwargs["multiprocess_mode"] = "livesum"
 
@@ -92,8 +114,77 @@ if PROMETHEUS_AVAILABLE:
         "Total soft-affinity bridge sessions rebound locally on a non-owner instance",
         registry=REGISTRY,
     )
+    bridge_owner_forward_total = Counter(
+        "codex_lb_bridge_owner_forward_total",
+        "Total bridge owner forwards by outcome",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    bridge_durable_recover_total = Counter(
+        "codex_lb_bridge_durable_recover_total",
+        "Total durable bridge recoveries by path",
+        ["path"],
+        registry=REGISTRY,
+    )
+    bridge_same_account_takeover_total = Counter(
+        "codex_lb_bridge_same_account_takeover_total",
+        "Total same-account takeover outcomes",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    bridge_reattach_total = Counter(
+        "codex_lb_bridge_reattach_total",
+        "Total bridge reattach outcomes by path",
+        ["path", "outcome"],
+        registry=REGISTRY,
+    )
+    bridge_first_turn_timeout_total = Counter(
+        "codex_lb_bridge_first_turn_timeout_total",
+        "Total first-turn bridge timeouts during upstream connect",
+        registry=REGISTRY,
+    )
+    bridge_drain_recovery_allowed_total = Counter(
+        "codex_lb_bridge_drain_recovery_allowed_total",
+        "Total continuity recoveries allowed while bridge drain is active",
+        registry=REGISTRY,
+    )
+    bridge_owner_mismatch_total = Counter(
+        "codex_lb_bridge_owner_mismatch_total",
+        "Total bridge owner mismatches by key strength",
+        ["strength"],
+        registry=REGISTRY,
+    )
+    bridge_local_rebind_total = Counter(
+        "codex_lb_bridge_local_rebind_total",
+        "Total bridge local rebinds by reason",
+        ["reason"],
+        registry=REGISTRY,
+    )
+    bridge_forward_latency_seconds = Histogram(
+        "codex_lb_bridge_forward_latency_seconds",
+        "Bridge owner forward latency",
+        registry=REGISTRY,
+    )
+    bridge_public_contract_error_total = Counter(
+        "codex_lb_bridge_public_contract_error_total",
+        "Total public /responses contract violations by kind",
+        ["kind"],
+        registry=REGISTRY,
+    )
+    continuity_owner_resolution_total = Counter(
+        "codex_lb_continuity_owner_resolution_total",
+        "Total continuity owner resolution outcomes by surface and source",
+        ["surface", "source", "outcome"],
+        registry=REGISTRY,
+    )
+    continuity_fail_closed_total = Counter(
+        "codex_lb_continuity_fail_closed_total",
+        "Total continuity fail-closed or masked retryable outcomes by surface and reason",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
 
-    def make_scrape_registry() -> Any:
+    def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
             _multiprocess = import_module("prometheus_client.multiprocess")
             registry = CollectorRegistry()
@@ -110,20 +201,32 @@ if PROMETHEUS_AVAILABLE:
                 pass
 
 else:
-    REGISTRY: Any = None
-    requests_total: Any = None
-    request_duration_seconds: Any = None
-    upstream_requests_total: Any = None
-    upstream_request_duration_seconds: Any = None
-    active_connections: Any = None
-    rate_limit_hits_total: Any = None
-    circuit_breaker_state: Any = None
-    accounts_total: Any = None
-    bridge_instance_mismatch_total: Any = None
-    bridge_prompt_cache_locality_miss_total: Any = None
-    bridge_soft_local_rebind_total: Any = None
+    REGISTRY: CollectorRegistryLike | None = None
+    requests_total: CounterLike | None = None
+    request_duration_seconds: HistogramLike | None = None
+    upstream_requests_total: CounterLike | None = None
+    upstream_request_duration_seconds: HistogramLike | None = None
+    active_connections: GaugeLike | None = None
+    rate_limit_hits_total: CounterLike | None = None
+    circuit_breaker_state: GaugeLike | None = None
+    accounts_total: GaugeLike | None = None
+    bridge_instance_mismatch_total: CounterLike | None = None
+    bridge_prompt_cache_locality_miss_total: CounterLike | None = None
+    bridge_soft_local_rebind_total: CounterLike | None = None
+    bridge_owner_forward_total: CounterLike | None = None
+    bridge_durable_recover_total: CounterLike | None = None
+    bridge_same_account_takeover_total: CounterLike | None = None
+    bridge_reattach_total: CounterLike | None = None
+    bridge_first_turn_timeout_total: CounterLike | None = None
+    bridge_drain_recovery_allowed_total: CounterLike | None = None
+    bridge_owner_mismatch_total: CounterLike | None = None
+    bridge_local_rebind_total: CounterLike | None = None
+    bridge_forward_latency_seconds: HistogramLike | None = None
+    bridge_public_contract_error_total: CounterLike | None = None
+    continuity_owner_resolution_total: CounterLike | None = None
+    continuity_fail_closed_total: CounterLike | None = None
 
-    def make_scrape_registry() -> Any:
+    def make_scrape_registry() -> None:
         return None
 
     def mark_process_dead() -> None:
@@ -137,9 +240,21 @@ __all__ = [
     "active_connections",
     "accounts_total",
     "bridge_instance_mismatch_total",
+    "bridge_forward_latency_seconds",
+    "bridge_durable_recover_total",
+    "bridge_drain_recovery_allowed_total",
+    "bridge_first_turn_timeout_total",
+    "bridge_local_rebind_total",
+    "bridge_owner_forward_total",
+    "bridge_owner_mismatch_total",
+    "bridge_public_contract_error_total",
     "bridge_prompt_cache_locality_miss_total",
+    "bridge_reattach_total",
+    "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
+    "continuity_fail_closed_total",
+    "continuity_owner_resolution_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",

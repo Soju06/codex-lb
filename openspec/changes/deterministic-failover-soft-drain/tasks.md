@@ -26,12 +26,12 @@
 
 - [x] T17: Modify `_stream_with_retry` in `service.py`: catch connect-phase `ProxyResponseError(429/quota)` → `classify_upstream_failure` → `failover_decision` → break to next account if `failover_next`
 - [x] T18: Modify `compact_responses` in `service.py`: catch 429/quota `ProxyResponseError` → `classify_upstream_failure` → `failover_decision` → continue to next account if `failover_next`
-- [ ] T19: Add WebSocket handshake-phase failover: on upstream connect 429/quota before first downstream frame, select next account and retry
+- [x] T19: Add WebSocket handshake-phase failover: on upstream connect 429/quota before first downstream frame, select next account and retry
 - [x] T20: Adjust `_select_with_stickiness()` in `load_balancer.py`: skip new sticky creation for DRAINING accounts (codex_session exempt)
-- [ ] T21: Add integration tests: streaming connect-phase 429 → transparent failover to account B
-- [ ] T22: Add integration tests: compact quota_exceeded → transparent failover to account B
-- [ ] T23: Add integration tests: mid-stream error → surface (no failover)
-- [ ] T24: Add integration tests: all accounts DRAINING → still selects best DRAINING (no hard block)
+- [x] T21: Add integration tests: streaming connect-phase 429 → transparent failover to account B
+- [x] T22: Add integration tests: compact quota_exceeded → transparent failover to account B
+- [x] T23: Add integration tests: mid-stream error → surface (no failover)
+- [x] T24: Add integration tests: all accounts DRAINING → still selects best DRAINING (no hard block)
 
 ## Wave 4 — Feature flags, observability, cleanup (depends on Wave 3)
 

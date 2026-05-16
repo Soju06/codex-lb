@@ -92,6 +92,43 @@ async def test_in_flight_middleware_increments_and_decrements() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_flight_middleware_does_not_count_drain_status() -> None:
+    in_flight_during_app: int | None = None
+
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal in_flight_during_app
+        in_flight_during_app = shutdown_state.get_in_flight()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    middleware = InFlightMiddleware(inner_app)
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/internal/drain/status",
+        "raw_path": b"/internal/drain/status",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive():  # noqa: ANN202
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):  # noqa: ANN001, ANN202
+        pass
+
+    await middleware(scope, receive, send)
+
+    assert in_flight_during_app == 0
+    assert shutdown_state.get_in_flight() == 0
+
+
+@pytest.mark.asyncio
 async def test_in_flight_middleware_skips_websocket_connections() -> None:
     in_flight_during_ws: int | None = None
 
@@ -135,3 +172,83 @@ async def test_in_flight_middleware_skips_lifespan() -> None:
 
     assert app_called is True
     assert shutdown_state.get_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_in_flight_middleware_allows_internal_bridge_handoff_during_drain() -> None:
+    shutdown_state.set_draining(True)
+    app_called = False
+
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal app_called
+        app_called = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    middleware = InFlightMiddleware(inner_app)
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/internal/bridge/responses",
+        "raw_path": b"/internal/bridge/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive():  # noqa: ANN202
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    sent_messages: list[dict] = []
+
+    async def send(msg):  # noqa: ANN001, ANN202
+        sent_messages.append(msg)
+
+    await middleware(scope, receive, send)
+
+    assert app_called is True
+    assert sent_messages[0]["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_in_flight_middleware_allows_drain_status_during_drain() -> None:
+    shutdown_state.set_draining(True)
+    app_called = False
+
+    async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
+        nonlocal app_called
+        app_called = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    middleware = InFlightMiddleware(inner_app)
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/internal/drain/status",
+        "raw_path": b"/internal/drain/status",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive():  # noqa: ANN202
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent_messages: list[dict] = []
+
+    async def send(msg):  # noqa: ANN001, ANN202
+        sent_messages.append(msg)
+
+    await middleware(scope, receive, send)
+
+    assert app_called is True
+    assert sent_messages[0]["status"] == 200

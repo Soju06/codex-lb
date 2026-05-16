@@ -8,6 +8,7 @@ import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
@@ -29,6 +30,47 @@ class RequestLogsRepository:
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
         return list(result.scalars().all())
+
+    async def find_latest_account_id_for_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+        session_id: str | None = None,
+    ) -> str | None:
+        response_id_value = response_id.strip()
+        if not response_id_value:
+            return None
+
+        base_conditions = [
+            RequestLog.request_id == response_id_value,
+            RequestLog.status == "success",
+            RequestLog.account_id.is_not(None),
+        ]
+        if api_key_id is not None:
+            base_conditions.append(RequestLog.api_key_id == api_key_id)
+
+        async def _lookup_account_id(conditions: list[ColumnElement[bool]]) -> str | None:
+            stmt = (
+                select(RequestLog.account_id)
+                .where(and_(*conditions))
+                .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+                .limit(1)
+            )
+            result = await self._session.execute(stmt)
+            account_id = result.scalar_one_or_none()
+            if not isinstance(account_id, str):
+                return None
+            stripped = account_id.strip()
+            return stripped or None
+
+        session_id_value = session_id.strip() if isinstance(session_id, str) else ""
+        if session_id_value:
+            scoped_owner = await _lookup_account_id([*base_conditions, RequestLog.session_id == session_id_value])
+            if scoped_owner is not None:
+                return scoped_owner
+
+        return await _lookup_account_id(base_conditions)
 
     async def aggregate_by_bucket(
         self,
@@ -139,13 +181,20 @@ class RequestLogsRepository:
         actual_service_tier: str | None = None,
         transport: str | None = None,
         api_key_id: str | None = None,
+        session_id: str | None = None,
+        plan_type: str | None = None,
     ) -> RequestLog:
         resolved_request_id = ensure_request_id(request_id)
+        resolved_plan_type = plan_type
+        if resolved_plan_type is None and account_id:
+            resolved_plan_type = await self._resolve_account_plan_type(account_id)
         log = RequestLog(
             account_id=account_id,
             api_key_id=api_key_id,
+            session_id=session_id,
             request_id=resolved_request_id,
             model=model,
+            plan_type=resolved_plan_type,
             transport=transport,
             service_tier=service_tier,
             requested_service_tier=requested_service_tier,
@@ -175,6 +224,40 @@ class RequestLogsRepository:
             await _safe_rollback(self._session)
             raise
 
+    async def update_model_for_request(self, request_id: str, model: str) -> int:
+        """Override the ``model`` field of any logs matching ``request_id``.
+
+        Used by route handlers that translate a public request shape (e.g.
+        ``/v1/images/generations``) into an internal Responses request: the
+        first-pass log row stores the internal host model used for routing,
+        and we rewrite it here once the public effective model is known so
+        the dashboard and usage views surface the user-visible model.
+
+        Returns the number of rows that were updated.
+        """
+        resolved_request_id = ensure_request_id(request_id)
+        try:
+            # Fetch the affected rows so we can recompute ``cost_usd``
+            # from the new model. ``add_log`` derives the cost at insert
+            # time from the original (host) model; without recomputing
+            # here, dashboards would mix the public ``gpt-image-*`` model
+            # label with host-model pricing and report inaccurate cost.
+            stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
+            result_rows = await self._session.execute(stmt)
+            logs = list(result_rows.scalars())
+            if not logs:
+                return 0
+            for log in logs:
+                log.model = model
+                log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+            await self._session.commit()
+        except sa_exc.ResourceClosedError:
+            return 0
+        except BaseException:
+            await _safe_rollback(self._session)
+            raise
+        return len(logs)
+
     async def list_recent(
         self,
         limit: int = 50,
@@ -183,6 +266,7 @@ class RequestLogsRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
@@ -196,6 +280,7 @@ class RequestLogsRepository:
             since=since,
             until=until,
             account_ids=account_ids,
+            api_key_ids=api_key_ids,
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
@@ -230,19 +315,38 @@ class RequestLogsRepository:
         result = await self._session.execute(count_stmt)
         return int(result.scalar_one())
 
+    async def _resolve_account_plan_type(self, account_id: str) -> str | None:
+        result = await self._session.execute(select(Account.plan_type).where(Account.id == account_id).limit(1))
+        return result.scalar_one_or_none()
+
     async def list_filter_options(
         self,
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
-    ) -> tuple[list[str], list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+    ) -> tuple[list[str], list[tuple[str, str | None]], list[str], list[tuple[str, str | None]]]:
         filters = self._build_filters(
             since=since,
             until=until,
             account_ids=account_ids,
+            api_key_ids=api_key_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=True,
+            include_error_other=True,
+            error_codes_in=None,
+            error_codes_excluding=None,
+        )
+        api_key_facet_filters = self._build_filters(
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            api_key_ids=None,
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
@@ -258,6 +362,7 @@ class RequestLogsRepository:
             .distinct()
             .order_by(RequestLog.model.asc(), RequestLog.reasoning_effort.asc())
         )
+        api_key_stmt = select(RequestLog.api_key_id).distinct().order_by(RequestLog.api_key_id.asc())
         status_stmt = (
             select(RequestLog.status, RequestLog.error_code)
             .distinct()
@@ -268,15 +373,19 @@ class RequestLogsRepository:
             account_stmt = account_stmt.where(clause)
             model_stmt = model_stmt.where(clause)
             status_stmt = status_stmt.where(clause)
+        if api_key_facet_filters.conditions:
+            api_key_stmt = api_key_stmt.where(and_(*api_key_facet_filters.conditions))
 
         account_rows = await self._session.execute(account_stmt)
         model_rows = await self._session.execute(model_stmt)
+        api_key_rows = await self._session.execute(api_key_stmt)
         status_rows = await self._session.execute(status_stmt)
 
         account_ids = [row[0] for row in account_rows.all() if row[0]]
         model_options = [(row[0], row[1]) for row in model_rows.all() if row[0]]
+        api_key_ids = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
-        return account_ids, model_options, status_values
+        return account_ids, model_options, api_key_ids, status_values
 
     async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
         unique_ids = sorted({key_id for key_id in api_key_ids if key_id})
@@ -285,6 +394,15 @@ class RequestLogsRepository:
         result = await self._session.execute(select(ApiKey.id, ApiKey.name).where(ApiKey.id.in_(unique_ids)))
         return {key_id: name for key_id, name in result.all() if key_id and name}
 
+    async def get_api_key_details_by_ids(self, api_key_ids: list[str]) -> dict[str, tuple[str, str | None]]:
+        unique_ids = sorted({key_id for key_id in api_key_ids if key_id})
+        if not unique_ids:
+            return {}
+        result = await self._session.execute(
+            select(ApiKey.id, ApiKey.name, ApiKey.key_prefix).where(ApiKey.id.in_(unique_ids))
+        )
+        return {key_id: (name, key_prefix) for key_id, name, key_prefix in result.all() if key_id and name}
+
     def _build_filters(
         self,
         *,
@@ -292,6 +410,7 @@ class RequestLogsRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
@@ -307,6 +426,8 @@ class RequestLogsRepository:
             conditions.append(RequestLog.requested_at <= until)
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
+        if api_key_ids:
+            conditions.append(RequestLog.api_key_id.in_(api_key_ids))
 
         if model_options:
             pair_conditions = []

@@ -103,6 +103,15 @@ export function DashboardPage() {
     });
   }, [optionsQuery.data?.accountIds, overview?.accounts]);
 
+  const apiKeyOptions = useMemo(
+    () =>
+      (optionsQuery.data?.apiKeys ?? []).map((option) => ({
+        value: option.id,
+        label: option.keyPrefix ? `${option.name} · ${option.keyPrefix}` : option.name,
+      })),
+    [optionsQuery.data?.apiKeys],
+  );
+
   const modelOptions = useMemo(
     () =>
       (optionsQuery.data?.modelOptions ?? []).map((option) => ({
@@ -189,11 +198,13 @@ export function DashboardPage() {
             <RequestFilters
               filters={filters}
               accountOptions={accountOptions}
+              apiKeyOptions={apiKeyOptions}
               modelOptions={modelOptions}
               statusOptions={statusOptions}
               onSearchChange={(search) => updateFilters({ search, offset: 0 })}
               onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
               onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
+              onApiKeyChange={(apiKeyIds) => updateFilters({ apiKeyIds, offset: 0 })}
               onModelChange={(modelOptionsSelected) =>
                 updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
               }
@@ -203,6 +214,7 @@ export function DashboardPage() {
                   search: "",
                   timeframe: "all",
                   accountIds: [],
+                  apiKeyIds: [],
                   modelOptions: [],
                   statuses: [],
                   offset: 0,

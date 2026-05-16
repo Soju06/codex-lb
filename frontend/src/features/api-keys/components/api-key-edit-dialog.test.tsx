@@ -149,8 +149,8 @@ describe("ApiKeyEditDialog", () => {
     );
 
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: "primary@example.com" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: "secondary@example.com" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
 

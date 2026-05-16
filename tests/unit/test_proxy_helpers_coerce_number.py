@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.types import JsonValue
 from app.modules.proxy.helpers import _coerce_number
 
 pytestmark = pytest.mark.unit
@@ -18,7 +19,7 @@ pytestmark = pytest.mark.unit
         (-7, -7),
     ],
 )
-def test_coerce_number_happy_path(value: object, expected: int | float) -> None:
+def test_coerce_number_happy_path(value: JsonValue, expected: int | float) -> None:
     assert _coerce_number(value) == expected
 
 
@@ -33,5 +34,5 @@ def test_coerce_number_happy_path(value: object, expected: int | float) -> None:
         [],
     ],
 )
-def test_coerce_number_edge_cases_return_none(value: object) -> None:
+def test_coerce_number_edge_cases_return_none(value: JsonValue) -> None:
     assert _coerce_number(value) is None

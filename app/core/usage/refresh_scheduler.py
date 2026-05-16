@@ -12,6 +12,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -44,13 +45,13 @@ class UsageRefreshScheduler:
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
-        if not self._task:
-            return
         self._stop.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+        await usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.cancel_all()
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

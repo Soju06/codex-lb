@@ -1,0 +1,155 @@
+{{- if .Release.IsUpgrade }}
+{{- $hookName := printf "%s-legacy-prepare" (include "codex-lb.fullname" . | trunc 44 | trimSuffix "-") -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hookName }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $hookName }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "codex-lb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: legacy-prepare
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $hookName }}
+      enableServiceLinks: false
+      {{- $pullSecrets := concat (.Values.global.imagePullSecrets | default list) (.Values.image.pullSecrets | default list) }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: prepare
+          image: {{ include "codex-lb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              import json
+              import os
+              import ssl
+              import time
+              from urllib import error, request
+
+              namespace = os.environ["POD_NAMESPACE"]
+              deployment = os.environ["LEGACY_DEPLOYMENT_NAME"]
+              token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r", encoding="utf-8").read().strip()
+              ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              api = "https://kubernetes.default.svc"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/json",
+                  "Content-Type": "application/merge-patch+json",
+              }
+              ctx = ssl.create_default_context(cafile=ca_file)
+              dep_url = f"{api}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment}"
+
+              patch_payload = json.dumps(
+                  {
+                      "spec": {
+                          "template": {
+                              "metadata": {
+                                  "labels": {
+                                      "codex-lb.soju.dev/traffic": "legacy",
+                                  }
+                              }
+                          }
+                      }
+                  }
+              ).encode("utf-8")
+
+              req = request.Request(dep_url, headers=headers, data=patch_payload, method="PATCH")
+              try:
+                  with request.urlopen(req, context=ctx, timeout=10):
+                      pass
+              except error.HTTPError as exc:
+                  if exc.code != 404:
+                      raise
+                  raise SystemExit(0)
+
+              def get_json(url: str) -> dict:
+                  req = request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+                  with request.urlopen(req, context=ctx, timeout=10) as resp:
+                      return json.load(resp)
+
+              deadline = time.time() + 600
+              while time.time() < deadline:
+                  payload = get_json(dep_url)
+                  spec = payload.get("spec") or {}
+                  status = payload.get("status") or {}
+                  desired = int(spec.get("replicas") or 1)
+                  ready = int(status.get("readyReplicas") or 0)
+                  if ready >= desired:
+                      break
+                  time.sleep(5)
+              else:
+                  raise SystemExit("Legacy Deployment did not finish selector-cutover rollout")
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LEGACY_DEPLOYMENT_NAME
+              value: {{ include "codex-lb.fullname" . | quote }}
+{{- end }}

@@ -77,9 +77,9 @@ const PIE_CY = 72;
 const INNER_R = 53;
 const OUTER_R = 68;
 const ACTIVE_RADIUS_OFFSET = 4;
-const LEGEND_VISIBLE_COUNT = 4;
+const LEGEND_VISIBLE_COUNT = 5;
 const LEGEND_ROW_HEIGHT_REM = 1.75;
-const LEGEND_ROW_GAP_REM = 0.125;
+const LEGEND_ROW_GAP_REM = 0;
 
 type DonutDatum = {
   id: string;
@@ -105,10 +105,12 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
   const palette = buildDonutPalette(items.length, isDark);
-  const normalizedItems = items.map((item, index) => ({
-    ...item,
-    color: item.color ?? palette[index % palette.length],
-  }));
+  const normalizedItems = items
+    .map((item, index) => ({
+      ...item,
+      color: item.color ?? palette[index % palette.length],
+    }))
+    .sort((a, b) => b.value - a.value);
 
   const usedSum = normalizedItems.reduce((acc, item) => acc + Math.max(0, item.value), 0);
   const safeCapacity = Math.max(0, total);
@@ -222,7 +224,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
         </div>
 
         <div
-          className="flex-1 space-y-0.5 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           data-testid="donut-legend-list"
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(LEGEND_VISIBLE_COUNT - 1) * LEGEND_ROW_GAP_REM}rem)` }}
         >

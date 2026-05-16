@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from inspect import isawaitable
 from typing import TYPE_CHECKING
 
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 NAMESPACE_API_KEY = "api_key"
 NAMESPACE_FIREWALL = "firewall"
+type InvalidationCallback = Callable[[], None | Awaitable[None]]
 
 
 class CacheInvalidationPoller:
@@ -31,12 +32,12 @@ class CacheInvalidationPoller:
         self._session_factory = session_factory
         self._poll_interval = poll_interval_seconds
         self._known_versions: dict[str, int] = {}
-        self._callbacks: dict[str, list[Callable[[], object]]] = {}
+        self._callbacks: dict[str, list[InvalidationCallback]] = {}
         self._poll_initialized = False
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
-    def on_invalidation(self, namespace: str, callback: Callable[[], object]) -> None:
+    def on_invalidation(self, namespace: str, callback: InvalidationCallback) -> None:
         self._callbacks.setdefault(namespace, []).append(callback)
 
     async def start(self) -> None:

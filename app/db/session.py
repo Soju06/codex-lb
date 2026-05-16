@@ -50,10 +50,24 @@ def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, ob
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and url.startswith("postgresql+asyncpg://"):
         kwargs["poolclass"] = NullPool
     else:
-        kwargs["pool_size"] = 3 if background else _settings.database_pool_size
-        kwargs["max_overflow"] = 2 if background else _settings.database_max_overflow
+        kwargs["pool_size"] = _database_pool_size(background=background)
+        kwargs["max_overflow"] = _database_max_overflow(background=background)
         kwargs["pool_timeout"] = _settings.database_pool_timeout_seconds
     return kwargs
+
+
+def _database_pool_size(*, background: bool) -> int:
+    if background:
+        return _settings.database_background_pool_size or _settings.database_pool_size
+    return _settings.database_pool_size
+
+
+def _database_max_overflow(*, background: bool) -> int:
+    if background:
+        if _settings.database_background_max_overflow is not None:
+            return _settings.database_background_max_overflow
+        return _settings.database_max_overflow
+    return _settings.database_max_overflow
 
 
 def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
@@ -189,15 +203,14 @@ def init_background_db(url: str | None = None) -> None:
             _background_engine = engine
             _background_session_factory = SessionLocal
             return
-        else:
-            _background_engine = create_async_engine(
-                db_url,
-                echo=False,
-                pool_size=3,
-                max_overflow=2,
-                pool_timeout=_settings.database_pool_timeout_seconds,
-                connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
-            )
+        _background_engine = create_async_engine(
+            db_url,
+            echo=False,
+            pool_size=_database_pool_size(background=True),
+            max_overflow=_database_max_overflow(background=True),
+            pool_timeout=_settings.database_pool_timeout_seconds,
+            connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
+        )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     else:
         _background_engine = create_async_engine(

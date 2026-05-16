@@ -75,11 +75,16 @@ class Account(Base):
     )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
         back_populates="account",
         cascade="all, delete-orphan",
+    )
+    request_logs: Mapped[list["RequestLog"]] = relationship(
+        "RequestLog",
+        back_populates="account",
     )
 
 
@@ -121,9 +126,11 @@ class RequestLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
+    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -139,6 +146,10 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account: Mapped[Account | None] = relationship(
+        "Account",
+        back_populates="request_logs",
+    )
 
 
 class AuditLog(Base):
@@ -211,6 +222,12 @@ class DashboardSettings(Base):
         Integer,
         default=1800,
         server_default=text("1800"),
+        nullable=False,
+    )
+    dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=43200,
+        server_default=text("43200"),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(
@@ -465,6 +482,120 @@ class BridgeRingMember(Base):
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class HttpBridgeSessionState(str, Enum):
+    ACTIVE = "active"
+    DRAINING = "draining"
+    CLOSED = "closed"
+
+
+class HttpBridgeSessionRecord(Base):
+    __tablename__ = "http_bridge_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_key_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_key_value: Mapped[str] = mapped_column(Text, nullable=False)
+    session_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    state: Mapped[HttpBridgeSessionState] = mapped_column(
+        SqlEnum(
+            HttpBridgeSessionState,
+            name="http_bridge_session_state",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=HttpBridgeSessionState.ACTIVE,
+        server_default=text("'active'"),
+        nullable=False,
+    )
+    account_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    aliases: Mapped[list["HttpBridgeSessionAlias"]] = relationship(
+        "HttpBridgeSessionAlias",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_key_kind",
+            "session_key_hash",
+            "api_key_scope",
+            name="uq_http_bridge_sessions_session_key",
+        ),
+    )
+
+
+class HttpBridgeSessionAlias(Base):
+    __tablename__ = "http_bridge_session_aliases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("http_bridge_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alias_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    alias_value: Mapped[str] = mapped_column(Text, nullable=False)
+    alias_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    session: Mapped[HttpBridgeSessionRecord] = relationship(
+        "HttpBridgeSessionRecord",
+        back_populates="aliases",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "alias_kind",
+            "alias_hash",
+            "api_key_scope",
+            name="uq_http_bridge_session_aliases_alias",
+        ),
+    )
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
@@ -485,6 +616,7 @@ Index(
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
@@ -507,14 +639,45 @@ Index(
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
 )
+Index(
+    "idx_logs_request_status_api_key_time",
+    RequestLog.request_id,
+    RequestLog.status,
+    RequestLog.api_key_id,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
+Index(
+    "idx_logs_request_status_api_key_session_time",
+    RequestLog.request_id,
+    RequestLog.status,
+    RequestLog.api_key_id,
+    RequestLog.session_id,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
+Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
+Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
+Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
+Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
+Index(
+    "idx_http_bridge_session_aliases_session_id",
+    HttpBridgeSessionAlias.session_id,
+)
+Index(
+    "idx_http_bridge_session_aliases_alias_kind_hash_scope",
+    HttpBridgeSessionAlias.alias_kind,
+    HttpBridgeSessionAlias.alias_hash,
+    HttpBridgeSessionAlias.api_key_scope,
+)
 Index("ix_additional_usage_history_account_id", AdditionalUsageHistory.account_id)
 Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded_at)
 Index(

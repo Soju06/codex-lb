@@ -72,6 +72,10 @@ def _make_proxy_settings() -> object:
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=False,
         sticky_reallocation_budget_threshold_pct=95.0,
+        proxy_token_refresh_limit=32,
+        proxy_upstream_websocket_connect_limit=64,
+        proxy_response_create_limit=64,
+        proxy_compact_response_create_limit=16,
     )
 
 

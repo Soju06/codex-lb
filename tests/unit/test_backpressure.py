@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, cast
 
 import pytest
@@ -52,7 +53,7 @@ async def test_backpressure_returns_429_when_at_capacity():
         first_response = await first_request
 
     assert overloaded.status_code == 429
-    assert overloaded.json() == {"detail": "Too Many Requests"}
+    assert overloaded.json() == {"detail": "codex-lb is temporarily overloaded by local backpressure"}
     assert overloaded.headers["retry-after"] == "5"
     assert first_response.status_code == 200
 
@@ -88,7 +89,7 @@ async def test_backpressure_exempts_health_live_even_at_capacity():
 
 
 @pytest.mark.asyncio
-async def test_backpressure_websocket_rejects_with_close_when_at_capacity():
+async def test_backpressure_websocket_rejects_with_http_response_when_at_capacity():
     app_called = False
 
     async def inner_app(scope, receive, send):
@@ -121,10 +122,46 @@ async def test_backpressure_websocket_rejects_with_close_when_at_capacity():
         middleware._semaphore.release()
 
     assert app_called is False
-    assert sent_events == [
-        {
-            "type": "websocket.close",
-            "code": 1013,
-            "reason": "Too Many Requests",
-        }
-    ]
+    assert sent_events[0]["type"] == "websocket.http.response.start"
+    assert sent_events[0]["status"] == 429
+    assert sent_events[1]["type"] == "websocket.http.response.body"
+    payload = json.loads(cast(bytes, sent_events[1]["body"]).decode("utf-8"))
+    assert payload["error"]["code"] == "proxy_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_backpressure_dashboard_websocket_uses_detail_payload_when_at_capacity():
+    app_called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal app_called
+        app_called = True
+        del scope, receive, send
+
+    middleware = BackpressureMiddleware(cast(Any, inner_app), max_concurrent=1)
+    await middleware._semaphore.acquire()
+    sent_events: list[dict[str, object]] = []
+    connect_delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal connect_delivered
+        if not connect_delivered:
+            connect_delivered = True
+            return {"type": "websocket.connect"}
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message: dict[str, object]) -> None:
+        sent_events.append(message)
+
+    try:
+        await middleware(
+            {"type": "websocket", "path": "/api/status/socket"},
+            cast(Any, receive),
+            cast(Any, send),
+        )
+    finally:
+        middleware._semaphore.release()
+
+    assert app_called is False
+    payload = json.loads(cast(bytes, sent_events[1]["body"]).decode("utf-8"))
+    assert payload == {"detail": "codex-lb is temporarily overloaded by local backpressure"}

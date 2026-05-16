@@ -40,6 +40,18 @@ async def test_cross_instance_rate_limiting(db_session):
 
 
 @pytest.mark.asyncio
+async def test_check_and_increment_records_first_password_attempt(db_session):
+    from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
+
+    limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=300, type="password")
+    key = "test-password-login"
+
+    await limiter.check_and_increment(key, db_session)
+    await limiter.clear_for_key(key, db_session)
+    await limiter.check_and_increment(key, db_session)
+
+
+@pytest.mark.asyncio
 async def test_settings_cache_consistency(db_session):
     from app.core.config.settings_cache import get_settings_cache
 

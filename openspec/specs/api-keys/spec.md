@@ -1,63 +1,23 @@
 # api-keys Specification
 
 ## Purpose
-TBD - created by archiving change admin-auth-and-api-keys. Update Purpose after archive.
-## Requirements
-### Requirement: API Key creation
 
+Define API key lifecycle, enforcement, accounting, and dashboard management contracts for downstream clients.
+
+## Requirements
+
+### Requirement: API Key creation
 The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), and `expires_at` (optional ISO 8601 datetime). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
 
-#### Scenario: Create key with all options
-
-- **WHEN** admin submits `POST /api/api-keys` with `{ "name": "dev-key", "allowedModels": ["o3-pro"], "weeklyTokenLimit": 1000000, "expiresAt": "2025-12-31T00:00:00Z" }`
-- **THEN** the system returns `{ "id": "<uuid>", "name": "dev-key", "key": "sk-clb-...", "keyPrefix": "sk-clb-a1b2c3d4", "allowedModels": ["o3-pro"], "weeklyTokenLimit": 1000000, "expiresAt": "2025-12-31T00:00:00Z", "createdAt": "..." }` with the plain key visible only in this response
-
 #### Scenario: Create key with timezone-aware expiration
-
 - **WHEN** admin submits `POST /api/api-keys` with `{ "name": "dev-key", "expiresAt": "2025-12-31T00:00:00Z" }`
 - **THEN** the system persists the expiration successfully without PostgreSQL datetime binding errors
 - **AND** the response returns `expiresAt` representing the same UTC instant
 
-#### Scenario: Create key with defaults
-
-- **WHEN** admin submits `POST /api/api-keys` with `{ "name": "open-key" }` and no optional fields
-- **THEN** the system creates a key with `allowedModels: null` (all models), `weeklyTokenLimit: null` (unlimited), `expiresAt: null` (no expiration)
-
-#### Scenario: Create key with duplicate name
-
-- **WHEN** admin submits a key with a `name` that already exists
-- **THEN** the system creates the key (names are labels, not unique constraints)
-
-### Requirement: API Key listing
-
-The system SHALL expose `GET /api/api-keys` returning all API keys with their metadata. The response MUST NOT include the key hash or plain key. Each key MUST include `id`, `name`, `keyPrefix`, `allowedModels`, `weeklyTokenLimit`, `weeklyTokensUsed`, `weeklyResetAt`, `expiresAt`, `isActive`, `createdAt`, and `lastUsedAt`.
-
-#### Scenario: List keys
-
-- **WHEN** admin calls `GET /api/api-keys`
-- **THEN** the system returns an array of key objects ordered by `createdAt` descending, without `key` or `keyHash` fields
-
-#### Scenario: No keys exist
-
-- **WHEN** no API keys have been created
-- **THEN** the system returns an empty array `[]`
-
 ### Requirement: API Key update
-
 The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence.
 
-#### Scenario: Update allowed models
-
-- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "allowedModels": ["o3-pro", "gpt-4.1"] }`
-- **THEN** the system updates the allowed models list and returns the updated key
-
-#### Scenario: Deactivate key
-
-- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "isActive": false }`
-- **THEN** the key is deactivated; subsequent Bearer requests using this key SHALL be rejected with 401
-
 #### Scenario: Update key with timezone-aware expiration
-
 - **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "expiresAt": "2025-12-31T00:00:00Z" }`
 - **THEN** the system persists the expiration successfully without PostgreSQL datetime binding errors
 - **AND** the response returns `expiresAt` representing the same UTC instant
@@ -92,7 +52,7 @@ The system SHALL allow regenerating an API key via `POST /api/api-keys/{id}/rege
 
 ### Requirement: API Key authentication global switch
 
-The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key, but non-local proxy requests MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key via `Authorization: Bearer <key>`.
+The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key via `Authorization: Bearer <key>`.
 
 #### Scenario: Enable API key auth
 
@@ -110,6 +70,12 @@ The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings
 - **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
 - **AND** a non-local client calls a protected proxy route
 - **THEN** the request is rejected with 401 until proxy authentication is configured
+
+#### Scenario: Disable API key auth for an explicitly allowlisted proxy client
+
+- **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
+- **AND** the request socket peer IP belongs to configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the protected proxy route proceeds without API key authentication
 
 #### Scenario: Enable without any keys created
 
@@ -151,7 +117,16 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 
 - **WHEN** `api_key_auth_enabled` is false
 - **AND** the request is classified as non-local
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
 - **THEN** the dependency rejects the request with 401
+
+#### Scenario: Disabled auth allowlist uses raw socket peer only
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** forwarded headers claim a different client IP
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the dependency rejects the request with 401
+- **AND** forwarded headers do not satisfy the explicit allowlist
 
 ### Requirement: Model restriction enforcement
 
@@ -205,7 +180,7 @@ The system SHALL atomically increment `weekly_tokens_used` on the API key record
 
 ### Requirement: Weekly token usage reset
 
-The system SHALL reset `weekly_tokens_used` to 0 using a lazy on-read strategy. When validating an API key, if `weekly_reset_at < now()`, the system MUST reset the counter and advance `weekly_reset_at` by 7-day intervals until it is in the future.
+The system SHALL keep the existing lazy on-read reset strategy for API key usage limits. When validating an API key, if a limit `reset_at < now()`, the system MUST reset the counter and advance `reset_at` by whole window intervals until it is in the future. The system MUST also run an hourly background fallback sweep that repairs expired API key limit usage even when no validation request arrives.
 
 #### Scenario: Weekly reset triggered on validation
 
@@ -216,6 +191,11 @@ The system SHALL reset `weekly_tokens_used` to 0 using a lazy on-read strategy. 
 
 - **WHEN** an API key is validated and `weekly_reset_at` is in the future
 - **THEN** no reset occurs; `weekly_tokens_used` retains its current value
+
+#### Scenario: Hourly fallback resets expired usage without a read
+
+- **WHEN** an API key usage limit is expired and no validation request occurs
+- **THEN** the hourly background fallback resets `current_value` to 0 and advances `reset_at` into the future
 
 ### Requirement: RequestLog API key reference
 

@@ -1,7 +1,7 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: {{ include "codex-lb.fullname" . }}
+  name: {{ include "codex-lb.workloadName" . }}
   namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}
@@ -10,24 +10,30 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  serviceName: {{ include "codex-lb.bridgeHeadlessServiceName" . }}
+  {{- $httpPort := .Values.service.port | default 2455 }}
+  {{- $statefulSetUpdateStrategyType := .Values.updateStrategy.type }}
+  {{- if eq $statefulSetUpdateStrategyType "Recreate" }}
+  {{- $statefulSetUpdateStrategyType = "RollingUpdate" }}
+  {{- end }}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  podManagementPolicy: {{ .Values.podManagementPolicy }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   selector:
     matchLabels:
-      {{- include "codex-lb.selectorLabels" . | nindent 6 }}
-  strategy:
-    type: {{ .Values.updateStrategy.type }}
-    {{- if eq .Values.updateStrategy.type "RollingUpdate" }}
+      {{- include "codex-lb.workloadSelectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: {{ $statefulSetUpdateStrategyType }}
+    {{- if eq $statefulSetUpdateStrategyType "RollingUpdate" }}
     rollingUpdate:
-      maxSurge: {{ .Values.updateStrategy.rollingUpdate.maxSurge }}
-      maxUnavailable: {{ .Values.updateStrategy.rollingUpdate.maxUnavailable }}
+      partition: {{ .Values.updateStrategy.rollingUpdate.partition }}
     {{- end }}
   template:
     metadata:
       labels:
-        {{- include "codex-lb.selectorLabels" . | nindent 8 }}
+        {{- include "codex-lb.workloadSelectorLabels" . | nindent 8 }}
         {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -75,7 +81,7 @@ spec:
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
-                    {{- include "codex-lb.selectorLabels" . | nindent 20 }}
+                    {{- include "codex-lb.workloadSelectorLabels" . | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
       {{- else if eq .Values.affinity.podAntiAffinity "hard" }}
       affinity:
@@ -83,7 +89,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  {{- include "codex-lb.selectorLabels" . | nindent 18 }}
+                  {{- include "codex-lb.workloadSelectorLabels" . | nindent 18 }}
               topologyKey: kubernetes.io/hostname
       {{- end }}
       {{- with .Values.topologySpreadConstraints }}
@@ -198,10 +204,10 @@ spec:
             - --host
             - "0.0.0.0"
             - --port
-            - "2455"
+            - {{ $httpPort | quote }}
           ports:
             - name: http
-              containerPort: 2455
+              containerPort: {{ $httpPort }}
               protocol: TCP
             {{- if .Values.metrics.enabled }}
             - name: metrics
@@ -222,6 +228,24 @@ spec:
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
             - name: CODEX_LB_ENCRYPTION_KEY_FILE
               value: /var/lib/codex-lb/encryption.key
+            {{- if .Values.config.sessionBridgeEnabled }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID
+              value: "$(POD_NAME)"
+            - name: CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL
+              value: {{ default (printf "http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.%s:%v" (include "codex-lb.bridgeHeadlessServiceName" .) .Values.clusterDomain .Values.service.port) .Values.config.sessionBridgeAdvertiseBaseUrl | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -245,7 +269,7 @@ spec:
                 command:
                   - python
                   - -c
-                  - "import time; time.sleep({{ .Values.preStopSleepSeconds }})"
+                  - "import json, time, urllib.error, urllib.request\nbase = 'http://127.0.0.1:{{ $httpPort }}'\ntry:\n    urllib.request.urlopen(urllib.request.Request(base + '/internal/drain/start', method='POST'), timeout=2).read()\nexcept Exception:\n    pass\ndeadline = time.monotonic() + {{ .Values.preStopSleepSeconds }}\nwhile time.monotonic() < deadline:\n    try:\n        json.loads(urllib.request.urlopen(base + '/internal/drain/status', timeout=2).read() or b'{}')\n    except Exception:\n        pass\n    time.sleep(1)"
           startupProbe:
             httpGet:
               path: /health/startup

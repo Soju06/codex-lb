@@ -16,7 +16,12 @@ from app.core.balancer import (
 )
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.proxy.load_balancer import RuntimeState, _state_from_account
+from app.modules.proxy.load_balancer import (
+    RuntimeState,
+    _select_account_preferring_budget_safe,
+    _state_above_sticky_budget_threshold,
+    _state_from_account,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -405,6 +410,7 @@ def _make_test_account(
     account_id: str = "a",
     status: AccountStatus = AccountStatus.ACTIVE,
     reset_at: int | None = None,
+    blocked_at: int | None = None,
 ) -> Account:
     return Account(
         id=account_id,
@@ -417,6 +423,7 @@ def _make_test_account(
         last_refresh=datetime(2025, 1, 1),
         status=status,
         reset_at=reset_at,
+        blocked_at=blocked_at,
     )
 
 
@@ -444,17 +451,153 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
-def test_state_from_account_preserves_quota_exceeded_on_restart(monkeypatch):
+def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    next_reset = int(now + 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=next_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_missing_and_no_blocked_at(
+    monkeypatch,
+):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 600),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_keeps_quota_exceeded_without_blocked_at_when_usage_stays_on_same_reset_window(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
     secondary = _make_test_usage(
         used_percent=10.0,
         reset_at=future_reset,
         recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_clears_quota_exceeded_after_restart_with_persisted_blocked_at(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+    assert state.blocked_at is None
+
+
+def test_state_from_account_keeps_quota_exceeded_after_restart_when_persisted_blocked_at_is_recent(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 60.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_keeps_quota_exceeded_after_restart_when_secondary_usage_is_older_than_block(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    secondary = _make_test_usage(
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
     )
 
     state = _state_from_account(
@@ -1063,6 +1206,155 @@ def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
         )
         assert result.account is not None
         assert result.account.account_id == "early"
+
+
+def test_all_primary_pressured_fallback_skips_unavailable_account():
+    now = time.time()
+    states = [
+        AccountState(
+            "blocked",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=5.0,
+            cooldown_until=now + 60,
+        ),
+        AccountState(
+            "available",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=90.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "available"
+
+
+def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe():
+    states = [
+        AccountState("secondary-high", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=90.0),
+        AccountState("secondary-low", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=1.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "secondary-low"
+
+
+def test_all_primary_pressured_fallback_prefers_healthy_over_draining():
+    states = [
+        AccountState(
+            "draining",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=5.0,
+            health_tier=1,
+        ),
+        AccountState(
+            "healthy",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=90.0,
+            health_tier=0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
+
+
+def test_primary_pressured_fallback_ignores_unavailable_safe_accounts():
+    states = [
+        AccountState(
+            "safe-but-exhausted",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+        ),
+        AccountState(
+            "higher-primary",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=1.0,
+        ),
+        AccountState(
+            "lower-primary",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=99.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "lower-primary"
+
+
+def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucket():
+    now = time.time()
+    states = [
+        AccountState(
+            "earlier-reset-higher-primary",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=1.0,
+            secondary_reset_at=int(now + 3600),
+        ),
+        AccountState(
+            "later-reset-lower-primary",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=99.0,
+            secondary_reset_at=int(now + 7 * 24 * 3600),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=True,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "later-reset-lower-primary"
+
+
+def test_sticky_budget_threshold_still_counts_secondary_pressure():
+    state = AccountState(
+        "sticky",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=99.0,
+    )
+
+    assert _state_above_sticky_budget_threshold(state, 95.0) is True
 
 
 def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():

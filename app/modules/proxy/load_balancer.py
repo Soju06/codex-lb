@@ -13,6 +13,7 @@ from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     AccountState,
     RoutingStrategy,
     SelectionResult,
@@ -25,6 +26,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.plan_types import account_plan_matches_allowed
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
@@ -169,10 +171,11 @@ class LoadBalancer:
                     runtime=self._runtime,
                 )
 
-                result = select_account(
+                result = _select_account_preferring_budget_safe(
                     states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    budget_threshold_pct=budget_threshold_pct,
                 )
 
                 selected_account_map = account_map
@@ -409,12 +412,12 @@ class LoadBalancer:
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
-            accounts = all_accounts
+            accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
             pre_model_filter_accounts = accounts
-            if model and (effective_limit_name is None or _mapped_model_has_registry_entry(model)):
+            if model and _mapped_model_has_registry_entry(model):
                 accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
             if model and not accounts:
                 if not all_accounts:
@@ -644,10 +647,11 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
-            return select_account(
+            return _select_account_preferring_budget_safe(
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
+                budget_threshold_pct=budget_threshold_pct,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -669,14 +673,16 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                # Check if pinned account has insufficient budget (< 5% remaining)
-                # or rate limit is far away (reset_at more than 10 minutes away)
+                # Proactively rebind session affinity for prompt-cache and
+                # codex sessions once the pinned account is already above the
+                # configured budget threshold. That preserves continuity below
+                # the threshold while avoiding obvious short-window failures
+                # once the session is skating on the edge of exhaustion.
                 now = time.time()
-                budget_exhausted = (
-                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                budget_pressured = (
+                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
                     and pinned.status != AccountStatus.RATE_LIMITED
-                    and pinned.used_percent is not None
-                    and pinned.used_percent > budget_threshold_pct
+                    and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
@@ -684,7 +690,7 @@ class LoadBalancer:
                     and pinned.reset_at is not None
                     and pinned.reset_at - now >= 600  # 10 minutes
                 )
-                if not (budget_exhausted or rate_limit_far_away):
+                if not (budget_pressured or rate_limit_far_away):
                     pinned_result = select_account(
                         [pinned],
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -701,19 +707,22 @@ class LoadBalancer:
                     # is above the budget threshold, reallocating just
                     # wastes DB writes and destroys prompt-cache locality
                     # (thrashing).
-                    if budget_exhausted:
-                        pool_best = select_account(
+                    if budget_pressured:
+                        pool_best = _select_account_preferring_budget_safe(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             deterministic_probe=True,
+                            budget_threshold_pct=budget_threshold_pct,
+                        )
+                        pool_exhausted = (
+                            _state_above_budget_threshold
+                            if _state_above_budget_threshold(pinned, budget_threshold_pct)
+                            else _state_above_sticky_budget_threshold
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
-                            or (
-                                pool_best.account.used_percent is not None
-                                and pool_best.account.used_percent > budget_threshold_pct
-                            )
+                            or pool_exhausted(pool_best.account, budget_threshold_pct)
                         )
                         if pool_also_exhausted:
                             pinned_result = select_account(
@@ -768,10 +777,11 @@ class LoadBalancer:
             else:
                 await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
-        chosen = select_account(
+        chosen = _select_account_preferring_budget_safe(
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
+            budget_threshold_pct=budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -783,7 +793,6 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_rate_limit(state, error)
             self._sync_runtime_state(account, state)
-            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -794,7 +803,6 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
             self._sync_runtime_state(account, state)
-            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -849,6 +857,7 @@ class LoadBalancer:
             status=account.status,
             used_percent=None,
             reset_at=runtime.reset_at,
+            blocked_at=float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at,
             cooldown_until=runtime.cooldown_until,
             secondary_used_percent=None,
             secondary_reset_at=None,
@@ -881,6 +890,9 @@ class LoadBalancer:
             dirty = True
         if runtime.cooldown_until != state.cooldown_until:
             runtime.cooldown_until = state.cooldown_until
+            dirty = True
+        if runtime.blocked_at != state.blocked_at:
+            runtime.blocked_at = state.blocked_at
             dirty = True
         if runtime.last_error_at != state.last_error_at:
             runtime.last_error_at = state.last_error_at
@@ -921,20 +933,24 @@ class LoadBalancer:
         state: AccountState,
     ) -> None:
         reset_at_int = int(state.reset_at) if state.reset_at else None
+        blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
         reset_changed = account.reset_at != reset_at_int
+        blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed:
+        if status_changed or reason_changed or reset_changed or blocked_changed:
             await accounts_repo.update_status(
                 account.id,
                 state.status,
                 state.deactivation_reason,
                 reset_at_int,
+                blocked_at=blocked_at_int,
             )
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
             account.reset_at = reset_at_int
+            account.blocked_at = blocked_at_int
 
     async def _persist_state_if_current(
         self,
@@ -943,24 +959,29 @@ class LoadBalancer:
         state: AccountState,
     ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
+        blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
         reason_changed = account.deactivation_reason != state.deactivation_reason
         reset_changed = account.reset_at != reset_at_int
+        blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed:
+        if status_changed or reason_changed or reset_changed or blocked_changed:
             updated = await accounts_repo.update_status_if_current(
                 account.id,
                 state.status,
                 state.deactivation_reason,
                 reset_at_int,
+                blocked_at=blocked_at_int,
                 expected_status=account.status,
                 expected_deactivation_reason=account.deactivation_reason,
                 expected_reset_at=account.reset_at,
+                expected_blocked_at=account.blocked_at,
             )
             if updated:
                 account.status = state.status
                 account.deactivation_reason = state.deactivation_reason
                 account.reset_at = reset_at_int
+                account.blocked_at = blocked_at_int
             return updated
         return True
 
@@ -1022,16 +1043,39 @@ def _state_from_account(
     # and to survive process restarts.
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
-    # Clear the runtime reset guard only when ALL conditions hold:
-    #   1. The quota/rate-limit cooldown has expired (debounce period over).
-    #   2. The block event was tracked in this process (blocked_at set).
-    #   3. The governing usage row was refreshed AFTER the block event.
-    # The freshness check must use the row that governs each status:
-    #   QUOTA_EXCEEDED → secondary window, RATE_LIMITED → primary window.
-    # On restart both blocked_at and cooldown_until are None, so the
-    # guard stays — accounts remain blocked until persisted reset_at expires.
-    if runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None:
+    if (
+        account.status == AccountStatus.QUOTA_EXCEEDED
+        and effective_runtime_reset is not None
+        and effective_runtime_reset > time.time()
+        and effective_blocked_at is None
+        and effective_secondary_entry is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and effective_secondary_entry.used_percent is not None
+        and float(effective_secondary_entry.used_percent) < 100.0
+        and effective_secondary_entry.reset_at is not None
+        and float(effective_secondary_entry.reset_at) > effective_runtime_reset
+    ):
+        effective_runtime_reset = None
+
+    # Clear the runtime reset guard only when a post-block refresh has been
+    # observed and the debounce period is over.
+    #
+    # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
+    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
+    # because its cooldown duration is not persisted today.
+    cooldown_ready = False
+    if account.status == AccountStatus.QUOTA_EXCEEDED:
+        cooldown_ready = (
+            effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+        )
+    elif (
+        runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+    ):
+        cooldown_ready = True
+
+    if cooldown_ready and effective_blocked_at is not None:
         if account.status == AccountStatus.QUOTA_EXCEEDED:
             freshness_entry = effective_secondary_entry
         elif account.status == AccountStatus.RATE_LIMITED:
@@ -1040,7 +1084,7 @@ def _state_from_account(
             freshness_entry = None
         if freshness_entry and freshness_entry.recorded_at is not None:
             recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-            if recorded_epoch > runtime.blocked_at:
+            if recorded_epoch > effective_blocked_at:
                 effective_runtime_reset = None
 
     status, used_percent, reset_at = apply_usage_quota(
@@ -1051,6 +1095,10 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+    )
+
+    next_blocked_at = (
+        effective_blocked_at if status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED) else None
     )
 
     settings = get_settings()
@@ -1093,6 +1141,7 @@ def _state_from_account(
         status=status,
         used_percent=used_percent,
         reset_at=reset_at,
+        blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=secondary_used,
         secondary_reset_at=secondary_reset,
@@ -1106,11 +1155,26 @@ def _state_from_account(
     )
 
 
+def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
+    if recorded_at is None:
+        return False
+    current_time = utcnow()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
+
+
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
-    return [a for a in accounts if a.plan_type in allowed_plans]
+    return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
+
+
+def _selectable_accounts(accounts: list[Account]) -> list[Account]:
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:
@@ -1242,6 +1306,58 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
     if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
         return False
     return float(entry.used_percent) >= 100.0
+
+
+def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+    return state.used_percent is not None and state.used_percent > budget_threshold_pct
+
+
+def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+    return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
+        state.secondary_used_percent is not None and state.secondary_used_percent > budget_threshold_pct
+    )
+
+
+def _select_account_preferring_budget_safe(
+    states: Iterable[AccountState],
+    *,
+    prefer_earlier_reset: bool,
+    routing_strategy: RoutingStrategy,
+    budget_threshold_pct: float,
+    allow_backoff_fallback: bool = True,
+    deterministic_probe: bool = False,
+) -> SelectionResult:
+    state_list = list(states)
+    preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
+    if preferred_states:
+        selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
+        preferred = select_account(
+            selection_pool,
+            prefer_earlier_reset=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+        )
+        if preferred.account is not None:
+            return preferred
+        if len(preferred_states) == len(state_list):
+            return preferred
+    if routing_strategy == "usage_weighted" and state_list:
+        return select_account(
+            state_list,
+            prefer_earlier_reset=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+            primary_first_usage_weighted=True,
+        )
+    return select_account(
+        state_list,
+        prefer_earlier_reset=prefer_earlier_reset,
+        routing_strategy=routing_strategy,
+        allow_backoff_fallback=allow_backoff_fallback,
+        deterministic_probe=deterministic_probe,
+    )
 
 
 def _is_upstream_circuit_breaker_open() -> bool:

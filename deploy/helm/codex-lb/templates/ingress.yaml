@@ -1,28 +1,29 @@
 {{- if .Values.ingress.enabled }}
-{{- $annotations := dict }}
+{{- $baseAnnotations := dict }}
 {{- if .Values.ingress.certManager.enabled }}
-{{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.ingress.certManager.clusterIssuer }}
+{{- $_ := set $baseAnnotations "cert-manager.io/cluster-issuer" .Values.ingress.certManager.clusterIssuer }}
 {{- end }}
 {{- if .Values.ingress.nginx.enabled }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-http-version" "1.1" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-buffering" "off" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-request-buffering" "off" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-body-size" "50m" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-read-timeout" "3600" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "3600" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-next-upstream" "error" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" "1" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/limit-rps" "100" }}
-{{- end }}
-{{- if .Values.ingress.nginx.upstreamHashBy }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.nginx.upstreamHashBy }}
-{{- end }}
-{{- if .Values.ingress.nginx.upstreamHashBySubset }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
-{{- $_ := set $annotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.nginx.upstreamHashBySubsetSize | toString) }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-http-version" "1.1" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-buffering" "off" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-request-buffering" "off" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-body-size" "50m" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-read-timeout" "3600" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-send-timeout" "3600" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream" "error" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" "1" }}
+{{- $_ := set $baseAnnotations "nginx.ingress.kubernetes.io/limit-rps" "100" }}
 {{- end }}
 {{- range $key, $value := .Values.ingress.annotations }}
-{{- $_ := set $annotations $key $value }}
+{{- $_ := set $baseAnnotations $key $value }}
+{{- end }}
+{{- $apiAnnotations := deepCopy $baseAnnotations }}
+{{- if .Values.ingress.nginx.upstreamHashBy }}
+{{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.nginx.upstreamHashBy }}
+{{- end }}
+{{- if .Values.ingress.nginx.upstreamHashBySubset }}
+{{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
+{{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.nginx.upstreamHashBySubsetSize | toString) }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -31,9 +32,9 @@ metadata:
   namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "codex-lb.labels" . | nindent 4 }}
-  {{- if $annotations }}
+  {{- if $apiAnnotations }}
   annotations:
-    {{- toYaml $annotations | nindent 4 }}
+    {{- toYaml $apiAnnotations | nindent 4 }}
   {{- end }}
 spec:
   {{- if .Values.ingress.ingressClassName }}
@@ -58,4 +59,58 @@ spec:
                   name: http
           {{- end }}
     {{- end }}
+{{- if .Values.ingress.responses.enabled }}
+---
+{{- $responsesAnnotations := deepCopy $baseAnnotations }}
+{{- if .Values.ingress.responses.nginx.upstreamHashBy }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.responses.nginx.upstreamHashBy }}
+{{- end }}
+{{- if .Values.ingress.responses.nginx.upstreamHashBySubset }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.responses.nginx.upstreamHashBySubsetSize | toString) }}
+{{- end }}
+{{- if .Values.ingress.responses.nginx.configurationSnippet }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/configuration-snippet" .Values.ingress.responses.nginx.configurationSnippet }}
+{{- end }}
+{{- if .Values.ingress.responses.nginx.proxyNextUpstream }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream" .Values.ingress.responses.nginx.proxyNextUpstream }}
+{{- end }}
+{{- if .Values.ingress.responses.nginx.proxyNextUpstreamTries }}
+{{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" (.Values.ingress.responses.nginx.proxyNextUpstreamTries | toString) }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ printf "%s-responses" (include "codex-lb.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  {{- if $responsesAnnotations }}
+  annotations:
+    {{- toYaml $responsesAnnotations | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.ingressClassName }}
+  ingressClassName: {{ .Values.ingress.ingressClassName | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range $.Values.ingress.responses.paths }}
+          - path: {{ . }}
+            pathType: {{ $.Values.ingress.responses.pathType }}
+            backend:
+              service:
+                name: {{ include "codex-lb.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}
 {{- end }}

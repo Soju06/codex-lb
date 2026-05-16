@@ -10,8 +10,10 @@ import { AppearanceSettings } from "@/features/settings/components/appearance-se
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
+import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useSettings } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -22,6 +24,9 @@ const TotpSettings = lazy(() =>
 
 export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
+  const authMode = useAuthStore((state) => state.authMode);
+  const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
+  const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
 
   const settings = settingsQuery.data;
   const busy = updateSettingsMutation.isPending;
@@ -48,6 +53,20 @@ export function SettingsPage() {
         <>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
 
+          {authMode === "trusted_header" ? (
+            <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
+              Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay
+              available only as optional fallback login.
+            </div>
+          ) : null}
+
+          {authMode === "disabled" ? (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground">
+              Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions
+              or external access control.
+            </div>
+          ) : null}
+
           <div className="space-y-4">
             <AppearanceSettings />
             <RoutingSettings
@@ -58,9 +77,14 @@ export function SettingsPage() {
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
-            <Suspense fallback={null}>
-              <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
-            </Suspense>
+            {passwordManagementEnabled ? (
+              <SessionSettings settings={settings} busy={busy} onSave={handleSave} />
+            ) : null}
+            {passwordManagementEnabled && passwordSessionActive ? (
+              <Suspense fallback={null}>
+                <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
+              </Suspense>
+            ) : null}
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}

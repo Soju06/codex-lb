@@ -38,17 +38,17 @@ image:
   # @param image.pullSecrets Container image pull secrets
   pullSecrets: []
 
-# @section Deployment parameters
+# @section Workload parameters
 # @param replicaCount Number of replicas
 replicaCount: 2
+# @param podManagementPolicy StatefulSet pod management policy
+podManagementPolicy: Parallel
 updateStrategy:
-  # @param updateStrategy.type Rolling update strategy type
+  # @param updateStrategy.type StatefulSet update strategy type (RollingUpdate|OnDelete)
   type: RollingUpdate
   rollingUpdate:
-    # @param updateStrategy.rollingUpdate.maxSurge Max surge pods during update
-    maxSurge: 1
-    # @param updateStrategy.rollingUpdate.maxUnavailable Max unavailable pods during update
-    maxUnavailable: 0
+    # @param updateStrategy.rollingUpdate.partition RollingUpdate partition for StatefulSet updates
+    partition: 0
 # @param terminationGracePeriodSeconds Pod termination grace period seconds
 terminationGracePeriodSeconds: 60
 # @param preStopSleepSeconds Seconds to sleep in preStop lifecycle hook
@@ -160,6 +160,8 @@ config:
   sessionBridgeQueueLimit: 8
   # @param config.sessionBridgeInstanceRing Comma-separated pod hostnames for session routing
   sessionBridgeInstanceRing: ""
+  # @param config.sessionBridgeAdvertiseBaseUrl Optional explicit owner-handoff base URL. Empty = auto-advertise headless-service DNS for the current pod
+  sessionBridgeAdvertiseBaseUrl: ""
   # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
   stickySessionCleanupEnabled: true
   # @param config.stickySessionCleanupIntervalSeconds Interval between sticky session cleanup runs
@@ -253,6 +255,7 @@ service:
   annotations: {}
 
 # @section Network parameters
+clusterDomain: cluster.local
 networkPolicy:
   # @param networkPolicy.enabled Enable NetworkPolicy with default-deny + whitelist
   enabled: false
@@ -294,6 +297,32 @@ ingress:
     upstreamHashBySubset: false
     # @param ingress.nginx.upstreamHashBySubsetSize Subset size when subset mode is enabled
     upstreamHashBySubsetSize: 3
+  responses:
+    # @param ingress.responses.enabled Render a dedicated ingress for `/v1/responses` and `/backend-api/codex/responses`
+    enabled: true
+    # @param ingress.responses.pathType Path match type for responses routes
+    pathType: Exact
+    # @param ingress.responses.paths Responses-specific ingress paths
+    paths:
+      - /v1/responses
+      - /backend-api/codex/responses
+    nginx:
+      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key variable for responses traffic
+      upstreamHashBy: "$codex_responses_hash_key"
+      # @param ingress.responses.nginx.configurationSnippet NGINX snippet that uses x-codex-session-id when present and a per-request fallback otherwise
+      configurationSnippet: |
+        set $codex_responses_hash_key "$http_authorization:$request_id";
+        if ($http_x_codex_session_id != "") {
+          set $codex_responses_hash_key $http_x_codex_session_id;
+        }
+      # @param ingress.responses.nginx.upstreamHashBySubset Enable subset mode for responses ingress
+      upstreamHashBySubset: false
+      # @param ingress.responses.nginx.upstreamHashBySubsetSize Subset size for responses ingress
+      upstreamHashBySubsetSize: 3
+      # @param ingress.responses.nginx.proxyNextUpstream Retry once on transient upstream unavailability during owner loss or rollout
+      proxyNextUpstream: "error timeout http_502 http_503 http_504 invalid_header"
+      # @param ingress.responses.nginx.proxyNextUpstreamTries Retry budget for responses ingress failover
+      proxyNextUpstreamTries: 2
 
 # @section Gateway API parameters
 gatewayApi:
@@ -420,6 +449,8 @@ dbInit:
 migration:
   # @param migration.enabled Run database migration Job on install/upgrade
   enabled: true
+  # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto keeps legacy during first upgrade/cutover and workload after cutover)
+  serviceSelectorMode: auto
   # @param migration.backoffLimit Maximum retries before marking Job failed
   backoffLimit: 3
   # @param migration.activeDeadlineSeconds Maximum Job duration in seconds

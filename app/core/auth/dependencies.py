@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from ipaddress import ip_address, ip_network
+from typing import cast
 
 from fastapi import Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.requests import HTTPConnection
 
 from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
@@ -54,7 +58,8 @@ async def validate_proxy_api_key_authorization(
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
         if request is not None and not is_local_request(request):
-            raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
+            if not _is_proxy_unauthenticated_socket_peer_allowed(request):
+                raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
         return None
 
     token = _extract_bearer_token(authorization)
@@ -69,7 +74,7 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
 
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     cache = get_api_key_cache()
-    cached = await cache.get(token_hash)
+    cached = cast(ApiKeyData | None, await cache.get(token_hash))
     if cached is not None:
         if cached.expires_at is not None and cached.expires_at <= utcnow():
             await cache.invalidate(token_hash)
@@ -111,9 +116,15 @@ async def validate_usage_api_key(
 
 
 async def validate_dashboard_session(request: Request) -> None:
+    request_auth = get_dashboard_request_auth(request)
+    if request_auth is not None:
+        return
+
     settings = await get_settings_cache().get()
     password_required = bool(settings.password_hash)
     requires_auth = password_required or settings.totp_required_on_login
+    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not requires_auth:
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
     if not requires_auth:
         if not is_local_request(request):
             raise DashboardAuthError(
@@ -138,10 +149,30 @@ async def validate_dashboard_session(request: Request) -> None:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
 
 
+def get_dashboard_request_auth_mode() -> DashboardAuthMode:
+    from app.core.config.settings import get_settings
+
+    return get_settings().dashboard_auth_mode
+
+
+def _is_proxy_unauthenticated_socket_peer_allowed(request: HTTPConnection) -> bool:
+    socket_host = request.client.host if request.client else None
+    if socket_host is None:
+        return False
+
+    try:
+        socket_ip = ip_address(socket_host)
+    except ValueError:
+        return False
+
+    configured_cidrs = get_settings().proxy_unauthenticated_client_cidrs
+    return any(socket_ip in ip_network(cidr, strict=False) for cidr in configured_cidrs)
+
+
 # --- Codex usage caller identity auth ---
 
 
-async def validate_codex_usage_identity(request: Request) -> None:
+async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
     token = _extract_bearer_token(request.headers.get("Authorization"))
     if not token:
         raise ProxyAuthError("Missing ChatGPT token in Authorization header")
@@ -149,6 +180,8 @@ async def validate_codex_usage_identity(request: Request) -> None:
     raw_account_id = request.headers.get("chatgpt-account-id")
     account_id = raw_account_id.strip() if raw_account_id else ""
     if not account_id:
+        if token.startswith("sk-clb-"):
+            return await _validate_api_key_token(token)
         raise ProxyAuthError("Missing chatgpt-account-id header")
 
     async with get_background_session() as session:
@@ -167,6 +200,7 @@ async def validate_codex_usage_identity(request: Request) -> None:
         if exc.status_code in (401, 403):
             raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
         raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
+    return None
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

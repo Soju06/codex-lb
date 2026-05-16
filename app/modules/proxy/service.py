@@ -9946,6 +9946,8 @@ def _websocket_receive_timeout_for_pending_requests(
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
     remaining_budget = _remaining_budget_seconds(oldest_started_at + proxy_request_budget_seconds)
+    if remaining_budget > 1.0 and idle_timeout_seconds >= remaining_budget:
+        idle_timeout_seconds = max(0.001, min(120.0, remaining_budget / 5.0))
 
     if remaining_budget <= 0:
         return _WebSocketReceiveTimeout(

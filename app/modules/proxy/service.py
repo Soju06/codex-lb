@@ -45,6 +45,7 @@ from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, 
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
+    CodexControlResponse,
     ProxyResponseError,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
@@ -55,8 +56,10 @@ from app.core.clients.proxy import (
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import codex_control_request as core_codex_control_request
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.clients.proxy import stream_responses as core_stream_responses
+from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
@@ -2010,6 +2013,364 @@ class ProxyService:
                 "compact",
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
+            )
+
+    async def thread_goal_request(
+        self,
+        operation: str,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        *,
+        method: str = "POST",
+        codex_session_affinity: bool = True,
+        api_key: ApiKeyData | None = None,
+    ) -> dict[str, JsonValue]:
+        filtered = filter_inbound_headers(headers)
+        request_id = get_request_id() or ensure_request_id(None)
+        start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.proxy_request_budget_seconds
+        settings = await get_settings_cache().get()
+        affinity = _sticky_key_for_codex_control_request(
+            headers,
+            codex_session_affinity=codex_session_affinity,
+        )
+        selection_model = api_key.enforced_model if api_key is not None else None
+        routing_strategy = _routing_strategy(settings)
+        account_id_value: str | None = None
+        log_status = "error"
+        log_error_code: str | None = None
+        log_error_message: str | None = None
+        request_kind = f"thread_goal_{operation}"
+
+        try:
+            selection = await self._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_id,
+                kind=request_kind,
+                api_key=api_key,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
+                reallocate_sticky=affinity.reallocate_sticky,
+                sticky_max_age_seconds=affinity.max_age_seconds,
+                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
+                model=selection_model,
+            )
+            account = selection.account
+            if not account:
+                account = await self._select_codex_control_account_without_budget(
+                    affinity=affinity,
+                    api_key=api_key,
+                )
+                if account is None:
+                    log_error_code = selection.error_code or "no_accounts"
+                    log_error_message = selection.error_message or "No active accounts available"
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(log_error_code, log_error_message),
+                    )
+            account_id_value = account.id
+
+            async def _call_goal(target: Account) -> dict[str, JsonValue]:
+                access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                upstream_account_id = _header_account_id(target.chatgpt_account_id)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Thread goal request budget exhausted before upstream call request_id=%s operation=%s "
+                        "account_id=%s",
+                        request_id,
+                        operation,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                return await core_thread_goal_request(
+                    operation,
+                    payload,
+                    filtered,
+                    access_token,
+                    upstream_account_id,
+                    method=method,
+                    timeout_seconds=remaining_budget,
+                )
+
+            try:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Thread goal request budget exhausted before freshness check request_id=%s operation=%s",
+                        request_id,
+                        operation,
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Thread goal refresh/connect failed request_id=%s operation=%s account_id=%s",
+                        request_id,
+                        operation,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                response = await _call_goal(account)
+                await self._load_balancer.record_success(account)
+                log_status = "success"
+                return response
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        refresh_exc.message,
+                        error_type="invalid_request_error",
+                    ),
+                ) from refresh_exc
+            except ProxyResponseError as exc:
+                if exc.status_code == 401:
+                    try:
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            logger.warning(
+                                "Thread goal request budget exhausted before forced refresh retry request_id=%s "
+                                "operation=%s account_id=%s",
+                                request_id,
+                                operation,
+                                account.id,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        account = await self._ensure_fresh_with_budget(
+                            account,
+                            force=True,
+                            timeout_seconds=remaining_budget,
+                        )
+                        try:
+                            response = await _call_goal(account)
+                            await self._load_balancer.record_success(account)
+                            log_status = "success"
+                            return response
+                        except ProxyResponseError as retry_exc:
+                            await self._handle_proxy_error(account, retry_exc)
+                            raise
+                    except RefreshError as refresh_exc:
+                        if refresh_exc.is_permanent:
+                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        raise exc
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                        logger.warning(
+                            "Thread goal forced refresh/connect failed request_id=%s operation=%s account_id=%s",
+                            request_id,
+                            operation,
+                            account.id,
+                            exc_info=True,
+                        )
+                        _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                if operation == "get" and _is_missing_thread_goal_protocol_error(exc):
+                    log_status = "success"
+                    return {"goal": None}
+                await self._handle_proxy_error(account, exc)
+                raise
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            log_error_code = log_error_code or _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            log_error_message = log_error_message or (error.message if error else None)
+            raise
+        finally:
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=api_key,
+                request_id=request_id,
+                model=None,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status=log_status,
+                error_code=log_error_code,
+                error_message=log_error_message,
+                transport=_REQUEST_TRANSPORT_HTTP,
+            )
+
+    async def codex_control_request(
+        self,
+        path: str,
+        *,
+        method: str,
+        payload: bytes | None,
+        query_params: Mapping[str, str],
+        headers: Mapping[str, str],
+        codex_session_affinity: bool = True,
+        api_key: ApiKeyData | None = None,
+    ) -> CodexControlResponse:
+        filtered = filter_inbound_headers(headers)
+        request_id = get_request_id() or ensure_request_id(None)
+        start = time.monotonic()
+        base_settings = get_settings()
+        deadline = start + base_settings.proxy_request_budget_seconds
+        settings = await get_settings_cache().get()
+        affinity = _sticky_key_for_codex_control_request(
+            headers,
+            codex_session_affinity=codex_session_affinity,
+        )
+        selection_model = api_key.enforced_model if api_key is not None else None
+        routing_strategy = _routing_strategy(settings)
+        account_id_value: str | None = None
+        log_status = "error"
+        log_error_code: str | None = None
+        log_error_message: str | None = None
+        request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
+
+        try:
+            selection = await self._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_id,
+                kind=request_kind,
+                api_key=api_key,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
+                reallocate_sticky=affinity.reallocate_sticky,
+                sticky_max_age_seconds=affinity.max_age_seconds,
+                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                routing_strategy=routing_strategy,
+                model=selection_model,
+            )
+            account = selection.account
+            if not account:
+                account = await self._select_codex_control_account_without_budget(
+                    affinity=affinity,
+                    api_key=api_key,
+                )
+                if account is None:
+                    log_error_code = selection.error_code or "no_accounts"
+                    log_error_message = selection.error_message or "No active accounts available"
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(log_error_code, log_error_message),
+                    )
+            account_id_value = account.id
+
+            async def _call_control(target: Account) -> CodexControlResponse:
+                access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                upstream_account_id = _header_account_id(target.chatgpt_account_id)
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Codex control request budget exhausted before upstream call request_id=%s path=%s "
+                        "account_id=%s",
+                        request_id,
+                        path,
+                        target.id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                return await core_codex_control_request(
+                    path,
+                    method=method,
+                    payload=payload,
+                    query_params=query_params,
+                    headers=filtered,
+                    access_token=access_token,
+                    account_id=upstream_account_id,
+                    timeout_seconds=remaining_budget,
+                )
+
+            try:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Codex control request budget exhausted before freshness check request_id=%s",
+                        request_id,
+                    )
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Codex control refresh/connect failed request_id=%s path=%s account_id=%s",
+                        request_id,
+                        path,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                response = await _call_control(account)
+                await self._load_balancer.record_success(account)
+                log_status = "success"
+                return response
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        refresh_exc.message,
+                        error_type="invalid_request_error",
+                    ),
+                ) from refresh_exc
+            except ProxyResponseError as exc:
+                if exc.status_code == 401:
+                    try:
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            logger.warning(
+                                "Codex control request budget exhausted before forced refresh retry request_id=%s "
+                                "path=%s account_id=%s",
+                                request_id,
+                                path,
+                                account.id,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        account = await self._ensure_fresh_with_budget(
+                            account,
+                            force=True,
+                            timeout_seconds=remaining_budget,
+                        )
+                        try:
+                            response = await _call_control(account)
+                            await self._load_balancer.record_success(account)
+                            log_status = "success"
+                            return response
+                        except ProxyResponseError as retry_exc:
+                            await self._handle_proxy_error(account, retry_exc)
+                            raise
+                    except RefreshError as refresh_exc:
+                        if refresh_exc.is_permanent:
+                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        raise exc
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                        logger.warning(
+                            "Codex control forced refresh/connect failed request_id=%s path=%s account_id=%s",
+                            request_id,
+                            path,
+                            account.id,
+                            exc_info=True,
+                        )
+                        _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                await self._handle_proxy_error(account, exc)
+                raise
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            log_error_code = log_error_code or _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            log_error_message = log_error_message or (error.message if error else None)
+            raise
+        finally:
+            await self._write_request_log(
+                account_id=account_id_value,
+                api_key=api_key,
+                request_id=request_id,
+                model=None,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                status=log_status,
+                error_code=log_error_code,
+                error_message=log_error_message,
+                transport=_REQUEST_TRANSPORT_HTTP,
             )
 
     async def transcribe(
@@ -4023,6 +4384,30 @@ class ProxyService:
 
         supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
         return await select_account_any(deadline, **supported_kwargs)
+
+    async def _select_codex_control_account_without_budget(
+        self,
+        *,
+        affinity: _AffinityPolicy,
+        api_key: ApiKeyData | None,
+    ) -> Account | None:
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        settings = await get_settings_cache().get()
+        selection = await self._load_balancer.select_account(
+            sticky_key=affinity.key,
+            sticky_kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            sticky_max_age_seconds=affinity.max_age_seconds,
+            account_ids=scoped_account_ids,
+            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+        )
+        if selection.account is None:
+            return None
+        return _detached_account_copy(selection.account)
 
     async def _create_http_bridge_session_compatible(
         self,
@@ -12135,6 +12520,43 @@ def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _sticky_key_for_codex_control_request(
+    headers: Mapping[str, str],
+    *,
+    codex_session_affinity: bool,
+) -> _AffinityPolicy:
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
+    if turn_state_key:
+        return _AffinityPolicy(
+            key=turn_state_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    if codex_session_affinity:
+        session_key = _sticky_key_from_session_header(headers)
+        if session_key:
+            return _AffinityPolicy(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+    return _AffinityPolicy()
+
+
+def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
+    if exc.status_code not in {404, 405}:
+        return False
+    error = _parse_openai_error(exc.payload)
+    code = _normalize_error_code(
+        error.code if error else None,
+        error.type if error else None,
+    )
+    return code in {"not_found", "method_not_allowed", "upstream_error"}
+
+
+def _detached_account_copy(account: Account) -> Account:
+    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
+    return Account(**data)
 
 
 def _owner_lookup_session_id_from_headers(headers: Mapping[str, str]) -> str | None:

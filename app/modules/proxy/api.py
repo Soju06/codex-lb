@@ -6,9 +6,23 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from typing import Final, cast
 
-from fastapi import APIRouter, Body, Depends, File, Form, Path, Request, Response, Security, UploadFile, WebSocket
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Request,
+    Response,
+    Security,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -127,6 +141,11 @@ ws_router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
 )
+wham_router = APIRouter(
+    prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
 v1_router = APIRouter(
     prefix="/v1",
     tags=["proxy"],
@@ -189,6 +208,165 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+
+
+async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
+    if request.method.upper() == "GET":
+        return {key: value for key, value in request.query_params.multi_items()}
+    try:
+        raw = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="thread goal payload must be valid JSON") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="thread goal payload must be a JSON object")
+    return cast(dict[str, JsonValue], raw)
+
+
+async def _thread_goal_proxy(
+    request: Request,
+    operation: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    payload = await _thread_goal_payload_from_request(request)
+    try:
+        response = await context.service.thread_goal_request(
+            operation,
+            payload,
+            request.headers,
+            method=request.method,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return JSONResponse(response)
+
+
+_CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-type",
+        "etag",
+        "last-modified",
+        "location",
+        "openai-processing-ms",
+        "request-id",
+        "x-request-id",
+    }
+)
+
+
+def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
+
+
+async def _codex_control_proxy(
+    request: Request,
+    path: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    try:
+        response = await context.service.codex_control_request(
+            path,
+            method=request.method,
+            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            query_params={key: value for key, value in request.query_params.multi_items()},
+            headers=request.headers,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return Response(
+        content=response.body,
+        status_code=response.status_code,
+        headers=_codex_control_downstream_headers(response.headers),
+    )
+
+
+@router.api_route("/thread/goal/get", methods=["GET", "POST"])
+async def thread_goal_get(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "get", context, api_key)
+
+
+@router.post("/thread/goal/set")
+async def thread_goal_set(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "set", context, api_key)
+
+
+@router.post("/thread/goal/clear")
+async def thread_goal_clear(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "clear", context, api_key)
+
+
+@router.post("/analytics-events/events")
+async def codex_analytics_events(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "analytics-events/events", context, api_key)
+
+
+@router.post("/memories/trace_summarize")
+async def codex_memories_trace_summarize(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "memories/trace_summarize", context, api_key)
+
+
+@router.post("/realtime/calls")
+async def codex_realtime_calls(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "realtime/calls", context, api_key)
+
+
+@router.post("/safety/arc")
+async def codex_safety_arc(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "safety/arc", context, api_key)
+
+
+@router.get("/agent-identities/jwks")
+async def codex_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "agent-identities/jwks", context, api_key)
+
+
+@wham_router.get("/agent-identities/jwks")
+async def wham_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
 
 
 @router.post(

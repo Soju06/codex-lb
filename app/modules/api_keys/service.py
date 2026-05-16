@@ -512,6 +512,7 @@ class ApiKeysService:
                     request_service_tier=request_service_tier,
                 )
             except OperationalError as exc:
+                await self._repository.rollback()
                 if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
                     raise
                 await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))

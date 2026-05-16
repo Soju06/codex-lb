@@ -839,6 +839,56 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BusyRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reset_limit_calls = 0
+            self.rollback_calls = 0
+
+        async def reset_limit(
+            self,
+            limit_id: int,
+            *,
+            expected_reset_at: datetime,
+            new_reset_at: datetime,
+        ) -> bool:
+            self.reset_limit_calls += 1
+            if self.reset_limit_calls < 3:
+                raise OperationalError("reset expired limit", {}, Exception("database is locked"))
+            return await super().reset_limit(limit_id, expected_reset_at=expected_reset_at, new_reset_at=new_reset_at)
+
+        async def rollback(self) -> None:
+            self.rollback_calls += 1
+            await super().rollback()
+
+    repo = _BusyRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="busy-lazy-reset-retry-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=10_000),
+            ],
+        )
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 0
+    limits[0].reset_at = utcnow() - timedelta(days=8)
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5")
+
+    assert reservation.key_id == created.id
+    assert repo.reset_limit_calls == 3
+    assert repo.rollback_calls >= 2
+    assert repo.commit_count == 1
+
+
+@pytest.mark.asyncio
 async def test_update_key_normalizes_timezone_aware_expiry_to_utc_naive() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

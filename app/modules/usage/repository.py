@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.db.session import sqlite_writer_section
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -116,8 +117,9 @@ class UsageRepository:
             recorded_at=recorded_at or utcnow(),
         )
         self._session.add(entry)
-        await self._session.commit()
-        await self._session.refresh(entry)
+        async with sqlite_writer_section():
+            await self._session.commit()
+            await self._session.refresh(entry)
         return entry
 
     async def aggregate_since(
@@ -333,12 +335,14 @@ class AdditionalUsageRepository:
             recorded_at=recorded_at or utcnow(),
         )
         self._session.add(entry)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.commit()
 
     async def delete_for_account(self, account_id: str) -> None:
         stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
         scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
@@ -348,8 +352,9 @@ class AdditionalUsageRepository:
             AdditionalUsageHistory.account_id == account_id,
             _additional_quota_match_clause(scope),
         )
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
         await self.delete_for_account_and_quota_key(account_id, limit_name)
@@ -368,8 +373,9 @@ class AdditionalUsageRepository:
             _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
         )
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_limit_window(
         self,

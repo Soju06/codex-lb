@@ -55,6 +55,32 @@ def _make_api_key(
     )
 
 
+def test_trim_http_bridge_previous_response_input_items_preserves_context_assistant_message() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "local context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items
+
+
+def test_trim_http_bridge_previous_response_input_items_trims_marked_replay_outputs() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {
+            "id": "msg_replay",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior"}],
+        },
+        {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items[2:]
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_stream_masks_single_top_level_previous_response_error(
     monkeypatch: pytest.MonkeyPatch,

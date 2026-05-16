@@ -8664,13 +8664,20 @@ def _openai_error_envelope_from_response_failed_payload(
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
-    first_non_output_index = next(
-        (index for index, item in enumerate(input_items) if not _is_http_bridge_previous_response_output_item(item)),
-        len(input_items),
+    first_output_index = next(
+        (
+            index
+            for index, item in enumerate(input_items)
+            if _http_bridge_input_item_type(item) in {"function_call_output", "custom_tool_call_output"}
+        ),
+        None,
     )
-    if first_non_output_index == 0:
+    if first_output_index is None or first_output_index == 0:
         return input_items
-    return input_items[first_non_output_index:]
+    prefix = input_items[:first_output_index]
+    if not all(_is_http_bridge_previous_response_output_item(item) for item in prefix):
+        return input_items
+    return input_items[first_output_index:]
 
 
 def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:

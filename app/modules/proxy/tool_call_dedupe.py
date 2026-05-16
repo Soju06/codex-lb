@@ -375,10 +375,7 @@ def dedupe_replayed_side_effect_input_items(
                 and first_call_id_by_key.get(last_side_effect_key) == output_call_id
             ):
                 continue
-            if (
-                output_call_id is not None
-                or (isinstance(item, dict) and replayed_tool_call_segment_boundary(item))
-            ):
+            if output_call_id is not None or (isinstance(item, dict) and replayed_tool_call_segment_boundary(item)):
                 first_call_id_by_key.clear()
                 first_call_index_by_key.clear()
                 last_side_effect_key = None

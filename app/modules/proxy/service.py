@@ -31,7 +31,14 @@ from app.core.auth.refresh import (
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
-from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    TRAFFIC_CLASS_FOREGROUND,
+    TRAFFIC_CLASS_OPPORTUNISTIC,
+    RoutingStrategy,
+    TrafficClass,
+    failover_decision,
+)
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
@@ -144,7 +151,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeOwnerClient,
     OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED, AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
@@ -3218,6 +3225,20 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
+            if exc.status_code == 429:
+                error = _parse_openai_error(exc.payload)
+                await self._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=None,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=429,
+                    payload=exc.payload,
+                    error_code=error.code if error and error.code else "rate_limit_exceeded",
+                    error_message=error.message if error and error.message else "opportunistic burn window closed",
+                )
+                return None
             raise
 
         account = selection.account
@@ -3277,6 +3298,30 @@ class ProxyService:
                     error_type="server_error",
                 ),
                 error_code="upstream_unavailable",
+                error_message=message,
+            )
+            return None
+        if (
+            api_key is not None
+            and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+            and error_code == OPPORTUNISTIC_BURN_WINDOW_CLOSED
+        ):
+            message = error_message
+            if not message.startswith("opportunistic burn window closed"):
+                message = f"opportunistic burn window closed: {message}"
+            await self._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                status_code=429,
+                payload=openai_error(
+                    "rate_limit_exceeded",
+                    message,
+                    error_type="rate_limit_error",
+                ),
+                error_code="rate_limit_exceeded",
                 error_message=message,
             )
             return None
@@ -8242,6 +8287,7 @@ class ProxyService:
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
     ) -> AccountSelection:
@@ -8255,6 +8301,11 @@ class ProxyService:
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
+        )
+        effective_traffic_class = (
+            TRAFFIC_CLASS_OPPORTUNISTIC
+            if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+            else traffic_class
         )
         excluded_account_ids_set = set(exclude_account_ids or ())
         try:
@@ -8285,6 +8336,7 @@ class ProxyService:
                             "sticky_reallocation_secondary_budget_threshold_pct",
                             100.0,
                         ),
+                        traffic_class=effective_traffic_class,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -8316,6 +8368,7 @@ class ProxyService:
                         "sticky_reallocation_secondary_budget_threshold_pct",
                         100.0,
                     ),
+                    traffic_class=effective_traffic_class,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     return AccountSelection(
@@ -8323,10 +8376,56 @@ class ProxyService:
                         error_message="No active accounts available",
                         error_code="no_accounts",
                     )
+                if (
+                    selection.account is None
+                    and effective_traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                    and selection.error_code == OPPORTUNISTIC_BURN_WINDOW_CLOSED
+                ):
+                    message = selection.error_message or "opportunistic burn window closed"
+                    if not message.startswith("opportunistic burn window closed"):
+                        message = f"opportunistic burn window closed: {message}"
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "rate_limit_exceeded",
+                            message,
+                            error_type="rate_limit_error",
+                        ),
+                        headers={"Retry-After": "60"},
+                    )
                 return selection
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
+
+    async def check_opportunistic_admission(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        model: str | None,
+    ) -> AccountSelection:
+        settings = await get_settings_cache().get()
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        return await self._load_balancer.check_opportunistic_admission(
+            model=model,
+            account_ids=scoped_account_ids,
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            routing_strategy=_routing_strategy(settings),
+            budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_primary_budget_threshold_pct",
+                settings.sticky_reallocation_budget_threshold_pct,
+            ),
+            secondary_budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_secondary_budget_threshold_pct",
+                100.0,
+            ),
+        )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)

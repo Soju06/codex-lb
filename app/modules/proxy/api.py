@@ -58,6 +58,7 @@ from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -71,6 +72,7 @@ from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     enforce_strict_text_format,
@@ -165,6 +167,7 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -220,6 +223,33 @@ async def responses(
         # contract that /v1/responses applies.
         enforce_openai_sdk_contract=False,
     )
+
+
+@router.get("/opportunistic/admission")
+async def opportunistic_admission(
+    request: Request,
+    model: str | None = None,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    effective_model = api_key.enforced_model if api_key is not None and api_key.enforced_model else model
+    if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and effective_model is None:
+        error = openai_error(
+            "invalid_request_error",
+            "model is required for opportunistic admission checks",
+            error_type="invalid_request_error",
+        )
+        error["error"]["param"] = "model"
+        return _logged_error_json_response(
+            request,
+            400,
+            error,
+        )
+    validate_model_access(api_key, effective_model)
+    denial = await _opportunistic_admission_denial(request, context, api_key, model=effective_model)
+    if denial is not None:
+        return denial
+    return JSONResponse({"admitted": True})
 
 
 @ws_router.websocket("/responses")
@@ -634,6 +664,7 @@ async def backend_files_create(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
+            headers=exc.headers,
         )
     finally:
         await _release_reservation(reservation)
@@ -678,6 +709,7 @@ async def backend_files_finalize(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
+            headers=exc.headers,
         )
     finally:
         await _release_reservation(reservation)
@@ -900,7 +932,7 @@ async def _prime_upstream_stream(
             request,
             exc.status_code,
             exc.payload,
-            headers=dict(rate_limit_headers),
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     async def _replay() -> AsyncIterator[str]:
@@ -1077,7 +1109,7 @@ async def _proxy_images_generation_request(
             request,
             exc.status_code,
             exc.payload,
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     response_id = captured.get("response_id")
@@ -1266,7 +1298,7 @@ async def _proxy_images_edit_request(
             request,
             exc.status_code,
             exc.payload,
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
 
     response_id = captured.get("response_id")
@@ -1494,6 +1526,9 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=effective_model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=effective_model,
@@ -1535,7 +1570,12 @@ async def v1_chat_completions(
     except StopAsyncIteration:
         first = None
     except ProxyResponseError as exc:
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers={**rate_limit_headers, **exc.headers},
+        )
 
     stream_with_first = _prepend_first(first, stream)
     result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
@@ -1578,6 +1618,9 @@ async def _stream_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     owns_reservation = api_key_reservation_override is None
     reservation = (
         api_key_reservation_override
@@ -1639,7 +1682,7 @@ async def _stream_responses(
         else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
     )
     if startup_error is not None:
-        if reservation is not None and owns_reservation:
+        if owns_reservation:
             await _release_reservation(reservation)
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     stream = _normalize_public_responses_stream(
@@ -1673,6 +1716,9 @@ async def _collect_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -1723,7 +1769,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
@@ -1795,6 +1841,9 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -1832,7 +1881,7 @@ async def _compact_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     finally:
         await _release_reservation(reservation)
@@ -1873,7 +1922,7 @@ async def _transcribe_request(
             request,
             exc.status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**rate_limit_headers, **exc.headers},
         )
     finally:
         await _release_reservation(reservation)
@@ -1969,7 +2018,7 @@ def _stream_startup_error_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers={**headers, **error.headers},
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(
@@ -2131,6 +2180,42 @@ async def _enforce_request_limits(
             raise ProxyRateLimitError(message) from exc
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc
+
+
+async def _opportunistic_admission_denial(
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    model: str | None,
+) -> JSONResponse | None:
+    if api_key is None or api_key.traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
+        return None
+    selection = await context.service.check_opportunistic_admission(api_key=api_key, model=model)
+    if selection.account is not None:
+        return None
+    message = selection.error_message or "opportunistic burn window closed"
+    if selection.error_code is not None:
+        error_code = selection.error_code
+    elif message.startswith("opportunistic burn window closed"):
+        error_code = OPPORTUNISTIC_BURN_WINDOW_CLOSED
+    else:
+        error_code = "no_accounts"
+    if error_code != OPPORTUNISTIC_BURN_WINDOW_CLOSED:
+        status_code = 503 if error_code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
+        return _logged_error_json_response(
+            request,
+            status_code,
+            openai_error(error_code, message, error_type="server_error"),
+        )
+    if not message.startswith("opportunistic burn window closed"):
+        message = f"opportunistic burn window closed: {message}"
+    return _logged_error_json_response(
+        request,
+        429,
+        openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),
+        headers={"Retry-After": str(_OPPORTUNISTIC_RETRY_AFTER_SECONDS)},
+    )
 
 
 async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:

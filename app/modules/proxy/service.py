@@ -216,6 +216,7 @@ _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.ref
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_API_KEY_RESERVATION_HEARTBEAT_SECONDS = 300.0
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
@@ -5674,6 +5675,18 @@ class ProxyService:
             session.upstream_control.reconnect_requested = True
             return
 
+        if status_request_state is not None and event_type not in {
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+            "error",
+        }:
+            await self._maybe_touch_request_state_api_key_reservation(
+                status_request_state,
+                api_key=status_request_state.api_key,
+                surface="http_bridge",
+            )
+
         if (
             status_request_state is not None
             and status_request_state.previous_response_id is not None
@@ -6239,6 +6252,13 @@ class ProxyService:
                 upstream_control.suppress_downstream_event = True
             return text
 
+        if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            await self._maybe_touch_request_state_api_key_reservation(
+                request_state,
+                api_key=request_state.api_key or api_key,
+                surface="websocket",
+            )
+
         retry_is_previous_response_not_found = is_previous_response_not_found_event
         retry_error_code = _websocket_precreated_retry_error_code(
             request_state,
@@ -6775,6 +6795,52 @@ class ProxyService:
             async with self._repo_factory() as repos:
                 service = ApiKeysService(repos.api_keys)
                 await service.release_usage_reservation(reservation.reservation_id)
+
+    async def _maybe_touch_api_key_reservation(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        reservation: ApiKeyUsageReservationData | None,
+        last_touch_at: float,
+        request_id: str,
+        surface: str,
+    ) -> float:
+        if reservation is None:
+            return last_touch_at
+
+        now = time.monotonic()
+        if now < last_touch_at + _API_KEY_RESERVATION_HEARTBEAT_SECONDS:
+            return last_touch_at
+
+        with anyio.CancelScope(shield=True):
+            try:
+                async with self._repo_factory() as repos:
+                    service = ApiKeysService(repos.api_keys)
+                    await service.touch_usage_reservation(reservation.reservation_id)
+            except Exception:
+                logger.warning(
+                    "Failed to touch %s API key reservation key_id=%s request_id=%s",
+                    surface,
+                    api_key.id if api_key is not None else None,
+                    request_id,
+                    exc_info=True,
+                )
+        return now
+
+    async def _maybe_touch_request_state_api_key_reservation(
+        self,
+        request_state: "_WebSocketRequestState",
+        *,
+        api_key: ApiKeyData | None,
+        surface: str,
+    ) -> None:
+        request_state.api_key_reservation_last_touch_at = await self._maybe_touch_api_key_reservation(
+            api_key=api_key,
+            reservation=request_state.api_key_reservation,
+            last_touch_at=request_state.api_key_reservation_last_touch_at,
+            request_id=request_state.response_id or request_state.request_id,
+            surface=surface,
+        )
 
     async def _settle_compact_api_key_usage(
         self,
@@ -7317,6 +7383,7 @@ class ProxyService:
                                     transient_retries < _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1 or allow_retry_flag
                                 ),
                                 api_key=api_key,
+                                api_key_reservation=api_key_reservation,
                                 settlement=settlement,
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
@@ -7525,6 +7592,7 @@ class ProxyService:
                                 False,
                                 request_started_at=start,
                                 api_key=api_key,
+                                api_key_reservation=api_key_reservation,
                                 settlement=settlement,
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
@@ -7643,6 +7711,7 @@ class ProxyService:
         request_started_at: float,
         allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
+        api_key_reservation: ApiKeyUsageReservationData | None,
         settlement: _StreamSettlement,
         suppress_text_done_events: bool,
         upstream_stream_transport: str | None,
@@ -7667,6 +7736,7 @@ class ProxyService:
         saw_text_delta = False
         latency_first_token_ms: int | None = None
         response_create_lease = AdmissionLease(None)
+        api_key_reservation_last_touch_at = start
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
@@ -7697,6 +7767,14 @@ class ProxyService:
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
+            if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                api_key_reservation_last_touch_at = await self._maybe_touch_api_key_reservation(
+                    api_key=api_key,
+                    reservation=api_key_reservation,
+                    last_touch_at=api_key_reservation_last_touch_at,
+                    request_id=request_id,
+                    surface="stream",
+                )
             event_service_tier = _service_tier_from_event_payload(first_payload)
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
@@ -7789,6 +7867,14 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
+                if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    api_key_reservation_last_touch_at = await self._maybe_touch_api_key_reservation(
+                        api_key=api_key,
+                        reservation=api_key_reservation,
+                        last_touch_at=api_key_reservation_last_touch_at,
+                        request_id=request_id,
+                        surface="stream",
+                    )
                 event_service_tier = _service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
@@ -8489,6 +8575,7 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass(frozen=True, slots=True)

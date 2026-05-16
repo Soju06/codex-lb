@@ -26,11 +26,11 @@ def _index_names(table_name: str) -> set[str]:
 
 def upgrade() -> None:
     reservation_indexes = _index_names("api_key_usage_reservations")
-    if "idx_api_key_usage_reservations_status_created_at" not in reservation_indexes:
+    if "idx_api_key_usage_reservations_status_updated_at" not in reservation_indexes:
         op.create_index(
-            "idx_api_key_usage_reservations_status_created_at",
+            "idx_api_key_usage_reservations_status_updated_at",
             "api_key_usage_reservations",
-            ["status", "created_at"],
+            ["status", "updated_at"],
             unique=False,
         )
 
@@ -71,5 +71,5 @@ def downgrade() -> None:
         op.drop_index("idx_http_bridge_sessions_latest_turn_scope_state_seen", table_name="http_bridge_sessions")
 
     reservation_indexes = _index_names("api_key_usage_reservations")
-    if "idx_api_key_usage_reservations_status_created_at" in reservation_indexes:
-        op.drop_index("idx_api_key_usage_reservations_status_created_at", table_name="api_key_usage_reservations")
+    if "idx_api_key_usage_reservations_status_updated_at" in reservation_indexes:
+        op.drop_index("idx_api_key_usage_reservations_status_updated_at", table_name="api_key_usage_reservations")

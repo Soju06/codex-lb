@@ -153,6 +153,8 @@ class ApiKeysRepositoryProtocol(Protocol):
         cost_microdollars: int | None,
     ) -> None: ...
 
+    async def touch_usage_reservation(self, reservation_id: str) -> bool: ...
+
     async def trends_by_key(
         self,
         key_id: str,
@@ -691,6 +693,21 @@ class ApiKeysService:
             except Exception:
                 await self._repository.rollback()
                 raise
+
+    async def touch_usage_reservation(self, reservation_id: str) -> bool:
+        for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
+            try:
+                async with sqlite_writer_section():
+                    touched = await self._repository.touch_usage_reservation(reservation_id)
+                    await self._repository.commit()
+                    return touched
+            except OperationalError as exc:
+                await self._repository.rollback()
+                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
+
+        raise RuntimeError("unreachable")
 
     async def release_usage_reservation(self, reservation_id: str) -> None:
         async with sqlite_writer_section():

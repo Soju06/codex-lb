@@ -604,6 +604,16 @@ class ApiKeysRepository:
             )
         )
 
+    async def touch_usage_reservation(self, reservation_id: str) -> bool:
+        result = await self._session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == reservation_id)
+            .where(ApiKeyUsageReservation.status == "reserved")
+            .values(updated_at=utcnow())
+            .returning(ApiKeyUsageReservation.id)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def release_stale_usage_reservations(
         self,
         *,
@@ -614,8 +624,8 @@ class ApiKeysRepository:
             select(ApiKeyUsageReservation)
             .options(selectinload(ApiKeyUsageReservation.items))
             .where(ApiKeyUsageReservation.status == "reserved")
-            .where(ApiKeyUsageReservation.created_at < cutoff)
-            .order_by(ApiKeyUsageReservation.created_at.asc())
+            .where(ApiKeyUsageReservation.updated_at < cutoff)
+            .order_by(ApiKeyUsageReservation.updated_at.asc())
             .limit(batch_size)
         )
         rows = list(result.scalars().unique().all())

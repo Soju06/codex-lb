@@ -40,6 +40,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._reservations: dict[str, UsageReservationData] = {}
         self.commit_count = 0
         self.update_last_used_commit_flags: list[bool] = []
+        self.touched_reservations: list[str] = []
 
     async def create(self, row: ApiKey) -> ApiKey:
         self.rows[row.id] = row
@@ -373,6 +374,13 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             status=status,
             items=reservation.items,
         )
+
+    async def touch_usage_reservation(self, reservation_id: str) -> bool:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return False
+        self.touched_reservations.append(reservation_id)
+        return True
 
 
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
@@ -1059,6 +1067,29 @@ async def test_release_usage_reservation_restores_reserved_counter() -> None:
     await service.release_usage_reservation(reservation.reservation_id)
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_touch_usage_reservation_only_updates_reserved_reservation() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-touch-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    assert await service.touch_usage_reservation(reservation.reservation_id) is True
+    await service.release_usage_reservation(reservation.reservation_id)
+    assert await service.touch_usage_reservation(reservation.reservation_id) is False
+    assert repo.touched_reservations == [reservation.reservation_id]
 
 
 @pytest.mark.asyncio

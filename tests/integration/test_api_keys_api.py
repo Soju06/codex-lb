@@ -2136,7 +2136,12 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         await session.execute(
             update(ApiKeyUsageReservation)
             .where(ApiKeyUsageReservation.id == stale.reservation_id)
-            .values(created_at=now - timedelta(hours=7))
+            .values(created_at=now - timedelta(hours=7), updated_at=now - timedelta(hours=7))
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == fresh.reservation_id)
+            .values(created_at=now - timedelta(hours=7), updated_at=now)
         )
         await session.commit()
 

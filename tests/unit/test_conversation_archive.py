@@ -124,8 +124,8 @@ def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_
         "get_settings",
         lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
     )
-    bounded_queue: queue.Queue[tuple[Path, dict[str, object]] | None] = queue.Queue(maxsize=1)
-    bounded_queue.put((tmp_path / "blocked.jsonl.gz", {"payload": "queued"}))
+    bounded_queue: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue(maxsize=1)
+    bounded_queue.put((tmp_path / "blocked.jsonl.gz", {"payload": "queued"}, 10))
     monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", bounded_queue)
     monkeypatch.setattr(conversation_archive, "_ensure_writer_thread", lambda: None)
 
@@ -139,6 +139,34 @@ def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_
     [line] = _archive_lines(tmp_path)
     assert "синхронный fallback" in line
     assert bounded_queue.qsize() == 1
+
+
+def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE_MAX_BYTES", 64)
+    monkeypatch.setattr(
+        conversation_archive,
+        "_ensure_writer_thread",
+        lambda: (_ for _ in ()).throw(AssertionError("writer should not start for byte-budget fallback")),
+    )
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 0
+
+    conversation_archive.archive_json(
+        direction="codex_to_server",
+        kind="responses",
+        transport="http",
+        payload={"text": "x" * 256},
+    )
+
+    [record] = _archive_records(tmp_path)
+    assert record["payload"] == {"text": "x" * 256}
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == 0
 
 
 def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):

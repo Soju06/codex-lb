@@ -7625,6 +7625,8 @@ class ProxyService:
                         requested_service_tier=payload.service_tier,
                     )
                     return
+                if not require_security_work_authorized and last_security_work_retry_error is not None:
+                    last_security_work_retry_error = None
                 try:
                     remaining_budget = _remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
@@ -7762,6 +7764,12 @@ class ProxyService:
                                     )
                                     excluded_account_ids.add(account.id)
                                     require_security_work_authorized = True
+                                    last_security_work_retry_error = _RetryableStreamError(
+                                        _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                        {
+                                            "message": error_message or "Security work authorization is required",
+                                        },
+                                    )
                                     last_transient_exc = tex
                                     break
                                 if _is_account_neutral_error_code(code):
@@ -7791,7 +7799,8 @@ class ProxyService:
                                 )
                                 if action == "failover_next":
                                     last_transient_exc = tex
-                                    excluded_account_ids.add(account.id)
+                                    if account.id != file_preferred_account_id:
+                                        excluded_account_ids.add(account.id)
                                     break
                                 raise
                             transient_retries += 1
@@ -7834,7 +7843,8 @@ class ProxyService:
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
-                            excluded_account_ids.add(account.id)
+                            if account.id != file_preferred_account_id:
+                                excluded_account_ids.add(account.id)
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
@@ -7888,7 +7898,8 @@ class ProxyService:
                         last_security_work_retry_error = exc
                         continue
                     await self._handle_stream_error(account, exc.error, exc.code)
-                    excluded_account_ids.add(account.id)
+                    if account.id != file_preferred_account_id:
+                        excluded_account_ids.add(account.id)
                     continue
                 except _TerminalStreamError as exc:
                     if _should_penalize_stream_error(exc.code):
@@ -8042,6 +8053,12 @@ class ProxyService:
                             )
                             excluded_account_ids.add(account.id)
                             require_security_work_authorized = True
+                            last_security_work_retry_error = _RetryableStreamError(
+                                _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                {
+                                    "message": error_message or "Security work authorization is required",
+                                },
+                            )
                             continue
                     if _should_penalize_stream_error(error_code):
                         await self._handle_stream_error(

@@ -11028,6 +11028,164 @@ async def test_stream_responses_preserves_security_work_error_when_no_fallback_a
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_preserves_http_security_work_error_when_authorized_retry_exhausts(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_http_no_fallback")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error(
+                "invalid_request_error",
+                cyber_message,
+                error_type="invalid_request_error",
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-http"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert event["response"]["error"]["message"] == cyber_message
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
+    assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_clears_stale_security_work_error_before_nonsecurity_no_accounts(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_stale")
+    fallback_account = _make_account("acc_fallback_after_security")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 4)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        if account_id == regular_account.chatgpt_account_id:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_cyber_stale",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-stale"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["warning"]["action"] == "continue_normal_selection"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "no_accounts"
+    assert event["response"]["error"]["message"] == "No active accounts available"
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_move_file_pinned_security_work_request(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -11106,6 +11264,68 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     only_call = select_account.await_args_list[0]
     assert only_call.kwargs["account_ids"] == {regular_account.id}
     assert only_call.kwargs["require_security_work_authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_file_pinned_account_on_retryable_stream_errors(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_retryable_file")
+    select_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=regular_account.id))
+
+    async def fake_select_account_with_budget_compatible(deadline, **kwargs):
+        del deadline
+        select_calls.append(dict(kwargs))
+        return AccountSelection(account=regular_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        assert account_id == regular_account.chatgpt_account_id
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("bad_gateway", "Bad gateway"),
+            failure_phase="status",
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", fake_select_account_with_budget_compatible)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "check pinned file retryable error",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": "file_retryable",
+                        }
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-file-retry"})]
+
+    assert chunks
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "bad_gateway"
+    assert len(select_calls) == 3
+    assert all(call["preferred_account_id"] == regular_account.id for call in select_calls)
+    assert all(call["exclude_account_ids"] == set() for call in select_calls)
 
 
 @pytest.mark.asyncio

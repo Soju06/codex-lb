@@ -4390,7 +4390,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_keeps_side_effect_tool_calls_across_response_ids(monkeypatch):
+async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_response_ids(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4441,12 +4441,13 @@ async def test_stream_responses_keeps_side_effect_tool_calls_across_response_ids
         if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
             tool_chunks.append(chunk_payload)
 
-    assert tool_chunks == [tool_payload, replayed_tool_payload]
-    assert parse_sse_data_json(chunks[-1]) == {
-        "type": "response.completed",
-        "response": {"id": "resp_http_tool_dupe"},
-    }
-    assert request_logs.calls[0]["status"] == "success"
+    assert tool_chunks == [tool_payload]
+    terminal_event = parse_sse_data_json(chunks[-1])
+    assert isinstance(terminal_event, dict)
+    assert terminal_event["type"] == "response.failed"
+    assert terminal_event["response"]["error"]["code"] == "stream_incomplete"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

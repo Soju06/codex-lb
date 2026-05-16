@@ -1,0 +1,52 @@
+{
+  "common": {
+    "language": "语言",
+    "english": "English",
+    "chinese": "简体中文",
+    "logout": "退出登录",
+    "loading": "加载中"
+  },
+  "nav": {
+    "dashboard": "仪表盘",
+    "accounts": "账户",
+    "apis": "API",
+    "settings": "设置",
+    "openMenu": "打开菜单",
+    "showEmails": "显示邮箱",
+    "hideEmails": "隐藏邮箱"
+  },
+  "statusBar": {
+    "lastSync": "最近同步：",
+    "routing": "路由策略：",
+    "version": "版本：",
+    "live": "实时"
+  },
+  "auth": {
+    "appTitle": "Codex LB",
+    "appSubtitle": "API 负载均衡器",
+    "login": {
+      "heading": "登录",
+      "subheading": "请输入管理员密码以继续。",
+      "passwordLabel": "密码",
+      "passwordPlaceholder": "请输入密码",
+      "submit": "登录"
+    },
+    "totp": {
+      "title": "两步验证",
+      "description": "请输入身份验证器应用中的 6 位验证码。",
+      "codeLabel": "TOTP 验证码",
+      "submit": "验证"
+    },
+    "bootstrap": {
+      "title": "完成远程初始化",
+      "subtitle": "在配置管理员密码之前，远程仪表盘访问将保持锁定。",
+      "body": "请使用下方的密码设置流程引导仪表盘访问，然后再加载其余管理界面。",
+      "tokenConfigured": "请在下方输入已配置的 bootstrap token 与新密码。根据你的部署，token 可能来自服务器日志或 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN 环境变量。",
+      "tokenMissing": "远程初始化被阻断。请在服务器上设置 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN，或在未配置密码的情况下重启以自动生成。"
+    },
+    "trustedHeader": {
+      "title": "需要反向代理鉴权",
+      "body": "该仪表盘需要由反向代理传入受信任的鉴权头。请通过 Authelia 等代理访问，或先配置回退仪表盘密码。"
+    }
+  }
+}

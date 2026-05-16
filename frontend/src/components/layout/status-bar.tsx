@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, ArrowRightLeft, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
 import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
@@ -26,6 +27,7 @@ function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_
 }
 
 export function StatusBar() {
+  const { t } = useTranslation();
   const { data: lastSyncAt = null } = useQuery({
     queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
     queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
@@ -59,19 +61,19 @@ export function StatusBar() {
         <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">
           <span className="inline-flex items-center gap-1.5">
             {isLive ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title={t("statusBar.live")} />
             ) : (
               <Activity className="h-3 w-3" aria-hidden="true" />
             )}
-            <span className="font-medium">Last sync:</span> {lastSync.time}
+            <span className="font-medium">{t("statusBar.lastSync")}</span> {lastSync.time}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">Routing:</span> {routingLabel}
+            <span className="font-medium">{t("statusBar.routing")}</span> {routingLabel}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <Tag className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">Version:</span> {__APP_VERSION__}
+            <span className="font-medium">{t("statusBar.version")}</span> {__APP_VERSION__}
           </span>
         </div>
         <a

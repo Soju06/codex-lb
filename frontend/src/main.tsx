@@ -7,6 +7,7 @@ import App from "./App.tsx";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { queryClient } from "@/lib/query-client";
 import { useThemeStore } from "@/hooks/use-theme";
+import "@/i18n";
 
 import "./index.css";
 

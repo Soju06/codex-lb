@@ -76,6 +76,7 @@ class AccountSummary(DashboardModel):
     additional_quotas: list[AccountAdditionalQuota] = Field(default_factory=list)
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
+    routing_policy: str = "normal"
 
 
 class AccountsResponse(DashboardModel):

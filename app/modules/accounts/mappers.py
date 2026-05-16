@@ -20,6 +20,8 @@ from app.modules.accounts.schemas import (
     UsageTrendPoint,
 )
 
+_ACCOUNT_ROUTING_POLICIES = frozenset({"normal", "burn_first", "preserve"})
+
 
 def build_account_summaries(
     *,
@@ -117,7 +119,14 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+        routing_policy=_normalize_account_routing_policy(getattr(account, "routing_policy", None)),
     )
+
+
+def _normalize_account_routing_policy(value: str | None) -> str:
+    if value in _ACCOUNT_ROUTING_POLICIES:
+        return value
+    return "normal"
 
 
 def _effective_usage_windows(

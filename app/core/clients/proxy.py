@@ -330,6 +330,7 @@ class ProxyResponseError(Exception):
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,
         upstream_status_code: int | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -339,6 +340,7 @@ class ProxyResponseError(Exception):
         self.failure_detail = failure_detail
         self.failure_exception_type = failure_exception_type
         self.upstream_status_code = upstream_status_code
+        self.headers = dict(headers or {})
 
 
 def _should_drop_inbound_header(name: str) -> bool:

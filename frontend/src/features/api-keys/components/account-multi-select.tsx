@@ -24,6 +24,8 @@ export type AccountMultiSelectProps = {
   placeholder?: string;
 };
 
+const EMPTY_ACCOUNTS: AccountSummary[] = [];
+
 type LimitChip = {
   key: string;
   label: string;
@@ -112,7 +114,7 @@ export function AccountMultiSelect({
   placeholder = "All accounts",
 }: AccountMultiSelectProps) {
   const { accountsQuery } = useAccounts();
-  const accounts = accountsQuery.data ?? [];
+  const accounts = accountsQuery.data ?? EMPTY_ACCOUNTS;
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {

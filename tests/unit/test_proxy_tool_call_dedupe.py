@@ -195,6 +195,47 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_write_s
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_suppresses_write_stdin_with_volatile_differences():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_write",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":17,"chars":"","yield_time_ms":1000,"max_output_tokens":4000}',
+            "call_id": "call_a",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_write",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":17,"chars":"","yield_time_ms":30000,"max_output_tokens":24000}',
+            "call_id": "call_b",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_write",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_write",
+        )
+        is True
+    )
+
+
 def test_rewrite_parallel_tool_call_payload_removes_duplicate_side_effect_tool_uses():
     arguments = {
         "tool_uses": [
@@ -379,6 +420,43 @@ def test_rewrite_parallel_tool_call_payload_tolerates_mixed_wait_agent_targets()
     assert changed is False
     assert removed_count == 0
     assert rewritten_payload is payload
+
+
+def test_rewrite_parallel_tool_call_payload_sorts_wait_agent_mapping_targets_canonically():
+    arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.wait_agent",
+                "parameters": {
+                    "targets": [{"agent": "b", "kind": "spark"}, {"kind": "spark", "agent": "a"}],
+                    "timeout_ms": 30000,
+                },
+            },
+            {
+                "recipient_name": "functions.wait_agent",
+                "parameters": {
+                    "targets": [{"kind": "spark", "agent": "a"}, {"kind": "spark", "agent": "b"}],
+                    "timeout_ms": 60000,
+                },
+            },
+        ]
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": json.dumps(arguments),
+            "call_id": "call_parallel",
+        },
+    }
+
+    rewritten_payload, changed, removed_count = tool_call_dedupe.rewrite_parallel_tool_call_payload(payload)
+
+    assert changed is True
+    assert removed_count == 1
+    assert isinstance(rewritten_payload, dict)
 
 
 def test_rewrite_parallel_tool_call_payload_keeps_duplicate_read_only_connector_uses():
@@ -732,6 +810,121 @@ def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_read_only_call
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_resets_after_non_side_effect_item():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"echo hi","yield_time_ms":1000}',
+            "call_id": "call_a",
+        },
+    }
+    reasoning_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "reasoning",
+            "summary": [],
+        },
+    }
+    repeated_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"echo hi","yield_time_ms":30000}',
+            "call_id": "call_b",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            reasoning_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            repeated_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+
+
+def test_mark_duplicate_tool_call_downstream_event_resets_after_intervening_side_effect():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    exec_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"pytest","yield_time_ms":1000}',
+            "call_id": "call_exec_a",
+        },
+    }
+    patch_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "apply_patch_call",
+            "operation": {"type": "update_file", "path": "app.py", "diff": "@@\n- old\n+ new\n"},
+            "call_id": "call_patch",
+        },
+    }
+    exec_repeat_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_chain",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"pytest","yield_time_ms":30000}',
+            "call_id": "call_exec_b",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            exec_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            patch_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            exec_repeat_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_chain",
+        )
+        is False
+    )
+
+
 def test_mark_duplicate_tool_call_downstream_event_suppresses_apply_patch_call_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
@@ -851,7 +1044,7 @@ def test_mark_duplicate_tool_call_downstream_event_can_suppress_one_stream_repla
     )
 
 
-def test_mark_duplicate_tool_call_downstream_event_bounds_seen_key_cache():
+def test_mark_duplicate_tool_call_downstream_event_keeps_only_active_side_effect_block():
     upstream_control = proxy_service._WebSocketUpstreamControl()
 
     for index in range(tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT + 3):
@@ -861,9 +1054,9 @@ def test_mark_duplicate_tool_call_downstream_event_bounds_seen_key_cache():
                     "type": "response.output_item.done",
                     "item": {
                         "type": "function_call",
-                        "name": "shell",
+                        "name": "exec_command",
                         "call_id": f"call_{index}",
-                        "arguments": f'{{"index":{index}}}',
+                        "arguments": json.dumps({"cmd": f"echo {index}"}),
                     },
                 },
                 seen_tool_call_keys=upstream_control.seen_tool_call_keys,
@@ -872,7 +1065,7 @@ def test_mark_duplicate_tool_call_downstream_event_bounds_seen_key_cache():
             is False
         )
 
-    assert len(upstream_control.seen_tool_call_keys) == tool_call_dedupe._TOOL_CALL_DEDUPE_CACHE_LIMIT
+    assert len(upstream_control.seen_tool_call_keys) == 1
 
 
 def test_dedupe_replayed_side_effect_input_items_removes_duplicate_call_but_preserves_outputs():

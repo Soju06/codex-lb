@@ -7108,8 +7108,8 @@ async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_outp
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
-        previous_response_id="resp_anchor_a",
-        request_text='{"type":"response.create","previous_response_id":"resp_anchor_a"}',
+        previous_response_id="resp_anchor_b",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_b"}',
     )
     followup_request_b = proxy_service._WebSocketRequestState(
         request_id="ws_req_missing_tool_unmatched_b",
@@ -11527,7 +11527,7 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_previous_respons
     assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
 
 
-def test_prepare_response_bridge_request_state_rewrites_replayed_side_effect_call_without_output():
+def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     input_items: list[JsonValue] = [
@@ -11556,10 +11556,7 @@ def test_prepare_response_bridge_request_state_rewrites_replayed_side_effect_cal
     upstream_payload = json.loads(text_data)
     upstream_input = upstream_payload["input"]
     assert request_state.input_item_count == 2
-    assert upstream_input[0]["type"] == "message"
-    assert upstream_input[0]["role"] == "assistant"
-    assert "without matching output: exec_command" in upstream_input[0]["content"][0]["text"]
-    assert "function_call" not in json.dumps(upstream_input)
+    assert upstream_input == input_items
 
 
 def test_prepare_response_bridge_request_state_rewrites_first_duplicate_when_only_replay_has_output():

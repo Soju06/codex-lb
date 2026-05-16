@@ -162,7 +162,6 @@ from app.modules.proxy.ring_membership import (
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
     mark_duplicate_tool_call_downstream_event,
-    response_id_from_payload,
     rewrite_parallel_tool_call_sse_line,
     rewrite_parallel_tool_call_text,
 )
@@ -3039,7 +3038,7 @@ class ProxyService:
             replayed_input_items = cast(list[JsonValue], payload.input)
             deduped_input_items, deduped_replayed_tool_call_count = dedupe_replayed_side_effect_input_items(
                 replayed_input_items,
-                sanitize_missing_outputs=True,
+                sanitize_missing_outputs=False,
             )
             if deduped_replayed_tool_call_count > 0:
                 deduped_replayed_input_count = len(replayed_input_items)
@@ -5736,6 +5735,11 @@ class ProxyService:
                                 session.pending_requests,
                             ),
                         )
+                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
+                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                            session.pending_requests,
+                            _all_pending_websocket_followup_requests(session.pending_requests),
+                        )
                     if grouped_previous_response_request_states:
                         session.queued_request_count = max(
                             0,
@@ -6498,6 +6502,11 @@ class ProxyService:
                             _matching_websocket_request_states_for_missing_tool_output_error(
                                 pending_requests,
                             ),
+                        )
+                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
+                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                            pending_requests,
+                            _all_pending_websocket_followup_requests(pending_requests),
                         )
                 elif request_state is None and event_type == "error":
                     grouped_previous_response_request_states = list(pending_requests)
@@ -7679,6 +7688,7 @@ class ProxyService:
                         return
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
+                    tool_call_dedupe = _WebSocketUpstreamControl()
                     effective_attempt_timeout = _remaining_budget_seconds(deadline)
                     if effective_attempt_timeout <= 0:
                         logger.warning(
@@ -7726,6 +7736,7 @@ class ProxyService:
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
                                 preferred_account_id=preferred_account_id,
+                                tool_call_dedupe=tool_call_dedupe,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
@@ -7933,6 +7944,7 @@ class ProxyService:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                tool_call_dedupe=tool_call_dedupe,
                             ):
                                 yield line
                         finally:
@@ -8052,6 +8064,7 @@ class ProxyService:
         upstream_stream_transport: str | None,
         request_transport: str,
         preferred_account_id: str | None = None,
+        tool_call_dedupe: _WebSocketUpstreamControl | None = None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -8070,7 +8083,8 @@ class ProxyService:
         usage = None
         saw_text_delta = False
         latency_first_token_ms: int | None = None
-        tool_call_dedupe = _WebSocketUpstreamControl()
+        if tool_call_dedupe is None:
+            tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
         response_create_lease = AdmissionLease(None)
 
@@ -8189,9 +8203,7 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     first_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=response_id_from_payload(first_payload)
-                    or _websocket_response_id(event, first_payload)
-                    or response_id,
+                    response_id=request_id,
                 ):
                     suppressed_duplicate_tool_call = True
                 else:
@@ -8297,9 +8309,7 @@ class ProxyService:
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=response_id_from_payload(event_payload)
-                    or _websocket_response_id(event, event_payload)
-                    or response_id,
+                    response_id=request_id,
                 ):
                     suppressed_duplicate_tool_call = True
                     continue
@@ -9770,6 +9780,12 @@ def _matching_websocket_request_states_for_missing_tool_output_error(
     if len(unique_previous_response_ids) == 1:
         return unresolved_followups
     return []
+
+
+def _all_pending_websocket_followup_requests(
+    pending_requests: deque[_WebSocketRequestState],
+) -> list[_WebSocketRequestState]:
+    return [request_state for request_state in pending_requests if request_state.previous_response_id is not None]
 
 
 def _pop_matching_websocket_request_states(

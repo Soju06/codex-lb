@@ -134,6 +134,10 @@ async def update_settings(
             if primary_threshold_provided or legacy_threshold_provided
             else current.sticky_reallocation_budget_threshold_pct
         )
+        if resolved_primary_threshold is None:
+            resolved_primary_threshold = current.sticky_reallocation_primary_budget_threshold_pct
+        if resolved_legacy_threshold is None:
+            resolved_legacy_threshold = current.sticky_reallocation_budget_threshold_pct
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=payload.sticky_threads_enabled,

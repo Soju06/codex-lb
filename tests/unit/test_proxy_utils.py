@@ -8362,6 +8362,56 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
+async def test_pop_replayable_precreated_request_refreshes_fresh_replay_fingerprint():
+    original_input: list[JsonValue] = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+    ]
+    fresh_input: list[JsonValue] = [{"role": "user", "content": "fresh"}]
+    fresh_request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": fresh_input,
+    }
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_refresh_fingerprint",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_anchor",
+                "input": original_input,
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_anchor",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+        input_item_count=len(original_input),
+        input_full_fingerprint=proxy_service._fingerprint_input_items(original_input),
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is pending_request
+    assert pending_request.previous_response_id is None
+    assert pending_request.input_item_count == len(fresh_input)
+    assert pending_request.input_full_fingerprint == proxy_service._fingerprint_input_items(fresh_input)
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_masks_previous_response_not_found_for_unique_followup_request(
     monkeypatch,
 ):

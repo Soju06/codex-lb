@@ -9199,6 +9199,7 @@ async def _pop_replayable_precreated_websocket_request_state(
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_state.replay_count += 1
     request_state.awaiting_response_created = True
     request_state.response_id = None
@@ -9216,6 +9217,30 @@ def _is_previous_response_not_found_error(
     if code != "invalid_request_error" or param != "previous_response_id":
         return False
     return _is_previous_response_not_found_message(message)
+
+
+def _refresh_websocket_request_input_fingerprint_from_text(request_state: _WebSocketRequestState) -> None:
+    if not request_state.request_text:
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    try:
+        payload = json.loads(request_state.request_text)
+    except json.JSONDecodeError:
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    if not isinstance(payload, dict):
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    request_state.input_item_count = len(input_items)
+    request_state.input_full_fingerprint = _fingerprint_input_items(cast(list[JsonValue], input_items))
 
 
 def _websocket_event_error_payload(

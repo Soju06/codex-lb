@@ -10,6 +10,8 @@ Resources
 
 # codex-lb
 
+**English** | [简体中文](./README.zh-CN.md)
+
 Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |

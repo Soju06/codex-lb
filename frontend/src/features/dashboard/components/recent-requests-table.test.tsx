@@ -58,7 +58,9 @@ describe("RecentRequestsTable", () => {
           {
             requestedAt: ISO,
             accountId: "acc-primary",
+            planType: "plus",
             apiKeyName: "Key Alpha",
+            apiKeyId: "key-alpha",
             requestId: "req-1",
             model: "gpt-5.1",
             serviceTier: "default",
@@ -79,6 +81,7 @@ describe("RecentRequestsTable", () => {
     );
 
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
+    expect(screen.getAllByText("Plus")[0]).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
     expect(screen.getByText("Requested priority")).toBeInTheDocument();
@@ -126,7 +129,9 @@ describe("RecentRequestsTable", () => {
           {
             requestedAt: ISO,
             accountId: "acc-legacy",
+            planType: null,
             apiKeyName: null,
+            apiKeyId: null,
             requestId: "req-legacy",
             model: "gpt-5.1",
             serviceTier: null,
@@ -158,7 +163,9 @@ describe("RecentRequestsTable", () => {
           {
             requestedAt: ISO,
             accountId: "acc-legacy",
+            planType: null,
             apiKeyName: null,
+            apiKeyId: null,
             requestId: "req-error-code",
             model: "gpt-5.1",
             serviceTier: null,

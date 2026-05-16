@@ -4,10 +4,11 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
-from app.db.models import Base
+from app.db.models import Base, HttpBridgeSessionAlias
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
 pytestmark = pytest.mark.unit
@@ -310,7 +311,7 @@ async def test_durable_bridge_takeover_preserves_existing_anchor_when_replacemen
         api_key_id=None,
         instance_id="instance-b",
         lease_ttl_seconds=60.0,
-        account_id="acc-2",
+        account_id="acc-1",
         model="gpt-5.4",
         service_tier=None,
         latest_turn_state=None,
@@ -321,6 +322,95 @@ async def test_durable_bridge_takeover_preserves_existing_anchor_when_replacemen
     assert reclaimed.owner_instance_id == "instance-b"
     assert reclaimed.latest_turn_state == "http_turn_old"
     assert reclaimed.latest_response_id == "resp_old"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_takeover_with_account_change_clears_stale_aliases(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-alias-reset",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_old",
+        latest_response_id="resp_old",
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_old",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_old",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-alias-reset",
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert reclaimed.owner_instance_id == "instance-b"
+    assert reclaimed.latest_turn_state is None
+    assert reclaimed.latest_response_id is None
+
+    stale_by_turn_state = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-1",
+        api_key_id=None,
+        turn_state="http_turn_old",
+        session_header=None,
+        previous_response_id=None,
+    )
+    stale_by_previous_response = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-1",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_old",
+    )
+    by_canonical_key = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-alias-reset",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+
+    assert stale_by_turn_state is None
+    assert stale_by_previous_response is None
+    assert by_canonical_key is not None
+    assert by_canonical_key.account_id == "acc-2"
 
 
 @pytest.mark.asyncio
@@ -356,6 +446,118 @@ async def test_durable_bridge_lookup_active_lease_survives_request_lookup(
     assert lookup.owner_instance_id == "instance-a"
     assert lookup.latest_response_id == "resp_1"
     assert lookup.lease_is_active(now=utcnow()) is True
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_falls_back_to_latest_turn_state_when_alias_missing(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="thread-123",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_restart",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            delete(HttpBridgeSessionAlias).where(
+                HttpBridgeSessionAlias.session_id == claimed.session_id,
+                HttpBridgeSessionAlias.alias_kind == "turn_state",
+            )
+        )
+        await session.commit()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_restart",
+        api_key_id="key-1",
+        turn_state="http_turn_restart",
+        session_header=None,
+        previous_response_id=None,
+    )
+
+    assert lookup is not None
+    assert lookup.canonical_kind == "prompt_cache"
+    assert lookup.canonical_key == "thread-123"
+    assert lookup.state == "draining"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_falls_back_to_latest_response_id_when_alias_missing(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="thread-123",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_restart",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            delete(HttpBridgeSessionAlias).where(
+                HttpBridgeSessionAlias.session_id == claimed.session_id,
+                HttpBridgeSessionAlias.alias_kind == "previous_response_id",
+            )
+        )
+        await session.commit()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-123",
+        api_key_id="key-1",
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_restart",
+    )
+
+    assert lookup is not None
+    assert lookup.canonical_kind == "prompt_cache"
+    assert lookup.canonical_key == "thread-123"
+    assert lookup.state == "draining"
 
 
 @pytest.mark.asyncio

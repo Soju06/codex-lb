@@ -18,7 +18,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.middleware.api_firewall import add_api_firewall_middleware
 from app.core.middleware.firewall_cache import get_firewall_ip_cache
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -262,7 +262,7 @@ async def test_deleted_key_rejected_immediately() -> None:
 
     from app.modules.api_keys.service import ApiKeysService
 
-    service = ApiKeysService(_DeleteOnlyRepo())  # type: ignore[arg-type]
+    service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _DeleteOnlyRepo()))
     await service.delete_key("key-del-1")
 
     # BUG: after deletion the cache should be empty, but it still holds stale data
@@ -333,7 +333,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
 
     from app.modules.api_keys.service import ApiKeysService
 
-    service = ApiKeysService(_RegenRepo())  # type: ignore[arg-type]
+    service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _RegenRepo()))
     await service.regenerate_key("key-regen-1")
 
     # BUG: old token should be evicted from cache but it still authorises requests
@@ -394,7 +394,7 @@ async def test_deactivated_key_rejected_immediately() -> None:
 
     from app.modules.api_keys.service import ApiKeysService, ApiKeyUpdateData
 
-    service = ApiKeysService(_UpdateOnlyRepo())  # type: ignore[arg-type]
+    service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _UpdateOnlyRepo()))
     await service.update_key("key-deact-1", ApiKeyUpdateData(is_active=False, is_active_set=True))
 
     # BUG: deactivated key should be evicted from cache but it still returns stale active data

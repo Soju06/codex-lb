@@ -172,7 +172,7 @@ def _is_proxy_unauthenticated_socket_peer_allowed(request: HTTPConnection) -> bo
 # --- Codex usage caller identity auth ---
 
 
-async def validate_codex_usage_identity(request: Request) -> None:
+async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
     token = _extract_bearer_token(request.headers.get("Authorization"))
     if not token:
         raise ProxyAuthError("Missing ChatGPT token in Authorization header")
@@ -180,6 +180,8 @@ async def validate_codex_usage_identity(request: Request) -> None:
     raw_account_id = request.headers.get("chatgpt-account-id")
     account_id = raw_account_id.strip() if raw_account_id else ""
     if not account_id:
+        if token.startswith("sk-clb-"):
+            return await _validate_api_key_token(token)
         raise ProxyAuthError("Missing chatgpt-account-id header")
 
     async with get_background_session() as session:
@@ -198,6 +200,7 @@ async def validate_codex_usage_identity(request: Request) -> None:
         if exc.status_code in (401, 403):
             raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
         raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
+    return None
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

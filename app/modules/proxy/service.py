@@ -4993,6 +4993,12 @@ class ProxyService:
                     502,
                     openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                 )
+        if session.upstream_control.retire_after_drain:
+            await self._retire_http_bridge_after_drain_if_ready(session)
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
+            )
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,

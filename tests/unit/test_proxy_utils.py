@@ -1081,6 +1081,35 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
     )
 
 
+@pytest.mark.asyncio
+async def test_select_codex_control_account_without_budget_uses_balancer(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selected_account = _make_account("acc_codex_balanced")
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    result = await service._select_codex_control_account_without_budget(
+        affinity=proxy_service._AffinityPolicy(
+            key="control-session",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            max_age_seconds=123,
+        ),
+        api_key=None,
+    )
+
+    assert result is not None
+    assert result.id == "acc_codex_balanced"
+    select_account.assert_awaited_once_with(
+        sticky_key="control-session",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=123,
+        account_ids=None,
+        budget_threshold_pct=95.0,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)

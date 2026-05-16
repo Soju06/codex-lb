@@ -4445,7 +4445,9 @@ async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_
     terminal_event = parse_sse_data_json(chunks[-1])
     assert isinstance(terminal_event, dict)
     assert terminal_event["type"] == "response.failed"
-    assert terminal_event["response"]["error"]["code"] == "stream_incomplete"
+    terminal_response = cast(dict[str, JsonValue], terminal_event["response"])
+    terminal_error = cast(dict[str, JsonValue], terminal_response["error"])
+    assert terminal_error["code"] == "stream_incomplete"
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 

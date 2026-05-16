@@ -1156,3 +1156,49 @@ def test_rewrite_parallel_tool_call_text_preserves_sse_event_name():
     assert rewritten_event_type == "response.output_item.done"
     assert rewritten_event is not None
     assert rewritten_payload is not None
+
+
+def test_rewrite_parallel_tool_call_payload_removes_duplicate_goal_side_effects():
+    arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.update_plan",
+                "parameters": {"plan": [{"step": "repair", "status": "in_progress"}]},
+            },
+            {
+                "recipient_name": "functions.update_plan",
+                "parameters": {"plan": [{"step": "repair", "status": "in_progress"}]},
+            },
+            {
+                "recipient_name": "functions.request_user_input",
+                "parameters": {"questions": [{"id": "choice", "question": "Pick one", "options": []}]},
+            },
+            {
+                "recipient_name": "functions.request_user_input",
+                "parameters": {"questions": [{"id": "choice", "question": "Pick one", "options": []}]},
+            },
+        ]
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_goal",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": json.dumps(arguments),
+            "call_id": "call_parallel",
+        },
+    }
+
+    rewritten_payload, changed, removed_count = tool_call_dedupe.rewrite_parallel_tool_call_payload(payload)
+
+    assert changed is True
+    assert removed_count == 2
+    assert isinstance(rewritten_payload, dict)
+    item = rewritten_payload["item"]
+    assert isinstance(item, dict)
+    rewritten_arguments = json.loads(item["arguments"])
+    assert [tool_use["recipient_name"] for tool_use in rewritten_arguments["tool_uses"]] == [
+        "functions.update_plan",
+        "functions.request_user_input",
+    ]

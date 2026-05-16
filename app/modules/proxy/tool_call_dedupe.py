@@ -40,14 +40,7 @@ _SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
 _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES = frozenset({"apply_patch_call"})
 _PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES = frozenset(
     {
-        "functions.apply_patch",
-        "functions.close_agent",
-        "functions.exec_command",
-        "functions.resume_agent",
-        "functions.send_input",
-        "functions.spawn_agent",
-        "functions.wait_agent",
-        "functions.write_stdin",
+        *(f"functions.{name}" for name in _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
         "multi_tool_use.parallel",
     }
 )

@@ -9313,7 +9313,7 @@ def _websocket_precreated_retry_error_code(
         param=error_param,
         message=error_message,
     ):
-        return "stream_incomplete"
+        return None
     if error_code not in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code

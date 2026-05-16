@@ -5350,8 +5350,18 @@ async def test_process_http_bridge_upstream_text_scopes_tool_dedupe_to_request_s
     assert queue_b is not None
     event_a = await asyncio.wait_for(queue_a.get(), timeout=0.1)
     event_b = await asyncio.wait_for(queue_b.get(), timeout=0.1)
-    assert proxy_service.parse_sse_data_json(event_a)["item"]["call_id"] == "call_a"
-    assert proxy_service.parse_sse_data_json(event_b)["item"]["call_id"] == "call_b"
+    assert event_a is not None
+    assert event_b is not None
+    payload_a = proxy_service.parse_sse_data_json(event_a)
+    payload_b = proxy_service.parse_sse_data_json(event_b)
+    assert isinstance(payload_a, dict)
+    assert isinstance(payload_b, dict)
+    item_a = payload_a.get("item")
+    item_b = payload_b.get("item")
+    assert isinstance(item_a, dict)
+    assert isinstance(item_b, dict)
+    assert item_a["call_id"] == "call_a"
+    assert item_b["call_id"] == "call_b"
 
 
 @pytest.mark.asyncio

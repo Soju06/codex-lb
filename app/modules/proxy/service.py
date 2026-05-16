@@ -5807,7 +5807,11 @@ class ProxyService:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
-        if status_request_state is not None and is_missing_tool_output_event:
+        if (
+            status_request_state is not None
+            and status_request_state.previous_response_id is not None
+            and is_missing_tool_output_event
+        ):
             status_request_state.error_http_status_override = 502
             event, payload, event_type, rewritten_text = _rewrite_websocket_continuity_corruption_event(
                 request_state=status_request_state,
@@ -6497,7 +6501,11 @@ class ProxyService:
                         )
                     )
                     text = rewritten_text
-                if request_state is not None and is_missing_tool_output_event:
+                if (
+                    request_state is not None
+                    and request_state.previous_response_id is not None
+                    and is_missing_tool_output_event
+                ):
                     request_state.error_http_status_override = 502
                     event, payload, event_type, text = _rewrite_websocket_continuity_corruption_event(
                         request_state=request_state,

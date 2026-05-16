@@ -7056,6 +7056,60 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_preserves_first_turn_missing_tool_output(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_first_turn_missing_tool")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    first_turn_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_first_turn_missing_tool",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create"}',
+    )
+    pending_requests = deque([first_turn_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert "No tool output found" in downstream_text
+    assert '"code":"stream_incomplete"' not in downstream_text
+    assert upstream_control.reconnect_requested is False
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == [first_turn_request]
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_failure(
     monkeypatch,
 ):

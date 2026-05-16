@@ -320,6 +320,10 @@ def dedupe_replayed_side_effect_input_items(
             last_side_effect_key = None
         key = call_keys.get(index)
         if key is None:
+            if isinstance(item, dict) and replayed_tool_call_segment_boundary(item):
+                first_call_id_by_key.clear()
+                first_call_index_by_key.clear()
+                last_side_effect_key = None
             continue
         if last_side_effect_key is not None and key != last_side_effect_key:
             first_call_id_by_key.clear()
@@ -418,6 +422,11 @@ def replayed_input_segment_boundary(item: Mapping[str, JsonValue]) -> bool:
         return False
     item_type = item.get("type")
     return item_type in {None, "message"}
+
+
+def replayed_tool_call_segment_boundary(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    return item_type in {"function_call", "custom_tool_call"} | _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES
 
 
 def replayed_tool_output_call_id(item: Mapping[str, JsonValue]) -> str | None:

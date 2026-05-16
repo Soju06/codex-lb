@@ -1088,6 +1088,38 @@ def test_dedupe_replayed_side_effect_input_items_keeps_read_only_custom_tool_cal
     assert deduped_items == input_items
 
 
+def test_dedupe_replayed_side_effect_input_items_resets_across_read_only_tool_call():
+    repeated_arguments = json.dumps({"cmd": "pytest"})
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": repeated_arguments,
+            "call_id": "call_pytest_first",
+        },
+        {"type": "function_call_output", "call_id": "call_pytest_first", "output": "failed"},
+        {
+            "type": "custom_tool_call",
+            "name": "read_context",
+            "input": json.dumps({"path": "README.md"}),
+            "call_id": "call_read",
+        },
+        {"type": "custom_tool_call_output", "call_id": "call_read", "output": "context"},
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": repeated_arguments,
+            "call_id": "call_pytest_second",
+        },
+        {"type": "function_call_output", "call_id": "call_pytest_second", "output": "passed"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
 def test_rewrite_parallel_tool_call_text_preserves_sse_event_name():
     arguments = {
         "tool_uses": [

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -198,7 +199,7 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     response = await proxy_api_module._stream_responses(
         request,
         payload,
-        ProxyContext(service=_FakeService()),
+        ProxyContext(service=cast(proxy_module.ProxyService, _FakeService())),
         api_key=None,
     )
 
@@ -209,7 +210,7 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     assert first_chunk == SSE_KEEPALIVE_FRAME
     assert upstream_started.is_set() is True
     release_upstream.set()
-    chunks = [await asyncio.wait_for(iterator.__anext__(), timeout=0.2) for _ in range(2)]
+    chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
     assert any("response.completed" in chunk for chunk in chunks)
 
 

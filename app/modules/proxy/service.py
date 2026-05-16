@@ -1991,7 +1991,7 @@ class ProxyService:
         *,
         method: str,
         payload: bytes | None,
-        query_params: Mapping[str, str],
+        query_params: Mapping[str, str] | Sequence[tuple[str, str]],
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
         api_key: ApiKeyData | None = None,
@@ -10641,7 +10641,7 @@ def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
         error.code if error else None,
         error.type if error else None,
     )
-    return code in {"not_found", "method_not_allowed", "upstream_error"}
+    return code in {"not_found", "method_not_allowed"}
 
 
 def _detached_account_copy(account: Account) -> Account:

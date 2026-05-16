@@ -243,6 +243,27 @@ async def test_thread_goal_get_returns_empty_goal_when_upstream_lacks_protocol(a
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_get_propagates_non_protocol_404(async_client, monkeypatch):
+    await _import_account(async_client, "acc_goal_gateway_404", "goal-gateway-404@example.com")
+
+    async def fake_thread_goal(*_args, **_kwargs):
+        raise ProxyResponseError(
+            404,
+            {"error": {"code": "upstream_error", "message": "Upstream error: HTTP 404 Not Found"}},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_thread_goal_request", fake_thread_goal)
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        json={"threadId": "019debd9-2372-7f23-92b9-9f34002a6355"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "upstream_error"
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_get_propagates_real_client_errors(async_client, monkeypatch):
     await _import_account(async_client, "acc_goal_rate_limited", "goal-rate@example.com")
 
@@ -596,7 +617,7 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
         timeout_seconds=None,
         **_kwargs,
     ):
-        calls.append((path, method, payload, dict(query_params), access_token, account_id, timeout_seconds))
+        calls.append((path, method, payload, list(query_params), access_token, account_id, timeout_seconds))
         return CodexControlResponse(
             status_code=200,
             body=b'{"keys":[]}',
@@ -610,14 +631,21 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
 
-    response = await async_client.get(endpoint, params={"kid": "test"})
+    response = await async_client.get(endpoint, params=[("kid", "test"), ("kid", "next")])
 
     assert response.status_code == 200
     assert response.json() == {"keys": []}
     assert response.headers["cache-control"] == "public, max-age=3600"
     assert response.headers["etag"] == '"jwks-v1"'
     assert response.headers["last-modified"] == "Sat, 16 May 2026 19:00:00 GMT"
-    assert calls[0][:6] == (upstream_path, "GET", None, {"kid": "test"}, "access-token", "acc_codex_jwks")
+    assert calls[0][:6] == (
+        upstream_path,
+        "GET",
+        None,
+        [("kid", "test"), ("kid", "next")],
+        "access-token",
+        "acc_codex_jwks",
+    )
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0
 

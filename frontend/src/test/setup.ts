@@ -2,6 +2,8 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 
+import "@/i18n";
+import { LANGUAGE_STORAGE_KEY } from "@/i18n";
 import { ensureLocalStorageShim } from "@/test/local-storage-shim";
 import { resetMockState } from "@/test/mocks/handlers";
 import { server, startMockServer } from "@/test/mocks/server";
@@ -45,6 +47,11 @@ beforeAll(() => {
 afterEach(() => {
   if (typeof window !== "undefined") {
     window.history.replaceState({}, "", "/");
+    try {
+      window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
   }
   resetMockState();
   server.resetHandlers();

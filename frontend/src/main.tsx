@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App.tsx";
 import { queryClient } from "@/lib/query-client";
 import { useThemeStore } from "@/hooks/use-theme";
+import "@/i18n";
 
 import "./index.css";
 

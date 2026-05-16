@@ -5458,6 +5458,21 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
     assert timeout.error_message == "Proxy request budget exhausted"
 
 
+def test_websocket_receive_timeout_clamps_idle_when_equal_to_full_budget(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
+        [100.0],
+        proxy_request_budget_seconds=600.0,
+        stream_idle_timeout_seconds=600.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == 120.0
+    assert timeout.error_code == "stream_idle_timeout"
+    assert timeout.error_message == "Upstream stream idle timeout"
+
+
 @pytest.mark.asyncio
 async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
     request_logs = _RequestLogsRecorder()

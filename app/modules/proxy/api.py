@@ -1962,7 +1962,10 @@ async def _stream_response_error_events(
             yield line
     except ProxyResponseError as exc:
         if owns_reservation:
-            await _release_reservation(reservation)
+            try:
+                await _release_reservation(reservation)
+            except Exception:
+                logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error

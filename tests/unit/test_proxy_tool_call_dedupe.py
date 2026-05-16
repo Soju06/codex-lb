@@ -172,7 +172,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_write_s
         "item": {
             "type": "function_call",
             "name": "write_stdin",
-            "arguments": '{"session_id":17,"chars":"","yield_time_ms":60000,"max_output_tokens":24000}',
+            "arguments": '{"session_id":17,"chars":"","yield_time_ms":1000,"max_output_tokens":24000}',
             "call_id": "call_b",
         },
     }
@@ -265,7 +265,7 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_write_stdin_owner(
                 "parameters": {
                     "session_id": 41288,
                     "chars": "",
-                    "yield_time_ms": 1000,
+                    "yield_time_ms": 30000,
                     "max_output_tokens": 2000,
                 },
             },
@@ -895,7 +895,7 @@ def test_dedupe_replayed_side_effect_input_items_removes_duplicate_call_but_pres
             "type": "function_call",
             "name": "write_stdin",
             "arguments": json.dumps(
-                {"session_id": 75180, "chars": "", "yield_time_ms": 1000, "max_output_tokens": 4000}
+                {"session_id": 75180, "chars": "", "yield_time_ms": 30000, "max_output_tokens": 4000}
             ),
             "call_id": "call_replay",
         },
@@ -937,6 +937,28 @@ def test_dedupe_replayed_side_effect_input_items_keeps_distinct_write_payloads()
             "name": "write_stdin",
             "arguments": json.dumps({"session_id": 75180, "chars": "y", "yield_time_ms": 30000}),
             "call_id": "call_input",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_write_waits():
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_long_poll",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 1000}),
+            "call_id": "call_short_poll",
         },
     ]
 
@@ -1156,6 +1178,30 @@ def test_rewrite_parallel_tool_call_text_preserves_sse_event_name():
     assert rewritten_event_type == "response.output_item.done"
     assert rewritten_event is not None
     assert rewritten_payload is not None
+
+
+def test_rewrite_parallel_tool_call_text_preserves_raw_error_type():
+    payload: dict[str, JsonValue] = {
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Upstream rejected the shared websocket request.",
+        },
+        "status": 400,
+    }
+
+    text, rewritten_payload, rewritten_event, rewritten_event_type, rewritten_event_block = (
+        tool_call_dedupe.rewrite_parallel_tool_call_text(
+            json.dumps(payload, separators=(",", ":")),
+            payload,
+            event_block=f"data: {json.dumps(payload, separators=(',', ':'))}\n\n",
+        )
+    )
+
+    assert rewritten_event_type == "error"
+    assert rewritten_event is None
+    assert rewritten_payload == payload
+    assert text == json.dumps(payload, separators=(",", ":"))
+    assert rewritten_event_block == f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 def test_rewrite_parallel_tool_call_payload_removes_duplicate_goal_side_effects():

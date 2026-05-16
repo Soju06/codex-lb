@@ -11493,7 +11493,7 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_previous_respons
         {
             "type": "function_call",
             "name": "write_stdin",
-            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 1000}),
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
             "call_id": "call_replay",
         },
         {

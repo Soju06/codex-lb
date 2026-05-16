@@ -6775,8 +6775,8 @@ class ProxyService:
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
-            error = event.error if event else None
             status = "error"
+            error = event.error if event else None
             error_code = _normalize_error_code(
                 error.code if error else _websocket_event_error_code(event_type, payload),
                 error.type if error else _websocket_event_error_type(event_type, payload),
@@ -6820,6 +6820,8 @@ class ProxyService:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
+        if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
+            settlement.account_health_error = False
         if (
             error_code == "stream_incomplete"
             and request_state.previous_response_id is not None

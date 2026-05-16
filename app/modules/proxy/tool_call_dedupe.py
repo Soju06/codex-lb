@@ -55,6 +55,8 @@ def event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonVa
     payload_type = payload.get("type")
     if isinstance(payload_type, str):
         return payload_type
+    if isinstance(payload.get("error"), dict):
+        return "error"
     return None
 
 
@@ -243,6 +245,7 @@ def canonical_side_effect_argument_key(item_name: str | None, argument_value: st
                 "name": normalized_item_name,
                 "session_id": argument.get("session_id"),
                 "chars": argument.get("chars"),
+                "yield_time_ms": argument.get("yield_time_ms"),
             }
         )
     if normalized_item_name == "wait_agent":
@@ -520,6 +523,7 @@ def canonical_parallel_tool_use_key(tool_use: dict[str, JsonValue]) -> str:
                 "recipient_name": normalized_recipient_name,
                 "session_id": parameters.get("session_id"),
                 "chars": parameters.get("chars"),
+                "yield_time_ms": parameters.get("yield_time_ms"),
             },
             sort_keys=True,
             separators=(",", ":"),

@@ -1827,6 +1827,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         sticky_max_age_seconds,
         exclude_account_ids,
         preferred_account_id,
+        require_security_work_authorized,
         require_preferred_account,
     ):
         del (
@@ -1844,6 +1845,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
             sticky_max_age_seconds,
             exclude_account_ids,
             preferred_account_id,
+            require_security_work_authorized,
             require_preferred_account,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor"

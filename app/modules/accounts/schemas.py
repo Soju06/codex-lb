@@ -63,6 +63,7 @@ class AccountSummary(DashboardModel):
     display_name: str
     plan_type: str
     status: str
+    security_work_authorized: bool = False
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
@@ -88,6 +89,14 @@ class AccountImportResponse(DashboardModel):
     account_id: str
     email: str
     plan_type: str
+    status: str
+
+
+class AccountUpdateRequest(DashboardModel):
+    security_work_authorized: bool | None = None
+
+
+class AccountUpdateResponse(DashboardModel):
     status: str
 
 

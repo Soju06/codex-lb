@@ -264,6 +264,27 @@ async def test_thread_goal_get_propagates_non_protocol_404(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_get_propagates_thread_not_found(async_client, monkeypatch):
+    await _import_account(async_client, "acc_goal_thread_not_found", "goal-thread-not-found@example.com")
+
+    async def fake_thread_goal(*_args, **_kwargs):
+        raise ProxyResponseError(
+            404,
+            {"error": {"code": "not_found", "message": "Thread not found"}},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_thread_goal_request", fake_thread_goal)
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        json={"threadId": "019debd9-2372-7f23-92b9-9f34002a6355"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_get_propagates_real_client_errors(async_client, monkeypatch):
     await _import_account(async_client, "acc_goal_rate_limited", "goal-rate@example.com")
 

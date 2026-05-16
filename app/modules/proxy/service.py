@@ -10641,7 +10641,10 @@ def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
         error.code if error else None,
         error.type if error else None,
     )
-    return code in {"not_found", "method_not_allowed"}
+    message = (error.message if error and error.message else "").strip().lower()
+    if exc.status_code == 404:
+        return code == "not_found" and message == "not found"
+    return code == "method_not_allowed" and message == "method not allowed"
 
 
 def _detached_account_copy(account: Account) -> Account:

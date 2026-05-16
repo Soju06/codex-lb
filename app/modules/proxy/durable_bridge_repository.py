@@ -336,13 +336,25 @@ class DurableBridgeRepository:
                 return deleted_count
             async with sqlite_writer_section():
                 await self._session.execute(
-                    delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
+                    delete(HttpBridgeSessionAlias).where(
+                        HttpBridgeSessionAlias.session_id.in_(
+                            select(HttpBridgeSessionRecord.id).where(
+                                HttpBridgeSessionRecord.id.in_(session_ids),
+                                HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                                HttpBridgeSessionRecord.last_seen_at < cutoff,
+                            )
+                        )
+                    )
                 )
-                await self._session.execute(
-                    delete(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(session_ids))
+                deleted = await self._session.execute(
+                    delete(HttpBridgeSessionRecord)
+                    .where(HttpBridgeSessionRecord.id.in_(session_ids))
+                    .where(HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED)
+                    .where(HttpBridgeSessionRecord.last_seen_at < cutoff)
+                    .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
-            deleted_count += len(session_ids)
+            deleted_count += len(deleted.scalars().all())
 
     async def upsert_alias(
         self,

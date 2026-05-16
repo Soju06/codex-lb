@@ -21,6 +21,7 @@ def test_build_api_key_limit_reset_scheduler_uses_fixed_hourly_interval() -> Non
 async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = AsyncMock()
     repo.reset_expired_limits = AsyncMock(return_value=3)
+    repo.release_stale_usage_reservations = AsyncMock(return_value=2)
 
     class FakeSession:
         async def __aenter__(self):
@@ -42,3 +43,4 @@ async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch)
 
     leader.try_acquire.assert_awaited_once()
     repo.reset_expired_limits.assert_awaited_once()
+    repo.release_stale_usage_reservations.assert_awaited_once()

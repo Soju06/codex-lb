@@ -24,7 +24,7 @@ _settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
-_SQLITE_BUSY_TIMEOUT_MS = 5_000
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 
 

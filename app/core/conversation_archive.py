@@ -325,6 +325,7 @@ def _stop_writer() -> None:
     thread = _WRITER_THREAD
     if thread is None:
         return
+    _WRITE_QUEUE.join()
     _WRITE_QUEUE.put(None)
     thread.join(timeout=1)
 

@@ -113,6 +113,30 @@ def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_
     assert bounded_queue.qsize() == 1
 
 
+def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
+    events: list[str] = []
+
+    class FakeQueue:
+        def join(self) -> None:
+            events.append("queue.join")
+
+        def put(self, item: object) -> None:
+            assert item is None
+            events.append("queue.put_sentinel")
+
+    class FakeThread:
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 1
+            events.append("thread.join")
+
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", FakeQueue())
+    monkeypatch.setattr(conversation_archive, "_WRITER_THREAD", FakeThread())
+
+    conversation_archive._stop_writer()
+
+    assert events == ["queue.join", "queue.put_sentinel", "thread.join"]
+
+
 def test_archive_appends_complete_gzip_members(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,

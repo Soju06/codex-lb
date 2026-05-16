@@ -8205,11 +8205,11 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
-                line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
                 event_service_tier = _service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
+                line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(

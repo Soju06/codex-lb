@@ -6397,6 +6397,14 @@ class ProxyService:
                             0,
                             session.queued_request_count - len(grouped_previous_response_request_states),
                         )
+                elif event_type == "error":
+                    grouped_previous_response_request_states = list(session.pending_requests)
+                    session.pending_requests.clear()
+                    if grouped_previous_response_request_states:
+                        session.queued_request_count = max(
+                            0,
+                            session.queued_request_count - len(grouped_previous_response_request_states),
+                        )
                 has_other_pending_requests = bool(session.pending_requests)
 
         if len(grouped_previous_response_request_states) > 1:
@@ -7508,8 +7516,8 @@ class ProxyService:
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
-            status = "error"
             error = event.error if event else None
+            status = "error"
             error_code = _normalize_error_code(
                 error.code if error else _websocket_event_error_code(event_type, payload),
                 error.type if error else _websocket_event_error_type(event_type, payload),

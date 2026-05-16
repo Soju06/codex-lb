@@ -2065,6 +2065,65 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    websocket = _WsResponse(
+        [
+            _ws_text_message({"type": "response.created", "response": {"id": "resp_ws_error"}}),
+            _ws_text_message(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "No tool output found for function call call_missing.",
+                        "param": "input",
+                    },
+                    "status": 400,
+                }
+            ),
+            _ws_text_message({"type": "response.completed", "response": {"id": "resp_ws_error"}}),
+        ]
+    )
+    session = _WsSession(websocket)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={"originator": "codex_cli_rs", "session_id": "sid_ws"},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert len(events) == 2
+    failed_payload = parse_sse_data_json(events[1])
+    assert failed_payload is not None
+    assert failed_payload["type"] == "response.failed"
+    assert failed_payload["response"]["error"]["code"] == "invalid_request_error"
+    assert failed_payload["response"]["error"]["message"] == "No tool output found for function call call_missing."
+    assert failed_payload["response"]["error"]["param"] == "input"
+    assert websocket._index == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_rejects_oversized_response_create_before_connect(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -5749,6 +5808,153 @@ async def test_process_upstream_websocket_text_does_not_match_foreign_completed_
     assert downstream_text == json.dumps(payload, separators=(",", ":"))
     finalize_request_state.assert_not_awaited()
     assert list(pending_requests) == [pending_request]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_buffers_nonterminal_events_until_response_created(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_precreated_buffer")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_precreated_buffer",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            },
+            separators=(",", ":"),
+        ),
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    pending_lock = anyio.Lock()
+    response_create_gate = asyncio.Semaphore(1)
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_precreated",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        delta_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=response_create_gate,
+    )
+
+    assert downstream_text == delta_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.downstream_texts is None
+    assert pending_request.pre_response_created_event_texts == [delta_text]
+    finalize_request_state.assert_not_awaited()
+
+    upstream_control.suppress_downstream_event = False
+    created_text = json.dumps(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_precreated_buffer", "status": "in_progress"},
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        created_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=pending_lock,
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=response_create_gate,
+    )
+
+    assert downstream_text == created_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.downstream_texts == [created_text, delta_text]
+    assert pending_request.pre_response_created_event_texts == []
+    assert pending_request.awaiting_response_created is False
+    assert pending_request.response_id == "resp_precreated_buffer"
+    finalize_request_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_clears_ambiguous_anonymous_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_ambiguous_raw_error")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    pending_requests = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_raw_error_a",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+            ),
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_raw_error_b",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+            ),
+        ]
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    raw_error_text = json.dumps(
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Upstream rejected the shared websocket request.",
+            },
+            "status": 400,
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        raw_error_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert not pending_requests
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.downstream_texts is not None
+    assert downstream_text == upstream_control.downstream_texts[0]
+    assert len(upstream_control.downstream_texts) == 2
+    assert finalize_request_state.await_count == 2
 
 
 @pytest.mark.parametrize(

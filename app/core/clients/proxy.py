@@ -84,6 +84,13 @@ _SSE_EVENT_TYPE_ALIASES = {
     "response.audio.delta": "response.output_audio.delta",
     "response.audio_transcript.delta": "response.output_audio_transcript.delta",
 }
+_RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }
+)
 
 _SSE_READ_CHUNK_SIZE = 1 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
@@ -915,6 +922,32 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
         normalized = dict(payload)
         normalized["type"] = _SSE_EVENT_TYPE_ALIASES[event_type]
         return normalized
+    error = parse_error_payload(payload)
+    if error is not None:
+        detail = error.model_dump(exclude_none=True)
+        event = response_failed_event(
+            _normalize_error_code(detail.get("code"), detail.get("type")),
+            detail.get("message", "Upstream websocket error"),
+            error_type=detail.get("type") or "server_error",
+            response_id=get_request_id(),
+            error_param=detail.get("param"),
+        )
+        for key in ("plan_type", "resets_at", "resets_in_seconds"):
+            if key in detail:
+                event["response"]["error"][key] = detail[key]
+        return event
+    if event_type == "error":
+        message = _extract_upstream_message(payload) or "Upstream websocket error"
+        code = payload.get("code")
+        error_type = payload.get("error_type") or payload.get("type")
+        return response_failed_event(
+            _normalize_error_code(
+                code if isinstance(code, str) else None, error_type if isinstance(error_type, str) else None
+            ),
+            message,
+            error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
+            response_id=get_request_id(),
+        )
     return payload
 
 
@@ -1210,13 +1243,9 @@ async def _stream_websocket_events(
         if not isinstance(payload, dict):
             continue
         normalized = _normalize_stream_event_payload(payload)
-        event_type = payload.get("type")
+        event_type = normalized.get("type")
         yield format_sse_event(normalized)
-        if isinstance(event_type, str) and event_type in (
-            "response.completed",
-            "response.failed",
-            "response.incomplete",
-        ):
+        if isinstance(event_type, str) and event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
             break
 
 
@@ -1303,7 +1332,7 @@ async def _stream_responses_via_websocket(
             max_event_bytes=max_event_bytes,
         ):
             parsed_event = parse_sse_event(event)
-            if parsed_event and parsed_event.type in ("response.completed", "response.failed", "response.incomplete"):
+            if parsed_event and parsed_event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
                 seen_terminal = True
                 await _record_lifecycle_success()
             yield event
@@ -1885,7 +1914,7 @@ async def stream_responses(
                 event = parse_sse_event(event_block)
                 if event:
                     event_type = event.type
-                    if event_type in ("response.completed", "response.failed", "response.incomplete"):
+                    if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
                         seen_terminal = True
                 yield event_block
                 if seen_terminal:
@@ -1919,7 +1948,7 @@ async def stream_responses(
                     event = parse_sse_event(event_block)
                     if event:
                         event_type = event.type
-                        if event_type in ("response.completed", "response.failed", "response.incomplete"):
+                        if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
                             seen_terminal = True
                     yield event_block
                     if seen_terminal:

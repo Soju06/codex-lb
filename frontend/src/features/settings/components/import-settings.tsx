@@ -1,4 +1,5 @@
 import { Upload } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
@@ -11,6 +12,7 @@ export type ImportSettingsProps = {
 };
 
 export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) {
+  const { t } = useTranslation();
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
 
@@ -23,17 +25,17 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
               <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">Import</h3>
-              <p className="text-xs text-muted-foreground">Control how account import handles duplicates.</p>
+              <h3 className="text-sm font-semibold">{t("settings.import.title")}</h3>
+              <p className="text-xs text-muted-foreground">{t("settings.import.description")}</p>
             </div>
           </div>
         </div>
 
         <div className="flex items-center justify-between rounded-lg border p-3">
           <div>
-            <p className="text-sm font-medium">Allow import without overwrite</p>
+            <p className="text-sm font-medium">{t("settings.import.allowDuplicates.label")}</p>
             <p className="text-xs text-muted-foreground">
-              Keep duplicate imports as separate accounts instead of replacing existing ones.
+              {t("settings.import.allowDuplicates.description")}
             </p>
           </div>
           <Switch

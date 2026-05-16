@@ -5635,6 +5635,11 @@ class ProxyService:
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
+        is_typeless_error_event = (
+            isinstance(payload, dict)
+            and not isinstance(payload.get("type"), str)
+            and isinstance(payload.get("error"), dict)
+        )
         is_previous_response_not_found_event = _is_previous_response_not_found_error(
             code=_normalize_error_code(
                 _websocket_event_error_code(event_type, payload),
@@ -5745,7 +5750,12 @@ class ProxyService:
                             0,
                             session.queued_request_count - len(grouped_previous_response_request_states),
                         )
-                elif event_type == "error":
+                if (
+                    terminal_request_state is None
+                    and event_type == "error"
+                    and is_typeless_error_event
+                    and not grouped_previous_response_request_states
+                ):
                     grouped_previous_response_request_states = list(session.pending_requests)
                     session.pending_requests.clear()
                     if grouped_previous_response_request_states:
@@ -6408,6 +6418,11 @@ class ProxyService:
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
+        is_typeless_error_event = (
+            isinstance(payload, dict)
+            and not isinstance(payload.get("type"), str)
+            and isinstance(payload.get("error"), dict)
+        )
         is_previous_response_not_found_event = _is_previous_response_not_found_error(
             code=_normalize_error_code(
                 _websocket_event_error_code(event_type, payload),
@@ -6509,7 +6524,12 @@ class ProxyService:
                             pending_requests,
                             _all_pending_websocket_followup_requests(pending_requests),
                         )
-                elif request_state is None and event_type == "error":
+                if (
+                    request_state is None
+                    and event_type == "error"
+                    and is_typeless_error_event
+                    and not grouped_previous_response_request_states
+                ):
                     grouped_previous_response_request_states = list(pending_requests)
                     pending_requests.clear()
                 if (

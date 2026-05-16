@@ -33,6 +33,8 @@ def _settings_response(settings) -> DashboardSettingsResponse:
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
+        sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
+        sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
@@ -121,6 +123,35 @@ async def update_settings(
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
     try:
+        legacy_threshold_provided = payload.sticky_reallocation_budget_threshold_pct is not None
+        primary_threshold_provided = payload.sticky_reallocation_primary_budget_threshold_pct is not None
+        legacy_threshold_changed = (
+            legacy_threshold_provided
+            and payload.sticky_reallocation_budget_threshold_pct != current.sticky_reallocation_budget_threshold_pct
+        )
+        primary_threshold_changed = (
+            primary_threshold_provided
+            and payload.sticky_reallocation_primary_budget_threshold_pct
+            != current.sticky_reallocation_primary_budget_threshold_pct
+        )
+        if legacy_threshold_provided and primary_threshold_provided:
+            if legacy_threshold_changed and not primary_threshold_changed:
+                resolved_primary_threshold = payload.sticky_reallocation_budget_threshold_pct
+            else:
+                resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
+        elif primary_threshold_provided:
+            resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
+        elif legacy_threshold_provided:
+            resolved_primary_threshold = payload.sticky_reallocation_budget_threshold_pct
+        else:
+            resolved_primary_threshold = current.sticky_reallocation_primary_budget_threshold_pct
+        resolved_legacy_threshold = (
+            resolved_primary_threshold
+            if primary_threshold_provided or legacy_threshold_provided
+            else current.sticky_reallocation_budget_threshold_pct
+        )
+        assert resolved_primary_threshold is not None
+        assert resolved_legacy_threshold is not None
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
@@ -147,10 +178,12 @@ async def update_settings(
                     if payload.http_responses_session_bridge_gateway_safe_mode is not None
                     else current.http_responses_session_bridge_gateway_safe_mode
                 ),
-                sticky_reallocation_budget_threshold_pct=(
-                    payload.sticky_reallocation_budget_threshold_pct
-                    if payload.sticky_reallocation_budget_threshold_pct is not None
-                    else current.sticky_reallocation_budget_threshold_pct
+                sticky_reallocation_budget_threshold_pct=resolved_legacy_threshold,
+                sticky_reallocation_primary_budget_threshold_pct=resolved_primary_threshold,
+                sticky_reallocation_secondary_budget_threshold_pct=(
+                    payload.sticky_reallocation_secondary_budget_threshold_pct
+                    if payload.sticky_reallocation_secondary_budget_threshold_pct is not None
+                    else current.sticky_reallocation_secondary_budget_threshold_pct
                 ),
                 import_without_overwrite=(
                     payload.import_without_overwrite
@@ -191,6 +224,9 @@ async def update_settings(
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
+            "sticky_reallocation_budget_threshold_pct",
+            "sticky_reallocation_primary_budget_threshold_pct",
+            "sticky_reallocation_secondary_budget_threshold_pct",
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",

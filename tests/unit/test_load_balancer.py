@@ -1531,7 +1531,18 @@ def test_sticky_budget_threshold_still_counts_secondary_pressure():
         secondary_used_percent=99.0,
     )
 
-    assert _state_above_sticky_budget_threshold(state, 95.0) is True
+    assert _state_above_sticky_budget_threshold(state, 95.0, 95.0) is True
+
+
+def test_sticky_budget_threshold_can_ignore_secondary_pressure_until_split_threshold():
+    state = AccountState(
+        "sticky",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=99.0,
+    )
+
+    assert _state_above_sticky_budget_threshold(state, 95.0, 100.0) is False
 
 
 def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():

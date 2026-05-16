@@ -19,6 +19,8 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
+    assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 95.0
+    assert payload["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -41,6 +43,8 @@ async def test_settings_api_get_and_update(async_client):
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
             "httpResponsesSessionBridgeGatewaySafeMode": True,
             "stickyReallocationBudgetThresholdPct": 90.0,
+            "stickyReallocationPrimaryBudgetThresholdPct": 85.0,
+            "stickyReallocationSecondaryBudgetThresholdPct": 98.0,
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
@@ -57,7 +61,9 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["dashboardSessionTtlSeconds"] == 31536000
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
-    assert updated["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert updated["stickyReallocationBudgetThresholdPct"] == 85.0
+    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
+    assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
@@ -79,7 +85,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True
-    assert payload["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert payload["stickyReallocationBudgetThresholdPct"] == 85.0
+    assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
+    assert payload["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False

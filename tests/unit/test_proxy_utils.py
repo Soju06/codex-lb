@@ -7056,6 +7056,79 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_output_for_followups(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_unmatched_missing_tool_followups")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    followup_request_a = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_unmatched_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor_a",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_a"}',
+    )
+    followup_request_b = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_unmatched_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor_b",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_b"}',
+    )
+    pending_requests = deque([followup_request_a, followup_request_b])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(2),
+    )
+
+    assert "No tool output found" not in downstream_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.downstream_texts is not None
+    assert len(upstream_control.downstream_texts) == 2
+    for emitted_text in upstream_control.downstream_texts:
+        assert '"type":"response.failed"' in emitted_text
+        assert '"code":"stream_incomplete"' in emitted_text
+        assert "call_missing_output" not in emitted_text
+    assert finalize_request_state.await_count == 2
+    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
+    assert finalized_requests == [followup_request_a, followup_request_b]
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_preserves_first_turn_missing_tool_output(
     monkeypatch,
 ):

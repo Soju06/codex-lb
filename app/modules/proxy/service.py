@@ -5729,6 +5729,13 @@ class ProxyService:
                             error_message=error_message,
                         ),
                     )
+                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
+                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                            session.pending_requests,
+                            _matching_websocket_request_states_for_missing_tool_output_error(
+                                session.pending_requests,
+                            ),
+                        )
                     if grouped_previous_response_request_states:
                         session.queued_request_count = max(
                             0,
@@ -6485,6 +6492,13 @@ class ProxyService:
                             error_message=error_message,
                         ),
                     )
+                    if not grouped_previous_response_request_states and is_missing_tool_output_event:
+                        grouped_previous_response_request_states = _pop_matching_websocket_request_states(
+                            pending_requests,
+                            _matching_websocket_request_states_for_missing_tool_output_error(
+                                pending_requests,
+                            ),
+                        )
                 elif request_state is None and event_type == "error":
                     grouped_previous_response_request_states = list(pending_requests)
                     pending_requests.clear()
@@ -9732,6 +9746,16 @@ def _matching_websocket_request_states_for_previous_response_error(
         if len(unique_previous_response_ids) == 1:
             return unresolved_followups
     return []
+
+
+def _matching_websocket_request_states_for_missing_tool_output_error(
+    pending_requests: deque[_WebSocketRequestState],
+) -> list[_WebSocketRequestState]:
+    return [
+        request_state
+        for request_state in pending_requests
+        if request_state.response_id is None and request_state.previous_response_id is not None
+    ]
 
 
 def _pop_matching_websocket_request_states(

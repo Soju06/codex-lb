@@ -9343,6 +9343,18 @@ async def _pop_replayable_precreated_websocket_request_state(
     return request_state
 
 
+def _is_missing_tool_output_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    if code != "invalid_request_error" or param != "input" or message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith("no tool output found for function call call_")
+
+
 def _is_previous_response_not_found_error(
     *,
     code: str | None,
@@ -9354,18 +9366,6 @@ def _is_previous_response_not_found_error(
     if code != "invalid_request_error" or param != "previous_response_id":
         return False
     return _is_previous_response_not_found_message(message)
-
-
-def _is_missing_tool_output_error(
-    *,
-    code: str | None,
-    param: str | None,
-    message: str | None,
-) -> bool:
-    if code != "invalid_request_error" or param != "input" or message is None:
-        return False
-    normalized = " ".join(message.lower().split())
-    return normalized.startswith("no tool output found for function call call_")
 
 
 def _websocket_event_error_payload(

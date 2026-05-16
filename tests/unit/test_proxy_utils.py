@@ -9059,75 +9059,6 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_across_reconnect(monkeypatch):
-    request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
-    finalize_request_state = AsyncMock()
-    handle_stream_error = AsyncMock()
-    account = _make_account("acc_ws_reconnect_tool_dedupe")
-
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
-    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-
-    pending_request = proxy_service._WebSocketRequestState(
-        request_id="ws_req_reconnect_tool_dedupe",
-        model="gpt-5.1",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
-        response_id="resp_reconnect_tool",
-    )
-    pending_requests = deque([pending_request])
-    tool_payload = {
-        "type": "response.output_item.done",
-        "response_id": "resp_reconnect_tool",
-        "item": {
-            "type": "function_call",
-            "name": "write_stdin",
-            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
-            "call_id": "call_first",
-        },
-    }
-    replayed_tool_payload = {
-        **tool_payload,
-        "item": {
-            **tool_payload["item"],
-            "call_id": "call_replayed",
-        },
-    }
-
-    first_text = await service._process_upstream_websocket_text(
-        json.dumps(tool_payload, separators=(",", ":")),
-        account=account,
-        account_id_value=account.id,
-        pending_requests=pending_requests,
-        pending_lock=anyio.Lock(),
-        api_key=None,
-        upstream_control=proxy_service._WebSocketUpstreamControl(),
-        response_create_gate=asyncio.Semaphore(1),
-    )
-    replay_control = proxy_service._WebSocketUpstreamControl()
-    replay_text = await service._process_upstream_websocket_text(
-        json.dumps(replayed_tool_payload, separators=(",", ":")),
-        account=account,
-        account_id_value=account.id,
-        pending_requests=pending_requests,
-        pending_lock=anyio.Lock(),
-        api_key=None,
-        upstream_control=replay_control,
-        response_create_gate=asyncio.Semaphore(1),
-    )
-
-    assert '"call_id":"call_first"' in first_text
-    assert '"call_id":"call_replayed"' in replay_text
-    assert replay_control.suppress_downstream_event is True
-    assert pending_request.suppressed_duplicate_tool_call is True
-    finalize_request_state.assert_not_awaited()
-    assert list(pending_requests) == [pending_request]
-
-
-@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_masks_previous_response_not_found_for_unique_followup_request(
     monkeypatch,
 ):
@@ -9213,6 +9144,75 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
     assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == [inflight_request]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_across_reconnect(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_reconnect_tool_dedupe")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_reconnect_tool_dedupe",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_reconnect_tool",
+    )
+    pending_requests = deque([pending_request])
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_reconnect_tool",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "item": {
+            **tool_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    first_text = await service._process_upstream_websocket_text(
+        json.dumps(tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    replay_control = proxy_service._WebSocketUpstreamControl()
+    replay_text = await service._process_upstream_websocket_text(
+        json.dumps(replayed_tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=replay_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"call_id":"call_first"' in first_text
+    assert '"call_id":"call_replayed"' in replay_text
+    assert replay_control.suppress_downstream_event is True
+    assert pending_request.suppressed_duplicate_tool_call is True
+    finalize_request_state.assert_not_awaited()
+    assert list(pending_requests) == [pending_request]
 
 
 def test_maybe_rewrite_websocket_previous_response_not_found_rewrites_response_failed_event():

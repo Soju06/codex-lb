@@ -350,6 +350,17 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
   };
 }
 
+function advanceWeeklyResetAt(resetAtMs: number, windowMs: number, nowMs: number): number {
+  if (!Number.isFinite(resetAtMs) || !isPositiveFinite(windowMs) || !Number.isFinite(nowMs)) {
+    return resetAtMs;
+  }
+  if (resetAtMs > nowMs) {
+    return resetAtMs;
+  }
+  const missedWindows = Math.floor((nowMs - resetAtMs) / windowMs) + 1;
+  return resetAtMs + missedWindows * windowMs;
+}
+
 export function buildWeeklyCreditPace(
   accounts: AccountSummary[],
   now: Date = new Date(),
@@ -381,7 +392,8 @@ export function buildWeeklyCreditPace(
     }
 
     const windowMs = windowMinutes * 60_000;
-    const timeLeftMs = clamp(resetAtMs - nowMs, 0, windowMs);
+    const effectiveResetAtMs = advanceWeeklyResetAt(resetAtMs, windowMs, nowMs);
+    const timeLeftMs = clamp(effectiveResetAtMs - nowMs, 0, windowMs);
     const expectedRemainingCredits = fullCredits * (timeLeftMs / windowMs);
     const actualRemainingCredits = clamp(remainingCredits, 0, fullCredits);
 
@@ -392,7 +404,7 @@ export function buildWeeklyCreditPace(
     weeklyAccounts.push({
       fullCredits,
       remainingCredits: actualRemainingCredits,
-      resetAtMs: Math.max(resetAtMs, nowMs),
+      resetAtMs: effectiveResetAtMs,
       windowMs,
     });
   }

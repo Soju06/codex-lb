@@ -372,6 +372,26 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.status).toBe("on_track");
   });
 
+  it("advances past-due weekly resets to the next cycle", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({
+          accountId: "acc-stale-reset",
+          fullCredits: 700,
+          remainingCredits: 600,
+          resetAtSecondary: new Date(now.getTime() - 24 * 3_600_000).toISOString(),
+        }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(600);
+    expect(pace?.scheduledUsedPercent).toBeCloseTo(100 / 7);
+    expect(pace?.overPlanCredits).toBeCloseTo(0);
+    expect(pace?.status).toBe("on_track");
+  });
+
   it("aggregates credit budgets instead of averaging account percentages", () => {
     const pace = buildWeeklyCreditPace(
       [

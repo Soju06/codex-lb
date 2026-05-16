@@ -5234,7 +5234,7 @@ class ProxyService:
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
         async with session.pending_lock:
-            should_reconnect = not session.pending_requests
+            should_reconnect = not session.pending_requests and session.queued_request_count == 0
         if not should_reconnect:
             return False
 

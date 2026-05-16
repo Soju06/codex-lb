@@ -5473,6 +5473,44 @@ async def test_http_bridge_retire_after_drain_closes_session_on_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retire_after_drain_waits_for_queued_submission() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    close = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_retire_queued", None),
+        headers={"x-codex-turn-state": "http_turn_retire_queued"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_retire_queued",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-limited", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=close)),
+        upstream_control=proxy_service._WebSocketUpstreamControl(
+            reconnect_requested=True,
+            retire_after_drain=True,
+        ),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    assert await service._retire_http_bridge_after_drain_if_ready(session) is False
+    assert session.closed is False
+    close.assert_not_awaited()
+
+    async with session.pending_lock:
+        session.queued_request_count = 0
+
+    assert await service._retire_http_bridge_after_drain_if_ready(session) is True
+    assert session.closed is True
+    close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_rejects_retiring_session() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     send_text = AsyncMock()

@@ -17,6 +17,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ class ModelRefreshScheduler:
                         len(per_plan_results),
                         total_models,
                     )
+                    get_account_selection_cache().invalidate()
                 else:
                     logger.warning("Model registry refresh failed for all plans")
         except Exception:

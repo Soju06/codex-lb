@@ -121,7 +121,9 @@ async def fetch_models_for_plan(
                 data = await resp.json(content_type=None)
     except ModelFetchError:
         raise
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+    except asyncio.TimeoutError as exc:
+        raise ModelFetchError(504, "Upstream models API timed out", transport_error=True) from exc
+    except (aiohttp.ClientError, OSError) as exc:
         message = str(exc) or exc.__class__.__name__
         raise ModelFetchError(0, f"Transport error during model fetch: {message}", transport_error=True) from exc
 

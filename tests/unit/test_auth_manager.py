@@ -412,3 +412,58 @@ async def test_refresh_account_deactivates_when_repo_only_reencrypted_same_refre
     assert exc_info.value.is_permanent is True
     assert repo.status_payload is not None
     assert repo.status_payload["status"] == AccountStatus.DEACTIVATED
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_deactivates_when_upstream_returns_token_expired(monkeypatch):
+    """Regression for #383: a ``token_expired`` code from the OAuth refresh
+    endpoint must classify as a permanent failure and deactivate the account,
+    not loop retries forever while the account stays ``ACTIVE``.
+    """
+
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        # Real upstream-observed shape: HTTP 4xx body whose error code is
+        # ``token_expired`` and message is the user-facing "Provided
+        # authentication token is expired" wording. classify_refresh_error
+        # must surface this as ``is_permanent=True``.
+        from app.core.auth.refresh import classify_refresh_error
+
+        assert classify_refresh_error("token_expired") is True
+        raise RefreshError(
+            "token_expired",
+            "Provided authentication token is expired. Please try signing in again.",
+            classify_refresh_error("token_expired"),
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    expired_account = Account(
+        id="acc_token_expired",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    latest_account = Account(
+        **{column.name: getattr(expired_account, column.name) for column in Account.__table__.columns}
+    )
+    repo.accounts_by_id[expired_account.id] = latest_account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await manager.refresh_account(expired_account)
+
+    assert exc_info.value.code == "token_expired"
+    assert exc_info.value.is_permanent is True
+    assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.DEACTIVATED
+    reason = repo.status_payload["deactivation_reason"]
+    assert isinstance(reason, str)
+    assert "re-login" in reason.lower() or "expired" in reason.lower()

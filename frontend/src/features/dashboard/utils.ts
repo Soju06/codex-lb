@@ -261,6 +261,54 @@ function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], am
   }
 }
 
+function buildEmptyWeeklyPoolProjection(
+  accounts: WeeklyPoolAccount[],
+  burnRateCreditsPerMs: number,
+  nowMs: number,
+): WeeklyPoolProjection {
+  const resetEvents = accounts
+    .filter((account) => account.resetAtMs > nowMs)
+    .map((account) => ({
+      fullCredits: account.fullCredits,
+      resetAtMs: account.resetAtMs,
+    }))
+    .sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  if (resetEvents.length === 0) {
+    return {
+      burnRateCreditsPerMs,
+      projectedShortfallCredits: 0,
+      projectedDepletionHours: 0,
+      projectedMinimumRemainingCredits: 0,
+      firstReplenishmentWaitMs: 0,
+    };
+  }
+
+  let cursorMs = nowMs;
+  let balanceCredits = 0;
+  let minimumRemainingCredits = 0;
+  let minimumRemainingAtMs = resetEvents[0].resetAtMs;
+
+  for (const event of resetEvents) {
+    const intervalMs = event.resetAtMs - cursorMs;
+    balanceCredits -= burnRateCreditsPerMs * intervalMs;
+    if (balanceCredits < minimumRemainingCredits) {
+      minimumRemainingCredits = balanceCredits;
+      minimumRemainingAtMs = event.resetAtMs;
+    }
+    balanceCredits += event.fullCredits;
+    cursorMs = event.resetAtMs;
+  }
+
+  return {
+    burnRateCreditsPerMs,
+    projectedShortfallCredits: Math.max(0, -minimumRemainingCredits),
+    projectedDepletionHours: 0,
+    projectedMinimumRemainingCredits: 0,
+    firstReplenishmentWaitMs: Math.max(0, minimumRemainingAtMs - nowMs),
+  };
+}
+
 function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number): WeeklyPoolProjection | null {
   const totalRemainingCredits = accounts.reduce((sum, account) => sum + account.remainingCredits, 0);
   const burnRateCreditsPerMs = accounts.reduce((sum, account) => {
@@ -276,24 +324,12 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
     return null;
   }
 
-  const firstResetAtMs = Math.min(...accounts.map((account) => account.resetAtMs));
   if (totalRemainingCredits <= 0) {
-    const firstReplenishmentWaitMs = Number.isFinite(firstResetAtMs) ? Math.max(0, firstResetAtMs - nowMs) : 0;
-    return {
-      burnRateCreditsPerMs,
-      projectedShortfallCredits: burnRateCreditsPerMs * firstReplenishmentWaitMs,
-      projectedDepletionHours: 0,
-      projectedMinimumRemainingCredits: 0,
-      firstReplenishmentWaitMs,
-    };
+    return buildEmptyWeeklyPoolProjection(accounts, burnRateCreditsPerMs, nowMs);
   }
 
-  const simulationAccounts: WeeklyPoolSimulationAccount[] = accounts.map((account) => ({
-    ...account,
-    balanceCredits: account.remainingCredits,
-  }));
-  const resetEvents: WeeklyResetEvent[] = simulationAccounts.filter((account) => account.resetAtMs > nowMs);
-  if (resetEvents.length === 0) {
+  const hasFutureReset = accounts.some((account) => account.resetAtMs > nowMs);
+  if (!hasFutureReset) {
     return {
       burnRateCreditsPerMs,
       projectedShortfallCredits: 0,
@@ -302,6 +338,12 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
       firstReplenishmentWaitMs: null,
     };
   }
+
+  const simulationAccounts: WeeklyPoolSimulationAccount[] = accounts.map((account) => ({
+    ...account,
+    balanceCredits: account.remainingCredits,
+  }));
+  const resetEvents: WeeklyResetEvent[] = simulationAccounts.filter((account) => account.resetAtMs > nowMs);
 
   let cursorMs = nowMs;
   let balanceCredits = totalRemainingCredits;

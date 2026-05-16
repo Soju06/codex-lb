@@ -533,13 +533,31 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(111_111.11);
+    expect(pace?.overPlanCredits).toBeCloseTo(900_000);
     expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
+    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(136.08);
     expect(pace?.paceMultiplier).toBeCloseTo(2);
-    expect(pace?.throttleToPercent).toBeCloseTo(0);
-    expect(pace?.reduceByPercent).toBeCloseTo(100);
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(2.2);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(3);
+    expect(pace?.throttleToPercent).toBeCloseTo(10);
+    expect(pace?.reduceByPercent).toBeCloseTo(90);
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(17.86);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(18);
+    expect(pace?.projectedDepletionHours).toBeCloseTo(0);
+    expect(pace?.status).toBe("danger");
+  });
+
+  it("continues past a tiny first reset when the weekly pool starts empty", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({ accountId: "tiny-reset", fullCredits: 2, remainingCredits: 0, timeLeftPercent: 1 }),
+        weeklyAccount({ accountId: "large-later", fullCredits: 100_000, remainingCredits: 0, timeLeftPercent: 50 }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.overPlanCredits).toBeCloseTo(99_999.01);
+    expect(pace?.pauseForBreakEvenHours).toBeCloseTo(84);
+    expect(pace?.throttleToPercent).toBeCloseTo(0.002);
     expect(pace?.projectedDepletionHours).toBeCloseTo(0);
     expect(pace?.status).toBe("danger");
   });

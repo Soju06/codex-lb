@@ -269,6 +269,18 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=95.0,
+        server_default=text("95.0"),
+        nullable=False,
+    )
+    sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

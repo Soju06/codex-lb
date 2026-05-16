@@ -5737,6 +5737,8 @@ class ProxyService:
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 owner_pinned_quota_error,
             )
+            if status_request_state is not None:
+                setattr(status_request_state, "account_health_error_handled", True)
             if (
                 status_request_state is not None
                 and status_request_state.previous_response_id is not None
@@ -5757,6 +5759,8 @@ class ProxyService:
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 retry_error_code,
             )
+            if status_request_state is not None:
+                setattr(status_request_state, "account_health_error_handled", True)
             if status_request_state is not None and status_request_state.previous_response_id is None:
                 async with session.pending_lock:
                     if status_request_state not in session.pending_requests:
@@ -6541,7 +6545,19 @@ class ProxyService:
         if event_type in {"response.failed", "response.incomplete", "error"}:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
-            settlement.account_health_error = _should_penalize_stream_error(error_code)
+            settlement.account_health_error = _should_penalize_stream_error(error_code) and not getattr(
+                request_state,
+                "account_health_error_handled",
+                False,
+            )
+        if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
+            settlement.account_health_error = False
+        if (
+            error_code == "stream_incomplete"
+            and request_state.previous_response_id is not None
+            and error_message == "Upstream websocket closed before response.completed"
+        ):
+            settlement.account_health_error = False
         _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(
             api_key,
@@ -8574,6 +8590,9 @@ class _WebSocketRequestState:
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    suppressed_downstream_tool_call: bool = False
+    suppressed_duplicate_tool_call: bool = False
+    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
 

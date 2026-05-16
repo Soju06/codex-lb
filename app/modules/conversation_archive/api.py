@@ -22,8 +22,8 @@ router = APIRouter(
 
 
 @router.get("/files", response_model=list[ConversationArchiveFileResponse])
-async def list_conversation_archive_files() -> list[ConversationArchiveFileResponse]:
-    files = await run_in_threadpool(service.list_archive_files)
+def list_conversation_archive_files() -> list[ConversationArchiveFileResponse]:
+    files = service.list_archive_files()
     return [
         ConversationArchiveFileResponse(
             name=file.name,

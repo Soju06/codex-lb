@@ -9,8 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-import pytest
-
 from app.core import conversation_archive
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.modules.conversation_archive import api as conversation_archive_api
@@ -43,6 +41,11 @@ def _archive_lines(directory: Path) -> list[str]:
     assert len(files) == 1
     with gzip.open(files[0], "rt", encoding="utf-8") as fh:
         return fh.read().splitlines()
+
+
+def _write_gzip_record(path: Path, payload: dict[str, object]) -> None:
+    with gzip.open(path, "at", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload) + "\n")
 
 
 def test_archive_json_writes_redacted_jsonl_record(monkeypatch, tmp_path):
@@ -140,8 +143,7 @@ def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
     assert events == ["queue.join", "queue.put_sentinel", "thread.join"]
 
 
-@pytest.mark.asyncio
-async def test_archive_file_listing_runs_in_threadpool(monkeypatch):
+def test_archive_file_listing_runs_sync(monkeypatch):
     called: list[object] = []
     modified_at = datetime.fromisoformat("2026-05-16T00:00:00+00:00")
     archive_file = conversation_archive_service.ConversationArchiveFile(
@@ -152,16 +154,15 @@ async def test_archive_file_listing_runs_in_threadpool(monkeypatch):
         modified_at=modified_at,
     )
 
-    async def fake_run_in_threadpool(func, *args, **kwargs):
-        called.append(func)
-        return func(*args, **kwargs)
+    monkeypatch.setattr(
+        conversation_archive_api.service,
+        "list_archive_files",
+        lambda: called.append("service") or [archive_file],
+    )
 
-    monkeypatch.setattr(conversation_archive_api, "run_in_threadpool", fake_run_in_threadpool)
-    monkeypatch.setattr(conversation_archive_api.service, "list_archive_files", lambda: [archive_file])
+    [response] = conversation_archive_api.list_conversation_archive_files()
 
-    [response] = await conversation_archive_api.list_conversation_archive_files()
-
-    assert called == [conversation_archive_api.service.list_archive_files]
+    assert called == ["service"]
     assert response.name == "2026-05-16T00.jsonl.gz"
     assert response.modified_at == modified_at
 
@@ -454,6 +455,48 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
         requested_at=datetime.fromisoformat("2026-04-29T10:30:00+00:00"),
     )
     assert [record["request_id"] for record in requested_at_page.records] == ["req_gzip"]
+
+
+def test_archive_service_lookup_requests_adjacent_hours(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+
+    _write_gzip_record(
+        tmp_path / "2026-04-29T10.jsonl.gz",
+        {
+            "timestamp": "2026-04-29T10:59:45+00:00",
+            "request_id": "req_prev_hour",
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": "http",
+            "payload": {"input": "prev"},
+        },
+    )
+    _write_gzip_record(
+        tmp_path / "2026-04-29T11.jsonl.gz",
+        {
+            "timestamp": "2026-04-29T11:00:15+00:00",
+            "request_id": "req_next_hour",
+            "direction": "server_to_codex",
+            "kind": "responses",
+            "transport": "http",
+            "payload": {"input": "next"},
+        },
+    )
+
+    boundary_requested_at = datetime.fromisoformat("2026-04-29T11:00:00+00:00")
+    page = conversation_archive_service.read_archive_records(
+        filename=None,
+        limit=10,
+        offset=0,
+        requested_at=boundary_requested_at,
+    )
+
+    assert page.total == 2
+    assert sorted(record["request_id"] for record in page.records) == ["req_next_hour", "req_prev_hour"]
 
 
 def test_archive_service_expands_user_home(monkeypatch, tmp_path):

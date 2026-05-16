@@ -5,7 +5,7 @@ import json
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -104,14 +104,24 @@ def _archive_paths_for_lookup(*, filename: str | None, requested_at: datetime | 
         return list(_iter_archive_paths(directory))
 
     requested_at_utc = requested_at.astimezone(UTC)
-    hourly_stem = requested_at_utc.strftime("%Y-%m-%dT%H")
-    daily_stem = requested_at_utc.strftime("%Y-%m-%d")
-    candidates = [
-        directory / f"{hourly_stem}{_GZIP_JSONL_SUFFIX}",
-        directory / f"{hourly_stem}{_JSONL_SUFFIX}",
-        directory / f"{daily_stem}{_GZIP_JSONL_SUFFIX}",
-        directory / f"{daily_stem}{_JSONL_SUFFIX}",
+    hourly_stems = [
+        (requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)
     ]
+    daily_stem = requested_at_utc.strftime("%Y-%m-%d")
+    candidates: list[Path] = []
+    for stem in hourly_stems:
+        candidates.extend(
+            (
+                directory / f"{stem}{_GZIP_JSONL_SUFFIX}",
+                directory / f"{stem}{_JSONL_SUFFIX}",
+            )
+        )
+    candidates.extend(
+        (
+            directory / f"{daily_stem}{_GZIP_JSONL_SUFFIX}",
+            directory / f"{daily_stem}{_JSONL_SUFFIX}",
+        )
+    )
     return [path for path in candidates if path.exists() and path.is_file()]
 
 

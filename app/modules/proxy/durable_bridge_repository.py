@@ -19,6 +19,7 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_sessions",
     "http_bridge_session_aliases",
 )
+_PURGE_CLOSED_BATCH_SIZE = 500
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -318,25 +319,30 @@ class DurableBridgeRepository:
         await self._commit_writer_section()
         return len(rows)
 
-    async def purge_closed_before(self, cutoff: datetime) -> int:
-        result = await self._session.execute(
-            select(HttpBridgeSessionRecord.id).where(
-                HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
-                HttpBridgeSessionRecord.last_seen_at < cutoff,
+    async def purge_closed_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
+        deleted_count = 0
+        while True:
+            result = await self._session.execute(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                    HttpBridgeSessionRecord.last_seen_at < cutoff,
+                )
+                .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
+                .limit(batch_size)
             )
-        )
-        session_ids = list(result.scalars().all())
-        if not session_ids:
-            return 0
-        async with sqlite_writer_section():
-            await self._session.execute(
-                delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
-            )
-            await self._session.execute(
-                delete(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(session_ids))
-            )
-            await self._session.commit()
-        return len(session_ids)
+            session_ids = list(result.scalars().all())
+            if not session_ids:
+                return deleted_count
+            async with sqlite_writer_section():
+                await self._session.execute(
+                    delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
+                )
+                await self._session.execute(
+                    delete(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(session_ids))
+                )
+                await self._session.commit()
+            deleted_count += len(session_ids)
 
     async def upsert_alias(
         self,

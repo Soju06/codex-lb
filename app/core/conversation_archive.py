@@ -124,6 +124,9 @@ def archive_bytes(
     headers: Mapping[str, str] | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> None:
+    if not archive_enabled():
+        return
+
     archive_json(
         direction=direction,
         kind=kind,

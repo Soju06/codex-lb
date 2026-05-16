@@ -96,6 +96,28 @@ def test_archive_json_writes_redacted_jsonl_record(monkeypatch, tmp_path):
     assert "\\u043f" not in line
 
 
+def test_archive_bytes_disabled_does_not_encode_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=False, directory=tmp_path),
+    )
+
+    def fail_b64encode(_data: bytes) -> bytes:
+        raise AssertionError("disabled archiving should not encode binary payloads")
+
+    monkeypatch.setattr(conversation_archive.base64, "b64encode", fail_b64encode)
+
+    conversation_archive.archive_bytes(
+        direction="server_to_codex",
+        kind="responses",
+        transport="websocket",
+        data=b"large binary frame",
+    )
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,

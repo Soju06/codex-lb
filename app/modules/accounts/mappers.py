@@ -201,12 +201,6 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     return entry.used_percent
 
 
-def _normalize_account_routing_policy(value: str | None) -> str:
-    if value in _ACCOUNT_ROUTING_POLICIES:
-        return value
-    return "normal"
-
-
 def build_account_usage_trends(
     buckets: list[UsageTrendBucket],
     since_epoch: int,

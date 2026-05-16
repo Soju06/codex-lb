@@ -11573,6 +11573,19 @@ def test_prepare_response_bridge_request_state_dedupes_replayed_previous_respons
     assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
 
 
+def test_trim_websocket_previous_response_input_items_handles_apply_patch_replay():
+    input_items: list[JsonValue] = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "patching"}]},
+        {"type": "apply_patch_call", "call_id": "patch_1", "input": "*** Begin Patch\n*** End Patch\n"},
+        {"type": "apply_patch_call_output", "call_id": "patch_1", "output": "Success"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
+
+    assert trimmed == input_items[2:]
+
+
 def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

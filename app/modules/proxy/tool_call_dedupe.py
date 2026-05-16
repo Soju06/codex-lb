@@ -316,7 +316,17 @@ def dedupe_replayed_side_effect_input_items(
             last_side_effect_key = None
         key = call_keys.get(index)
         if key is None:
-            if isinstance(item, dict) and replayed_tool_call_segment_boundary(item):
+            output_call_id = replayed_tool_output_call_id(item) if isinstance(item, dict) else None
+            if (
+                last_side_effect_key is not None
+                and output_call_id is not None
+                and first_call_id_by_key.get(last_side_effect_key) == output_call_id
+            ):
+                continue
+            if (
+                output_call_id is not None
+                or (isinstance(item, dict) and replayed_tool_call_segment_boundary(item))
+            ):
                 first_call_id_by_key.clear()
                 first_call_index_by_key.clear()
                 last_side_effect_key = None

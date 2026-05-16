@@ -9755,11 +9755,21 @@ def _matching_websocket_request_states_for_previous_response_error(
 def _matching_websocket_request_states_for_missing_tool_output_error(
     pending_requests: deque[_WebSocketRequestState],
 ) -> list[_WebSocketRequestState]:
-    return [
+    unresolved_followups = [
         request_state
         for request_state in pending_requests
         if request_state.response_id is None and request_state.previous_response_id is not None
     ]
+    if len(unresolved_followups) <= 1:
+        return unresolved_followups
+    unique_previous_response_ids = {
+        request_state.previous_response_id
+        for request_state in unresolved_followups
+        if request_state.previous_response_id
+    }
+    if len(unique_previous_response_ids) == 1:
+        return unresolved_followups
+    return []
 
 
 def _pop_matching_websocket_request_states(

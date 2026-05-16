@@ -7118,8 +7118,8 @@ async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_outp
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
-        previous_response_id="resp_anchor_b",
-        request_text='{"type":"response.create","previous_response_id":"resp_anchor_b"}',
+        previous_response_id="resp_anchor_a",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_a"}',
     )
     pending_requests = deque([followup_request_a, followup_request_b])
     upstream_control = proxy_service._WebSocketUpstreamControl()

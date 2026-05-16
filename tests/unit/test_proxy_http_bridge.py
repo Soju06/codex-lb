@@ -5133,7 +5133,7 @@ async def test_process_http_bridge_upstream_text_masks_unmatched_missing_tool_ou
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=1.0,
-        previous_response_id="resp_missing_tool_b",
+        previous_response_id="resp_missing_tool_a",
         event_queue=asyncio.Queue(),
         transport="http",
         skip_request_log=True,

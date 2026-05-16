@@ -75,7 +75,7 @@ def read_archive_records(
     total = 0
     end = offset + limit
 
-    for path in sorted(paths, key=lambda item: item.name, reverse=True):
+    for path in sorted(paths, key=lambda item: item.name):
         for record in _iter_records(path):
             if not _record_matches(
                 record,

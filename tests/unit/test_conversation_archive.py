@@ -496,7 +496,14 @@ def test_archive_service_lookup_requests_adjacent_hours(monkeypatch, tmp_path):
     )
 
     assert page.total == 2
-    assert sorted(record["request_id"] for record in page.records) == ["req_next_hour", "req_prev_hour"]
+    assert [record["request_id"] for record in page.records] == [
+        "req_prev_hour",
+        "req_next_hour",
+    ]
+    assert [record["_archive_file"] for record in page.records] == [
+        "2026-04-29T10.jsonl.gz",
+        "2026-04-29T11.jsonl.gz",
+    ]
 
 
 def test_archive_service_expands_user_home(monkeypatch, tmp_path):

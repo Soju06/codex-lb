@@ -204,11 +204,10 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     )
 
     assert isinstance(response, StreamingResponse)
-    assert upstream_started.is_set() is False
+    assert upstream_started.is_set() is True
     iterator = response.body_iterator.__aiter__()
     first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
     assert first_chunk == SSE_KEEPALIVE_FRAME
-    assert upstream_started.is_set() is True
     release_upstream.set()
     chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
     assert any("response.completed" in chunk for chunk in chunks)

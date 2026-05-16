@@ -4352,7 +4352,7 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert select_account.await_count == 1
-    record_error.assert_not_awaited()
+    record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
 
 

@@ -5828,6 +5828,7 @@ class ProxyService:
                 request_state=status_request_state,
                 upstream_control=session.upstream_control,
                 reason="missing_tool_output",
+                reconnect_requested=True,
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
@@ -6534,6 +6535,7 @@ class ProxyService:
                         request_state=request_state,
                         upstream_control=upstream_control,
                         reason="missing_tool_output",
+                        reconnect_requested=True,
                         original_text=text,
                     )
                 has_other_pending_requests = bool(pending_requests)

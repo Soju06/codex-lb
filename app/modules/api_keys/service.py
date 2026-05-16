@@ -33,10 +33,10 @@ from app.modules.api_keys.repository import (
     _Unset,
 )
 
-_SPARKLINE_DAYS = 7
-_DETAIL_BUCKET_SECONDS = 3600
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.1
+_SPARKLINE_DAYS = 7
+_DETAIL_BUCKET_SECONDS = 3600
 
 
 class ApiKeysRepositoryProtocol(Protocol):

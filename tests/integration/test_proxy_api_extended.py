@@ -8,7 +8,8 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
-from app.core.clients.proxy import CodexControlResponse, ProxyResponseError
+from app.core.clients import proxy as core_proxy
+from app.core.clients.proxy import ProxyResponseError
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy.load_balancer import AccountSelection
@@ -496,7 +497,7 @@ async def test_codex_control_json_endpoints_forward_upstream(
                 "timeout_seconds": timeout_seconds,
             }
         )
-        return CodexControlResponse(
+        return core_proxy.CodexControlResponse(
             status_code=200,
             body=json.dumps({"ok": True}).encode("utf-8"),
             headers={"content-type": "application/json", "x-request-id": "upstream-request"},
@@ -543,7 +544,7 @@ async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, m
         **_kwargs,
     ):
         calls.append((path, method, payload, headers.get("content-type"), access_token, account_id, timeout_seconds))
-        return CodexControlResponse(
+        return core_proxy.CodexControlResponse(
             status_code=201,
             body=b"v=answer\r\n",
             headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/call_123"},
@@ -639,7 +640,7 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
         **_kwargs,
     ):
         calls.append((path, method, payload, list(query_params), access_token, account_id, timeout_seconds))
-        return CodexControlResponse(
+        return core_proxy.CodexControlResponse(
             status_code=200,
             body=b'{"keys":[]}',
             headers={

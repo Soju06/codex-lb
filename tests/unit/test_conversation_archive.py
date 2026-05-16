@@ -4,7 +4,9 @@ import base64
 import errno
 import gzip
 import json
+import os
 import queue
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -287,6 +289,30 @@ def test_archive_uses_hourly_gzip_files(monkeypatch, tmp_path):
     assert len(path.stem) == len("2026-04-30T12.jsonl")
     assert path.name.endswith(".jsonl.gz")
     assert "T" in path.name
+
+
+def test_archive_files_are_operator_only_even_with_permissive_umask(monkeypatch, tmp_path):
+    archive_dir = tmp_path / "archive"
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=archive_dir),
+    )
+    old_umask = os.umask(0o022)
+    try:
+        conversation_archive.archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload={"text": "private"},
+        )
+        conversation_archive.flush_archive_writer()
+    finally:
+        os.umask(old_umask)
+
+    [path] = list(archive_dir.glob("*.jsonl.gz"))
+    assert stat.S_IMODE(archive_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_archive_path_expands_user_home(monkeypatch, tmp_path):

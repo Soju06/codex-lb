@@ -6,6 +6,7 @@ import errno
 import gzip
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -47,6 +48,8 @@ _DISK_PRESSURE_WARNING_INTERVAL_SECONDS = 300.0
 _DISK_PRESSURE_PAUSED_UNTIL = 0.0
 _DISK_PRESSURE_LAST_WARNING_AT = -_DISK_PRESSURE_WARNING_INTERVAL_SECONDS
 _DISK_PRESSURE_LOCK = threading.Lock()
+_ARCHIVE_DIR_MODE = 0o700
+_ARCHIVE_FILE_MODE = 0o600
 
 
 def archive_enabled() -> bool:
@@ -239,6 +242,7 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
             if _archive_disk_pressure_active():
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(_ARCHIVE_DIR_MODE)
             _recover_corrupt_gzip_archive(path)
             _write_gzip_member(path, data)
     except Exception as exc:
@@ -270,8 +274,15 @@ def _release_archive_queue_bytes(size: int) -> None:
 
 
 def _write_gzip_member(path: Path, data: bytes) -> None:
-    with path.open("ab") as fh:
-        fh.write(data)
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, _ARCHIVE_FILE_MODE)
+    try:
+        os.fchmod(fd, _ARCHIVE_FILE_MODE)
+        with os.fdopen(fd, "ab") as fh:
+            fd = -1
+            fh.write(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _archive_disk_pressure_active() -> bool:

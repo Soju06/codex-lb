@@ -181,16 +181,22 @@ def _enqueue_record(path: Path, record: dict[str, Any]) -> None:
         )
         _append_record(path, record)
         return
-    _ensure_writer_thread()
+    queued = False
     try:
+        _ensure_writer_thread()
         _WRITE_QUEUE.put_nowait((path, record, queued_bytes))
+        queued = True
     except queue.Full:
-        _release_archive_queue_bytes(queued_bytes)
         logger.warning(
             "Conversation archive writer queue is full; applying synchronous archive write backpressure",
             extra={"queue_max_records": _WRITE_QUEUE_MAX_RECORDS},
         )
         _append_record(path, record)
+    except Exception:
+        logger.warning("Failed to enqueue conversation archive record; dropping it", exc_info=True)
+    finally:
+        if not queued:
+            _release_archive_queue_bytes(queued_bytes)
 
 
 def _ensure_writer_thread() -> None:

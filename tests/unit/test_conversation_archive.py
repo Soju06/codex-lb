@@ -169,6 +169,32 @@ def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path
         assert conversation_archive._WRITE_QUEUE_BYTES == 0
 
 
+def test_archive_queue_thread_start_failure_drops_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 0
+
+    def fail_writer_thread() -> None:
+        raise RuntimeError("thread limit reached")
+
+    monkeypatch.setattr(conversation_archive, "_ensure_writer_thread", fail_writer_thread)
+
+    conversation_archive.archive_json(
+        direction="codex_to_server",
+        kind="responses",
+        transport="http",
+        payload={"text": "optional archive"},
+    )
+
+    assert list(tmp_path.glob("*.jsonl.gz")) == []
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == 0
+
+
 def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
     events: list[str] = []
 

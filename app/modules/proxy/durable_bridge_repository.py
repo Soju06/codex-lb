@@ -318,6 +318,26 @@ class DurableBridgeRepository:
         await self._commit_writer_section()
         return len(rows)
 
+    async def purge_closed_before(self, cutoff: datetime) -> int:
+        result = await self._session.execute(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                HttpBridgeSessionRecord.last_seen_at < cutoff,
+            )
+        )
+        session_ids = list(result.scalars().all())
+        if not session_ids:
+            return 0
+        async with sqlite_writer_section():
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
+            )
+            await self._session.execute(
+                delete(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(session_ids))
+            )
+            await self._session.commit()
+        return len(session_ids)
+
     async def upsert_alias(
         self,
         *,

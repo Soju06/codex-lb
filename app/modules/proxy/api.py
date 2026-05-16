@@ -1644,7 +1644,7 @@ async def _stream_responses(
         return _stream_startup_error_response(
             request,
             startup_error,
-            headers=rate_limit_headers,
+            headers={**turn_state_headers, **rate_limit_headers},
         )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(

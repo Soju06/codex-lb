@@ -664,10 +664,29 @@ Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
+Index(
+    "idx_api_key_usage_reservations_status_created_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.created_at
+)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
+Index(
+    "idx_http_bridge_sessions_latest_turn_scope_state_seen",
+    HttpBridgeSessionRecord.latest_turn_state,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
+Index(
+    "idx_http_bridge_sessions_latest_response_scope_state_seen",
+    HttpBridgeSessionRecord.latest_response_id,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
 Index(
     "idx_http_bridge_session_aliases_session_id",
     HttpBridgeSessionAlias.session_id,

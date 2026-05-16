@@ -14,6 +14,8 @@ from app.modules.accounts.schemas import (
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
+    AccountUpdateRequest,
+    AccountUpdateResponse,
 )
 from app.modules.accounts.service import InvalidAuthJsonError
 
@@ -73,6 +75,33 @@ async def reactivate_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
+
+
+@router.patch("/{account_id}", response_model=AccountUpdateResponse)
+async def update_account(
+    account_id: str,
+    payload: AccountUpdateRequest,
+    request: Request,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUpdateResponse:
+    changed_fields = [field for field, value in payload.model_dump(exclude_unset=True).items() if value is not None]
+    if not changed_fields:
+        raise DashboardBadRequestError("No supported account fields to update", code="empty_account_update")
+    success = await context.service.update_account(
+        account_id,
+        security_work_authorized=payload.security_work_authorized,
+    )
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_updated",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": account_id,
+            "changed_fields": changed_fields,
+        },
+    )
+    return AccountUpdateResponse(status="updated")
 
 
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)

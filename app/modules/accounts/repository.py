@@ -157,6 +157,16 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
+        result = await self._session.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(security_work_authorized=enabled)
+            .returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def update_status_if_current(
         self,
         account_id: str,

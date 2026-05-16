@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { ShieldCheck } from "lucide-react";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -70,6 +71,9 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
           </p>
         </div>
+        {account.securityWorkAuthorized === true ? (
+          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" aria-label="Trusted Access for Cyber" />
+        ) : null}
         <StatusBadge status={status} />
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>

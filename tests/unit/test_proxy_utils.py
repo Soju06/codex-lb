@@ -7861,7 +7861,7 @@ async def test_relay_upstream_websocket_emits_keepalive_while_upstream_is_silent
 
 
 @pytest.mark.asyncio
-async def test_relay_upstream_websocket_emits_keepalive_before_response_created(monkeypatch):
+async def test_relay_upstream_websocket_omits_keepalive_before_response_created(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
@@ -7921,15 +7921,8 @@ async def test_relay_upstream_websocket_emits_keepalive_before_response_created(
     )
 
     try:
-        for _ in range(20):
-            if downstream.sent_text:
-                break
-            await asyncio.sleep(0.01)
-        assert downstream.sent_text
-        assert json.loads(downstream.sent_text[0]) == {
-            "type": "response.in_progress",
-            "response": {"id": "ws_req_precreated_keepalive", "status": "in_progress"},
-        }
+        await asyncio.sleep(0.05)
+        assert downstream.sent_text == []
     finally:
         relay.cancel()
         with pytest.raises(asyncio.CancelledError):

@@ -5639,6 +5639,14 @@ class ProxyService:
                             0,
                             session.queued_request_count - len(grouped_previous_response_request_states),
                         )
+                elif event_type == "error":
+                    grouped_previous_response_request_states = list(session.pending_requests)
+                    session.pending_requests.clear()
+                    if grouped_previous_response_request_states:
+                        session.queued_request_count = max(
+                            0,
+                            session.queued_request_count - len(grouped_previous_response_request_states),
+                        )
                 has_other_pending_requests = bool(session.pending_requests)
 
         if len(grouped_previous_response_request_states) > 1:
@@ -6206,6 +6214,9 @@ class ProxyService:
                             error_message=error_message,
                         ),
                     )
+                elif request_state is None and event_type == "error":
+                    grouped_previous_response_request_states = list(pending_requests)
+                    pending_requests.clear()
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
@@ -6424,10 +6435,13 @@ class ProxyService:
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
-            status = "error"
             error = event.error if event else None
-            error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            error_message = error.message if error else None
+            status = "error"
+            error_code = _normalize_error_code(
+                error.code if error else _websocket_event_error_code(event_type, payload),
+                error.type if error else _websocket_event_error_type(event_type, payload),
+            )
+            error_message = error.message if error else _websocket_event_error_message(event_type, payload)
             error_payload = _upstream_error_from_openai(error)
         elif event_type in {"response.failed", "response.incomplete"}:
             status = "error"
@@ -8611,6 +8625,8 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     payload_type = payload.get("type")
     if isinstance(payload_type, str):
         return payload_type
+    if isinstance(payload.get("error"), dict):
+        return "error"
     return None
 
 

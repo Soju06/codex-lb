@@ -1631,19 +1631,12 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
         )
-    stream, startup_error = await _probe_stream_startup_error(
-        stream,
-        convert_event_errors=bridge_active,
-        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
-        if prefer_http_bridge
-        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
-    )
-    if startup_error is not None:
-        if reservation is not None and owns_reservation:
-            await _release_reservation(reservation)
-        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     stream = _normalize_public_responses_stream(
-        _stream_proxy_errors_as_response_failed(stream),
+        _stream_response_error_events(
+            stream,
+            owns_reservation=owns_reservation,
+            reservation=reservation,
+        ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
     return StreamingResponse(
@@ -1939,10 +1932,22 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
+        yield line
+
+
+async def _stream_response_error_events(
+    stream: AsyncIterator[str],
+    *,
+    owns_reservation: bool,
+    reservation: ApiKeyUsageReservationData | None,
+) -> AsyncIterator[str]:
     try:
         async for line in stream:
             yield line
     except ProxyResponseError as exc:
+        if owns_reservation:
+            await _release_reservation(reservation)
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error

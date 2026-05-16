@@ -110,6 +110,7 @@ def _websocket_settings(**overrides):
         "stream_idle_timeout_seconds": 300.0,
         "proxy_downstream_websocket_idle_timeout_seconds": 120.0,
         "http_responses_session_bridge_instance_id": "test-instance",
+        "sse_keepalive_interval_seconds": 10.0,
         "log_proxy_request_shape": False,
         "log_proxy_request_shape_raw_cache_key": False,
         "proxy_token_refresh_limit": 32,
@@ -3449,6 +3450,7 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         ]
     )
     log_calls: list[dict[str, object]] = []
+    handled_error_codes: list[str] = []
     connect_attempts = {"count": 0}
 
     class _FakeSettingsCache:
@@ -3487,7 +3489,20 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         connect_attempts["count"] += 1
         if connect_attempts["count"] == 1:
             del client_send_lock, websocket, request_state
-            return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+            return (
+                proxy_module.Account(
+                    id="acct_ws_proxy",
+                    chatgpt_account_id="acct_ws_proxy",
+                    email="acct_ws_proxy@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"access",
+                    refresh_token_encrypted=b"refresh",
+                    id_token_encrypted=b"id",
+                    last_refresh=proxy_module.utcnow(),
+                    status=proxy_module.AccountStatus.ACTIVE,
+                ),
+                fake_upstream,
+            )
         async with client_send_lock:
             await websocket.send_text(json.dumps({"type": "error", "status": 503, "error": {"code": "no_accounts"}}))
         return None, None
@@ -3496,11 +3511,16 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         del self
         log_calls.append(kwargs)
 
+    async def fake_handle_stream_error(self, account, error, code):
+        del self, account, error
+        handled_error_codes.append(code)
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module, "get_settings", lambda: runtime_settings)
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
     request_payload = {
@@ -3527,6 +3547,7 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
     assert failed_event["response"]["error"]["message"] == "Upstream stream idle timeout"
     assert fake_upstream.closed is True
     assert connect_attempts["count"] == 2
+    assert handled_error_codes == ["stream_idle_timeout"]
     assert followup_event["type"] == "error"
     assert followup_event["status"] == 503
     assert followup_event["error"]["code"] == "no_accounts"

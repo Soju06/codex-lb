@@ -7545,8 +7545,6 @@ class ProxyService:
                                     code,
                                     http_status=tex.status_code,
                                 )
-                                if propagate_http_errors:
-                                    raise
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],

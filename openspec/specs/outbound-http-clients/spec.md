@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define outbound HTTP client behavior so upstream OAuth and API calls use stable headers, personas, and proxy handling.
 
 ## Requirements
 ### Requirement: OAuth authorize requests use a configurable originator persona

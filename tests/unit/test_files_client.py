@@ -47,6 +47,7 @@ class _FakeResponse:
     def __init__(self, *, status: int, body: str) -> None:
         self.status = status
         self._body = body
+        self.headers: dict[str, str] = {}
 
     async def __aenter__(self) -> "_FakeResponse":
         return self

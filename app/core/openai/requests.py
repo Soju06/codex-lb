@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -118,8 +119,28 @@ def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     return isinstance(file_id, str) and bool(file_id)
 
 
+@dataclass(frozen=True, slots=True)
+class InputImageFileReference:
+    item_index: int
+    content_index: int | None
+    file_id: str
+
+
+def _input_image_file_reference(item: Mapping[str, JsonValue]) -> str | None:
+    if item.get("type") != "input_image":
+        return None
+    file_id = item.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        return file_id
+    image_url = item.get("image_url")
+    if not isinstance(image_url, str) or not image_url.startswith("sediment://"):
+        return None
+    resolved = image_url.removeprefix("sediment://").strip()
+    return resolved or None
+
+
 def extract_input_file_ids(input_value: JsonValue) -> set[str]:
-    """Return all ``file_id`` strings referenced by ``input_file`` items.
+    """Return all ``file_id`` strings referenced by ``input_file`` / ``input_image`` items.
 
     Walks both top-level items and nested role-message ``content`` parts,
     matching the shapes accepted by ``ResponsesRequest.input`` /
@@ -141,6 +162,9 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
             file_id = item_mapping.get("file_id")
             if isinstance(file_id, str) and file_id:
                 file_ids.add(file_id)
+        image_file_id = _input_image_file_reference(item_mapping)
+        if image_file_id is not None:
+            file_ids.add(image_file_id)
         content = item_mapping.get("content")
         if is_json_list(content):
             parts: list[JsonValue] = content
@@ -155,7 +179,49 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
                 file_id = part.get("file_id")
                 if isinstance(file_id, str) and file_id:
                     file_ids.add(file_id)
+            image_file_id = _input_image_file_reference(part)
+            if image_file_id is not None:
+                file_ids.add(image_file_id)
     return file_ids
+
+
+def extract_input_image_file_references(input_value: JsonValue) -> list[InputImageFileReference]:
+    if not is_json_list(input_value):
+        return []
+    references: list[InputImageFileReference] = []
+    for item_index, item in enumerate(input_value):
+        if not is_json_mapping(item):
+            continue
+        item_mapping = item
+        top_level_file_id = _input_image_file_reference(item_mapping)
+        if top_level_file_id is not None:
+            references.append(
+                InputImageFileReference(
+                    item_index=item_index,
+                    content_index=None,
+                    file_id=top_level_file_id,
+                )
+            )
+        content = item_mapping.get("content")
+        if is_json_list(content):
+            parts: list[JsonValue] = content
+        elif is_json_mapping(content):
+            parts = [content]
+        else:
+            parts = []
+        for content_index, part in enumerate(parts):
+            if not is_json_mapping(part):
+                continue
+            file_id = _input_image_file_reference(part)
+            if file_id is not None:
+                references.append(
+                    InputImageFileReference(
+                        item_index=item_index,
+                        content_index=content_index,
+                        file_id=file_id,
+                    )
+                )
+    return references
 
 
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -495,6 +561,7 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "prompt_cache_retention",
     "safety_identifier",
     "temperature",
+    "top_p",
 }
 
 

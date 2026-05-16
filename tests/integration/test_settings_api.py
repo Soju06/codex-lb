@@ -55,7 +55,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["dashboardSessionTtlSeconds"] == 31536000
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
-    assert updated["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert updated["stickyReallocationBudgetThresholdPct"] == 85.0
     assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
     assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
     assert updated["importWithoutOverwrite"] is False
@@ -74,10 +74,62 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True
-    assert payload["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert payload["stickyReallocationBudgetThresholdPct"] == 85.0
     assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
     assert payload["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_legacy_sticky_threshold_updates_primary_threshold(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "stickyReallocationBudgetThresholdPct": 88.0,
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["stickyReallocationBudgetThresholdPct"] == 88.0
+    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 88.0
+    assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_settings_primary_sticky_threshold_updates_legacy_threshold(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "stickyReallocationPrimaryBudgetThresholdPct": 87.0,
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["stickyReallocationBudgetThresholdPct"] == 87.0
+    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 87.0
+    assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_settings_full_put_honors_changed_legacy_sticky_threshold(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    payload["stickyReallocationBudgetThresholdPct"] = 86.0
+
+    response = await async_client.put("/api/settings", json=payload)
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["stickyReallocationBudgetThresholdPct"] == 86.0
+    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 86.0
+    assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0

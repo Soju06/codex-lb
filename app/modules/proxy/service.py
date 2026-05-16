@@ -5700,7 +5700,7 @@ class ProxyService:
                     matched_request_state.service_tier = actual_service_tier
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
-                    seen_tool_call_keys=session.seen_tool_call_keys,
+                    seen_tool_call_keys=matched_request_state.seen_tool_call_keys,
                     response_id=tool_call_response_id_from_payload(payload) or matched_request_state.request_id,
                     scope_side_effects_by_response_id=False,
                 ):

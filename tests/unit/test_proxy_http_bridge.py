@@ -5278,6 +5278,83 @@ async def test_process_http_bridge_upstream_text_does_not_mask_unmatched_missing
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_scopes_tool_dedupe_to_request_state() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state_a = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-tool-a",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_bridge_tool_a",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state_b = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-tool-b",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=2.0,
+        response_id="resp_bridge_tool_b",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+        headers={"x-codex-session-id": "sid-123"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-123",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state_a, request_state_b]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(2),
+        queued_request_count=2,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    def tool_event(response_id: str, call_id: str) -> str:
+        return json.dumps(
+            {
+                "type": "response.output_item.done",
+                "response": {"id": response_id, "status": "in_progress"},
+                "response_id": response_id,
+                "item": {
+                    "type": "function_call",
+                    "name": "write_stdin",
+                    "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+                    "call_id": call_id,
+                },
+            },
+            separators=(",", ":"),
+        )
+
+    await service._process_http_bridge_upstream_text(session, tool_event("resp_bridge_tool_a", "call_a"))
+    await service._process_http_bridge_upstream_text(session, tool_event("resp_bridge_tool_b", "call_b"))
+
+    assert request_state_a.suppressed_duplicate_tool_call is False
+    assert request_state_b.suppressed_duplicate_tool_call is False
+    queue_a = request_state_a.event_queue
+    queue_b = request_state_b.event_queue
+    assert queue_a is not None
+    assert queue_b is not None
+    event_a = await asyncio.wait_for(queue_a.get(), timeout=0.1)
+    event_b = await asyncio.wait_for(queue_b.get(), timeout=0.1)
+    assert proxy_service.parse_sse_data_json(event_a)["item"]["call_id"] == "call_a"
+    assert proxy_service.parse_sse_data_json(event_b)["item"]["call_id"] == "call_b"
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_request_on_fresh_upstream_refuses_to_resend_previous_response_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

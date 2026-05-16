@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from typing import Final, cast
 
 from fastapi import (
@@ -211,8 +212,8 @@ async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonV
         return {key: value for key, value in request.query_params.multi_items()}
     try:
         raw = await request.json()
-    except Exception:
-        raw = {}
+    except JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="thread goal payload must be valid JSON") from exc
     if raw is None:
         return {}
     if not isinstance(raw, dict):

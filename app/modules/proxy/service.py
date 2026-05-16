@@ -1856,9 +1856,6 @@ class ProxyService:
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
-                    if operation == "get":
-                        log_status = "success"
-                        return {"goal": None}
                     raise ProxyResponseError(
                         503,
                         openai_error(log_error_code, log_error_message),

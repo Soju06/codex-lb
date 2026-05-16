@@ -264,6 +264,40 @@ async def test_thread_goal_get_propagates_real_client_errors(async_client, monke
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_get_rejects_malformed_json(async_client):
+    await _import_account(async_client, "acc_goal_bad_json", "goal-bad-json@example.com")
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        content=b'{"threadId":',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "thread goal payload must be valid JSON"
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_get_propagates_selection_failures(async_client, monkeypatch):
+    async def fake_select(*_args, **_kwargs):
+        return AccountSelection(
+            account=None,
+            error_message="No scoped accounts are available",
+            error_code="no_accounts",
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select)
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        json={"threadId": "019debd9-2372-7f23-92b9-9f34002a6355"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_set_propagates_upstream_errors(async_client, monkeypatch):
     await _import_account(async_client, "acc_goal_set_error", "goal-set-error@example.com")
 

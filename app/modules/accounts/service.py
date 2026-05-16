@@ -140,6 +140,7 @@ class AccountsService:
             account_id=account_id,
             primary=trend.primary if trend else [],
             secondary=trend.secondary if trend else [],
+            secondary_scheduled=trend.secondary_scheduled if trend else [],
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -191,3 +191,42 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
     plan_json = json.dumps(plan)
     assert "idx_usage_window_account_latest" in plan_json or "idx_usage_window_account_time" in plan_json
     assert "Seq Scan" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_trends_by_bucket_uses_latest_sample_window_metadata(db_setup):
+    recorded_at = datetime(2026, 1, 1, 12, 0, 0)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+
+        await repo.add_entry(
+            "acc1",
+            10.0,
+            window="secondary",
+            reset_at=9999,
+            window_minutes=10080,
+            recorded_at=recorded_at,
+        )
+        await repo.add_entry(
+            "acc1",
+            30.0,
+            window="secondary",
+            reset_at=1111,
+            window_minutes=300,
+            recorded_at=recorded_at + timedelta(minutes=5),
+        )
+
+        trends = await repo.trends_by_bucket(
+            since=recorded_at - timedelta(minutes=1),
+            bucket_seconds=86400,
+            window="secondary",
+        )
+
+    assert len(trends) == 1
+    assert trends[0].samples == 2
+    assert trends[0].avg_used_percent == pytest.approx(20.0)
+    assert trends[0].reset_at == 1111
+    assert trends[0].window_minutes == 300
+    assert trends[0].recorded_at == recorded_at + timedelta(minutes=5)

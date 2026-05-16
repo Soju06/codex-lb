@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Shield } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -29,8 +30,10 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessage } from "@/utils/errors";
 
+// NOTE: validation message is intentionally a translation key resolved at render time;
+// keeping the schema decoupled from the i18n instance lets us continue to colocate it here.
 const totpCodeSchema = z.object({
-  code: z.string().length(6, "Enter a 6-digit code"),
+  code: z.string().length(6, "settings.totp.validation.codeLength"),
 });
 
 type TotpCodeValues = z.infer<typeof totpCodeSchema>;
@@ -43,6 +46,7 @@ export type TotpSettingsProps = {
 };
 
 export function TotpSettings({ settings, disabled = false, onSave }: TotpSettingsProps) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const refreshSession = useAuthStore((state) => state.refreshSession);
 
@@ -95,7 +99,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       await confirmTotpSetup({ secret: setupSecret, code: values.code });
       await refreshSession();
       void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
-      toast.success("TOTP configured");
+      toast.success(t("settings.totp.toasts.configured"));
       closeDialog();
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -108,7 +112,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       await disableTotp({ code: values.code });
       await refreshSession();
       void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
-      toast.success("TOTP disabled");
+      toast.success(t("settings.totp.toasts.disabled"));
       closeDialog();
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -125,9 +129,11 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
               <Shield className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">TOTP</h3>
+              <h3 className="text-sm font-semibold">{t("settings.totp.title")}</h3>
               <p className="text-xs text-muted-foreground">
-                {settings.totpConfigured ? "TOTP is configured." : "No TOTP configured."}
+                {settings.totpConfigured
+                  ? t("settings.totp.status.configured")
+                  : t("settings.totp.status.notConfigured")}
               </p>
             </div>
           </div>
@@ -142,7 +148,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                 disabled={lock}
                 onClick={() => setActiveDialog("disable")}
               >
-                Disable
+                {t("settings.totp.actions.disable")}
               </Button>
             ) : (
               <Button
@@ -152,7 +158,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                 disabled={lock}
                 onClick={handleOpenSetup}
               >
-                Enable TOTP
+                {t("settings.totp.actions.enable")}
               </Button>
             )}
           </div>
@@ -161,8 +167,8 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
         {/* Require on login toggle */}
         <div className="flex items-center justify-between rounded-lg border p-3">
           <div>
-            <p className="text-sm font-medium">Require TOTP on login</p>
-            <p className="text-xs text-muted-foreground">Prompt for TOTP code after password login.</p>
+            <p className="text-sm font-medium">{t("settings.totp.requireLogin.label")}</p>
+            <p className="text-xs text-muted-foreground">{t("settings.totp.requireLogin.description")}</p>
           </div>
           <Switch
             checked={settings.totpRequiredOnLogin}
@@ -178,22 +184,22 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       <Dialog open={activeDialog === "setup"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Enable TOTP</DialogTitle>
+            <DialogTitle>{t("settings.totp.setupDialog.title")}</DialogTitle>
             <DialogDescription>
-              Scan the QR code with your authenticator app, then enter the verification code.
+              {t("settings.totp.setupDialog.description")}
             </DialogDescription>
           </DialogHeader>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
 
           {setupQrDataUri ? (
             <div className="flex justify-center rounded-lg border bg-card p-4 dark:bg-white/95">
-              <img src={setupQrDataUri} alt="TOTP QR code" className="h-40 w-40" />
+              <img src={setupQrDataUri} alt={t("settings.totp.setupDialog.qrAlt")} className="h-40 w-40" />
             </div>
           ) : null}
 
           {setupSecret ? (
             <p className="rounded-lg border bg-muted/30 px-3 py-2 font-mono text-xs">
-              Secret: {setupSecret}
+              {t("settings.totp.setupDialog.secretLabel")} {setupSecret}
             </p>
           ) : null}
 
@@ -203,9 +209,9 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                 <FormField
                   control={confirmForm.control}
                   name="code"
-                  render={({ field }) => (
+                  render={({ field, fieldState }) => (
                     <FormItem className="flex flex-col items-center gap-2">
-                      <FormLabel className="sr-only">Verification code</FormLabel>
+                      <FormLabel className="sr-only">{t("settings.totp.setupDialog.codeLabel")}</FormLabel>
                       <FormControl>
                         <InputOTP
                           maxLength={6}
@@ -225,16 +231,20 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                           </InputOTPGroup>
                         </InputOTP>
                       </FormControl>
-                      <FormMessage />
+                      {fieldState.error?.message ? (
+                        <FormMessage>{t(fieldState.error.message)}</FormMessage>
+                      ) : (
+                        <FormMessage />
+                      )}
                     </FormItem>
                   )}
                 />
                 <DialogFooter>
                   <Button type="button" variant="outline" onClick={closeDialog} disabled={prefetching}>
-                    Cancel
+                    {t("common.cancel")}
                   </Button>
                   <Button type="submit" disabled={lock}>
-                    Confirm setup
+                    {t("settings.totp.setupDialog.submit")}
                   </Button>
                 </DialogFooter>
               </form>
@@ -247,8 +257,8 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       <Dialog open={activeDialog === "disable"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Disable TOTP</DialogTitle>
-            <DialogDescription>Enter your current TOTP code to disable two-factor authentication.</DialogDescription>
+            <DialogTitle>{t("settings.totp.disableDialog.title")}</DialogTitle>
+            <DialogDescription>{t("settings.totp.disableDialog.description")}</DialogDescription>
           </DialogHeader>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
           <Form {...disableForm}>
@@ -256,9 +266,9 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
               <FormField
                 control={disableForm.control}
                 name="code"
-                render={({ field }) => (
+                render={({ field, fieldState }) => (
                   <FormItem className="flex flex-col items-center gap-2">
-                    <FormLabel className="sr-only">TOTP code</FormLabel>
+                    <FormLabel className="sr-only">{t("settings.totp.disableDialog.codeLabel")}</FormLabel>
                     <FormControl>
                       <InputOTP
                         maxLength={6}
@@ -278,16 +288,20 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                         </InputOTPGroup>
                       </InputOTP>
                     </FormControl>
-                    <FormMessage />
+                    {fieldState.error?.message ? (
+                      <FormMessage>{t(fieldState.error.message)}</FormMessage>
+                    ) : (
+                      <FormMessage />
+                    )}
                   </FormItem>
                 )}
               />
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={closeDialog} disabled={lock}>
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
                 <Button type="submit" variant="destructive" disabled={lock}>
-                  Disable TOTP
+                  {t("settings.totp.disableDialog.submit")}
                 </Button>
               </DialogFooter>
             </form>

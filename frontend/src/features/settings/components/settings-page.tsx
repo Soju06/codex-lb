@@ -1,5 +1,6 @@
 import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
@@ -23,6 +24,7 @@ const TotpSettings = lazy(() =>
 );
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
@@ -42,9 +44,9 @@ export function SettingsPage() {
       <div>
         <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
           <Settings className="h-5 w-5 text-primary" />
-          Settings
+          {t("settings.page.title")}
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, API key management, and firewall.</p>
+        <p className="mt-1 text-sm text-muted-foreground">{t("settings.page.subtitle")}</p>
       </div>
 
       {!settings ? (
@@ -55,15 +57,13 @@ export function SettingsPage() {
 
           {authMode === "trusted_header" ? (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
-              Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay
-              available only as optional fallback login.
+              {t("settings.page.trustedHeaderNotice")}
             </div>
           ) : null}
 
           {authMode === "disabled" ? (
             <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground">
-              Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions
-              or external access control.
+              {t("settings.page.disabledNotice")}
             </div>
           ) : null}
 
@@ -97,7 +97,7 @@ export function SettingsPage() {
             <StickySessionsSection />
           </div>
 
-          <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />
+          <LoadingOverlay visible={!!settings && busy} label={t("settings.page.savingLabel")} />
         </>
       )}
     </div>

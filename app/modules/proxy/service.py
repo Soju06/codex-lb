@@ -5009,6 +5009,16 @@ class ProxyService:
                 if request_stage == "first_turn":
                     _record_bridge_first_turn_timeout()
                 _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
+            except ProxyResponseError as exc:
+                if _is_retryable_websocket_open_timeout(exc) and _remaining_budget_seconds(deadline) > 0:
+                    await self._handle_websocket_connect_error(account, exc)
+                    if selected_is_preferred and retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
@@ -5641,6 +5651,16 @@ class ProxyService:
                     preferred_candidate_id = None
                     continue
                 raise
+            except ProxyResponseError as exc:
+                if _is_retryable_websocket_open_timeout(exc) and _remaining_budget_seconds(deadline) > 0:
+                    await self._handle_websocket_connect_error(account, exc)
+                    if selected_is_preferred and retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
@@ -6053,6 +6073,7 @@ class ProxyService:
     async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         error = _parse_openai_error(exc.payload)
         error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+        error_code = _websocket_connect_request_log_error_code(exc, error_code)
         return await self._handle_stream_error(
             account,
             _upstream_error_from_openai(error),
@@ -9217,6 +9238,10 @@ def _websocket_connect_request_log_error_code(exc: ProxyResponseError, error_cod
     if exc.failure_phase == "websocket_open_timeout" and error_code == "upstream_unavailable":
         return "upstream_websocket_open_timeout"
     return error_code
+
+
+def _is_retryable_websocket_open_timeout(exc: ProxyResponseError) -> bool:
+    return exc.failure_phase == "websocket_open_timeout" and exc.retryable_same_contract
 
 
 def _rewrite_previous_response_stream_error(

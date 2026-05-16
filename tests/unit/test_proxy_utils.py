@@ -4957,6 +4957,69 @@ async def test_connect_proxy_websocket_logs_upstream_open_timeout_distinctly(mon
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_fails_over_on_upstream_open_timeout(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_ws_open_timeout_failover_a")
+    account_b = _make_account("acc_ws_open_timeout_failover_b")
+    upstream = SimpleNamespace()
+
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=account_a, error_message=None),
+            AccountSelection(account=account_b, error_message=None),
+        ]
+    )
+    record_error = AsyncMock()
+    first_open_timeout = proxy_module.ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "Request to upstream timed out"),
+        failure_phase="websocket_open_timeout",
+        retryable_same_contract=True,
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_open_timeout, upstream]))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_open_timeout_failover",
+        model="gpt-5.1",
+        service_tier="fast",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == account_b
+    assert selected_upstream is upstream
+    assert select_account.await_count == 2
+    first_call, second_call = select_account.await_args_list
+    assert first_call.kwargs["exclude_account_ids"] == set()
+    assert second_call.kwargs["exclude_account_ids"] == {account_a.id}
+    record_error.assert_awaited_once_with(account_a)
+    websocket_send.assert_not_awaited()
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
 async def test_select_websocket_connect_account_requires_preferred_account_for_previous_response(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

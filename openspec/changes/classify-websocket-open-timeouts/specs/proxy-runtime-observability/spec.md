@@ -7,6 +7,8 @@ The system SHALL persist a distinct request-log error code for upstream websocke
 - **WHEN** an upstream Responses websocket open attempt times out before the proxy has emitted downstream response frames
 - **THEN** the persisted request_logs.error_code is upstream_websocket_open_timeout
 - **AND** the downstream websocket error payload remains upstream_unavailable
+- **AND** when another eligible account remains before client-visible output,
+  the failed attempt is eligible for same-transport failover
 
 #### Scenario: refresh timeout is not classified as websocket open timeout
 - **WHEN** a token refresh or other pre-open transport step times out before the upstream websocket open attempt begins

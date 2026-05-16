@@ -9,3 +9,6 @@
 - [x] 1.5 Add focused unit coverage for timeout classification and diagnostic
   trace fields.
 - [x] 1.6 Run focused unit tests, lint, and OpenSpec validation.
+- [x] 1.7 Treat pre-visible upstream WebSocket open timeouts as bounded
+  same-transport failover candidates while preserving the final client/log
+  timeout contract.

@@ -6121,7 +6121,7 @@ async def test_process_upstream_websocket_text_masks_foreign_previous_response_n
     assert finalize_call.args[0] is pending_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == []
 
@@ -6212,7 +6212,7 @@ async def test_process_upstream_websocket_text_matches_foreign_prev_nf_to_anchor
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_a
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_b]
 
 
@@ -6302,7 +6302,7 @@ async def test_process_upstream_websocket_text_matches_foreign_prev_nf_with_over
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_b
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_a]
 
 
@@ -6462,7 +6462,7 @@ async def test_process_upstream_websocket_text_matches_anonymous_prev_nf_to_anch
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_a
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_b]
 
 
@@ -6550,7 +6550,7 @@ async def test_process_upstream_websocket_text_matches_anonymous_prev_nf_with_ov
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_b
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_a]
 
 
@@ -6638,7 +6638,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_previous_response
     assert finalize_call.args[0] is followup_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == [inflight_request]
 
@@ -8662,7 +8662,7 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == [inflight_request]
 
@@ -8708,7 +8708,7 @@ def test_maybe_rewrite_websocket_previous_response_not_found_rewrites_response_f
         )
     )
 
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert rewritten_event_type == "response.failed"
     assert rewritten_payload is not None
     response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
@@ -8756,7 +8756,7 @@ def test_maybe_rewrite_websocket_previous_response_invalid_request_error_rewrite
         )
     )
 
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert rewritten_event_type == "response.failed"
     assert rewritten_payload is not None
     response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))

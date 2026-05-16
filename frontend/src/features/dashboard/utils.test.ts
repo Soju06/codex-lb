@@ -392,6 +392,28 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.status).toBe("on_track");
   });
 
+  it("normalizes stale resets that are more than one full cycle in the past", () => {
+    const pace = buildWeeklyCreditPace(
+      [
+        weeklyAccount({
+          accountId: "acc-multiple-cycles-stale",
+          fullCredits: 70_000,
+          remainingCredits: 35_000,
+          // One full weekly cycle plus one extra day behind.
+          resetAtSecondary: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      now,
+    );
+
+    expect(pace).not.toBeNull();
+    expect(pace?.scheduledUsedPercent).toBeCloseTo(14.2857, 3);
+    expect(pace?.actualUsedPercent).toBeCloseTo(50);
+    expect(pace?.overPlanCredits).toBeGreaterThan(0);
+    expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
+    expect(pace?.status).toBe("danger");
+  });
+
   it("aggregates credit budgets instead of averaging account percentages", () => {
     const pace = buildWeeklyCreditPace(
       [

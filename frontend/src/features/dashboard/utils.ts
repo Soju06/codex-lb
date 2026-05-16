@@ -292,9 +292,7 @@ function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number)
     ...account,
     balanceCredits: account.remainingCredits,
   }));
-  const resetEvents: WeeklyResetEvent[] = simulationAccounts
-    .filter((account) => account.resetAtMs > nowMs)
-    .map((account) => account);
+  const resetEvents: WeeklyResetEvent[] = simulationAccounts.filter((account) => account.resetAtMs > nowMs);
   if (resetEvents.length === 0) {
     return {
       burnRateCreditsPerMs,

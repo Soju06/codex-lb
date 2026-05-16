@@ -101,4 +101,21 @@ describe("AccountUsagePanel", () => {
 
     expect(screen.getByText("Weekly plan")).toBeInTheDocument();
   });
+
+  it("shows trends when only secondary scheduled trend points are present", () => {
+    const account = createAccountSummary();
+    const trends = createAccountTrends(account.accountId, {
+      primary: [],
+      secondary: [],
+      secondaryScheduled: [
+        { t: "2026-01-01T00:00:00.000Z", v: 100 },
+        { t: "2026-01-01T06:00:00.000Z", v: 92 },
+      ],
+    });
+
+    render(<AccountUsagePanel account={account} trends={trends} />);
+
+    expect(screen.getByText("7-day trend")).toBeInTheDocument();
+    expect(screen.getByText("Weekly plan")).toBeInTheDocument();
+  });
 });

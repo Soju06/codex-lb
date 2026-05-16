@@ -128,7 +128,9 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
-  const hasTrends = trends && (trends.primary.length > 0 || trends.secondary.length > 0);
+  const hasTrends =
+    trends &&
+    (trends.primary.length > 0 || trends.secondary.length > 0 || trends.secondaryScheduled.length > 0);
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">

@@ -9900,42 +9900,6 @@ def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int
     return None
 
 
-def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
-    first_output_index = next(
-        (
-            index
-            for index, item in enumerate(input_items)
-            if _websocket_input_item_type(item) in {"function_call_output", "custom_tool_call_output"}
-        ),
-        None,
-    )
-    if first_output_index is None or first_output_index == 0:
-        return input_items
-    prefix = input_items[:first_output_index]
-    if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
-        return input_items
-    return input_items[first_output_index:]
-
-
-def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
-    if isinstance(item, dict) and _websocket_input_item_type(item) is None and item.get("role") == "assistant":
-        return True
-    item_type = _websocket_input_item_type(item)
-    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
-        return True
-    if item_type != "message" or not isinstance(item, dict):
-        return False
-    role = item.get("role")
-    return role == "assistant"
-
-
-def _websocket_input_item_type(item: JsonValue) -> str | None:
-    if not isinstance(item, dict):
-        return None
-    item_type = item.get("type")
-    return item_type if isinstance(item_type, str) else None
-
-
 def _openai_error_envelope_from_response_failed_payload(
     payload: dict[str, JsonValue] | None,
 ) -> OpenAIErrorEnvelope:

@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
+from app.db.session import sqlite_writer_section
 
 _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
 REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_sessions",
     "http_bridge_session_aliases",
 )
+_PURGE_CLOSED_BATCH_SIZE = 500
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -53,6 +55,10 @@ class DurableBridgeSessionSnapshot:
 class DurableBridgeRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def _commit_writer_section(self) -> None:
+        async with sqlite_writer_section():
+            await self._session.commit()
 
     async def get_session(
         self,
@@ -192,7 +198,7 @@ class DurableBridgeRepository:
                 )
                 self._session.add(record)
                 try:
-                    await self._session.commit()
+                    await self._commit_writer_section()
                 except IntegrityError:
                     await self._session.rollback()
                     if attempt == 0:
@@ -216,31 +222,32 @@ class DurableBridgeRepository:
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1
 
-            existing.owner_instance_id = instance_id
-            existing.owner_epoch = next_epoch
-            existing.lease_expires_at = lease_expires_at
-            existing.state = HttpBridgeSessionState.ACTIVE
-            if account_changed:
-                await self._clear_aliases_for_session(existing.id)
-            existing.account_id = account_id
-            existing.model = model
-            existing.service_tier = service_tier
-            if account_changed:
-                existing.latest_turn_state = latest_turn_state
-                existing.latest_response_id = latest_response_id
-            elif owner_changed:
-                if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
+            async with sqlite_writer_section():
+                existing.owner_instance_id = instance_id
+                existing.owner_epoch = next_epoch
+                existing.lease_expires_at = lease_expires_at
+                existing.state = HttpBridgeSessionState.ACTIVE
+                if account_changed:
+                    await self._clear_aliases_for_session(existing.id)
+                existing.account_id = account_id
+                existing.model = model
+                existing.service_tier = service_tier
+                if account_changed:
                     existing.latest_turn_state = latest_turn_state
-                if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
                     existing.latest_response_id = latest_response_id
-            else:
-                if latest_turn_state is not None:
-                    existing.latest_turn_state = latest_turn_state
-                if latest_response_id is not None:
-                    existing.latest_response_id = latest_response_id
-            existing.last_seen_at = now
-            existing.closed_at = None
-            await self._session.commit()
+                elif owner_changed:
+                    if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                        existing.latest_turn_state = latest_turn_state
+                    if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                        existing.latest_response_id = latest_response_id
+                else:
+                    if latest_turn_state is not None:
+                        existing.latest_turn_state = latest_turn_state
+                    if latest_response_id is not None:
+                        existing.latest_response_id = latest_response_id
+                existing.last_seen_at = now
+                existing.closed_at = None
+                await self._session.commit()
             await self._session.refresh(existing)
             return _to_snapshot_required(existing)
         raise RuntimeError("Failed to claim durable bridge session after retry")
@@ -270,7 +277,7 @@ class DurableBridgeRepository:
             row.latest_response_id = latest_response_id
         if state is not None:
             row.state = state
-        await self._session.commit()
+        await self._commit_writer_section()
         await self._session.refresh(row)
         return _to_snapshot(row)
 
@@ -293,7 +300,7 @@ class DurableBridgeRepository:
         row.last_seen_at = now
         row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
         row.closed_at = None if draining else now
-        await self._session.commit()
+        await self._commit_writer_section()
         await self._session.refresh(row)
         return _to_snapshot(row)
 
@@ -309,8 +316,45 @@ class DurableBridgeRepository:
         for row in rows:
             row.state = HttpBridgeSessionState.DRAINING
             row.last_seen_at = now
-        await self._session.commit()
+        await self._commit_writer_section()
         return len(rows)
+
+    async def purge_closed_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
+        deleted_count = 0
+        while True:
+            result = await self._session.execute(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                    HttpBridgeSessionRecord.last_seen_at < cutoff,
+                )
+                .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
+                .limit(batch_size)
+            )
+            session_ids = list(result.scalars().all())
+            if not session_ids:
+                return deleted_count
+            async with sqlite_writer_section():
+                await self._session.execute(
+                    delete(HttpBridgeSessionAlias).where(
+                        HttpBridgeSessionAlias.session_id.in_(
+                            select(HttpBridgeSessionRecord.id).where(
+                                HttpBridgeSessionRecord.id.in_(session_ids),
+                                HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                                HttpBridgeSessionRecord.last_seen_at < cutoff,
+                            )
+                        )
+                    )
+                )
+                deleted = await self._session.execute(
+                    delete(HttpBridgeSessionRecord)
+                    .where(HttpBridgeSessionRecord.id.in_(session_ids))
+                    .where(HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED)
+                    .where(HttpBridgeSessionRecord.last_seen_at < cutoff)
+                    .returning(HttpBridgeSessionRecord.id)
+                )
+                await self._session.commit()
+            deleted_count += len(deleted.scalars().all())
 
     async def upsert_alias(
         self,
@@ -364,8 +408,9 @@ class DurableBridgeRepository:
             )
         else:
             raise RuntimeError(f"DurableBridgeRepository alias upsert unsupported for dialect={dialect!r}")
-        await self._session.execute(statement)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(statement)
+            await self._session.commit()
 
     async def _clear_aliases_for_session(self, session_id: str) -> None:
         await self._session.execute(

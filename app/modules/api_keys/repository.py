@@ -79,6 +79,7 @@ class _Unset(Enum):
 
 _UNSET = _Unset.UNSET
 _EXPIRED_LIMIT_RESET_BATCH_SIZE = 500
+_STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE = 500
 
 
 class ApiKeysRepository:
@@ -247,9 +248,10 @@ class ApiKeysRepository:
         await self._session.commit()
         return True
 
-    async def update_last_used(self, key_id: str) -> None:
+    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
         await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
 
     async def commit(self) -> None:
         await self._session.commit()
@@ -601,6 +603,81 @@ class ApiKeysRepository:
                 cost_microdollars=cost_microdollars,
             )
         )
+
+    async def touch_usage_reservation(self, reservation_id: str) -> bool:
+        result = await self._session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == reservation_id)
+            .where(ApiKeyUsageReservation.status == "reserved")
+            .values(updated_at=utcnow())
+            .returning(ApiKeyUsageReservation.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def release_stale_usage_reservations(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE,
+    ) -> int:
+        released_count = 0
+
+        try:
+            while True:
+                result = await self._session.execute(
+                    select(ApiKeyUsageReservation)
+                    .options(selectinload(ApiKeyUsageReservation.items))
+                    .where(ApiKeyUsageReservation.status == "reserved")
+                    .where(ApiKeyUsageReservation.updated_at < cutoff)
+                    .order_by(ApiKeyUsageReservation.updated_at.asc())
+                    .limit(batch_size)
+                )
+                rows = list(result.scalars().unique().all())
+                if not rows:
+                    break
+
+                for row in rows:
+                    claimed = await self._session.execute(
+                        update(ApiKeyUsageReservation)
+                        .where(ApiKeyUsageReservation.id == row.id)
+                        .where(ApiKeyUsageReservation.status == "reserved")
+                        .where(ApiKeyUsageReservation.updated_at < cutoff)
+                        .values(
+                            status="released",
+                            input_tokens=None,
+                            output_tokens=None,
+                            cached_input_tokens=None,
+                            cost_microdollars=None,
+                        )
+                        .returning(ApiKeyUsageReservation.id)
+                    )
+                    if claimed.scalar_one_or_none() is None:
+                        continue
+
+                    for item in row.items:
+                        await self.adjust_reserved_usage(
+                            item.limit_id,
+                            delta=-item.reserved_delta,
+                            expected_reset_at=item.expected_reset_at,
+                        )
+                        await self.upsert_reservation_item_actual(
+                            row.id,
+                            item=UsageReservationItemData(
+                                limit_id=item.limit_id,
+                                limit_type=LimitType(item.limit_type),
+                                reserved_delta=item.reserved_delta,
+                                expected_reset_at=item.expected_reset_at,
+                                actual_delta=item.actual_delta,
+                            ),
+                            actual_delta=0,
+                        )
+                    released_count += 1
+                await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        return released_count
 
     async def trends_by_key(
         self,

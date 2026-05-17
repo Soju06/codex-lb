@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -83,6 +84,63 @@ def test_import_session_with_postgres_url_does_not_error() -> None:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+@pytest.mark.asyncio
+async def test_sqlite_writer_section_serializes_file_sqlite_writers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'store.db'}"),
+    )
+    monkeypatch.setattr(session_module, "_sqlite_writer_lock", None)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    order: list[str] = []
+
+    async def first_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            order.append("first-start")
+            first_entered.set()
+            await release_first.wait()
+            order.append("first-end")
+
+    async def second_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            order.append("second-start")
+            order.append("second-end")
+
+    first_task = asyncio.create_task(first_writer())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second_writer())
+    await asyncio.sleep(0)
+
+    assert order == ["first-start"]
+
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert order == ["first-start", "first-end", "second-start", "second-end"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_writer_section_does_not_serialize_memory_sqlite(monkeypatch) -> None:
+    monkeypatch.setattr(session_module, "_settings", _FakeSettings(database_url="sqlite+aiosqlite:///:memory:"))
+    monkeypatch.setattr(session_module, "_sqlite_writer_lock", None)
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            first_entered.set()
+            await second_entered.wait()
+
+    async def second_writer() -> None:
+        await first_entered.wait()
+        async with session_module.sqlite_writer_section():
+            second_entered.set()
+
+    await asyncio.wait_for(asyncio.gather(first_writer(), second_writer()), timeout=1)
 
 
 def test_background_pool_defaults_to_main_pool_settings(monkeypatch) -> None:

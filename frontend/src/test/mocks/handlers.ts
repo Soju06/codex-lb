@@ -79,6 +79,9 @@ const SettingsPayloadSchema = z
 		preferEarlierResetAccounts: z.boolean().optional(),
 		routingStrategy: z.enum(["usage_weighted", "round_robin", "capacity_weighted"]).optional(),
 		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
+		stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+		stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+		stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),
 		totpConfigured: z.boolean().optional(),
@@ -395,6 +398,22 @@ export const handlers = [
 		}
 		account.status = "active";
 		return HttpResponse.json({ status: "reactivated" });
+	}),
+
+	http.patch("/api/accounts/:accountId", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await request.json() as { securityWorkAuthorized?: boolean };
+		if (typeof payload.securityWorkAuthorized === "boolean") {
+			account.securityWorkAuthorized = payload.securityWorkAuthorized;
+		}
+		return HttpResponse.json({ status: "updated" });
 	}),
 
 	http.get("/api/accounts/:accountId/trends", ({ params }) => {

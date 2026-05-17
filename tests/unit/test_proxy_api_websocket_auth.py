@@ -521,3 +521,25 @@ def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking
     error = masked.model_dump(mode="json")["error"]
     assert error["code"] == "stream_incomplete"
     assert "resp_missing" not in masked.model_dump_json()
+
+
+def test_public_missing_tool_output_input_error_preserves_client_status():
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "param": "input",
+        },
+    }
+
+    parsed = proxy_api_module._parse_error_envelope(payload)
+    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
+
+    assert status_code == 400
+    error = masked.model_dump(mode="json")["error"]
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" in masked.model_dump_json()

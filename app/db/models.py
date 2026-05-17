@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    REAL,
     BigInteger,
     Boolean,
     DateTime,
@@ -76,6 +77,18 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    routing_policy: Mapped[str] = mapped_column(
+        String,
+        default="normal",
+        server_default=text("'normal'"),
+        nullable=False,
+    )
+    security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -146,6 +159,7 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    slim_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
@@ -269,6 +283,24 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
+        REAL,
+        default=95.0,
+        server_default=text("95.0"),
+        nullable=False,
+    )
+    sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
+        REAL,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
+    additional_quota_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -296,6 +328,12 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    traffic_class: Mapped[str] = mapped_column(
+        String,
+        default="foreground",
+        server_default=text("'foreground'"),
+        nullable=False,
+    )
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -664,10 +702,29 @@ Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
+Index(
+    "idx_api_key_usage_reservations_status_updated_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.updated_at
+)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
+Index(
+    "idx_http_bridge_sessions_latest_turn_scope_state_seen",
+    HttpBridgeSessionRecord.latest_turn_state,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
+Index(
+    "idx_http_bridge_sessions_latest_response_scope_state_seen",
+    HttpBridgeSessionRecord.latest_response_id,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
 Index(
     "idx_http_bridge_session_aliases_session_id",
     HttpBridgeSessionAlias.session_id,

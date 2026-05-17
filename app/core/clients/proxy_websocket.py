@@ -20,6 +20,7 @@ from websockets.typing import Origin
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
+from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
@@ -100,6 +101,95 @@ class WebsocketsResponsesWebSocket:
         if value is None:
             return None
         return str(value)
+
+
+class ArchivingResponsesWebSocket:
+    def __init__(
+        self,
+        wrapped: UpstreamResponsesWebSocket,
+        *,
+        url: str,
+        headers: dict[str, str],
+        account_id: str | None,
+    ) -> None:
+        self._wrapped = wrapped
+        self._url = url
+        self._headers = headers
+        self._account_id = account_id
+
+    async def send_text(self, text: str) -> None:
+        archive_text(
+            direction="codex_to_server",
+            kind="responses",
+            transport="websocket",
+            text=text,
+            account_id=self._account_id,
+            method="GET",
+            url=self._url,
+            headers=self._headers,
+            extra={"frame_type": "text"},
+        )
+        await self._wrapped.send_text(text)
+
+    async def send_bytes(self, data: bytes) -> None:
+        archive_bytes(
+            direction="codex_to_server",
+            kind="responses",
+            transport="websocket",
+            data=data,
+            account_id=self._account_id,
+            method="GET",
+            url=self._url,
+            headers=self._headers,
+            extra={"frame_type": "binary"},
+        )
+        await self._wrapped.send_bytes(data)
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        message = await self._wrapped.receive()
+        if message.kind == "text" and message.text is not None:
+            archive_text(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                text=message.text,
+                account_id=self._account_id,
+                method="GET",
+                url=self._url,
+                headers=self._headers,
+                extra={"frame_type": "text"},
+            )
+        elif message.kind == "binary" and message.data is not None:
+            archive_bytes(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                data=message.data,
+                account_id=self._account_id,
+                method="GET",
+                url=self._url,
+                headers=self._headers,
+                extra={"frame_type": "binary"},
+            )
+        else:
+            archive_text(
+                direction="server_to_codex",
+                kind="responses",
+                transport="websocket",
+                text=message.error or "",
+                account_id=self._account_id,
+                method="GET",
+                url=self._url,
+                headers=self._headers,
+                extra={"frame_type": message.kind, "close_code": message.close_code},
+            )
+        return message
+
+    async def close(self) -> None:
+        await self._wrapped.close()
+
+    def response_header(self, name: str) -> str | None:
+        return self._wrapped.response_header(name)
 
 
 def filter_inbound_websocket_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -207,7 +297,12 @@ async def connect_responses_websocket(
             openai_error("upstream_unavailable", str(exc)),
         ) from exc
 
-    return WebsocketsResponsesWebSocket(response)
+    return ArchivingResponsesWebSocket(
+        WebsocketsResponsesWebSocket(response),
+        url=url,
+        headers=upstream_headers,
+        account_id=account_id,
+    )
 
 
 def _close_code_from_exception(exc: ConnectionClosedOK | ConnectionClosedError) -> int | None:

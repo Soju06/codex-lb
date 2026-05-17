@@ -134,8 +134,8 @@ class Settings(BaseSettings):
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = False
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
-    compact_request_budget_seconds: float = Field(default=75.0, gt=0)
-    stream_idle_timeout_seconds: float = 300.0
+    compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    stream_idle_timeout_seconds: float = 600.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
@@ -181,6 +181,8 @@ class Settings(BaseSettings):
     log_proxy_service_tier_trace: bool = False
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
+    conversation_archive_enabled: bool = False
+    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)

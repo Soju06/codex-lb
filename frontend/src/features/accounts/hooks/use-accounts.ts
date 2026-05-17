@@ -8,6 +8,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccount,
 } from "@/features/accounts/api";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
@@ -67,7 +68,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const updateMutation = useMutation({
+    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
+      updateAccount(accountId, { securityWorkAuthorized }),
+    onSuccess: () => {
+      toast.success("Account updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, updateMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

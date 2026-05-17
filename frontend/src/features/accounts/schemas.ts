@@ -55,6 +55,7 @@ export const AccountSummarySchema = z.object({
   displayName: z.string(),
   planType: z.string(),
   status: z.string(),
+  securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -87,6 +88,10 @@ export const AccountImportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+});
+
+export const AccountUpdateRequestSchema = z.object({
+  securityWorkAuthorized: z.boolean().optional(),
 });
 
 export const OauthStartRequestSchema = z.object({

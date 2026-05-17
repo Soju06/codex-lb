@@ -24,7 +24,7 @@ _settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
-_SQLITE_BUSY_TIMEOUT_MS = 5_000
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 
 
@@ -113,6 +113,7 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 _background_engine: AsyncEngine | None = None
 _background_session_factory: async_sessionmaker[AsyncSession] | None = None
+_sqlite_writer_lock: anyio.Lock | None = None
 
 _T = TypeVar("_T")
 
@@ -239,6 +240,19 @@ async def get_background_session() -> AsyncIterator[AsyncSession]:
         if session.in_transaction():
             await _safe_rollback(session)
         await _safe_close(session)
+
+
+@asynccontextmanager
+async def sqlite_writer_section() -> AsyncIterator[None]:
+    """Serialize local SQLite write transactions without throttling upstream work."""
+    global _sqlite_writer_lock
+    if not _is_sqlite_url(_settings.database_url) or _is_sqlite_memory_url(_settings.database_url):
+        yield
+        return
+    if _sqlite_writer_lock is None:
+        _sqlite_writer_lock = anyio.Lock()
+    async with _sqlite_writer_lock:
+        yield
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

@@ -625,6 +625,56 @@ async def test_select_account_filters_to_assigned_account_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_filters_to_security_work_authorized_accounts() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+    authorized = _make_account("acc-cyber", "cyber@example.com")
+    authorized.security_work_authorized = True
+
+    accounts_repo = StubAccountsRepository([regular, authorized])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(require_security_work_authorized=True)
+
+    assert selection.account is not None
+    assert selection.account.id == authorized.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_missing_security_work_authorized_accounts() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+
+    accounts_repo = StubAccountsRepository([regular])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(require_security_work_authorized=True)
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_missing_security_work_authorized_before_exclusions() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+
+    accounts_repo = StubAccountsRepository([regular])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        exclude_account_ids={regular.id},
+        require_security_work_authorized=True,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
 async def test_select_account_scope_does_not_prune_runtime_for_other_accounts() -> None:
     retained = _make_account("acc-retained", "retained@example.com")
     assigned = _make_account("acc-assigned", "assigned@example.com")
@@ -1010,6 +1060,58 @@ async def test_select_account_accepts_legacy_additional_limit_aliases(additional
 
     assert selection.account is not None
     assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
+async def test_additional_quota_selection_does_not_persist_standard_status_recovery() -> None:
+    account = _make_account("acc-additional-standard-exhausted")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = int(time.time()) + 3600
+    account.blocked_at = int(time.time())
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=61,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                62,
+                account_id=account.id,
+                window="primary",
+                used_percent=5.0,
+                recorded_at=now,
+                reset_at=now_epoch + 300,
+            )
+        }
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(additional_limit_name="codex_other")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio
@@ -2276,6 +2378,26 @@ async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_reque
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    assert selection.account is None
+    assert selection.error_code is None
+    assert selection.error_message is not None
+    assert "No available accounts" in selection.error_message
+
+
+@pytest.mark.asyncio
+async def test_select_account_empty_pool_preserves_no_accounts_for_opportunistic_request(monkeypatch) -> None:
+    accounts_repo = StubAccountsRepository([])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex", traffic_class="opportunistic")
 
     assert selection.account is None
     assert selection.error_code is None

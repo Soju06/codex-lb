@@ -25,12 +25,14 @@ def _active(
     account_id: str,
     used_percent: float = 10.0,
     secondary_used_percent: float | None = None,
+    routing_policy: str = "normal",
 ) -> AccountState:
     return AccountState(
         account_id,
         AccountStatus.ACTIVE,
         used_percent=used_percent,
         secondary_used_percent=secondary_used_percent,
+        routing_policy=routing_policy,
     )
 
 
@@ -68,6 +70,7 @@ async def _invoke_stickiness(
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
     budget_threshold_pct: float = 95.0,
+    secondary_budget_threshold_pct: float = 100.0,
     routing_strategy: RoutingStrategy = "usage_weighted",
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
@@ -91,6 +94,7 @@ async def _invoke_stickiness(
         reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=sticky_max_age_seconds,
         budget_threshold_pct=budget_threshold_pct,
+        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
         routing_strategy=routing_strategy,
         sticky_repo=sticky_repo,
@@ -166,6 +170,44 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD)
+
+
+@pytest.mark.asyncio
+async def test_sticky_reallocates_from_normal_to_burn_first_policy():
+    acc_a = _active("a", used_percent=1.0, routing_policy="normal")
+    acc_b = _active("b", used_percent=80.0, routing_policy="burn_first")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_sticky_reallocates_from_preserve_to_normal_policy():
+    acc_a = _active("a", used_percent=1.0, routing_policy="preserve")
+    acc_b = _active("b", used_percent=10.0, routing_policy="normal")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
 @pytest.mark.asyncio
@@ -811,6 +853,29 @@ async def test_budget_threshold_preserves_sticky_when_every_candidate_secondary_
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
     repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_secondary_budget_threshold_controls_sticky_reallocation():
+    acc_a = _active("a", used_percent=10.0, secondary_used_percent=99.0)
+    acc_b = _active("b", used_percent=20.0, secondary_used_percent=10.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
 
 
 @pytest.mark.asyncio

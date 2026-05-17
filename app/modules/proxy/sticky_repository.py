@@ -12,6 +12,7 @@ from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, StickySession, StickySessionKind
+from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 
@@ -56,8 +57,9 @@ class StickySessionsRepository:
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
         statement = self._build_upsert_statement(key, account_id, kind)
-        await self._session.execute(statement)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(statement)
+            await self._session.commit()
         row = await self.get_entry(key, kind=kind)
         if row is None:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
@@ -71,8 +73,9 @@ class StickySessionsRepository:
             StickySession.key == key,
             StickySession.kind == kind,
         )
-        result = await self._session.execute(statement.returning(StickySession.key))
-        await self._session.commit()
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement.returning(StickySession.key))
+            await self._session.commit()
         return result.scalar_one_or_none() is not None
 
     async def delete_entries(
@@ -85,8 +88,9 @@ class StickySessionsRepository:
         statement = delete(StickySession).where(
             or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in targets))
         )
-        result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
-        await self._session.commit()
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
+            await self._session.commit()
         return [(key, kind) for key, kind in result.all()]
 
     async def list_entry_identifiers(
@@ -174,9 +178,10 @@ class StickySessionsRepository:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
-        result = await self._session.execute(stmt.returning(StickySession.key))
-        deleted = len(result.scalars().all())
-        await self._session.commit()
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
         return deleted
 
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:

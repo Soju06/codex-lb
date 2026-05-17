@@ -79,6 +79,7 @@ export function createAccountSummary(
 		displayName: "primary@example.com",
 		planType: "plus",
 		status: "active",
+		securityWorkAuthorized: false,
 		usage: {
 			primaryRemainingPercent: 82,
 			secondaryRemainingPercent: 67,
@@ -355,6 +356,9 @@ export function createDashboardSettings(
 		routingStrategy: "usage_weighted",
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
+		stickyReallocationBudgetThresholdPct: 95,
+		stickyReallocationPrimaryBudgetThresholdPct: 95,
+		stickyReallocationSecondaryBudgetThresholdPct: 100,
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,

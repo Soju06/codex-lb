@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, Self, cast
+from typing import Any, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
@@ -21,6 +22,7 @@ from app.core.clients.proxy import _build_upstream_headers, filter_inbound_heade
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
+from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
@@ -37,13 +39,46 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import OPPORTUNISTIC_BURN_WINDOW_CLOSED, AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_missing_tool_precreated",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":[]}',
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "param": "input",
+            "message": "No tool output found for function call call_missing.",
+        },
+    }
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
 
 
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
@@ -57,6 +92,26 @@ def _proxy_error_code(exc: proxy_module.ProxyResponseError) -> str | None:
 
 def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
     return exc.payload["error"].get("message")
+
+
+def test_trim_websocket_previous_response_input_items_accepts_untyped_assistant_replay() -> None:
+    items: list[JsonValue] = [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+        {"type": "custom_tool_call", "call_id": "call_custom", "name": "shell", "input": "pwd"},
+        {"type": "custom_tool_call_output", "call_id": "call_custom", "output": "/tmp"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_websocket_previous_response_input_items(items) == items[2:]
+
+
+def test_trim_websocket_previous_response_input_items_keeps_non_replay_prefix() -> None:
+    items: list[JsonValue] = [
+        {"role": "system", "content": [{"type": "input_text", "text": "local context"}]},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+    ]
+
+    assert proxy_service._trim_websocket_previous_response_input_items(items) == items
 
 
 def test_filter_inbound_headers_strips_auth_and_account():
@@ -142,6 +197,507 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     proxy_request_policy.apply_api_key_enforcement(payload, api_key)
 
     assert payload.service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_rejects_disallowed_model_before_capacity_check():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock()))
+    request = Request({"type": "http", "method": "GET", "path": "/backend-api/codex/opportunistic/admission"})
+
+    with pytest.raises(ProxyModelNotAllowed):
+        await proxy_api.opportunistic_admission(
+            request,
+            model="gpt-5.2",
+            context=cast(proxy_api.ProxyContext, context),
+            api_key=api_key,
+        )
+
+    context.service.check_opportunistic_admission.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_uses_enforced_model_for_capacity_check():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=["gpt-5.1"],
+        enforced_model="gpt-5.1",
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    selection = AccountSelection(account=_make_account("acc_opportunistic"), error_message=None)
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection)))
+    request = Request({"type": "http", "method": "GET", "path": "/backend-api/codex/opportunistic/admission"})
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 200
+    context.service.check_opportunistic_admission.assert_awaited_once()
+    assert context.service.check_opportunistic_admission.await_args.kwargs["model"] == "gpt-5.1"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_requires_model_without_enforced_model():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(service=SimpleNamespace(check_opportunistic_admission=AsyncMock()))
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/backend-api/codex/opportunistic/admission",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 400
+    body = json.loads(bytes(response.body))
+    assert body["error"]["param"] == "model"
+    context.service.check_opportunistic_admission.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_preserves_no_account_denial_without_burn_window():
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No available accounts",
+                    error_code=None,
+                )
+            )
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/backend-api/codex/opportunistic/admission",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    response = await proxy_api.opportunistic_admission(
+        request,
+        model="gpt-5.1",
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    assert "Retry-After" not in response.headers
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "no_accounts"
+    context.service.check_opportunistic_admission.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_files_create_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def create_file(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(service=SimpleNamespace(create_file=create_file))
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/files", "headers": []})
+
+    response = await proxy_api.backend_files_create(
+        request,
+        proxy_api.FileCreateRequest(file_name="input.txt", file_size=1, use_case="assistants"),
+        cast(proxy_api.ProxyContext, context),
+        None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_files_finalize_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def finalize_file(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(service=SimpleNamespace(finalize_file=finalize_file))
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/files/file_1/uploaded", "headers": []})
+
+    response = await proxy_api.backend_files_finalize(
+        request,
+        "file_1",
+        cast(proxy_api.ProxyContext, context),
+        None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_preserves_retry_after_from_proxy_selection(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def skip_release(reservation):
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", skip_release)
+
+    async def read_file():
+        return b"audio"
+
+    async def transcribe(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            transcribe=transcribe,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/audio/transcriptions", "headers": []})
+    file = SimpleNamespace(read=read_file, filename="audio.wav", content_type="audio/wav")
+
+    response = await proxy_api._transcribe_request(
+        request=request,
+        file=cast(Any, file),
+        prompt=None,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers["X-RateLimit-Limit"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_preserves_retry_after_from_late_selection_denial(monkeypatch):
+    async def skip_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    async def stream_responses(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "opportunistic burn window closed"),
+            headers={"Retry-After": "60"},
+        )
+        yield ""
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(account=_make_account("acc_opportunistic"), error_message=None)
+            ),
+            rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
+            stream_responses=stream_responses,
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="test", input="hello")
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers["X-RateLimit-Limit"] == "1"
+    release_reservation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_applies_opportunistic_admission_before_limits(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No accounts with available additional quota",
+                    error_code="no_additional_quota_eligible_accounts",
+                )
+            ),
+            compact_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses/compact",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = ResponsesCompactRequest(model="gpt-5.1", instructions="test", input="compact")
+
+    response = await proxy_api._compact_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "no_additional_quota_eligible_accounts"
+    enforce_limits.assert_not_awaited()
+    context.service.compact_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_applies_opportunistic_admission_before_limits(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="No accounts with available additional quota",
+                    error_code="no_additional_quota_eligible_accounts",
+                )
+            ),
+            stream_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = proxy_api.ChatCompletionsRequest.model_validate(
+        {"model": "gpt-5.1", "messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    response = await proxy_api.v1_chat_completions(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "no_additional_quota_eligible_accounts"
+    enforce_limits.assert_not_awaited()
+    context.service.stream_responses.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_preserves_non_burn_window_opportunistic_admission_failure(monkeypatch):
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            check_opportunistic_admission=AsyncMock(
+                return_value=AccountSelection(
+                    account=None,
+                    error_message="Additional quota usage data is unavailable",
+                    error_code="additional_quota_data_unavailable",
+                )
+            ),
+            stream_responses=AsyncMock(),
+        )
+    )
+    enforce_limits = AsyncMock()
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce_limits)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+    payload = proxy_api.ChatCompletionsRequest.model_validate(
+        {"model": "gpt-5.1", "messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    response = await proxy_api.v1_chat_completions(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "additional_quota_data_unavailable"
+    enforce_limits.assert_not_awaited()
+    context.service.stream_responses.assert_not_called()
 
 
 def _build_registry_with_model(slug: str, efforts: list[str]):
@@ -1057,6 +1613,8 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
         sticky_reallocation_budget_threshold_pct=95.0,
+        sticky_reallocation_primary_budget_threshold_pct=95.0,
+        sticky_reallocation_secondary_budget_threshold_pct=100.0,
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
@@ -1078,6 +1636,35 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         max_sse_event_bytes=16 * 1024 * 1024,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_codex_control_account_without_budget_uses_balancer(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selected_account = _make_account("acc_codex_balanced")
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    result = await service._select_codex_control_account_without_budget(
+        affinity=proxy_service._AffinityPolicy(
+            key="control-session",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            max_age_seconds=123,
+        ),
+        api_key=None,
+    )
+
+    assert result is not None
+    assert result.id == "acc_codex_balanced"
+    select_account.assert_awaited_once_with(
+        sticky_key="control-session",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=123,
+        account_ids=None,
+        budget_threshold_pct=95.0,
     )
 
 
@@ -1160,7 +1747,7 @@ class _SsePostResponse:
 
 
 class _SseSession:
-    def __init__(self, response: _SsePostResponse) -> None:
+    def __init__(self, response: object) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
@@ -1732,6 +2319,70 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    class ErrorPostResponse:
+        status = 429
+        reason = "Too Many Requests"
+        content = _DummyContent([])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            del content_type
+            return {"error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}}
+
+        async def text(self):
+            return "slow down"
+
+    archived: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_json", lambda **kwargs: archived.append(kwargs))
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_module.stream_responses(
+                payload,
+                headers={},
+                access_token="token",
+                account_id="acc_1",
+                session=cast(proxy_module.aiohttp.ClientSession, _SseSession(ErrorPostResponse())),
+                raise_for_status=True,
+            )
+        ]
+
+    assert exc_info.value.status_code == 429
+    assert len(archived) == 2
+    assert archived[-1]["direction"] == "server_to_codex"
+    assert archived[-1]["status_code"] == 429
+    assert archived[-1]["payload"] == {
+        "error": {"code": "rate_limit_exceeded", "message": "slow down", "type": "server_error"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -2062,6 +2713,67 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
         expected_created,
         expected_completed,
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    websocket = _WsResponse(
+        [
+            _ws_text_message({"type": "response.created", "response": {"id": "resp_ws_error"}}),
+            _ws_text_message(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "No tool output found for function call call_missing.",
+                        "param": "input",
+                    },
+                    "status": 400,
+                }
+            ),
+            _ws_text_message({"type": "response.completed", "response": {"id": "resp_ws_error"}}),
+        ]
+    )
+    session = _WsSession(websocket)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={"originator": "codex_cli_rs", "session_id": "sid_ws"},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert len(events) == 2
+    failed_payload = parse_sse_data_json(events[1])
+    assert failed_payload is not None
+    assert failed_payload["type"] == "response.failed"
+    failed_response = cast(dict[str, JsonValue], failed_payload["response"])
+    failed_error = cast(dict[str, JsonValue], failed_response["error"])
+    assert failed_error["code"] == "invalid_request_error"
+    assert failed_error["message"] == "No tool output found for function call call_missing."
+    assert failed_error["param"] == "input"
+    assert websocket._index == 2
 
 
 @pytest.mark.asyncio
@@ -4260,6 +4972,27 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_admission_uses_split_sticky_budget_thresholds(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sticky_reallocation_budget_threshold_pct = 90.0
+    settings.sticky_reallocation_primary_budget_threshold_pct = 85.0
+    settings.sticky_reallocation_secondary_budget_threshold_pct = 98.0
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    admission = AsyncMock(return_value=AccountSelection(account=_make_account("acc_opportunistic"), error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "check_opportunistic_admission", admission)
+
+    await service.check_opportunistic_admission(api_key=None, model="gpt-5.1")
+
+    admission.assert_awaited_once()
+    await_args = admission.await_args
+    assert await_args is not None
+    assert await_args.kwargs["budget_threshold_pct"] == 85.0
+    assert await_args.kwargs["secondary_budget_threshold_pct"] == 98.0
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_non_retryable_first_failure_does_not_retry(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -4290,8 +5023,217 @@ async def test_stream_responses_non_retryable_first_failure_does_not_retry(monke
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert select_account.await_count == 1
-    record_error.assert_not_awaited()
+    record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_response_ids(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_tool_dupe")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_tool_first",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "response_id": "resp_tool_replayed",
+        "item": {
+            **tool_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_tool_dupe"}}\n\n'
+        yield f"data: {json.dumps(tool_payload)}\n\n"
+        yield f"data: {json.dumps(replayed_tool_payload)}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_tool_dupe"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[JsonValue] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert tool_chunks == [tool_payload]
+    terminal_event = parse_sse_data_json(chunks[-1])
+    assert isinstance(terminal_event, dict)
+    assert terminal_event["type"] == "response.failed"
+    terminal_response = cast(dict[str, JsonValue], terminal_event["response"])
+    terminal_error = cast(dict[str, JsonValue], terminal_response["error"])
+    assert terminal_error["code"] == "stream_incomplete"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_suppresses_same_response_http_tool_call_replay(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_tool_dupe")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_http_tool_dupe",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"date","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "item": {
+            **tool_payload["item"],
+            "id": "fc_replayed",
+            "call_id": "call_replayed",
+        },
+    }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_tool_dupe"}}\n\n'
+        yield f"data: {json.dumps(tool_payload)}\n\n"
+        yield f"data: {json.dumps(replayed_tool_payload)}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_tool_dupe"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[JsonValue] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert tool_chunks == [tool_payload]
+    terminal_payload = parse_sse_data_json(chunks[-1])
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.failed"
+    terminal_response = cast(dict[str, object], terminal_payload["response"])
+    terminal_error = cast(dict[str, object], terminal_response["error"])
+    assert terminal_error["code"] == "stream_incomplete"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_trims_overlapping_parallel_http_tool_call_replay(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_parallel_tool_overlap")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    first_arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+            },
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr checks --repo Soju06/codex-lb"},
+            },
+        ]
+    }
+    replay_arguments = {
+        "tool_uses": [
+            {
+                "recipient_name": "functions.exec_command",
+                "parameters": {"cmd": "gh pr view --repo Soju06/codex-lb"},
+            },
+            {
+                "recipient_name": "github.read_file",
+                "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+            },
+        ]
+    }
+
+    def _parallel_payload(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": "resp_http_parallel_overlap",
+            "item": {
+                "type": "function_call",
+                "name": "multi_tool_use.parallel",
+                "arguments": json.dumps(arguments),
+                "call_id": "call_parallel",
+            },
+        }
+
+    async def fake_stream(*_, **__):
+        yield 'data: {"type":"response.created","response":{"id":"resp_http_parallel_overlap"}}\n\n'
+        yield proxy_service.format_sse_event(_parallel_payload(first_arguments))
+        yield proxy_service.format_sse_event(_parallel_payload(replay_arguments))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_http_parallel_overlap"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    tool_chunks: list[dict[str, JsonValue]] = []
+    for chunk in chunks:
+        chunk_payload = parse_sse_data_json(chunk)
+        if isinstance(chunk_payload, dict) and chunk_payload.get("type") == "response.output_item.done":
+            tool_chunks.append(chunk_payload)
+
+    assert len(tool_chunks) == 2
+    replay_item = tool_chunks[1]["item"]
+    assert isinstance(replay_item, dict)
+    replay_item_arguments = replay_item["arguments"]
+    assert isinstance(replay_item_arguments, str)
+    assert json.loads(replay_item_arguments)["tool_uses"] == [
+        {
+            "recipient_name": "github.read_file",
+            "parameters": {"repo": "Soju06/codex-lb", "path": "README.md"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -4379,6 +5321,133 @@ async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["transport"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_preserves_non_burn_window_opportunistic_denial(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No accounts with available additional quota",
+            error_code="no_additional_quota_eligible_accounts",
+        )
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_opportunistic_closed",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 503
+    assert sent_payload["error"]["code"] == "no_additional_quota_eligible_accounts"
+    assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_maps_opportunistic_burn_window_to_rate_limit(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="preserve floor or stale usage data blocks opportunistic burn",
+            error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+        )
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="opportunistic-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        traffic_class="opportunistic",
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_opportunistic_closed",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"]["code"] == "rate_limit_exceeded"
+    assert sent_payload["error"]["message"].startswith("opportunistic burn window closed")
+    assert request_logs.calls[0]["error_code"] == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio
@@ -5297,6 +6366,385 @@ async def test_prepare_websocket_response_create_request_does_not_infer_previous
     assert request_logs.session_lookup_calls == []
 
 
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_trims_codex_session_full_replay(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_trim_replay",
+        name="ws-trim-replay",
+        key_prefix="sk-ws-trim",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {"type": "function_call_output", "call_id": "call_old", "output": "old output"},
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_trim"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_completed_anchor"
+    assert upstream_payload["input"] == [new_input]
+    assert prepared.request_state.previous_response_id == "resp_completed_anchor"
+    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert prepared.request_state.input_item_count == 3
+    assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
+        [*historical_input, new_input]
+    )
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == [*historical_input, new_input]
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_trim_replay_size",
+        name="ws-trim-replay-size",
+        key_prefix="sk-ws-trim-size",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {"type": "function_call_output", "call_id": "call_large", "output": "A" * 40000},
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_trim_size"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    fresh_input = cast(list[JsonValue], fresh_payload["input"])
+    assert len(prepared.request_state.fresh_upstream_request_text.encode("utf-8")) <= 2048
+    assert fresh_input[1] == {
+        "type": "function_call_output",
+        "call_id": "call_large",
+        "output": proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(bytes=40000),
+    }
+    assert fresh_input[-1] == new_input
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_full_replay_retry_text_disables_oversized_unslimmable_retry(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_trim_replay_too_large",
+        name="ws-trim-replay-too-large",
+        key_prefix="sk-ws-trim-large",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "H" * 5000}]},
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_trim_too_large"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    assert prepared.request_state.fresh_upstream_request_text is None
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+
+
+def test_websocket_continuity_state_reuses_codex_session_scope():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+
+    first = service._websocket_continuity_state_for_request(
+        {"session_id": "codex-session-shared"},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    first.last_completed_response_id = "resp_cached"
+
+    second = service._websocket_continuity_state_for_request(
+        {"session_id": "codex-session-shared"},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    unscoped = service._websocket_continuity_state_for_request(
+        {"session_id": "codex-session-shared"},
+        api_key=None,
+        codex_session_affinity=False,
+    )
+
+    assert second is first
+    assert second.last_completed_response_id == "resp_cached"
+    assert unscoped is not first
+
+
+def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=2,
+        last_completed_response_id="resp_old",
+        last_completed_input_prefix_fingerprint="old-fingerprint",
+    )
+    incomplete_state = proxy_service._WebSocketRequestState(
+        request_id="ws_incomplete_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=3,
+        input_full_fingerprint=None,
+    )
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=incomplete_state,
+        response_id="resp_new_without_fingerprint",
+    )
+
+    assert continuity_state.last_completed_response_id is None
+    assert continuity_state.last_completed_input_count == 0
+    assert continuity_state.last_completed_input_prefix_fingerprint is None
+
+    complete_state = proxy_service._WebSocketRequestState(
+        request_id="ws_complete_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=3,
+        input_full_fingerprint="new-fingerprint",
+    )
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=complete_state,
+        response_id="resp_new",
+    )
+
+    assert continuity_state.last_completed_response_id == "resp_new"
+    assert continuity_state.last_completed_input_count == 3
+    assert continuity_state.last_completed_input_prefix_fingerprint == "new-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_websocket_full_replay_waits_for_pending_continuity_gap():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_pending_full_replay_anchor",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    next_request = proxy_service._WebSocketRequestState(
+        request_id="ws_next_full_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=proxy_service._WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
+    )
+    pending_requests = deque([pending_request])
+    pending_lock = anyio.Lock()
+
+    assert await proxy_service._websocket_full_replay_should_wait_for_continuity(
+        next_request,
+        pending_requests,
+        pending_lock=pending_lock,
+        codex_session_affinity=True,
+    )
+
+    async def clear_pending() -> None:
+        await asyncio.sleep(0.01)
+        async with pending_lock:
+            pending_requests.clear()
+
+    clear_task = asyncio.create_task(clear_pending())
+    try:
+        assert await proxy_service._wait_for_websocket_continuity_gap(
+            pending_requests,
+            pending_lock=pending_lock,
+            timeout_seconds=1.0,
+        )
+    finally:
+        await clear_task
+
+
+def test_websocket_response_id_reads_output_item_done_response_id():
+    payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": " resp_output_item ",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": "{}",
+        },
+    }
+
+    assert proxy_service._websocket_response_id(None, payload) == "resp_output_item"
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_precreated_websocket_request_replays_injected_anchor_as_fresh_payload():
+    anchored_payload = {"type": "response.create", "previous_response_id": "resp_anchor", "input": ["tail"]}
+    fresh_payload = {"type": "response.create", "input": ["old", "tail"]}
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_injected_anchor_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        previous_response_id="resp_anchor",
+        request_text=json.dumps(anchored_payload, separators=(",", ":")),
+        fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+        proxy_injected_previous_response_id=True,
+    )
+    pending_requests = deque([pending_request])
+
+    replay_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replay_request is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 1
+    assert pending_request.previous_response_id is None
+    assert pending_request.proxy_injected_previous_response_id is False
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert pending_request.request_text is not None
+    assert json.loads(pending_request.request_text) == fresh_payload
+
+
 def test_slim_response_create_payload_rewrites_top_level_historical_input_image():
     payload: dict[str, JsonValue] = {
         "type": "response.create",
@@ -5396,6 +6844,21 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
     assert timeout.error_message == "Proxy request budget exhausted"
 
 
+def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+
+    timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
+        [100.0],
+        proxy_request_budget_seconds=600.0,
+        stream_idle_timeout_seconds=600.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == 600.0
+    assert timeout.error_code == "stream_idle_timeout"
+    assert timeout.error_message == "Upstream stream idle timeout"
+
+
 @pytest.mark.asyncio
 async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -5445,6 +6908,171 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_expired"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_penalizes_upstream_stream_drop(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_drop")
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_drop",
+        response_id="resp_ws_drop",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    handle_stream_error.assert_awaited_once_with(
+        account,
+        {"message": "Upstream websocket closed before response.completed"},
+        "stream_incomplete",
+    )
+    assert list(pending_requests) == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_ws_drop"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+async def test_fail_pending_websocket_requests_does_not_penalize_rejected_input_override(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_rejected")
+
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_rejected",
+        response_id="resp_ws_rejected",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        error_code_override="upstream_rejected_input",
+        error_message_override="Upstream rejected the request before response.created (close_code=1000)",
+    )
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_ws_rejected"
+    assert request_logs.calls[0]["error_code"] == "upstream_rejected_input"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_logs_even_when_penalty_fails(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_penalty_fail")
+
+    async def fail_health_penalty(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("state store down")
+
+    monkeypatch.setattr(service, "_handle_stream_error", fail_health_penalty)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_penalty_fail",
+        response_id="resp_ws_penalty_fail",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert list(pending_requests) == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_ws_penalty_fail"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_marks_client_disconnect_without_penalty(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_client_disconnect")
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_client_disconnect",
+        response_id="resp_ws_client_disconnect",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        session_id="turn_client_disconnect",
+    )
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="client_disconnected",
+        error_message="Downstream websocket disconnected before response.completed",
+        api_key=None,
+        status="cancelled",
+        penalize_account=False,
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == "resp_ws_client_disconnect"
+    assert request_logs.calls[0]["status"] == "cancelled"
+    assert request_logs.calls[0]["error_code"] == "client_disconnected"
+    assert request_logs.calls[0]["session_id"] == "turn_client_disconnect"
 
 
 @pytest.mark.asyncio
@@ -5531,6 +7159,46 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     assert handle_args.args[0] == account
     assert handle_args.args[2] == "rate_limit_exceeded"
     assert failed_upstream_control.reconnect_requested is True
+
+    record_success.reset_mock()
+    handle_stream_error.reset_mock()
+    server_error_payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_server_failed",
+            "error": {"code": "server_error", "message": "upstream fell over"},
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+    server_error_event = parse_sse_event(f"data: {json.dumps(server_error_payload)}\n\n")
+    assert server_error_event is not None
+    server_error_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_server_failed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    server_error_upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._finalize_websocket_request_state(
+        server_error_state,
+        account=account,
+        account_id_value=account.id,
+        event=server_error_event,
+        event_type="response.failed",
+        payload=server_error_payload,
+        api_key=None,
+        upstream_control=server_error_upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    handle_args = handle_stream_error.await_args
+    assert handle_args is not None
+    assert handle_args.args[0] == account
+    assert handle_args.args[2] == "server_error"
+    assert server_error_upstream_control.reconnect_requested is True
 
     record_success.reset_mock()
     handle_stream_error.reset_mock()
@@ -5667,6 +7335,66 @@ async def test_process_upstream_websocket_text_does_not_match_foreign_completed_
     assert downstream_text == json.dumps(payload, separators=(",", ":"))
     finalize_request_state.assert_not_awaited()
     assert list(pending_requests) == [pending_request]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_clears_ambiguous_anonymous_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_ambiguous_raw_error")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    pending_requests = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_raw_error_a",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+            ),
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_raw_error_b",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+            ),
+        ]
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    raw_error_text = json.dumps(
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Upstream rejected the shared websocket request.",
+            },
+            "status": 400,
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        raw_error_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert not pending_requests
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.downstream_texts is not None
+    assert downstream_text == upstream_control.downstream_texts[0]
+    assert len(upstream_control.downstream_texts) == 2
+    assert finalize_request_state.await_count == 2
 
 
 @pytest.mark.parametrize(
@@ -5819,7 +7547,7 @@ async def test_process_upstream_websocket_text_masks_foreign_previous_response_n
     assert finalize_call.args[0] is pending_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == []
 
@@ -5910,7 +7638,7 @@ async def test_process_upstream_websocket_text_matches_foreign_prev_nf_to_anchor
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_a
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_b]
 
 
@@ -6000,7 +7728,7 @@ async def test_process_upstream_websocket_text_matches_foreign_prev_nf_with_over
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_b
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_a]
 
 
@@ -6160,7 +7888,7 @@ async def test_process_upstream_websocket_text_matches_anonymous_prev_nf_to_anch
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_a
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_b]
 
 
@@ -6248,7 +7976,7 @@ async def test_process_upstream_websocket_text_matches_anonymous_prev_nf_with_ov
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request_b
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert list(pending_requests) == [followup_request_a]
 
 
@@ -6336,7 +8064,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_previous_response
     assert finalize_call.args[0] is followup_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == [inflight_request]
 
@@ -6432,6 +8160,206 @@ async def test_process_upstream_websocket_text_masks_anonymous_previous_response
         assert call.kwargs["event_type"] == "response.failed"
     handle_stream_error.assert_not_awaited()
     assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_output_for_same_anchor_followups(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_anonymous_missing_tool_same_anchor")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    followup_request_a = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_same_anchor_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    followup_request_b = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_same_anchor_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+    )
+    pending_requests = deque([followup_request_a, followup_request_b])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(2),
+    )
+
+    assert "No tool output found" not in downstream_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.downstream_texts is not None
+    assert len(upstream_control.downstream_texts) == 2
+    for emitted_text in upstream_control.downstream_texts:
+        assert '"type":"response.failed"' in emitted_text
+        assert '"code":"stream_incomplete"' in emitted_text
+        assert "call_missing_output" not in emitted_text
+    assert finalize_request_state.await_count == 2
+    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
+    assert finalized_requests == [followup_request_a, followup_request_b]
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_unmatched_missing_tool_output_for_followups(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_unmatched_missing_tool_followups")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    followup_request_a = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_unmatched_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor_b",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_b"}',
+    )
+    followup_request_b = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_unmatched_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_anchor_a",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor_a"}',
+    )
+    pending_requests = deque([followup_request_a, followup_request_b])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(2),
+    )
+
+    assert "No tool output found" not in downstream_text
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.downstream_texts is not None
+    assert len(upstream_control.downstream_texts) == 2
+    for emitted_text in upstream_control.downstream_texts:
+        assert '"type":"response.failed"' in emitted_text
+        assert '"code":"stream_incomplete"' in emitted_text
+        assert "call_missing_output" not in emitted_text
+    assert finalize_request_state.await_count == 2
+    finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
+    assert finalized_requests == [followup_request_a, followup_request_b]
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_preserves_first_turn_missing_tool_output(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_first_turn_missing_tool")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    first_turn_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_first_turn_missing_tool",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create"}',
+    )
+    pending_requests = deque([first_turn_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_missing_output.",
+            "param": "input",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert "No tool output found" in downstream_text
+    assert '"code":"stream_incomplete"' not in downstream_text
+    assert upstream_control.reconnect_requested is False
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_not_awaited()
+    assert list(pending_requests) == [first_turn_request]
 
 
 @pytest.mark.asyncio
@@ -6855,6 +8783,301 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
     assert len(first_upstream.sent_text) == 1
     assert len(second_upstream.sent_text) == 1
     assert json.loads(first_upstream.sent_text[0]) == json.loads(second_upstream.sent_text[0])
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize_account(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.ProxyService, "_handle_stream_error", handle_stream_error)
+
+    class _DisconnectingDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self.sent_text: list[str] = []
+            self.closed = False
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self.closed = True
+
+    class _BlockingUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+            self.closed = False
+            self._closed = asyncio.Event()
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            await self._closed.wait()
+            return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+
+        async def close(self) -> None:
+            self.closed = True
+            self._closed.set()
+
+    upstream = _BlockingUpstreamWebSocket()
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return _make_account("acc_ws_client_disconnect_live"), upstream
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "bye"}]}],
+        "stream": True,
+    }
+    downstream = _DisconnectingDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"x-codex-turn-state": "turn_client_disconnect_live"},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert upstream.closed is True
+    assert len(upstream.sent_text) == 1
+    assert downstream.sent_text == []
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "cancelled"
+    assert request_logs.calls[0]["error_code"] == "client_disconnected"
+    assert request_logs.calls[0]["session_id"] == "turn_client_disconnect_live"
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_emits_keepalive_while_upstream_is_silent(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sse_keepalive_interval_seconds = 0.01
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+            self.closed = False
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self.closed = True
+
+    class _SilentAfterCreatedUpstream:
+        def __init__(self) -> None:
+            self._created_sent = False
+            self.closed = False
+            self._closed = asyncio.Event()
+
+        async def receive(self) -> SimpleNamespace:
+            if not self._created_sent:
+                self._created_sent = True
+                return SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_ws_keepalive"}},
+                        separators=(",", ":"),
+                    ),
+                    data=None,
+                    close_code=None,
+                    error=None,
+                )
+            await self._closed.wait()
+            return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+
+        async def close(self) -> None:
+            self.closed = True
+            self._closed.set()
+
+    downstream = _FakeDownstreamWebSocket()
+    upstream = _SilentAfterCreatedUpstream()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_keepalive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    pending_requests = deque([request_state])
+
+    relay = asyncio.create_task(
+        service._relay_upstream_websocket_messages(
+            cast(WebSocket, downstream),
+            cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+            account=_make_account("acc_ws_keepalive"),
+            account_id_value="acc_ws_keepalive",
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=proxy_service._WebSocketUpstreamControl(),
+            response_create_gate=asyncio.Semaphore(1),
+            proxy_request_budget_seconds=5.0,
+            stream_idle_timeout_seconds=5.0,
+            downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        )
+    )
+
+    try:
+        for _ in range(20):
+            if len(downstream.sent_text) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(downstream.sent_text) >= 2
+        emitted = [json.loads(text) for text in downstream.sent_text[:2]]
+        assert emitted[0]["type"] == "response.created"
+        assert emitted[1] == {
+            "type": "response.in_progress",
+            "response": {"id": "resp_ws_keepalive", "status": "in_progress"},
+        }
+    finally:
+        relay.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await relay
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_emits_keepalive_before_response_created(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sse_keepalive_interval_seconds = 0.01
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+    class _SilentBeforeCreatedUpstream:
+        def __init__(self) -> None:
+            self._closed = asyncio.Event()
+
+        async def receive(self) -> SimpleNamespace:
+            await self._closed.wait()
+            return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+
+        async def close(self) -> None:
+            self._closed.set()
+
+    downstream = _FakeDownstreamWebSocket()
+    upstream = _SilentBeforeCreatedUpstream()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_precreated_keepalive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    pending_requests = deque([request_state])
+
+    relay = asyncio.create_task(
+        service._relay_upstream_websocket_messages(
+            cast(WebSocket, downstream),
+            cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+            account=_make_account("acc_ws_precreated_keepalive"),
+            account_id_value="acc_ws_precreated_keepalive",
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=proxy_service._WebSocketUpstreamControl(),
+            response_create_gate=asyncio.Semaphore(1),
+            proxy_request_budget_seconds=5.0,
+            stream_idle_timeout_seconds=5.0,
+            downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        )
+    )
+
+    try:
+        for _ in range(20):
+            if downstream.sent_text:
+                break
+            await asyncio.sleep(0.01)
+        assert downstream.sent_text
+        assert json.loads(downstream.sent_text[0]) == {
+            "type": "response.in_progress",
+            "response": {"id": "ws_req_precreated_keepalive", "status": "in_progress"},
+        }
+    finally:
+        relay.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await relay
 
 
 @pytest.mark.asyncio
@@ -7983,6 +10206,56 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
+async def test_pop_replayable_precreated_request_refreshes_fresh_replay_fingerprint():
+    original_input: list[JsonValue] = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+    ]
+    fresh_input: list[JsonValue] = [{"role": "user", "content": "fresh"}]
+    fresh_request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": fresh_input,
+    }
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_refresh_fingerprint",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_anchor",
+                "input": original_input,
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_anchor",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+        input_item_count=len(original_input),
+        input_full_fingerprint=proxy_service._fingerprint_input_items(original_input),
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is pending_request
+    assert pending_request.previous_response_id is None
+    assert pending_request.input_item_count == len(fresh_input)
+    assert pending_request.input_full_fingerprint == proxy_service._fingerprint_input_items(fresh_input)
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_masks_previous_response_not_found_for_unique_followup_request(
     monkeypatch,
 ):
@@ -8065,9 +10338,78 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
     assert finalize_call is not None
     assert finalize_call.args[0] is followup_request
     assert finalize_call.kwargs["event_type"] == "response.failed"
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert list(pending_requests) == [inflight_request]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_preserves_tool_dedupe_cache_across_reconnect(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_reconnect_tool_dedupe")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_reconnect_tool_dedupe",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_reconnect_tool",
+    )
+    pending_requests = deque([pending_request])
+    tool_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_reconnect_tool",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": '{"session_id":1,"chars":"","yield_time_ms":1000}',
+            "call_id": "call_first",
+        },
+    }
+    replayed_tool_payload = {
+        **tool_payload,
+        "item": {
+            **tool_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+
+    first_text = await service._process_upstream_websocket_text(
+        json.dumps(tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    replay_control = proxy_service._WebSocketUpstreamControl()
+    replay_text = await service._process_upstream_websocket_text(
+        json.dumps(replayed_tool_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=replay_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"call_id":"call_first"' in first_text
+    assert '"call_id":"call_replayed"' in replay_text
+    assert replay_control.suppress_downstream_event is True
+    assert pending_request.suppressed_duplicate_tool_call is True
+    finalize_request_state.assert_not_awaited()
+    assert list(pending_requests) == [pending_request]
 
 
 def test_maybe_rewrite_websocket_previous_response_not_found_rewrites_response_failed_event():
@@ -8111,7 +10453,7 @@ def test_maybe_rewrite_websocket_previous_response_not_found_rewrites_response_f
         )
     )
 
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert rewritten_event_type == "response.failed"
     assert rewritten_payload is not None
     response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
@@ -8159,7 +10501,7 @@ def test_maybe_rewrite_websocket_previous_response_invalid_request_error_rewrite
         )
     )
 
-    assert upstream_control.reconnect_requested is True
+    assert upstream_control.reconnect_requested is False
     assert rewritten_event_type == "response.failed"
     assert rewritten_payload is not None
     response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
@@ -8167,6 +10509,66 @@ def test_maybe_rewrite_websocket_previous_response_invalid_request_error_rewrite
     assert error_payload["code"] == "stream_incomplete"
     assert error_payload["message"] == "Upstream websocket closed before response.completed"
     assert "previous_response_not_found" not in rewritten_text
+
+
+def test_maybe_rewrite_websocket_missing_tool_output_rewrites_to_stream_incomplete(caplog, monkeypatch):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_output",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            "param": "input",
+        },
+    }
+    original_text = json.dumps(original_payload, separators=(",", ":"))
+    original_event = parse_sse_event(f"data: {original_text}\n\n")
+    assert original_event is not None
+    original_event_type = proxy_service._event_type_from_payload(original_event, original_payload)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    _, rewritten_payload, rewritten_event_type, rewritten_text = (
+        proxy_service._maybe_rewrite_websocket_previous_response_not_found_event(
+            request_state=request_state,
+            event=original_event,
+            payload=original_payload,
+            event_type=original_event_type,
+            upstream_control=upstream_control,
+            original_text=original_text,
+        )
+    )
+
+    assert upstream_control.reconnect_requested is True
+    assert rewritten_event_type == "response.failed"
+    assert rewritten_payload is not None
+    response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
+    error_payload = cast(dict[str, JsonValue], response_payload.get("error"))
+    assert error_payload["code"] == "stream_incomplete"
+    assert error_payload["message"] == "Upstream websocket closed before response.completed"
+    assert "No tool output found" not in rewritten_text
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in rewritten_text
+    assert "continuity_fail_closed surface=websocket_stream reason=missing_tool_output" in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_stream", "reason": "missing_tool_output"},
+            "value": 1.0,
+        }
+    ]
 
 
 def test_maybe_rewrite_websocket_previous_response_invalid_request_error_does_not_rewrite_other_message():
@@ -8440,6 +10842,44 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
         payload=original_payload,
         error_code="invalid_request_error",
         error_message="Previous response with id 'resp_prev_anchor' not found.",
+    )
+
+    assert rewritten_status == 502
+    assert rewritten_payload["error"]["code"] == "stream_incomplete"
+    assert rewritten_payload["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert rewritten_payload["error"]["type"] == "server_error"
+    assert rewritten_error_code == "stream_incomplete"
+    assert rewritten_error_message == "Upstream websocket closed before response.completed"
+
+
+def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_missing_tool_output_connect",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_payload = proxy_module.openai_error(
+        "invalid_request_error",
+        "No tool output found for function call call_qFY2plVIaGr1Qv2AIxiziz3G.",
+        error_type="invalid_request_error",
+    )
+    original_payload["error"]["param"] = "input"
+
+    (
+        rewritten_status,
+        rewritten_payload,
+        rewritten_error_code,
+        rewritten_error_message,
+    ) = proxy_service._sanitize_websocket_connect_failure(
+        request_state=request_state,
+        status_code=400,
+        payload=original_payload,
+        error_code="invalid_request_error",
+        error_message="No tool output found for function call call_qFY2plVIaGr1Qv2AIxiziz3G.",
     )
 
     assert rewritten_status == 502
@@ -9018,6 +11458,76 @@ async def test_stream_previous_response_not_found_proxy_error_is_masked_to_strea
     assert counter.samples == [
         {
             "labels": {"surface": "http_stream", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+    record_error.assert_not_awaited()
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomplete(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_missing_tool_output_stream")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        error_payload = openai_error(
+            "invalid_request_error",
+            "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            error_type="invalid_request_error",
+        )
+        error_payload["error"]["param"] = "input"
+        raise proxy_module.ProxyResponseError(400, error_payload)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_prev_anchor",
+        }
+    )
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert event["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "No tool output found" not in chunks[0]
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in chunks[0]
+    assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert "continuity_fail_closed surface=http_stream reason=missing_tool_output" in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"surface": "http_stream", "reason": "missing_tool_output"},
             "value": 1.0,
         }
     ]
@@ -10162,6 +12672,257 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
 
+def test_prepare_response_bridge_request_state_dedupes_replayed_previous_response_tool_calls_before_serializing():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "Process running with session ID 75180",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_replay",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_replay",
+            "output": "Process exited with code 0",
+        },
+    ]
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 4
+    assert len(upstream_input) == 3
+    assert upstream_input[0]["call_id"] == "call_first"
+    assert upstream_input[1]["call_id"] == "call_first"
+    assert upstream_input[1]["output"] == "Process running with session ID 75180"
+    assert upstream_input[2]["role"] == "assistant"
+    assert upstream_input[2]["content"] == [{"type": "output_text", "text": "Process exited with code 0"}]
+
+
+def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 1000}),
+            "call_id": "call_missing",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 2
+    assert upstream_input == input_items
+
+
+def test_prepare_response_bridge_request_state_rewrites_first_duplicate_when_only_replay_has_output():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 1000}),
+            "call_id": "call_missing",
+        },
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "timeout 8s rg -n needle .", "yield_time_ms": 30000}),
+            "call_id": "call_replay",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_replay",
+            "output": "needle found",
+        },
+    ]
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "", "input": input_items, "previous_response_id": "resp_anchor"}
+    )
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 3
+    assert len(upstream_input) == 2
+    assert upstream_input[0]["type"] == "message"
+    assert "without matching output: exec_command" in upstream_input[0]["content"][0]["text"]
+    assert upstream_input[1]["type"] == "message"
+    assert upstream_input[1]["content"] == [{"type": "output_text", "text": "needle found"}]
+    assert "function_call" not in json.dumps(upstream_input)
+
+
+def test_prepare_response_bridge_request_state_keeps_repeated_first_attempt_tool_calls():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": "Process running with session ID 75180",
+        },
+        {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 1000}),
+            "call_id": "call_repeat",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_repeat",
+            "output": "Still running",
+        },
+    ]
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": input_items})
+
+    request_state, text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+    )
+
+    upstream_payload = json.loads(text_data)
+    upstream_input = upstream_payload["input"]
+    assert request_state.input_item_count == 4
+    assert len(upstream_input) == 4
+    assert upstream_input[2]["call_id"] == "call_repeat"
+    assert upstream_input[3]["call_id"] == "call_repeat"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_tool_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_bridge_tool_replay",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_tool_replay"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    first_payload = {
+        "type": "response.output_item.done",
+        "response_id": "resp_bridge_tool_replay",
+        "item": {
+            "type": "function_call",
+            "name": "write_stdin",
+            "arguments": json.dumps({"session_id": 75180, "chars": "", "yield_time_ms": 30000}),
+            "call_id": "call_first",
+        },
+    }
+    replay_payload = {
+        **first_payload,
+        "response_id": "resp_bridge_tool_replay_after_reconnect",
+        "item": {
+            **first_payload["item"],
+            "call_id": "call_replayed",
+        },
+    }
+    replay_created_payload = {
+        "type": "response.created",
+        "response": {"id": "resp_bridge_tool_replay_after_reconnect", "status": "in_progress"},
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(first_payload, separators=(",", ":")))
+    session.upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_created_payload, separators=(",", ":")))
+    await service._process_http_bridge_upstream_text(session, json.dumps(replay_payload, separators=(",", ":")))
+
+    assert request_state.suppressed_duplicate_tool_call is True
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    forwarded = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert forwarded is not None
+    assert proxy_service.parse_sse_data_json(forwarded) == first_payload
+    forwarded_created = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert forwarded_created is not None
+    assert proxy_service.parse_sse_data_json(forwarded_created) == replay_created_payload
+    assert event_queue.empty()
+
+
 @pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
     request_logs = _RequestLogsRecorder()
@@ -10199,3 +12960,1512 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejecte
     assert request_state.error_code_override == "upstream_rejected_input"
     assert request_state.error_http_status_override == 502
     assert "close_code=1000" in (request_state.error_message_override or "")
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_retries_security_work_warning_on_authorized_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security")
+    authorized_account = _make_account("acc_authorized_security")
+    authorized_account.security_work_authorized = True
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+        ]
+    )
+    record_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        if account_id == regular_account.chatgpt_account_id:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_cyber_fail",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_ok","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert len(chunks) == 2
+    warning = json.loads(chunks[0].split("data: ", 1)[1])
+    event = json.loads(chunks[1].split("data: ", 1)[1])
+    assert warning["type"] == "codex_lb.warning"
+    assert warning["warning"]["code"] == "security_work_authorization_required"
+    assert warning["warning"]["action"] == "retry_security_work_authorized"
+    assert event["type"] == "response.completed"
+    assert select_account.await_count == 2
+    first_call, second_call = select_account.await_args_list
+    assert first_call.kwargs["require_security_work_authorized"] is False
+    assert second_call.kwargs["require_security_work_authorized"] is True
+    assert second_call.kwargs["exclude_account_ids"] == {regular_account.id}
+    assert [call["account_id"] for call in request_logs.calls] == [
+        regular_account.id,
+        authorized_account.id,
+    ]
+    assert request_logs.calls[0]["error_code"] == "security_work_authorization_required"
+    assert request_logs.calls[1]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_treats_missing_security_work_pool_as_optional(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_optional")
+    fallback_account = _make_account("acc_fallback_security_optional")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        if account_id == regular_account.chatgpt_account_id:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_cyber_optional",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_ok_optional","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["type"] == "codex_lb.warning"
+    assert retry_warning["warning"]["code"] == "security_work_authorization_required"
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["type"] == "codex_lb.warning"
+    assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
+    assert missing_pool_warning["warning"]["action"] == "continue_normal_selection"
+    assert event["type"] == "response.completed"
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
+    assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert [call["account_id"] for call in request_logs.calls] == [
+        regular_account.id,
+        fallback_account.id,
+    ]
+    assert request_logs.calls[0]["error_code"] == "security_work_authorization_required"
+    assert request_logs.calls[1]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_preserves_security_work_error_when_no_fallback_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_no_fallback")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_cyber_no_fallback",
+                        "error": {
+                            "code": "invalid_request_error",
+                            "type": "invalid_request_error",
+                            "message": cyber_message,
+                        },
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert event["response"]["error"]["message"] == cyber_message
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
+    assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_preserves_http_security_work_error_when_authorized_retry_exhausts(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_http_no_fallback")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error(
+                "invalid_request_error",
+                cyber_message,
+                error_type="invalid_request_error",
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-http"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert event["response"]["error"]["message"] == cyber_message
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
+    assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_clears_stale_security_work_error_before_nonsecurity_no_accounts(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_stale")
+    fallback_account = _make_account("acc_fallback_after_security")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 4)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        if account_id == regular_account.chatgpt_account_id:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_cyber_stale",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-stale"})]
+
+    assert len(chunks) == 3
+    retry_warning = json.loads(chunks[0].split("data: ", 1)[1])
+    missing_pool_warning = json.loads(chunks[1].split("data: ", 1)[1])
+    event = json.loads(chunks[2].split("data: ", 1)[1])
+    assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
+    assert missing_pool_warning["warning"]["action"] == "continue_normal_selection"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "no_accounts"
+    assert event["response"]["error"]["message"] == "No active accounts available"
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_does_not_move_file_pinned_security_work_request(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_file")
+    authorized_account = _make_account("acc_authorized_security_file")
+    authorized_account.security_work_authorized = True
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=regular_account.id))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        assert account_id == regular_account.chatgpt_account_id
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_cyber_file",
+                        "error": {
+                            "code": "invalid_request_error",
+                            "type": "invalid_request_error",
+                            "message": cyber_message,
+                        },
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "check pinned file",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": "file_pinned",
+                        }
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-file"})]
+
+    assert len(chunks) == 1
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert select_account.await_count == 1
+    only_call = select_account.await_args_list[0]
+    assert only_call.kwargs["account_ids"] == {regular_account.id}
+    assert only_call.kwargs["require_security_work_authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_file_pinned_account_on_retryable_stream_errors(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_retryable_file")
+    select_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=regular_account.id))
+
+    async def fake_select_account_with_budget_compatible(deadline, **kwargs):
+        del deadline
+        select_calls.append(dict(kwargs))
+        return AccountSelection(account=regular_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        assert account_id == regular_account.chatgpt_account_id
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("bad_gateway", "Bad gateway"),
+            failure_phase="status",
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", fake_select_account_with_budget_compatible)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "check pinned file retryable error",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": "file_retryable",
+                        }
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-file-retry"})]
+
+    assert chunks
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "bad_gateway"
+    assert len(select_calls) == 3
+    assert all(call["preferred_account_id"] == regular_account.id for call in select_calls)
+    assert all(call["exclude_account_ids"] == set() for call in select_calls)
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_does_not_move_previous_response_security_work_request(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_regular_security_previous_response")
+    authorized_account = _make_account("acc_authorized_security_previous_response")
+    authorized_account.security_work_authorized = True
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=owner_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=owner_account.id),
+    )
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        assert account_id == owner_account.chatgpt_account_id
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_cyber_previous_response",
+                        "error": {
+                            "code": "invalid_request_error",
+                            "type": "invalid_request_error",
+                            "message": cyber_message,
+                        },
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_security_owner",
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-prev"})]
+
+    assert len(chunks) == 1
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert select_account.await_count == 1
+    only_call = select_account.await_args_list[0]
+    assert only_call.kwargs["account_ids"] == {owner_account.id}
+    assert only_call.kwargs["require_security_work_authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retries_security_work_warning_on_authorized_account(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_bridge_security_regular")
+    authorized_account = _make_account("acc_bridge_security_authorized")
+    authorized_account.security_work_authorized = True
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        },
+        separators=(",", ":"),
+    )
+
+    class _FakeUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+    retry_upstream = _FakeUpstreamWebSocket()
+    reconnect_calls: list[dict[str, object]] = []
+
+    async def fake_reconnect_http_bridge_session(
+        session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_security_work_authorized=False,
+    ):
+        reconnect_calls.append(
+            {
+                "request_state": request_state,
+                "restart_reader": restart_reader,
+                "require_security_work_authorized": require_security_work_authorized,
+            }
+        )
+        session.account = authorized_account
+        session.upstream = retry_upstream
+        session.upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=regular_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_failed",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert reconnect_calls == [
+        {
+            "request_state": request_state,
+            "restart_reader": False,
+            "require_security_work_authorized": True,
+        }
+    ]
+    assert session.account is authorized_account
+    assert retry_upstream.sent_text == [request_text]
+    assert list(session.pending_requests) == [request_state]
+    assert session.queued_request_count == 1
+    assert request_state.replay_count == 1
+    assert request_state.response_id is None
+    assert request_state.awaiting_response_created is True
+    assert request_state.event_queue is not None
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["type"] == "codex_lb.warning"
+    assert warning["warning"]["code"] == "security_work_authorization_required"
+    assert warning["warning"]["action"] == "retry_security_work_authorized"
+    assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_does_not_replay_security_work_warning_with_other_pending_requests(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_bridge_security_pending")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        },
+        separators=(",", ":"),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    other_request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_other_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    other_request_state.response_id = "resp_other_pending"
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-pending", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=regular_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state, other_request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=2,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_pending",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    reconnect.assert_not_awaited()
+    assert request_state.replay_count == 0
+    assert list(session.pending_requests) == [other_request_state]
+    assert session.queued_request_count == 1
+    assert request_state.event_queue is not None
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+    forwarded = await request_state.event_queue.get()
+    assert forwarded is not None
+    assert json.loads(forwarded.split("data: ", 1)[1])["type"] == "response.failed"
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_does_not_move_file_pinned_security_work_request(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_bridge_security_file_owner")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"type": "input_file", "file_id": "file-owned"}],
+        },
+        separators=(",", ":"),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_file",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    request_state.preferred_account_id = regular_account.id
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-file", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=regular_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_file",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    reconnect.assert_not_awaited()
+    assert request_state.replay_count == 0
+    assert list(session.pending_requests) == []
+    assert request_state.event_queue is not None
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+    forwarded = await request_state.event_queue.get()
+    assert forwarded is not None
+    assert json.loads(forwarded.split("data: ", 1)[1])["type"] == "response.failed"
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reports_missing_security_work_pool_before_original_warning(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_bridge_security_missing_pool")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        },
+        separators=(",", ":"),
+    )
+
+    class _FakeUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def fake_select_account_with_budget_compatible(*args, **kwargs):
+        del args
+        assert kwargs["require_security_work_authorized"] is True
+        return AccountSelection(
+            account=None,
+            error_message="No accounts marked as authorized for security work",
+            error_code="no_security_work_authorized_accounts",
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        fake_select_account_with_budget_compatible,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_missing_pool",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    upstream = _FakeUpstreamWebSocket()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-missing-pool", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=regular_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_missing_pool",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert request_state.replay_count == 1
+    assert request_state.event_queue is not None
+    retry_warning_block = await request_state.event_queue.get()
+    missing_pool_warning_block = await request_state.event_queue.get()
+    original_failure_block = await request_state.event_queue.get()
+    assert retry_warning_block is not None
+    assert missing_pool_warning_block is not None
+    assert original_failure_block is not None
+    retry_warning = json.loads(retry_warning_block.split("data: ", 1)[1])
+    missing_pool_warning = json.loads(missing_pool_warning_block.split("data: ", 1)[1])
+    original_failure = json.loads(original_failure_block.split("data: ", 1)[1])
+    assert retry_warning["warning"]["code"] == "security_work_authorization_required"
+    assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
+    assert missing_pool_warning["warning"]["action"] == "forward_original_security_work_error"
+    assert original_failure["type"] == "response.failed"
+    assert original_failure["response"]["error"]["message"] == cyber_message
+    assert upstream.closed is False
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_does_not_replay_security_work_warning_after_response_created(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_bridge_security_created")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        },
+        separators=(",", ":"),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_created",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    request_state.response_id = "resp_security_created"
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-created", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=regular_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_created",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    reconnect.assert_not_awaited()
+    assert request_state.replay_count == 0
+    assert list(session.pending_requests) == []
+    assert request_state.event_queue is not None
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["type"] == "codex_lb.warning"
+    assert warning["warning"]["code"] == "security_work_authorization_required"
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+    forwarded = await request_state.event_queue.get()
+    assert forwarded is not None
+    assert json.loads(forwarded.split("data: ", 1)[1])["type"] == "response.failed"
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_retries_security_work_warning_on_authorized_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_compact_security_regular")
+    authorized_account = _make_account("acc_compact_security_authorized")
+    authorized_account.security_work_authorized = True
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+        ]
+    )
+    record_error = AsyncMock()
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == regular_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "invalid_request_error",
+                    cyber_message,
+                    error_type="invalid_request_error",
+                ),
+            )
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert result.model_extra == {"output": []}
+    assert select_account.await_count == 2
+    first_call, second_call = select_account.await_args_list
+    assert first_call.kwargs["require_security_work_authorized"] is False
+    assert second_call.kwargs["require_security_work_authorized"] is True
+    assert second_call.kwargs["exclude_account_ids"] == {regular_account.id}
+    assert [call["account_id"] for call in request_logs.calls] == [authorized_account.id]
+    assert request_logs.calls[0]["status"] == "success"
+    record_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_treats_missing_security_work_pool_as_optional(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_compact_security_regular_optional")
+    fallback_account = _make_account("acc_compact_security_fallback_optional")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == regular_account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                openai_error(
+                    "invalid_request_error",
+                    cyber_message,
+                    error_type="invalid_request_error",
+                ),
+            )
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert result.model_extra == {"output": []}
+    assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
+        False,
+        True,
+        False,
+    ]
+    assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert [call["account_id"] for call in request_logs.calls] == [fallback_account.id]
+    assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_retries_security_work_on_authorized_account(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self._disconnect_sent = False
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            if not self._disconnect_sent:
+                await self._done.wait()
+                self._disconnect_sent = True
+                return {"type": "websocket.disconnect"}
+            await asyncio.sleep(0)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            payload = json.loads(text)
+            if payload.get("type") in {"response.completed", "response.failed", "error"}:
+                self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    class _FakeUpstreamWebSocket:
+        def __init__(self, messages: list[SimpleNamespace]) -> None:
+            self.sent_text: list[str] = []
+            self.closed = False
+            self._messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+            for message in messages:
+                self._messages.put_nowait(message)
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            return await self._messages.get()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            SimpleNamespace(
+                kind="text",
+                text=json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_ws_security_failed",
+                            "status": "failed",
+                            "error": {
+                                "code": "invalid_request_error",
+                                "type": "invalid_request_error",
+                                "message": cyber_message,
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+                data=None,
+                close_code=None,
+                error=None,
+            )
+        ]
+    )
+    second_upstream = _FakeUpstreamWebSocket(
+        [
+            SimpleNamespace(
+                kind="text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": "resp_ws_security_ok"}},
+                    separators=(",", ":"),
+                ),
+                data=None,
+                close_code=None,
+                error=None,
+            ),
+            SimpleNamespace(
+                kind="text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_security_ok",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+                data=None,
+                close_code=None,
+                error=None,
+            ),
+        ]
+    )
+    regular_account = _make_account("acc_ws_security_regular")
+    authorized_account = _make_account("acc_ws_security_authorized")
+    authorized_account.security_work_authorized = True
+    connect_calls: list[bool] = []
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_calls.append(request_state.require_security_work_authorized)
+        if len(connect_calls) == 1:
+            return regular_account, first_upstream
+        return authorized_account, second_upstream
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    emitted_events = [json.loads(event) for event in downstream.sent_text]
+    assert [event["type"] for event in emitted_events] == [
+        "codex_lb.warning",
+        "response.created",
+        "response.completed",
+    ]
+    assert emitted_events[0]["warning"]["action"] == "retry_security_work_authorized"
+    assert connect_calls == [False, True]
+    assert first_upstream.closed is True
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
+    assert json.loads(first_upstream.sent_text[0]) == json.loads(second_upstream.sent_text[0])
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_does_not_replay_security_work_with_other_pending_requests():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_security_pending")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "check api"}]}],
+        },
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_security_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="websocket",
+        request_text=request_text,
+    )
+    other_request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_other_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=False,
+        transport="websocket",
+        request_text=request_text,
+    )
+    other_request_state.response_id = "resp_ws_other_pending"
+    pending_requests = deque([request_state, other_request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_ws_security_pending",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == text
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.replay_request_state is None
+    assert request_state.replay_count == 0
+    assert list(pending_requests) == [other_request_state]

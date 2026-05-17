@@ -8293,6 +8293,98 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_websocket_cancels_api_key_heartbeat_when_connect_fails(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    api_key = ApiKeyData(
+        id="key_ws_connect_fail",
+        name="ws connect fail",
+        key_prefix="sk-ws",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_connect_fail",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    heartbeat_started = asyncio.Event()
+    seen_stop_event: asyncio.Event | None = None
+    seen_request_state: proxy_service._WebSocketRequestState | None = None
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    async def fake_heartbeat(**kwargs: object) -> None:
+        nonlocal seen_stop_event
+        seen_stop_event = cast(asyncio.Event, kwargs["stop_event"])
+        heartbeat_started.set()
+        await seen_stop_event.wait()
+
+    async def fail_connect_proxy_websocket(self, *args, **kwargs):
+        nonlocal seen_request_state
+        del self, args
+        seen_request_state = cast(proxy_service._WebSocketRequestState, kwargs["request_state"])
+        await asyncio.wait_for(heartbeat_started.wait(), timeout=1.0)
+        return None, None
+
+    monkeypatch.setattr(service, "_run_api_key_reservation_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "connect"}]}],
+        "stream": True,
+    }
+
+    class _ConnectFailDownstreamWebSocket:
+        def __init__(self) -> None:
+            self._request_sent = False
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": json.dumps(request_payload, separators=(",", ":"))}
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, _text: str) -> None:
+            return None
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, _ConnectFailDownstreamWebSocket()),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=api_key,
+    )
+
+    assert seen_request_state is not None
+    assert seen_request_state.api_key_reservation_heartbeat_task is None
+    assert seen_request_state.api_key_reservation_heartbeat_stop is None
+    assert seen_stop_event is not None
+    assert seen_stop_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_relay_upstream_websocket_emits_keepalive_while_upstream_is_silent(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

@@ -3232,6 +3232,7 @@ class ProxyService:
                         _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     except asyncio.CancelledError:
+                        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         await self._release_websocket_reservation(request_state.api_key_reservation)
                         if request_state_registered:
                             async with pending_lock:
@@ -3240,6 +3241,7 @@ class ProxyService:
                         _release_websocket_response_create_gate(request_state, response_create_gate)
                         raise
                     except Exception:
+                        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         await self._release_websocket_reservation(request_state.api_key_reservation)
                         if request_state_registered:
                             async with pending_lock:
@@ -3288,6 +3290,7 @@ class ProxyService:
                         websocket=websocket,
                     )
                     if upstream is None or account is None:
+                        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         if request_state_registered:
                             async with pending_lock:
                                 if request_state in pending_requests:

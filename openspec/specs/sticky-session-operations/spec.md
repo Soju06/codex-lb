@@ -3,7 +3,6 @@
 ## Purpose
 
 Define sticky-session operation contracts so durable sessions, dashboard affinity, and prompt-cache affinity stay distinct.
-
 ## Requirements
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently.
@@ -12,17 +11,11 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 - **WHEN** a backend Codex request creates or refreshes stickiness from `session_id`
 - **THEN** the stored mapping kind is `codex_session`
 
-#### Scenario: Dashboard sticky thread routing is stored as durable
-- **WHEN** sticky-thread routing creates or refreshes stickiness from a prompt-derived key
-- **THEN** the stored mapping kind is `sticky_thread`
-
-#### Scenario: OpenAI prompt-cache affinity is stored as bounded
-- **WHEN** an OpenAI-style request creates or refreshes prompt-cache affinity
-- **THEN** the stored mapping kind is `prompt_cache`
-
-#### Scenario: Identical keys remain isolated across sticky-session kinds
-- **WHEN** the same sticky-session key value is used for more than one kind
-- **THEN** each `(key, kind)` mapping is stored and managed independently without overwriting the others
+#### Scenario: Backend Codex session rebinds under budget pressure
+- **WHEN** a backend Codex request resolves an existing `codex_session` mapping
+- **AND** the pinned account is above the configured sticky reallocation budget threshold
+- **AND** another eligible account remains below that threshold
+- **THEN** selection rebinds the durable `codex_session` mapping to the healthier account before sending the request upstream
 
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
@@ -54,3 +47,4 @@ The system SHALL run a background cleanup loop that deletes stale `prompt_cache`
 #### Scenario: Cleanup loop preserves durable mappings
 - **WHEN** the cleanup loop runs
 - **THEN** it does not delete `codex_session` or `sticky_thread` mappings regardless of age
+

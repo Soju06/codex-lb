@@ -185,6 +185,18 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_V1_FULL_CONTEXT_WINDOW_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 1_000_000,
+    "gpt-5.5": 400_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5.3-codex": 400_000,
+}
+_V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 128_000,
+    "gpt-5.5": 128_000,
+    "gpt-5.4-mini": 128_000,
+    "gpt-5.3-codex": 128_000,
+}
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -1615,6 +1627,40 @@ def _effective_context_window(model: UpstreamModel) -> int:
     return overrides.get(model.slug, model.context_window)
 
 
+def _raw_positive_int(raw: Mapping[str, JsonValue], key: str) -> int | None:
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _v1_full_context_window(model: UpstreamModel) -> int:
+    overrides = get_settings().model_context_window_overrides
+    explicit_override = overrides.get(model.slug)
+    if explicit_override is not None:
+        return explicit_override
+
+    known_context_window = _V1_FULL_CONTEXT_WINDOW_OVERRIDES.get(model.slug)
+    if known_context_window is not None:
+        return known_context_window
+
+    upstream_context_window = model.context_window
+    raw_max_context_window = _raw_positive_int(model.raw, "max_context_window")
+    if raw_max_context_window is not None and raw_max_context_window > upstream_context_window:
+        return raw_max_context_window
+
+    return upstream_context_window
+
+
+def _v1_input_context_window(model: UpstreamModel) -> int | None:
+    input_context_window = _effective_context_window(model)
+    return input_context_window if input_context_window != _v1_full_context_window(model) else None
+
+
+def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
+    return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
+
+
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
@@ -1624,7 +1670,9 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=_effective_context_window(model),
+        context_window=_v1_full_context_window(model),
+        input_context_window=_v1_input_context_window(model),
+        max_output_tokens=_v1_max_output_tokens(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
             ReasoningLevelSchema(effort=rl.effort, description=rl.description)

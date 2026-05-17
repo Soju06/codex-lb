@@ -165,6 +165,8 @@ class ModelMetadata(BaseModel):
     display_name: str
     description: str
     context_window: int
+    input_context_window: int | None = None
+    max_output_tokens: int | None = None
     input_modalities: list[str]
     supported_reasoning_levels: list[ReasoningLevelSchema]
     default_reasoning_level: str | None = None

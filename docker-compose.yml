@@ -19,6 +19,7 @@ services:
       - --reload
     volumes:
       - codex-lb-data:/var/lib/codex-lb
+      - ./config:/app/config
     develop:
       watch:
         - action: sync

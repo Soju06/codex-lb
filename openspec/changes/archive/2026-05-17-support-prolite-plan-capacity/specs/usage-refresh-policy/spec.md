@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Usage capacity recognizes upstream ChatGPT plan types
 

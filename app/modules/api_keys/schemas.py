@@ -32,6 +32,7 @@ class ApiKeyCreateRequest(DashboardModel):
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
+    assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
 
 

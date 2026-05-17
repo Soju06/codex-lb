@@ -8285,6 +8285,7 @@ class ProxyService:
         excluded_account_ids: set[str] = set()
         preferred_account_id: str | None = None
         require_preferred_account = False
+        last_retryable_stream_error: _RetryableStreamError | None = None
         try:
             if payload.previous_response_id is not None:
                 preferred_account_id = await self._resolve_websocket_previous_response_owner(
@@ -8407,6 +8408,29 @@ class ProxyService:
                     # instead of returning a generic no_accounts event.
                     if propagate_http_errors and last_transient_exc is not None:
                         raise last_transient_exc
+                    if last_retryable_stream_error is not None:
+                        error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
+                        event = response_failed_event(
+                            last_retryable_stream_error.code,
+                            error_message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        await self._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code=last_retryable_stream_error.code,
+                            error_message=error_message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                        )
+                        return
                     no_accounts_msg = selection.error_message or "No active accounts available"
                     error_code = selection.error_code or "no_accounts"
                     event = response_failed_event(
@@ -8575,6 +8599,7 @@ class ProxyService:
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
                             if settlement.downstream_visible:
+                                failed_response_id = settlement.response_id or request_id
                                 if isinstance(tex, ProxyResponseError):
                                     error = _parse_openai_error(tex.payload)
                                     error_code = _normalize_error_code(
@@ -8588,7 +8613,7 @@ class ProxyService:
                                         error_code or "upstream_error",
                                         error_message or "Upstream error",
                                         error_type=error_type or "server_error",
-                                        response_id=request_id,
+                                        response_id=failed_response_id,
                                         error_param=error_param,
                                     )
                                     _apply_error_metadata(event["response"]["error"], error)
@@ -8598,7 +8623,7 @@ class ProxyService:
                                     event = response_failed_event(
                                         error_code or "upstream_error",
                                         error_message,
-                                        response_id=request_id,
+                                        response_id=failed_response_id,
                                     )
                                 logger.warning(
                                     "Surfacing mid-stream upstream failure without replay "
@@ -8608,7 +8633,21 @@ class ProxyService:
                                     error_code,
                                 )
                                 yield format_sse_event(event)
-                                await self._settle_stream_api_key_usage(
+                                settlement.record_success = False
+                                settlement.error_code = error_code
+                                settlement.error_message = error_message
+                                if isinstance(tex, ProxyResponseError):
+                                    settlement.error = _upstream_error_from_openai(error)
+                                else:
+                                    settlement.error = tex.error
+                                settlement.account_health_error = _should_penalize_stream_error(error_code)
+                                if settlement.account_health_error:
+                                    await self._handle_stream_error(
+                                        account,
+                                        _stream_settlement_error_payload(settlement),
+                                        settlement.error_code or "upstream_error",
+                                    )
+                                settled = await self._settle_stream_api_key_usage(
                                     api_key,
                                     api_key_reservation,
                                     settlement,
@@ -8714,6 +8753,7 @@ class ProxyService:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     await self._handle_stream_error(account, exc.error, exc.code)
+                    last_retryable_stream_error = exc
                     if exc.exclude_account:
                         excluded_account_ids.add(account.id)
                     continue
@@ -8887,6 +8927,30 @@ class ProxyService:
             # a transient 500, re-raise to preserve the upstream status/payload.
             if propagate_http_errors and last_transient_exc is not None:
                 raise last_transient_exc
+            if last_retryable_stream_error is not None:
+                retries_exhausted_msg = str(last_retryable_stream_error.error.get("message") or "Upstream error")
+                event = response_failed_event(
+                    last_retryable_stream_error.code,
+                    retries_exhausted_msg,
+                    response_id=request_id,
+                )
+                yield format_sse_event(event)
+                if not any_attempt_logged:
+                    await self._write_request_log(
+                        account_id=None,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=payload.model,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        status="error",
+                        error_code=last_retryable_stream_error.code,
+                        error_message=retries_exhausted_msg,
+                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        transport=request_transport,
+                        service_tier=payload.service_tier,
+                        requested_service_tier=payload.service_tier,
+                    )
+                return
             retries_exhausted_msg = "No available accounts after retries"
             event = response_failed_event(
                 "no_accounts",
@@ -9030,6 +9094,9 @@ class ProxyService:
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
                 service_tier = event_service_tier
+            if event and event.response and event.response.id:
+                response_id = event.response.id
+                settlement.response_id = response_id
             terminal_stream_error: _TerminalStreamError | None = None
             if event and event.type in ("response.failed", "error"):
                 if event.type == "response.failed":
@@ -9174,6 +9241,7 @@ class ProxyService:
                             error = response.error if response else None
                             if response and response.id:
                                 response_id = response.id
+                                settlement.response_id = response_id
                         else:
                             error = event.error
                         raw_error_code = _normalize_error_code(
@@ -9230,6 +9298,7 @@ class ProxyService:
                         usage = response.usage if response else None
                         if response and response.id:
                             response_id = response.id
+                            settlement.response_id = response_id
                         if event_type == "response.incomplete":
                             status = "error"
                     if event_type == "response.completed" and suppressed_duplicate_tool_call:
@@ -9794,6 +9863,7 @@ class _StreamSettlement:
     record_success: bool = True
     downstream_visible: bool = False
     downstream_text_visible: bool = False
+    response_id: str | None = None
 
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
@@ -10224,6 +10294,8 @@ def _normalize_http_bridge_error_event(
         error_type_value = event.error.type
         error_message_value = event.error.message
         error_param_value = event.error.param
+        if isinstance(error_code_value, str) and error_code_value.strip():
+            explicit_error_code = True
     elif isinstance(payload, dict):
         payload_error = payload.get("error")
         if isinstance(payload_error, dict):

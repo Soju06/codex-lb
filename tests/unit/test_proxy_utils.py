@@ -2355,6 +2355,26 @@ async def test_stream_responses_websocket_normalizes_typeless_error_code_to_upst
     assert failed_error["message"] == "generic upstream failure"
 
 
+def test_normalize_http_bridge_error_event_preserves_explicit_error_code_from_parsed_event():
+    event = parse_sse_event(
+        'data: {"type":"error","error":{"code":"error","type":"server_error","message":"explicit"}}\n\n'
+    )
+
+    _line, payload, parsed_event, event_type = proxy_service._normalize_http_bridge_error_event(
+        event=event,
+        payload={"type": "error", "error": {"code": "error", "type": "server_error", "message": "explicit"}},
+        request_state=None,
+    )
+
+    assert event_type == "response.failed"
+    assert parsed_event is not None
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "error"
+    assert error["message"] == "explicit"
+
+
 @pytest.mark.asyncio
 async def test_stream_responses_websocket_rejects_oversized_response_create_before_connect(monkeypatch):
     class Settings:
@@ -4602,6 +4622,53 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     record_success.assert_awaited_once_with(account_b)
     assert [call["status"] for call in request_logs.calls] == ["error", "success"]
     assert request_logs.calls[0]["error_code"] == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_failover_candidate(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_idle_only")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if not excluded_account_ids:
+            return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts")
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            'data: {"type":"response.failed","response":{"error":{"code":"stream_idle_timeout","message":"idle"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "stream_idle_timeout"
+    assert event["response"]["error"]["message"] == "idle"
+    assert seen_excluded_account_ids == [set(), {account.id}]
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
+    assert request_logs.calls[-1]["error_code"] == "stream_idle_timeout"
 
 
 @pytest.mark.asyncio
@@ -10906,6 +10973,89 @@ async def test_stream_midstream_generic_failure_is_neutral_to_account_health(mon
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_stream_midstream_proxy_failure_records_health_and_keeps_settled(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_midstream_proxy_failure")
+    handle_stream_error = AsyncMock()
+    settle = AsyncMock(return_value=True)
+    release_unsettled = AsyncMock()
+    api_key = ApiKeyData(
+        id="key_midstream_proxy_failure",
+        name="midstream-proxy-failure",
+        key_prefix="sk-mid",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_midstream_proxy_failure",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            'data: {"type":"response.created","response":{"id":"resp_midstream_proxy_failure",'
+            '"status":"in_progress"}}\n\n'
+        )
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "limit hit", error_type="rate_limit_error"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-stream"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+        )
+    ]
+
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["id"] == "resp_midstream_proxy_failure"
+    assert event["response"]["error"]["code"] == "usage_limit_reached"
+    handle_stream_error.assert_awaited_once()
+    handle_stream_error_args = handle_stream_error.await_args
+    assert handle_stream_error_args is not None
+    assert handle_stream_error_args.args[0] == account
+    settle.assert_awaited_once()
+    release_unsettled.assert_not_awaited()
 
 
 @pytest.mark.asyncio

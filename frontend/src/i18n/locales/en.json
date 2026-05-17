@@ -1,0 +1,52 @@
+{
+  "common": {
+    "language": "Language",
+    "english": "English",
+    "chinese": "简体中文",
+    "logout": "Logout",
+    "loading": "Loading"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "accounts": "Accounts",
+    "apis": "APIs",
+    "settings": "Settings",
+    "openMenu": "Open menu",
+    "showEmails": "Show Emails",
+    "hideEmails": "Hide Emails"
+  },
+  "statusBar": {
+    "lastSync": "Last sync:",
+    "routing": "Routing:",
+    "version": "Version:",
+    "live": "Live"
+  },
+  "auth": {
+    "appTitle": "Codex LB",
+    "appSubtitle": "API Load Balancer",
+    "login": {
+      "heading": "Sign in",
+      "subheading": "Enter your admin password to continue.",
+      "passwordLabel": "Password",
+      "passwordPlaceholder": "Enter password",
+      "submit": "Sign In"
+    },
+    "totp": {
+      "title": "Two-factor verification",
+      "description": "Enter the 6-digit code from your authenticator app.",
+      "codeLabel": "TOTP code",
+      "submit": "Verify"
+    },
+    "bootstrap": {
+      "title": "Complete Remote Setup",
+      "subtitle": "Remote dashboard access stays locked until an admin password is configured.",
+      "body": "Use the password setup flow below to bootstrap dashboard access before loading the rest of the admin UI.",
+      "tokenConfigured": "Enter the configured bootstrap token below with your new password. Depending on your setup, it may come from your server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN.",
+      "tokenMissing": "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart without a password to auto-generate one."
+    },
+    "trustedHeader": {
+      "title": "Reverse proxy authentication required",
+      "body": "This dashboard expects a trusted auth header from your reverse proxy. Open it through Authelia or configure a fallback dashboard password first."
+    }
+  }
+}

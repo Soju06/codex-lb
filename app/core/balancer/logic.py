@@ -28,6 +28,7 @@ PERMANENT_FAILURE_CODES = {
 SECONDS_PER_DAY = 60 * 60 * 24
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
 RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted"]
+ResetPreferenceWindow = Literal["primary", "secondary"]
 UNKNOWN_PLAN_FALLBACK = "free"
 CAPACITY_PLAN_ALIASES = {
     "education": "edu",
@@ -57,6 +58,7 @@ class AccountState:
     status: AccountStatus
     used_percent: float | None = None
     reset_at: float | None = None
+    primary_reset_at: int | None = None
     blocked_at: float | None = None
     cooldown_until: float | None = None
     secondary_used_percent: float | None = None
@@ -90,15 +92,23 @@ def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, s
     return primary_used, secondary_used, last_selected, state.account_id
 
 
-def _reset_bucket_days(state: AccountState, current: float) -> int:
-    if state.secondary_reset_at is None:
+def _reset_bucket_days(state: AccountState, current: float, window: ResetPreferenceWindow) -> int:
+    if window == "primary":
+        reset_at = state.primary_reset_at if state.primary_reset_at is not None else state.secondary_reset_at
+    else:
+        reset_at = state.secondary_reset_at if state.secondary_reset_at is not None else state.primary_reset_at
+    if reset_at is None:
         return UNKNOWN_RESET_BUCKET_DAYS
-    return max(0, int((state.secondary_reset_at - current) // SECONDS_PER_DAY))
+    return max(0, int((reset_at - current) // SECONDS_PER_DAY))
 
 
-def _prefer_earlier_reset_candidates(available: list[AccountState], current: float) -> list[AccountState]:
-    earliest_bucket = min(_reset_bucket_days(state, current) for state in available)
-    return [state for state in available if _reset_bucket_days(state, current) == earliest_bucket]
+def _prefer_earlier_reset_candidates(
+    available: list[AccountState],
+    current: float,
+    window: ResetPreferenceWindow,
+) -> list[AccountState]:
+    earliest_bucket = min(_reset_bucket_days(state, current, window) for state in available)
+    return [state for state in available if _reset_bucket_days(state, current, window) == earliest_bucket]
 
 
 def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
@@ -115,6 +125,7 @@ def select_account(
     now: float | None = None,
     *,
     prefer_earlier_reset: bool = False,
+    prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
@@ -132,7 +143,10 @@ def select_account(
         now: Unix timestamp in seconds used as the evaluation clock. If
             ``None``, the current system time is used.
         prefer_earlier_reset: Whether to bias selection toward accounts whose
-            secondary quota window resets sooner.
+            configured quota window resets sooner.
+        prefer_earlier_reset_window: Quota window used for reset preference
+            (``"primary"`` for 5h or ``"secondary"`` for weekly), with the other
+            window used as fallback when the configured reset is unavailable.
         routing_strategy: Balancing strategy used to pick from the effective
             pool (``"capacity_weighted"``, ``"round_robin"``, or
             ``"usage_weighted"``).
@@ -236,12 +250,12 @@ def select_account(
             return SelectionResult(None, "No available accounts")
 
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current)
+        reset_bucket_days = _reset_bucket_days(state, current, prefer_earlier_reset_window)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
     def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current)
+        reset_bucket_days = _reset_bucket_days(state, current, prefer_earlier_reset_window)
         primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
         return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
 
@@ -258,7 +272,9 @@ def select_account(
         selected = min(effective_pool, key=_round_robin_sort_key)
     elif routing_strategy == "capacity_weighted":
         candidate_pool = (
-            _prefer_earlier_reset_candidates(effective_pool, current) if prefer_earlier_reset else effective_pool
+            _prefer_earlier_reset_candidates(effective_pool, current, prefer_earlier_reset_window)
+            if prefer_earlier_reset
+            else effective_pool
         )
         if deterministic_probe:
             selected = min(candidate_pool, key=_capacity_probe_sort_key)

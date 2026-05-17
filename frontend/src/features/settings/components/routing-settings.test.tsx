@@ -9,6 +9,7 @@ const BASE_SETTINGS: DashboardSettings = {
   stickyThreadsEnabled: false,
   upstreamStreamTransport: "default",
   preferEarlierResetAccounts: true,
+  preferEarlierResetWindow: "secondary",
   routingStrategy: "usage_weighted",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
@@ -35,6 +36,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
@@ -58,6 +60,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: false,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
@@ -86,6 +89,7 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
@@ -100,5 +104,35 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
     expect(screen.getByText("Server default")).toBeInTheDocument();
+  });
+
+  it("saves the reset preference window", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: () => false,
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => undefined,
+    });
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getAllByRole("combobox")[2]!);
+    await user.click(await screen.findByText("5h quota"));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "primary",
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+    });
   });
 });

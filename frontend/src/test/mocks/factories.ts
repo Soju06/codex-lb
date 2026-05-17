@@ -348,6 +348,7 @@ export function createDashboardSettings(
 		stickyThreadsEnabled: true,
 		upstreamStreamTransport: "default",
 		preferEarlierResetAccounts: false,
+		preferEarlierResetWindow: "secondary",
 		routingStrategy: "usage_weighted",
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,

@@ -36,7 +36,7 @@ def test_select_account_picks_lowest_used_percent():
     assert result.account.account_id == "b"
 
 
-def test_select_account_prefers_earlier_secondary_reset_bucket():
+def test_select_account_can_prefer_earlier_primary_reset_before_secondary():
     now = time.time()
     states = [
         AccountState(
@@ -44,22 +44,30 @@ def test_select_account_prefers_earlier_secondary_reset_bucket():
             AccountStatus.ACTIVE,
             used_percent=10.0,
             secondary_used_percent=10.0,
-            secondary_reset_at=int(now + 3 * 24 * 3600),
+            primary_reset_at=int(now + 3 * 24 * 3600),
+            secondary_reset_at=int(now + 1 * 3600),
         ),
         AccountState(
             "b",
             AccountStatus.ACTIVE,
             used_percent=50.0,
             secondary_used_percent=50.0,
-            secondary_reset_at=int(now + 2 * 3600),
+            primary_reset_at=int(now + 2 * 3600),
+            secondary_reset_at=int(now + 7 * 24 * 3600),
         ),
     ]
-    result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
     assert result.account is not None
     assert result.account.account_id == "b"
 
 
-def test_select_account_secondary_reset_is_bucketed_by_day():
+def test_select_account_falls_back_to_secondary_reset_when_primary_missing():
     now = time.time()
     states = [
         AccountState(
@@ -80,6 +88,38 @@ def test_select_account_secondary_reset_is_bucketed_by_day():
     result = select_account(states, now=now, prefer_earlier_reset=True, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_defaults_to_secondary_reset_window():
+    now = time.time()
+    states = [
+        AccountState(
+            "primary-earlier",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            primary_reset_at=int(now + 1 * 3600),
+            secondary_reset_at=int(now + 7 * 24 * 3600),
+        ),
+        AccountState(
+            "secondary-earlier",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            secondary_used_percent=50.0,
+            primary_reset_at=int(now + 4 * 24 * 3600),
+            secondary_reset_at=int(now + 2 * 3600),
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "secondary-earlier"
 
 
 def test_select_account_prefers_lower_secondary_used_with_same_reset_bucket():
@@ -449,6 +489,24 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     from datetime import timezone
 
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
+
+
+def test_state_from_account_carries_primary_reset_for_prefer_earlier_reset():
+    primary_reset = 1_700_003_600
+    secondary_reset = 1_700_604_800
+    primary = _make_test_usage(window="primary", reset_at=primary_reset)
+    primary.window_minutes = 300
+    secondary = _make_test_usage(window="secondary", reset_at=secondary_reset)
+
+    state = _state_from_account(
+        account=_make_test_account(),
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_reset_at == primary_reset
+    assert state.secondary_reset_at == secondary_reset
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
@@ -1175,7 +1233,7 @@ def test_select_account_capacity_weighted_three_tiers_distribution_matches_capac
     assert pro_ratio > plus_ratio > free_ratio
 
 
-def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
+def test_select_account_capacity_weighted_can_prefer_earlier_primary_reset_bucket():
     random.seed(55)
     now = time.time()
     early = AccountState(
@@ -1183,7 +1241,8 @@ def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
         AccountStatus.ACTIVE,
         used_percent=80.0,
         secondary_used_percent=80.0,
-        secondary_reset_at=int(now + 2 * 3600),
+        primary_reset_at=int(now + 2 * 3600),
+        secondary_reset_at=int(now + 4 * 24 * 3600),
         plan_type="plus",
         capacity_credits=7560.0,
     )
@@ -1192,7 +1251,8 @@ def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
         AccountStatus.ACTIVE,
         used_percent=10.0,
         secondary_used_percent=10.0,
-        secondary_reset_at=int(now + 4 * 24 * 3600),
+        primary_reset_at=int(now + 4 * 24 * 3600),
+        secondary_reset_at=int(now + 1 * 3600),
         plan_type="pro",
         capacity_credits=50400.0,
     )
@@ -1202,6 +1262,7 @@ def test_select_account_capacity_weighted_prefers_earlier_reset_bucket():
             [early, late],
             now=now,
             prefer_earlier_reset=True,
+            prefer_earlier_reset_window="primary",
             routing_strategy="capacity_weighted",
         )
         assert result.account is not None

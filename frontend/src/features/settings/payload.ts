@@ -8,6 +8,7 @@ export function buildSettingsUpdateRequest(
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+    preferEarlierResetWindow: settings.preferEarlierResetWindow,
     routingStrategy: settings.routingStrategy,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,

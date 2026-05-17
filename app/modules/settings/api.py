@@ -79,6 +79,7 @@ async def get_settings(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=settings.prefer_earlier_reset_window,
         routing_strategy=settings.routing_strategy,
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
@@ -110,6 +111,7 @@ async def update_settings(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=payload.prefer_earlier_reset_window or current.prefer_earlier_reset_window,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
@@ -163,6 +165,7 @@ async def update_settings(
             "sticky_threads_enabled",
             "upstream_stream_transport",
             "prefer_earlier_reset_accounts",
+            "prefer_earlier_reset_window",
             "routing_strategy",
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
@@ -182,6 +185,7 @@ async def update_settings(
         sticky_threads_enabled=updated.sticky_threads_enabled,
         upstream_stream_transport=updated.upstream_stream_transport,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=updated.prefer_earlier_reset_window,
         routing_strategy=updated.routing_strategy,
         openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,

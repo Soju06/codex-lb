@@ -1780,6 +1780,22 @@ class ProxyService:
                         log_status = "success"
                         return response
                     except ProxyResponseError as exc:
+                        compact_continuity_error = _compact_previous_response_not_found_error(exc)
+                        if compact_continuity_error is not None:
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            _record_continuity_fail_closed(
+                                surface="compact",
+                                reason="previous_response_not_found",
+                                previous_response_id=None,
+                                session_id=_owner_lookup_session_id_from_headers(headers),
+                                upstream_error_code=_proxy_response_error_code(exc),
+                            )
+                            raise compact_continuity_error from exc
                         if exc.status_code == 401:
                             if refresh_retry_used:
                                 await self._settle_compact_api_key_usage(
@@ -10421,6 +10437,39 @@ def _is_previous_response_not_found_error(
     if code != "invalid_request_error" or param != "previous_response_id":
         return False
     return _is_previous_response_not_found_message(message)
+
+
+def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> ProxyResponseError | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    code = _normalize_error_code(error.code, error.type)
+    if not _is_previous_response_not_found_error(
+        code=code,
+        param=error.param,
+        message=error.message,
+    ):
+        return None
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "stream_incomplete",
+            "Upstream websocket closed before response.completed",
+            error_type="server_error",
+        ),
+        failure_phase=exc.failure_phase,
+        retryable_same_contract=False,
+        failure_detail="previous_response_not_found",
+        failure_exception_type=exc.failure_exception_type,
+        upstream_status_code=exc.upstream_status_code or exc.status_code,
+    )
+
+
+def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    return _normalize_error_code(error.code, error.type)
 
 
 def _refresh_websocket_request_input_fingerprint_from_text(request_state: _WebSocketRequestState) -> None:

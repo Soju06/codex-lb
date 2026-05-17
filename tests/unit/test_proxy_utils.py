@@ -11180,6 +11180,65 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
 
 
 @pytest.mark.asyncio
+async def test_compact_previous_response_not_found_is_masked_without_account_penalty(monkeypatch, caplog):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_prev_missing")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def failing_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        error_payload = openai_error(
+            "invalid_request_error",
+            "Previous response with id 'resp_compact_missing' not found.",
+            error_type="invalid_request_error",
+        )
+        error_payload["error"]["param"] = "previous_response_id"
+        raise proxy_module.ProxyResponseError(400, error_payload)
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "stream_incomplete"
+    assert _proxy_error_message(exc) == "Upstream websocket closed before response.completed"
+    assert "resp_compact_missing" not in json.dumps(exc.payload)
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert "continuity_fail_closed surface=compact reason=previous_response_not_found" in caplog.text
+    assert "resp_compact_missing" not in caplog.text
+    assert counter.samples == [
+        {
+            "labels": {"surface": "compact", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+    record_error.assert_not_awaited()
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_surfaces_local_create_overload_without_penalizing_account(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.proxy_compact_response_create_limit = 1

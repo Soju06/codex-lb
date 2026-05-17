@@ -2732,7 +2732,9 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
 
     async def fake_stream_responses(**kwargs: object):
         del kwargs
-        yield "data: first\n\n"
+        yield proxy_service.format_sse_event(
+            cast(Any, {"type": "response.created", "response": {"id": "resp_owner_1"}})
+        )
         raise ProxyResponseError(503, proxy_service.openai_error("bridge_owner_unreachable", "boom"))
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
@@ -2756,9 +2758,12 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
         )
     ]
 
-    assert chunks[0] == "data: first\n\n"
+    assert chunks[0] == proxy_service.format_sse_event(
+        cast(Any, {"type": "response.created", "response": {"id": "resp_owner_1"}})
+    )
     terminal_event = cast(dict[str, Any], proxy_service.parse_sse_data_json(chunks[1]))
     assert terminal_event["type"] == "response.failed"
+    assert terminal_event["response"]["id"] == "resp_owner_1"
     assert terminal_event["response"]["error"]["code"] == "bridge_owner_unreachable"
     assert terminal_event["response"]["error"]["message"] == "boom"
 
@@ -2777,7 +2782,9 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
 
     async def fake_stream_responses(**kwargs: object):
         del kwargs
-        yield "data: first\n\n"
+        yield proxy_service.format_sse_event(
+            cast(Any, {"type": "response.created", "response": {"id": "resp_owner_2"}})
+        )
         raise aiohttp.ClientError("connection reset")
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
@@ -2801,9 +2808,12 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
         )
     ]
 
-    assert chunks[0] == "data: first\n\n"
+    assert chunks[0] == proxy_service.format_sse_event(
+        cast(Any, {"type": "response.created", "response": {"id": "resp_owner_2"}})
+    )
     terminal_event = cast(dict[str, Any], proxy_service.parse_sse_data_json(chunks[1]))
     assert terminal_event["type"] == "response.failed"
+    assert terminal_event["response"]["id"] == "resp_owner_2"
     assert terminal_event["response"]["error"]["code"] == "bridge_owner_unreachable"
     assert terminal_event["response"]["error"]["message"] == "HTTP bridge owner request failed"
 

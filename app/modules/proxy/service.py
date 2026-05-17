@@ -1546,6 +1546,7 @@ class ProxyService:
         )
 
         forwarded_any = False
+        forwarded_response_id: str | None = None
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -1555,6 +1556,8 @@ class ProxyService:
                 request_started_at=request_started_at,
             ):
                 forwarded_any = True
+                block_payload = parse_sse_data_json(event_block)
+                forwarded_response_id = _websocket_response_id(None, block_payload) or forwarded_response_id
                 yield event_block
         except OwnerForwardRelayFailure as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1607,7 +1610,7 @@ class ProxyService:
                     error_code or "bridge_owner_unreachable",
                     error_message or "HTTP bridge owner request failed",
                     error_type=(error.type if error and error.type else "server_error"),
-                    response_id=get_request_id(),
+                    response_id=forwarded_response_id or get_request_id(),
                     error_param=error.param if error else None,
                 )
                 _apply_error_metadata(event["response"]["error"], error)
@@ -1634,7 +1637,7 @@ class ProxyService:
                     response_failed_event(
                         "bridge_owner_unreachable",
                         "HTTP bridge owner request failed",
-                        response_id=get_request_id(),
+                        response_id=forwarded_response_id or get_request_id(),
                     )
                 )
                 return

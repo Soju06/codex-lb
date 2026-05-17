@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.18.1](https://github.com/Soju06/codex-lb/compare/v1.18.0...v1.18.1) (2026-05-17)
+
+
+### Bug Fixes
+
+* **db,firewall:** validate pooled connections + raise IP cache TTL ([#679](https://github.com/Soju06/codex-lb/issues/679)) ([f46a5de](https://github.com/Soju06/codex-lb/commit/f46a5de6afed70553381d76532b477ad9fdb2ecd))
+* **db,firewall:** validate pooled connections + raise IP cache TTL ([#679](https://github.com/Soju06/codex-lb/issues/679)) ([f46a5de](https://github.com/Soju06/codex-lb/commit/f46a5de6afed70553381d76532b477ad9fdb2ecd)), closes [#672](https://github.com/Soju06/codex-lb/issues/672)
+* **proxy:** proxy Codex control-plane protocol ([#596](https://github.com/Soju06/codex-lb/issues/596)) ([1ca7d2e](https://github.com/Soju06/codex-lb/commit/1ca7d2e8a20375f0062866de6296792954ff37a4))
+* **proxy:** replay HTTP bridge quota failures ([#634](https://github.com/Soju06/codex-lb/issues/634)) ([ad34477](https://github.com/Soju06/codex-lb/commit/ad3447776e8312f8bd1967dfaa659b8961916882))
+* **proxy:** suppress duplicate side-effect tool calls ([#586](https://github.com/Soju06/codex-lb/issues/586)) ([bc5d1bd](https://github.com/Soju06/codex-lb/commit/bc5d1bd0a97cbcc2a292ec4f615185409322327d))
+
+
+### Documentation
+
+* add balakumardev as a contributor for ideas ([#468](https://github.com/Soju06/codex-lb/issues/468)) ([1c75087](https://github.com/Soju06/codex-lb/commit/1c750879c16f2714a25055af93ba6fec60f15d6c))
+
 ## [1.18.0](https://github.com/Soju06/codex-lb/compare/v1.17.0...v1.18.0) (2026-05-17)
 
 

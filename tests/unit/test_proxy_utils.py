@@ -3242,7 +3242,7 @@ async def test_compact_request_log_omits_visibility_when_flag_disabled(monkeypat
 
 @pytest.mark.asyncio
 async def test_compact_request_log_persists_redacted_visibility_when_flag_enabled(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = cast(SimpleNamespace, _make_proxy_settings(log_proxy_service_tier_trace=False))
     settings.request_visibility_mode = "persistent"
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -3307,7 +3307,7 @@ async def test_compact_request_log_persists_redacted_visibility_when_flag_enable
 
 @pytest.mark.asyncio
 async def test_stream_request_log_persists_redacted_visibility_when_flag_enabled(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = cast(SimpleNamespace, _make_proxy_settings(log_proxy_service_tier_trace=False))
     settings.request_visibility_mode = "persistent"
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -3324,7 +3324,10 @@ async def test_stream_request_log_persists_redacted_visibility_when_flag_enabled
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        yield 'data: {"type":"response.completed","response":{"id":"resp_stream_visibility","service_tier":"priority"}}\n\n'
+        yield (
+            'data: {"type":"response.completed",'
+            '"response":{"id":"resp_stream_visibility","service_tier":"priority"}}\n\n'
+        )
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
 

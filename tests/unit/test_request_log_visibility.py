@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from app.modules.request_logs.visibility import (
-    MAX_REQUEST_VISIBILITY_BYTES,
     build_request_visibility_document,
 )
 

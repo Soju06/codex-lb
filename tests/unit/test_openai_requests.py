@@ -358,8 +358,10 @@ def test_top_level_normalization_does_not_mutate_nested_payload_keys():
     assert isinstance(tools, list)
     first_tool = tools[0]
     assert isinstance(first_tool, dict)
+    first_tool = cast(dict[str, JsonValue], first_tool)
     parameters = first_tool["parameters"]
     assert isinstance(parameters, dict)
+    parameters = cast(dict[str, JsonValue], parameters)
     properties = parameters["properties"]
     assert isinstance(properties, dict)
     assert "serviceTier" in properties

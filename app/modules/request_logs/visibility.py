@@ -111,7 +111,9 @@ def _is_supported_json_body(body: object) -> bool:
 
 def _redact_json_value(value: object) -> JsonValue:
     if is_json_mapping(value):
-        return {key: _REDACTED_VALUE if _is_secret_key(key) else _redact_json_value(item) for key, item in value.items()}
+        return {
+            key: _REDACTED_VALUE if _is_secret_key(key) else _redact_json_value(item) for key, item in value.items()
+        }
     if is_json_list(value):
         return [_redact_json_value(item) for item in value]
     if isinstance(value, str):

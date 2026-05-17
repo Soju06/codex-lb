@@ -5,7 +5,6 @@ from datetime import UTC, datetime, timedelta
 
 from app.modules.settings.repository import SettingsRepository
 
-
 _REQUEST_VISIBILITY_MODES = frozenset({"off", "persistent", "temporary"})
 
 

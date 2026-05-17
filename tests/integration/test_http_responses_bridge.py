@@ -4197,6 +4197,7 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
         {},
         api_key=None,
         api_key_reservation=None,
+        request_visibility=None,
     )
     request_state.transport = "http"
     submit_task = asyncio.create_task(
@@ -4354,12 +4355,14 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
         max_sessions=128,
     )
 
-    first_state, first_text = service._prepare_http_bridge_request(payload, {}, api_key=None, api_key_reservation=None)
+    first_state, first_text = service._prepare_http_bridge_request(
+        payload, {}, api_key=None, api_key_reservation=None, request_visibility=None
+    )
     first_state.transport = "http"
     await service._submit_http_bridge_request(session, request_state=first_state, text_data=first_text, queue_limit=1)
 
     second_state, second_text = service._prepare_http_bridge_request(
-        payload, {}, api_key=None, api_key_reservation=None
+        payload, {}, api_key=None, api_key_reservation=None, request_visibility=None
     )
     second_state.transport = "http"
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -5242,7 +5245,9 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
     )
 
     await session.response_create_gate.acquire()
-    request_state, text_data = service._prepare_http_bridge_request(payload, {}, api_key=None, api_key_reservation=None)
+    request_state, text_data = service._prepare_http_bridge_request(
+        payload, {}, api_key=None, api_key_reservation=None, request_visibility=None
+    )
     request_state.transport = "http"
     task = asyncio.create_task(
         service._submit_http_bridge_request(
@@ -5895,6 +5900,7 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
         openai_cache_affinity=True,
         api_key=None,
         api_key_reservation=None,
+        request_visibility=None,
         suppress_text_done_events=False,
         idle_ttl_seconds=120.0,
         codex_idle_ttl_seconds=900.0,
@@ -5942,12 +5948,14 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
             {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
             api_key=None,
             api_key_reservation=None,
+            request_visibility=None,
         )
         second_request_state, _ = service._prepare_http_bridge_request(
             payload,
             {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
             api_key=None,
             api_key_reservation=None,
+            request_visibility=None,
         )
     finally:
         reset_request_id(token)

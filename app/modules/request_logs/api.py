@@ -9,8 +9,8 @@ from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
-    RequestLogVisibilityResponse,
     RequestLogsResponse,
+    RequestLogVisibilityResponse,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
 

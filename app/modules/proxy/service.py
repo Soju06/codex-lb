@@ -207,6 +207,7 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
+
         async def _run() -> AsyncIterator[str]:
             settings = await get_settings_cache().get()
             request_visibility = _request_visibility_blob(
@@ -245,6 +246,7 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         filtered = filter_inbound_headers(headers)
+
         async def _run() -> AsyncIterator[str]:
             settings = await get_settings_cache().get()
             request_visibility = _request_visibility_blob(
@@ -1142,7 +1144,11 @@ class ProxyService:
             client_metadata=client_metadata,
             request_visibility=_request_visibility_blob(
                 filter_inbound_headers(headers),
-                {"type": "response.create", **responses_payload.to_payload(), **({"client_metadata": client_metadata} if client_metadata else {})},
+                {
+                    "type": "response.create",
+                    **responses_payload.to_payload(),
+                    **({"client_metadata": client_metadata} if client_metadata else {}),
+                },
                 enabled=request_visibility_capture_enabled_now(settings),
             ),
         )

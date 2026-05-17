@@ -1315,6 +1315,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
@@ -1325,9 +1326,17 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     entries: list[CodexModelEntry] = []
     for slug, model in models.items():
-        if not is_public_model(model, allowed_models):
+        if visibility_allowed_models is None:
+            if not is_public_model(model, allowed_models):
+                continue
+            entries.append(_to_codex_model_entry(model))
             continue
-        entries.append(_to_codex_model_entry(model))
+        entries.append(
+            _to_codex_model_entry(
+                model,
+                visibility="list" if slug in visibility_allowed_models else "hide",
+            )
+        )
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
 
@@ -1373,7 +1382,13 @@ def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     return allowed_models
 
 
-def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
+def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
+    if api_key is None or not api_key.apply_to_codex_model or not api_key.allowed_models:
+        return None
+    return _allowed_models_for_api_key(api_key)
+
+
+def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
 
     extra: dict[str, JsonValue] = {}
@@ -1427,7 +1442,7 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
-        visibility=_model_visibility(model),
+        visibility=visibility or _model_visibility(model),
         **extra,
     )
 

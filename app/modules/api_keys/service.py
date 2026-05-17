@@ -51,6 +51,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
+        apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
@@ -200,6 +201,7 @@ class LimitRuleInput:
 class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
+    apply_to_codex_model: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
@@ -213,6 +215,8 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
+    apply_to_codex_model: bool | None = None
+    apply_to_codex_model_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -243,6 +247,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    apply_to_codex_model: bool = False
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
@@ -288,6 +293,7 @@ class ApiKeysService:
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
+            apply_to_codex_model=bool(payload.apply_to_codex_model),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
@@ -346,6 +352,12 @@ class ApiKeysService:
         else:
             enforced_model = None
 
+        apply_to_codex_model: bool | _Unset
+        if payload.apply_to_codex_model_set:
+            apply_to_codex_model = bool(payload.apply_to_codex_model)
+        else:
+            apply_to_codex_model = _UNSET
+
         if payload.enforced_reasoning_effort_set:
             enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         else:
@@ -390,6 +402,7 @@ class ApiKeysService:
                 key_id,
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+                apply_to_codex_model=apply_to_codex_model,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -420,6 +433,7 @@ class ApiKeysService:
             or limit_rows is not None
             or payload.name_set
             or payload.allowed_models_set
+            or payload.apply_to_codex_model_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
@@ -1096,6 +1110,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
+        apply_to_codex_model=data.apply_to_codex_model,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
@@ -1119,6 +1134,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
+        apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),

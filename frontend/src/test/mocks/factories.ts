@@ -400,6 +400,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		name: "Default key",
 		keyPrefix: "sk-test",
 		allowedModels: ["gpt-5.1"],
+		applyToCodexModel: false,
 		expiresAt: offsetIso(30 * 24 * 60),
 		isActive: true,
 		accountAssignmentScopeEnabled: false,

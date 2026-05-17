@@ -16,6 +16,7 @@ describe("ApiKeySchema", () => {
       name: "Service Key",
       keyPrefix: "sk-live",
       allowedModels: ["gpt-4.1"],
+      applyToCodexModel: true,
       expiresAt: null,
       isActive: true,
       createdAt: ISO,
@@ -35,6 +36,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.id).toBe("key-1");
     expect(parsed.allowedModels).toEqual(["gpt-4.1"]);
+    expect(parsed.applyToCodexModel).toBe(true);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
   });
@@ -52,6 +54,7 @@ describe("ApiKeySchema", () => {
     });
 
     expect(parsed.limits).toEqual([]);
+    expect(parsed.applyToCodexModel).toBe(false);
   });
 });
 
@@ -79,12 +82,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
     const parsed = ApiKeyUpdateRequestSchema.parse({
       name: "Updated Key",
       allowedModels: ["gpt-4.1-mini"],
+      applyToCodexModel: true,
       weeklyTokenLimit: 50000,
       expiresAt: ISO,
       isActive: false,
     });
 
     expect(parsed.name).toBe("Updated Key");
+    expect(parsed.applyToCodexModel).toBe(true);
     expect(parsed.isActive).toBe(false);
   });
 

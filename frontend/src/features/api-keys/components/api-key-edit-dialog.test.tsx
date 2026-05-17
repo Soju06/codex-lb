@@ -36,6 +36,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
+    expect(payload.applyToCodexModel).toBe(false);
     expect("assignedAccountIds" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
@@ -246,6 +247,44 @@ describe("ApiKeyEditDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
     expect(payload.assignedAccountIds).toEqual([]);
+  });
+
+  it("submits the codex /model checkbox value", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+  });
+
+  it("shows the stored codex /model checkbox value", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ applyToCodexModel: true })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).toBeChecked();
   });
 });
 

@@ -1,0 +1,4 @@
+- [ ] 1. Add API key spec coverage for the new `Apply to codex /model` option and the `/backend-api/codex/models` visibility rewrite behavior.
+- [ ] 2. Persist the new API key boolean field through database, backend schemas, service, and dashboard API responses.
+- [ ] 3. Update the create/edit API key dialogs to expose the checkbox below `Allowed models`.
+- [ ] 4. Add regression tests for API key payloads and `/backend-api/codex/models` behavior when the flag is off, on with allowed models, and on without an allowlist.

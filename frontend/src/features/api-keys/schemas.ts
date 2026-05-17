@@ -38,6 +38,7 @@ export const ApiKeySchema = z.object({
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
+  applyToCodexModel: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
@@ -60,6 +61,7 @@ export const ApiKeySchema = z.object({
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
+  applyToCodexModel: z.boolean().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
@@ -81,6 +83,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
+  applyToCodexModel: z.boolean().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])

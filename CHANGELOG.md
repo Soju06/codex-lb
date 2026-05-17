@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.18.0](https://github.com/Soju06/codex-lb/compare/v1.17.0...v1.18.0) (2026-05-17)
+
+
+### Features
+
+* **accounts:** expose weekly token pace data ([#655](https://github.com/Soju06/codex-lb/issues/655)) ([9bd5bc3](https://github.com/Soju06/codex-lb/commit/9bd5bc3b73803935fff437437b0a038002177265))
+* **acc:** preserve metrics when the account is deleted ([#640](https://github.com/Soju06/codex-lb/issues/640)) ([4aee3aa](https://github.com/Soju06/codex-lb/commit/4aee3aaa26f32bd2c6ac7206afefc70637bc4ea3))
+* **dashboard:** show weekly token pace card ([#656](https://github.com/Soju06/codex-lb/issues/656)) ([998e2f0](https://github.com/Soju06/codex-lb/commit/998e2f058c2218a69377ce054199d76d4e181107))
+
+
+### Bug Fixes
+
+* **api:** add back the account selection on api creation ([#594](https://github.com/Soju06/codex-lb/issues/594)) ([f9b62bf](https://github.com/Soju06/codex-lb/commit/f9b62bfdee061a2b1011e804041f631cee1804ec))
+* **auth:** deactivate account on refresh-time token_expired ([#600](https://github.com/Soju06/codex-lb/issues/600)) ([7b0e0ff](https://github.com/Soju06/codex-lb/commit/7b0e0ff9a6b28020e87dbe23c17c1cc8fb498298))
+* **chat-completions:** drop unknown message-object keys during coercion ([#637](https://github.com/Soju06/codex-lb/issues/637)) ([d314d00](https://github.com/Soju06/codex-lb/commit/d314d00ccfd60245e8792b8282766e94742a3cb8))
+* **dashboard-auth:** reject passwords longer than bcrypt's 72-byte limit ([#598](https://github.com/Soju06/codex-lb/issues/598)) ([d9b0493](https://github.com/Soju06/codex-lb/commit/d9b0493879a4e2059f70838c4334eda47c900dd2))
+* **oauth:** start device polling on oauth start ([#635](https://github.com/Soju06/codex-lb/issues/635)) ([94fa0bc](https://github.com/Soju06/codex-lb/commit/94fa0bc3f615679157a82e151b372370842dc23a))
+* **proxy:** classify upstream overloaded_error as retryable transient ([#601](https://github.com/Soju06/codex-lb/issues/601)) ([8ef0833](https://github.com/Soju06/codex-lb/commit/8ef0833c58a8a8964f5b1d42914bc83494320d52))
+* **proxy:** make /v1/responses streams parseable by the OpenAI SDK ([#639](https://github.com/Soju06/codex-lb/issues/639)) ([febf4b6](https://github.com/Soju06/codex-lb/commit/febf4b63156598084cafd209ed88534cffd90ad6))
+* **proxy:** mask single previous response misses ([#516](https://github.com/Soju06/codex-lb/issues/516)) ([67cc11f](https://github.com/Soju06/codex-lb/commit/67cc11f831a1e39fc1a91a709b2168e37016e9b5))
+* **proxy:** pre-validate strict function tool schemas ([#658](https://github.com/Soju06/codex-lb/issues/658)) ([0998cac](https://github.com/Soju06/codex-lb/commit/0998cacd25f9e057a790155c07b2d121a697d46e))
+* **proxy:** support Pro Lite account routing ([#558](https://github.com/Soju06/codex-lb/issues/558)) ([a737c7e](https://github.com/Soju06/codex-lb/commit/a737c7e66e9464ef81d64d445b440019f8e90762))
+* remove unsupported `type` field from issue forms ([#638](https://github.com/Soju06/codex-lb/issues/638)) ([a1ef739](https://github.com/Soju06/codex-lb/commit/a1ef73925391523752e9260b7f230eabe0743b64))
+
+
+### Performance Improvements
+
+* add index to db ([#613](https://github.com/Soju06/codex-lb/issues/613)) ([852be82](https://github.com/Soju06/codex-lb/commit/852be82861794893c9429d5add1a1b1250155f1c))
+
+
+### Documentation
+
+* add issue forms, PR template, and community health files ([#614](https://github.com/Soju06/codex-lb/issues/614)) ([d1d6360](https://github.com/Soju06/codex-lb/commit/d1d6360d2c88159f87bbc4ac2ec7b43e10fa29e8))
+* add JeffKandt as a contributor for test, and review ([#606](https://github.com/Soju06/codex-lb/issues/606)) ([28332ad](https://github.com/Soju06/codex-lb/commit/28332adf9114233af286c38caacc7089458dfc4c))
+* add jumski, mgwals, ozpool, klaascommerce as contributors ([#641](https://github.com/Soju06/codex-lb/issues/641)) ([ff2f237](https://github.com/Soju06/codex-lb/commit/ff2f237e759d358a69327e8508e80883a5cddcaa))
+* add Komzpa as a contributor for code, and bug ([#603](https://github.com/Soju06/codex-lb/issues/603)) ([8a0cfdb](https://github.com/Soju06/codex-lb/commit/8a0cfdb326a699415e88280ba0582f3fb40ed324))
+* **contributing:** codify merge gates, collaborator rules, and bus-factor clause ([#642](https://github.com/Soju06/codex-lb/issues/642)) ([91b39fd](https://github.com/Soju06/codex-lb/commit/91b39fdb897bd9a88a45a983b6e28e636e8524af))
+
 ## [1.17.0](https://github.com/Soju06/codex-lb/compare/v1.16.0...v1.17.0) (2026-05-12)
 
 

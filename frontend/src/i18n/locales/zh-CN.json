@@ -1,0 +1,237 @@
+{
+  "common": {
+    "language": "语言",
+    "english": "English",
+    "chinese": "简体中文",
+    "logout": "退出登录",
+    "loading": "加载中",
+    "cancel": "取消"
+  },
+  "nav": {
+    "dashboard": "仪表盘",
+    "accounts": "账户",
+    "apis": "API",
+    "settings": "设置",
+    "openMenu": "打开菜单",
+    "showEmails": "显示邮箱",
+    "hideEmails": "隐藏邮箱"
+  },
+  "statusBar": {
+    "lastSync": "最近同步：",
+    "routing": "路由策略：",
+    "version": "版本：",
+    "live": "实时"
+  },
+  "auth": {
+    "appTitle": "Codex LB",
+    "appSubtitle": "API 负载均衡器",
+    "login": {
+      "heading": "登录",
+      "subheading": "请输入管理员密码以继续。",
+      "passwordLabel": "密码",
+      "passwordPlaceholder": "请输入密码",
+      "submit": "登录"
+    },
+    "totp": {
+      "title": "两步验证",
+      "description": "请输入身份验证器应用中的 6 位验证码。",
+      "codeLabel": "TOTP 验证码",
+      "submit": "验证"
+    },
+    "bootstrap": {
+      "title": "完成远程初始化",
+      "subtitle": "在配置管理员密码之前，远程仪表盘访问将保持锁定。",
+      "body": "请使用下方的密码设置流程引导仪表盘访问，然后再加载其余管理界面。",
+      "tokenConfigured": "请在下方输入已配置的 bootstrap token 与新密码。根据你的部署，token 可能来自服务器日志或 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN 环境变量。",
+      "tokenMissing": "远程初始化被阻断。请在服务器上设置 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN，或在未配置密码的情况下重启以自动生成。"
+    },
+    "trustedHeader": {
+      "title": "需要反向代理鉴权",
+      "body": "该仪表盘需要由反向代理传入受信任的鉴权头。请通过 Authelia 等代理访问，或先配置回退仪表盘密码。"
+    }
+  },
+  "settings": {
+    "page": {
+      "title": "设置",
+      "subtitle": "配置路由、鉴权、API Key 管理与防火墙。",
+      "trustedHeaderNotice": "仪表盘访问由可信反向代理头部鉴权。密码与 TOTP 仅作为可选的回退登录方式保留。",
+      "disabledNotice": "仪表盘鉴权已被配置完全跳过。请仅在网络受限或外部已有访问控制的场景下使用此模式。",
+      "savingLabel": "保存设置中..."
+    },
+    "appearance": {
+      "title": "外观",
+      "description": "选择界面外观与时间显示方式。",
+      "theme": {
+        "label": "主题",
+        "description": "选择你偏好的配色方案。",
+        "light": "浅色",
+        "dark": "深色",
+        "auto": "跟随系统"
+      },
+      "timeFormat": {
+        "label": "时间格式",
+        "description": "在仪表盘中以 12 小时或 24 小时制显示时间。",
+        "h12": "12 小时",
+        "h24": "24 小时"
+      },
+      "accountRows": {
+        "label": "账户行",
+        "description": "选择紧凑账户视图中显示哪些配额行。",
+        "fiveHour": "5H",
+        "fiveHourDescription": "仅在可用时显示 5 小时配额行。",
+        "weekly": "周",
+        "weeklyDescription": "仅显示周配额行。",
+        "both": "全部",
+        "bothDescription": "同时显示两条配额行。"
+      }
+    },
+    "routing": {
+      "title": "路由",
+      "description": "控制请求如何在多个账户之间分发。",
+      "upstream": {
+        "label": "上游流式传输",
+        "description": "选择 `codex-lb` 与上游建立流式响应连接的方式。",
+        "default": "服务器默认",
+        "auto": "自动",
+        "http": "Responses",
+        "websocket": "WebSocket"
+      },
+      "strategy": {
+        "label": "路由策略",
+        "description": "选择请求如何在多个账户之间分发。",
+        "capacityWeighted": "按容量加权",
+        "usageWeighted": "按用量加权",
+        "roundRobin": "轮询"
+      },
+      "stickyThreads": {
+        "label": "粘性会话",
+        "description": "将相关请求保持在同一账户上。"
+      },
+      "preferEarlier": {
+        "label": "优先重置较早的账户",
+        "description": "倾向于将流量分配给配额更早重置的账户。"
+      },
+      "promptCacheTtl": {
+        "label": "Prompt 缓存亲和 TTL",
+        "description": "在指定秒数内保留 OpenAI 风格的 prompt 缓存映射。",
+        "save": "保存 TTL"
+      }
+    },
+    "import": {
+      "title": "导入",
+      "description": "控制账户导入时如何处理重复项。",
+      "allowDuplicates": {
+        "label": "允许导入而不覆盖",
+        "description": "将重复导入保留为单独的账户，而不是替换已有账户。"
+      }
+    },
+    "session": {
+      "title": "会话",
+      "description": "控制新签发的密码会话在仪表盘中保持登录的时长。",
+      "lifetime": {
+        "label": "仪表盘会话有效期",
+        "description": "新密码会话的绝对有效期（小时）。已有会话仍按原过期时间保留。",
+        "ariaLabel": "仪表盘会话有效期",
+        "hoursSuffix": "小时",
+        "save": "保存有效期",
+        "invalid": "请输入整数小时数（1 或更大）。不接受 <0>1.5</0> 这类小数。",
+        "longWarning": "超过 30 天的会话有效期会让管理员会话长期可用。这在个人电脑上可能可以接受，但会放大浏览器配置文件泄露或 cookie 被盗的影响。"
+      }
+    },
+    "password": {
+      "title": "密码",
+      "status": {
+        "disabled": "当前仪表盘鉴权模式下密码登录已禁用。",
+        "fallbackConfigured": "密码已配置为可选回退方式。",
+        "fallbackMissing": "未设置回退密码。",
+        "configured": "密码已配置。",
+        "notSet": "未设置密码。"
+      },
+      "actions": {
+        "change": "修改",
+        "remove": "移除",
+        "loginToManage": "登录以管理",
+        "set": "设置密码"
+      },
+      "setupDialog": {
+        "title": "设置密码",
+        "description": "为仪表盘登录设置密码。",
+        "bootstrapTokenConfigured": "远程初始化需要已配置的 bootstrap token（来自服务器日志或 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN）。",
+        "bootstrapTokenMissing": "远程初始化被阻断。请在服务器上设置 CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN，或重启以自动生成 token。",
+        "passwordLabel": "密码",
+        "passwordPlaceholder": "至少 8 个字符",
+        "bootstrapTokenLabel": "Bootstrap token",
+        "bootstrapTokenPlaceholder": "请输入 bootstrap token",
+        "submit": "设置密码"
+      },
+      "changeDialog": {
+        "title": "修改密码",
+        "description": "请输入当前密码与新密码。",
+        "currentLabel": "当前密码",
+        "newLabel": "新密码",
+        "newPlaceholder": "至少 8 个字符",
+        "submit": "修改密码"
+      },
+      "removeDialog": {
+        "title": "移除密码",
+        "description": "请确认当前密码以将其移除。",
+        "currentLabel": "当前密码",
+        "currentPlaceholder": "请输入当前密码",
+        "submit": "移除密码"
+      },
+      "verifyDialog": {
+        "title": "验证密码",
+        "description": "请输入密码以解锁密码与 TOTP 管理。",
+        "totpTitle": "TOTP 验证",
+        "totpDescription": "请输入 TOTP 验证码以完成验证。",
+        "passwordLabel": "密码",
+        "passwordPlaceholder": "请输入当前密码",
+        "totpLabel": "TOTP 验证码",
+        "totpPlaceholder": "6 位验证码",
+        "submit": "验证"
+      },
+      "toasts": {
+        "configured": "密码已配置",
+        "changed": "密码已修改",
+        "removed": "密码已移除",
+        "sessionEstablished": "已建立密码会话"
+      }
+    },
+    "totp": {
+      "title": "TOTP",
+      "status": {
+        "configured": "TOTP 已配置。",
+        "notConfigured": "未配置 TOTP。"
+      },
+      "actions": {
+        "enable": "启用 TOTP",
+        "disable": "禁用"
+      },
+      "requireLogin": {
+        "label": "登录时要求 TOTP",
+        "description": "密码登录后再要求输入 TOTP 验证码。"
+      },
+      "setupDialog": {
+        "title": "启用 TOTP",
+        "description": "用身份验证器应用扫描二维码，然后输入验证码。",
+        "qrAlt": "TOTP 二维码",
+        "secretLabel": "Secret：",
+        "codeLabel": "验证码",
+        "submit": "确认启用"
+      },
+      "disableDialog": {
+        "title": "禁用 TOTP",
+        "description": "请输入当前 TOTP 验证码以禁用两步验证。",
+        "codeLabel": "TOTP 验证码",
+        "submit": "禁用 TOTP"
+      },
+      "validation": {
+        "codeLength": "请输入 6 位验证码"
+      },
+      "toasts": {
+        "configured": "TOTP 已配置",
+        "disabled": "TOTP 已禁用"
+      }
+    }
+  }
+}

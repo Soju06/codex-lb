@@ -1,0 +1,13 @@
+- [x] Add `i18next`, `react-i18next`, `i18next-browser-languagedetector` to `frontend/package.json` dependencies.
+- [x] Create `frontend/src/i18n/index.ts` initialising `i18next` with `en` and `zh-CN` resources, language detection (querystring, localStorage, navigator), `localStorage` persistence under `codex-lb-language`, and English fallback.
+- [x] Create `frontend/src/i18n/locales/en.json` and `frontend/src/i18n/locales/zh-CN.json` covering the in-scope keys (`common.*`, `nav.*`, `auth.*`, `statusBar.*`).
+- [x] Import the i18n bootstrap from `frontend/src/main.tsx` so it runs before React hydration.
+- [x] Add a `LanguageToggle` control rendered inside `AppHeader` (desktop and mobile sheet) that switches between English and Simplified Chinese, persists the change, and updates the `<html lang>` attribute.
+- [x] Migrate `AppHeader` nav labels, privacy toggle aria-label, and Logout button to `useTranslation`.
+- [x] Migrate `StatusBar` static labels (`Last sync`, `Routing`, `Version`, `Live` tooltip) to `useTranslation`. Leave the dynamic routing-strategy string in English (out of scope).
+- [x] Migrate `AuthGate` reverse-proxy fallback copy to `useTranslation`.
+- [x] Migrate `LoginForm` heading, helper text, label, placeholder, and submit button to `useTranslation`.
+- [x] Migrate `TotpDialog` title, description, label, and Verify button to `useTranslation`.
+- [x] Migrate `BootstrapSetupScreen` title, body, and bootstrap-token alert variants to `useTranslation`.
+- [x] Verify with `bun run lint`, `bun run typecheck`, and `bun run test`.
+- [x] Document the new behaviour under the `frontend-architecture` capability spec.

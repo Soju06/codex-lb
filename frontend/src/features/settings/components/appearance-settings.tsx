@@ -1,28 +1,46 @@
 import { Monitor, Moon, Palette, Sun } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
 import { cn } from "@/lib/utils";
 
-const THEME_OPTIONS: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
-  { value: "auto", label: "System", icon: Monitor },
+const THEME_OPTIONS: { value: ThemePreference; labelKey: string; icon: typeof Sun }[] = [
+  { value: "light", labelKey: "settings.appearance.theme.light", icon: Sun },
+  { value: "dark", labelKey: "settings.appearance.theme.dark", icon: Moon },
+  { value: "auto", labelKey: "settings.appearance.theme.auto", icon: Monitor },
 ];
 
-const TIME_FORMAT_OPTIONS: { value: TimeFormatPreference; label: string }[] = [
-  { value: "12h", label: "12h" },
-  { value: "24h", label: "24h" },
+const TIME_FORMAT_OPTIONS: { value: TimeFormatPreference; labelKey: string }[] = [
+  { value: "12h", labelKey: "settings.appearance.timeFormat.h12" },
+  { value: "24h", labelKey: "settings.appearance.timeFormat.h24" },
 ];
 
-const QUOTA_DISPLAY_OPTIONS: { value: AccountQuotaDisplayPreference; label: string; description: string }[] = [
-  { value: "5h", label: "5H", description: "Show only the 5h quota row when available." },
-  { value: "weekly", label: "W", description: "Show only the weekly quota row." },
-  { value: "both", label: "Both", description: "Show both quota rows." },
+const QUOTA_DISPLAY_OPTIONS: {
+  value: AccountQuotaDisplayPreference;
+  labelKey: string;
+  descriptionKey: string;
+}[] = [
+  {
+    value: "5h",
+    labelKey: "settings.appearance.accountRows.fiveHour",
+    descriptionKey: "settings.appearance.accountRows.fiveHourDescription",
+  },
+  {
+    value: "weekly",
+    labelKey: "settings.appearance.accountRows.weekly",
+    descriptionKey: "settings.appearance.accountRows.weeklyDescription",
+  },
+  {
+    value: "both",
+    labelKey: "settings.appearance.accountRows.both",
+    descriptionKey: "settings.appearance.accountRows.bothDescription",
+  },
 ];
 
 export function AppearanceSettings() {
+  const { t } = useTranslation();
   const preference = useThemeStore((s) => s.preference);
   const setTheme = useThemeStore((s) => s.setTheme);
   const timeFormat = useTimeFormatStore((s) => s.timeFormat);
@@ -39,8 +57,8 @@ export function AppearanceSettings() {
               <Palette className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">Appearance</h3>
-              <p className="text-xs text-muted-foreground">Choose how the interface looks and how time is displayed.</p>
+              <h3 className="text-sm font-semibold">{t("settings.appearance.title")}</h3>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.description")}</p>
             </div>
           </div>
         </div>
@@ -48,11 +66,11 @@ export function AppearanceSettings() {
         <div className="divide-y rounded-lg border">
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-medium">Theme</p>
-              <p className="text-xs text-muted-foreground">Select your preferred color scheme.</p>
+              <p className="text-sm font-medium">{t("settings.appearance.theme.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.theme.description")}</p>
             </div>
             <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
-              {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+              {THEME_OPTIONS.map(({ value, labelKey, icon: Icon }) => (
                 <button
                   key={value}
                   type="button"
@@ -66,7 +84,7 @@ export function AppearanceSettings() {
                   )}
                 >
                   <Icon className="h-3.5 w-3.5" />
-                  {label}
+                  {t(labelKey)}
                 </button>
               ))}
             </div>
@@ -74,11 +92,11 @@ export function AppearanceSettings() {
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-medium">Time format</p>
-              <p className="text-xs text-muted-foreground">Apply 12h or 24h formatting to datetimes across the dashboard.</p>
+              <p className="text-sm font-medium">{t("settings.appearance.timeFormat.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.timeFormat.description")}</p>
             </div>
             <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
-              {TIME_FORMAT_OPTIONS.map(({ value, label }) => (
+              {TIME_FORMAT_OPTIONS.map(({ value, labelKey }) => (
                 <button
                   key={value}
                   type="button"
@@ -91,7 +109,7 @@ export function AppearanceSettings() {
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  <span className="block">{label}</span>
+                  <span className="block">{t(labelKey)}</span>
                 </button>
               ))}
             </div>
@@ -99,16 +117,16 @@ export function AppearanceSettings() {
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-medium">Account rows</p>
-              <p className="text-xs text-muted-foreground">Choose which quota rows appear in compact account views.</p>
+              <p className="text-sm font-medium">{t("settings.appearance.accountRows.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.accountRows.description")}</p>
             </div>
             <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
-              {QUOTA_DISPLAY_OPTIONS.map(({ value, label, description }) => (
+              {QUOTA_DISPLAY_OPTIONS.map(({ value, labelKey, descriptionKey }) => (
                 <button
                   key={value}
                   type="button"
                   aria-pressed={quotaDisplay === value}
-                  title={description}
+                  title={t(descriptionKey)}
                   onClick={() => setQuotaDisplay(value)}
                   className={cn(
                     "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
@@ -117,7 +135,7 @@ export function AppearanceSettings() {
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  <span className="block">{label}</span>
+                  <span className="block">{t(labelKey)}</span>
                 </button>
               ))}
             </div>

@@ -1,0 +1,237 @@
+{
+  "common": {
+    "language": "Language",
+    "english": "English",
+    "chinese": "简体中文",
+    "logout": "Logout",
+    "loading": "Loading",
+    "cancel": "Cancel"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "accounts": "Accounts",
+    "apis": "APIs",
+    "settings": "Settings",
+    "openMenu": "Open menu",
+    "showEmails": "Show Emails",
+    "hideEmails": "Hide Emails"
+  },
+  "statusBar": {
+    "lastSync": "Last sync:",
+    "routing": "Routing:",
+    "version": "Version:",
+    "live": "Live"
+  },
+  "auth": {
+    "appTitle": "Codex LB",
+    "appSubtitle": "API Load Balancer",
+    "login": {
+      "heading": "Sign in",
+      "subheading": "Enter your admin password to continue.",
+      "passwordLabel": "Password",
+      "passwordPlaceholder": "Enter password",
+      "submit": "Sign In"
+    },
+    "totp": {
+      "title": "Two-factor verification",
+      "description": "Enter the 6-digit code from your authenticator app.",
+      "codeLabel": "TOTP code",
+      "submit": "Verify"
+    },
+    "bootstrap": {
+      "title": "Complete Remote Setup",
+      "subtitle": "Remote dashboard access stays locked until an admin password is configured.",
+      "body": "Use the password setup flow below to bootstrap dashboard access before loading the rest of the admin UI.",
+      "tokenConfigured": "Enter the configured bootstrap token below with your new password. Depending on your setup, it may come from your server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN.",
+      "tokenMissing": "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart without a password to auto-generate one."
+    },
+    "trustedHeader": {
+      "title": "Reverse proxy authentication required",
+      "body": "This dashboard expects a trusted auth header from your reverse proxy. Open it through Authelia or configure a fallback dashboard password first."
+    }
+  },
+  "settings": {
+    "page": {
+      "title": "Settings",
+      "subtitle": "Configure routing, auth, API key management, and firewall.",
+      "trustedHeaderNotice": "Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay available only as optional fallback login.",
+      "disabledNotice": "Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions or external access control.",
+      "savingLabel": "Saving settings..."
+    },
+    "appearance": {
+      "title": "Appearance",
+      "description": "Choose how the interface looks and how time is displayed.",
+      "theme": {
+        "label": "Theme",
+        "description": "Select your preferred color scheme.",
+        "light": "Light",
+        "dark": "Dark",
+        "auto": "System"
+      },
+      "timeFormat": {
+        "label": "Time format",
+        "description": "Apply 12h or 24h formatting to datetimes across the dashboard.",
+        "h12": "12h",
+        "h24": "24h"
+      },
+      "accountRows": {
+        "label": "Account rows",
+        "description": "Choose which quota rows appear in compact account views.",
+        "fiveHour": "5H",
+        "fiveHourDescription": "Show only the 5h quota row when available.",
+        "weekly": "W",
+        "weeklyDescription": "Show only the weekly quota row.",
+        "both": "Both",
+        "bothDescription": "Show both quota rows."
+      }
+    },
+    "routing": {
+      "title": "Routing",
+      "description": "Control how requests are distributed across accounts.",
+      "upstream": {
+        "label": "Upstream stream transport",
+        "description": "Choose how `codex-lb` connects upstream for streaming responses.",
+        "default": "Server default",
+        "auto": "Auto",
+        "http": "Responses",
+        "websocket": "WebSockets"
+      },
+      "strategy": {
+        "label": "Routing strategy",
+        "description": "Choose how requests are distributed across accounts.",
+        "capacityWeighted": "Capacity weighted",
+        "usageWeighted": "Usage weighted",
+        "roundRobin": "Round robin"
+      },
+      "stickyThreads": {
+        "label": "Sticky threads",
+        "description": "Keep related requests on the same account."
+      },
+      "preferEarlier": {
+        "label": "Prefer earlier reset",
+        "description": "Bias traffic to accounts with earlier quota reset."
+      },
+      "promptCacheTtl": {
+        "label": "Prompt-cache affinity TTL",
+        "description": "Keep OpenAI-style prompt-cache mappings warm for a bounded number of seconds.",
+        "save": "Save TTL"
+      }
+    },
+    "import": {
+      "title": "Import",
+      "description": "Control how account import handles duplicates.",
+      "allowDuplicates": {
+        "label": "Allow import without overwrite",
+        "description": "Keep duplicate imports as separate accounts instead of replacing existing ones."
+      }
+    },
+    "session": {
+      "title": "Session",
+      "description": "Control how long newly issued password-backed dashboard sessions stay signed in.",
+      "lifetime": {
+        "label": "Dashboard session lifetime",
+        "description": "Absolute lifetime in hours for new password sessions. Existing sessions keep their original expiry.",
+        "ariaLabel": "Dashboard session lifetime",
+        "hoursSuffix": "hours",
+        "save": "Save lifetime",
+        "invalid": "Enter a whole number of hours (1 or more). Decimals such as <0>1.5</0> are not accepted.",
+        "longWarning": "Lifetimes over 30 days keep admin sessions valid for a long time. That may be acceptable on a personal laptop, but it increases the impact of a leaked browser profile or stolen cookie."
+      }
+    },
+    "password": {
+      "title": "Password",
+      "status": {
+        "disabled": "Password login is disabled by the current dashboard auth mode.",
+        "fallbackConfigured": "Password is configured as an optional fallback.",
+        "fallbackMissing": "No fallback password set.",
+        "configured": "Password is configured.",
+        "notSet": "No password set."
+      },
+      "actions": {
+        "change": "Change",
+        "remove": "Remove",
+        "loginToManage": "Login to manage",
+        "set": "Set password"
+      },
+      "setupDialog": {
+        "title": "Set password",
+        "description": "Set a password for dashboard login.",
+        "bootstrapTokenConfigured": "Remote setup requires the configured bootstrap token (from server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN).",
+        "bootstrapTokenMissing": "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart to auto-generate a token.",
+        "passwordLabel": "Password",
+        "passwordPlaceholder": "Min. 8 characters",
+        "bootstrapTokenLabel": "Bootstrap token",
+        "bootstrapTokenPlaceholder": "Enter bootstrap token",
+        "submit": "Set password"
+      },
+      "changeDialog": {
+        "title": "Change password",
+        "description": "Enter your current password and a new one.",
+        "currentLabel": "Current password",
+        "newLabel": "New password",
+        "newPlaceholder": "Min. 8 characters",
+        "submit": "Change password"
+      },
+      "removeDialog": {
+        "title": "Remove password",
+        "description": "Confirm your current password to remove it.",
+        "currentLabel": "Current password",
+        "currentPlaceholder": "Enter current password",
+        "submit": "Remove password"
+      },
+      "verifyDialog": {
+        "title": "Verify password",
+        "description": "Enter your password to unlock password and TOTP management.",
+        "totpTitle": "TOTP verification",
+        "totpDescription": "Enter your TOTP code to complete verification.",
+        "passwordLabel": "Password",
+        "passwordPlaceholder": "Enter current password",
+        "totpLabel": "TOTP code",
+        "totpPlaceholder": "6-digit code",
+        "submit": "Verify"
+      },
+      "toasts": {
+        "configured": "Password configured",
+        "changed": "Password changed",
+        "removed": "Password removed",
+        "sessionEstablished": "Password session established"
+      }
+    },
+    "totp": {
+      "title": "TOTP",
+      "status": {
+        "configured": "TOTP is configured.",
+        "notConfigured": "No TOTP configured."
+      },
+      "actions": {
+        "enable": "Enable TOTP",
+        "disable": "Disable"
+      },
+      "requireLogin": {
+        "label": "Require TOTP on login",
+        "description": "Prompt for TOTP code after password login."
+      },
+      "setupDialog": {
+        "title": "Enable TOTP",
+        "description": "Scan the QR code with your authenticator app, then enter the verification code.",
+        "qrAlt": "TOTP QR code",
+        "secretLabel": "Secret:",
+        "codeLabel": "Verification code",
+        "submit": "Confirm setup"
+      },
+      "disableDialog": {
+        "title": "Disable TOTP",
+        "description": "Enter your current TOTP code to disable two-factor authentication.",
+        "codeLabel": "TOTP code",
+        "submit": "Disable TOTP"
+      },
+      "validation": {
+        "codeLength": "Enter a 6-digit code"
+      },
+      "toasts": {
+        "configured": "TOTP configured",
+        "disabled": "TOTP disabled"
+      }
+    }
+  }
+}

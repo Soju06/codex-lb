@@ -2148,9 +2148,16 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
 
 
 @pytest.mark.asyncio
-async def test_release_stale_usage_reservations_restores_reserved_usage(async_client):
+async def test_release_stale_usage_reservations_restores_reserved_usage(async_client, monkeypatch):
     del async_client
     now = utcnow()
+    writer_section_entries = 0
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal writer_section_entries
+        writer_section_entries += 1
+        yield
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
@@ -2181,9 +2188,12 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         await session.commit()
 
     async with SessionLocal() as session:
+        monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
         repo = ApiKeysRepository(session)
         released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
         assert released_count == 2
+
+    assert writer_section_entries == 3
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)

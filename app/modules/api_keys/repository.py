@@ -624,9 +624,9 @@ class ApiKeysRepository:
     ) -> int:
         released_count = 0
 
-        async with sqlite_writer_section():
-            try:
-                while True:
+        try:
+            while True:
+                async with sqlite_writer_section():
                     result = await self._session.execute(
                         select(ApiKeyUsageReservation)
                         .options(selectinload(ApiKeyUsageReservation.items))
@@ -676,9 +676,9 @@ class ApiKeysRepository:
                             )
                         released_count += 1
                     await self._session.commit()
-            except Exception:
-                await self._session.rollback()
-                raise
+        except Exception:
+            await self._session.rollback()
+            raise
 
         return released_count
 

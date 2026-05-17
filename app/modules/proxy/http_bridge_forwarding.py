@@ -96,6 +96,7 @@ class HTTPBridgeOwnerClient:
                         response.status,
                         _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
                     )
+                yielded_event = False
                 try:
                     async for event_block in _iter_sse_event_blocks(
                         response,
@@ -103,6 +104,7 @@ class HTTPBridgeOwnerClient:
                         proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
+                        yielded_event = True
                         yield event_block
                 except _OwnerForwardStreamTimeoutError as exc:
                     raise OwnerForwardRelayFailure(
@@ -112,6 +114,14 @@ class HTTPBridgeOwnerClient:
                                 exc.error_message,
                                 response_id=get_request_id(),
                             )
+                        )
+                    )
+                if not yielded_event:
+                    yield format_sse_event(
+                        response_failed_event(
+                            "stream_incomplete",
+                            "Upstream websocket closed before response.completed",
+                            response_id=get_request_id(),
                         )
                     )
 

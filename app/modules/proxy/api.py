@@ -1653,7 +1653,7 @@ def _v1_full_context_window(model: UpstreamModel) -> int:
 
 
 def _v1_input_context_window(model: UpstreamModel) -> int | None:
-    input_context_window = _effective_context_window(model)
+    input_context_window = model.context_window
     return input_context_window if input_context_window != _v1_full_context_window(model) else None
 
 

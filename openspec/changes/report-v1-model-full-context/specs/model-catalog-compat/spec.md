@@ -33,6 +33,13 @@ When serving `GET /v1/models`, the system SHALL preserve the Codex-native compac
 - **THEN** `GET /v1/models` returns that model with `metadata.input_context_window=272000`
 - **AND** `metadata.context_window` remains the model's full context window
 
+#### Scenario: Explicit reported-context overrides do not hide the Codex input budget
+
+- **WHEN** an operator override sets a known GPT-5 Codex model's reported `metadata.context_window` to `515000`
+- **AND** the upstream model catalog contains that model with `context_window=272000`
+- **THEN** `GET /v1/models` returns that model with `metadata.context_window=515000`
+- **AND** `metadata.input_context_window=272000`
+
 #### Scenario: /v1/models exposes max output budget for known GPT-5 Codex models
 
 - **WHEN** `GET /v1/models` returns `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, or `gpt-5.3-codex`

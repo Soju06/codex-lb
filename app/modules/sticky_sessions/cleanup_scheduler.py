@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Protocol, cast
 
+from app.core import startup as startup_module
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
@@ -75,9 +76,10 @@ class StickySessionCleanupScheduler:
                     deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                     if deleted_count > 0:
                         logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
-                    bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
-                    if bridge_deleted_count > 0:
-                        logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
+                    if startup_module._bridge_durable_schema_ready:
+                        bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
+                        if bridge_deleted_count > 0:
+                            logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
             except Exception:
                 logger.exception("Sticky session cleanup loop failed")
 

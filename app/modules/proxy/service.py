@@ -828,7 +828,22 @@ class ProxyService:
                 return
             except ProxyResponseError as exc:
                 if forwarded_any:
-                    raise
+                    error = _parse_openai_error(exc.payload)
+                    error_code = _normalize_error_code(
+                        error.code if error else None,
+                        error.type if error else None,
+                    )
+                    error_message = error.message if error else "HTTP bridge owner request failed"
+                    event = response_failed_event(
+                        error_code or "bridge_owner_unreachable",
+                        error_message or "HTTP bridge owner request failed",
+                        error_type=(error.type if error and error.type else "server_error"),
+                        response_id=request_state.response_id or request_id,
+                        error_param=error.param if error else None,
+                    )
+                    _apply_error_metadata(event["response"]["error"], error)
+                    yield format_sse_event(event)
+                    return
                 should_attempt_previous_response_recovery = (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
@@ -1568,7 +1583,7 @@ class ProxyService:
                     error_type="server_error",
                 ),
             ) from exc
-        except ProxyResponseError:
+        except ProxyResponseError as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
             _log_http_bridge_event(
@@ -1581,6 +1596,23 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                error = _parse_openai_error(exc.payload)
+                error_code = _normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                error_message = error.message if error else "HTTP bridge owner request failed"
+                event = response_failed_event(
+                    error_code or "bridge_owner_unreachable",
+                    error_message or "HTTP bridge owner request failed",
+                    error_type=(error.type if error and error.type else "server_error"),
+                    response_id=get_request_id(),
+                    error_param=error.param if error else None,
+                )
+                _apply_error_metadata(event["response"]["error"], error)
+                yield format_sse_event(event)
+                return
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1597,6 +1629,15 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                yield format_sse_event(
+                    response_failed_event(
+                        "bridge_owner_unreachable",
+                        "HTTP bridge owner request failed",
+                        response_id=get_request_id(),
+                    )
+                )
+                return
             raise ProxyResponseError(
                 503,
                 openai_error(

@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     database_background_pool_size: int | None = Field(default=None, gt=0)
     database_background_max_overflow: int | None = Field(default=None, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
+    database_pool_recycle_seconds: int = Field(default=1800, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
@@ -208,6 +209,7 @@ class Settings(BaseSettings):
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
+    firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     dashboard_auth_proxy_header: str = "Remote-User"
 

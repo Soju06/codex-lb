@@ -2757,7 +2757,7 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
     ]
 
     assert chunks[0] == "data: first\n\n"
-    terminal_event = proxy_service.parse_sse_data_json(chunks[1])
+    terminal_event = cast(dict[str, Any], proxy_service.parse_sse_data_json(chunks[1]))
     assert terminal_event["type"] == "response.failed"
     assert terminal_event["response"]["error"]["code"] == "bridge_owner_unreachable"
     assert terminal_event["response"]["error"]["message"] == "boom"
@@ -2802,7 +2802,7 @@ async def test_forward_http_bridge_request_to_owner_emits_terminal_sse_after_for
     ]
 
     assert chunks[0] == "data: first\n\n"
-    terminal_event = proxy_service.parse_sse_data_json(chunks[1])
+    terminal_event = cast(dict[str, Any], proxy_service.parse_sse_data_json(chunks[1]))
     assert terminal_event["type"] == "response.failed"
     assert terminal_event["response"]["error"]["code"] == "bridge_owner_unreachable"
     assert terminal_event["response"]["error"]["message"] == "HTTP bridge owner request failed"
@@ -2866,7 +2866,7 @@ async def test_stream_via_http_bridge_does_not_rebind_after_forwarded_bytes(
         seen.append(chunk)
 
     assert seen[0] == "data: first\n\n"
-    terminal_event = proxy_service.parse_sse_data_json(seen[1])
+    terminal_event = cast(dict[str, Any], proxy_service.parse_sse_data_json(seen[1]))
     assert terminal_event["type"] == "response.failed"
     assert terminal_event["response"]["error"]["code"] == "bridge_owner_unreachable"
     assert terminal_event["response"]["error"]["message"] == "boom"

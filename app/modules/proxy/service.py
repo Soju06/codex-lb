@@ -336,16 +336,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
-    {
-        "rate_limit_exceeded",
-        "usage_limit_reached",
-        "insufficient_quota",
-        "usage_not_included",
-        "quota_exceeded",
-    }
-)
-_WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)

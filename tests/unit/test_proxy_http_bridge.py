@@ -55,6 +55,50 @@ def _make_api_key(
     )
 
 
+def test_trim_http_bridge_previous_response_input_items_preserves_context_assistant_message() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "local context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items
+
+
+def test_trim_http_bridge_previous_response_input_items_trims_marked_replay_outputs() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {"id": "rs_replay", "type": "reasoning", "summary": []},
+        {
+            "id": "msg_replay",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior"}],
+        },
+        {
+            "id": "fc_replay",
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items[3:]
+
+
+def test_trim_http_bridge_previous_response_input_items_preserves_unmarked_call_context() -> None:
+    items: list[proxy_service.JsonValue] = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "local context"}]},
+        {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+
+    assert proxy_service._trim_http_bridge_previous_response_input_items(items) == items
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_stream_masks_single_top_level_previous_response_error(
     monkeypatch: pytest.MonkeyPatch,
@@ -848,6 +892,141 @@ async def test_stream_via_http_bridge_injects_durable_previous_response_anchor(
 
     assert chunks == []
     assert captured["previous_response_id"] == "resp_latest"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previous_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_prev_tool_call",
+            "input": [
+                {"id": "rs_repeat", "type": "reasoning", "summary": []},
+                {
+                    "id": "msg_repeat",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "running command"}],
+                },
+                {
+                    "id": "fc_repeat",
+                    "type": "function_call",
+                    "call_id": "call_repeat",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"date"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_repeat",
+                    "output": "Wed May 6 16:00:00 UTC 2026",
+                },
+            ],
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-trim-tool-call",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    await event_queue.put(None)
+    captured_input: list[proxy_service.JsonValue] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id
+        assert isinstance(prepared_payload.input, list)
+        captured_input[:] = cast(list[proxy_service.JsonValue], prepared_payload.input)
+        request_state.previous_response_id = prepared_payload.previous_response_id
+        return request_state, json.dumps({"type": "response.create", "input": prepared_payload.input})
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+        headers={"x-codex-session-id": "sid-123"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-123",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-123"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == []
+    assert captured_input == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_repeat",
+            "output": "Wed May 6 16:00:00 UTC 2026",
+        }
+    ]
 
 
 @pytest.mark.asyncio

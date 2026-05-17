@@ -69,14 +69,15 @@ async def test_v1_models_list(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_empty_when_registry_not_populated(async_client):
+async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["object"] == "list"
-    assert payload["data"] == []
+    ids = {item["id"] for item in payload["data"]}
+    assert {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}.issubset(ids)
 
 
 @pytest.mark.asyncio
@@ -235,13 +236,14 @@ async def test_backend_codex_models_includes_supported_in_api_false_models(async
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_empty_when_registry_not_populated(async_client):
+async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["models"] == []
+    slugs = {item["slug"] for item in payload["models"]}
+    assert {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}.issubset(slugs)
 
 
 @pytest.mark.asyncio

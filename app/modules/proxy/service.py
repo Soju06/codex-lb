@@ -2981,6 +2981,11 @@ class ProxyService:
                         continue
                     async with pending_lock:
                         pending_requests.append(request_state)
+                    self._start_request_state_api_key_reservation_heartbeat(
+                        request_state,
+                        api_key=request_state.api_key or api_key,
+                        surface="websocket",
+                    )
                     request_state_registered = True
                 else:
                     downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
@@ -3193,6 +3198,11 @@ class ProxyService:
                         )
                         async with pending_lock:
                             pending_requests.append(request_state)
+                        self._start_request_state_api_key_reservation_heartbeat(
+                            request_state,
+                            api_key=request_state.api_key or api_key,
+                            surface="websocket",
+                        )
                         request_state_registered = True
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
@@ -5720,6 +5730,11 @@ class ProxyService:
             gate_acquired = True
             async with session.pending_lock:
                 session.pending_requests.append(request_state)
+            self._start_request_state_api_key_reservation_heartbeat(
+                request_state,
+                api_key=request_state.api_key,
+                surface="http_bridge",
+            )
             request_enqueued = True
             await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()
@@ -5893,6 +5908,7 @@ class ProxyService:
             if request_enqueued and request_state in session.pending_requests:
                 session.pending_requests.remove(request_state)
             session.queued_request_count = max(0, session.queued_request_count - 1)
+        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if gate_acquired:
             _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
@@ -5911,6 +5927,7 @@ class ProxyService:
         request_state.event_queue = None
         if not removed:
             return False
+        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         _release_websocket_response_create_gate(request_state, session.response_create_gate)
         await self._release_websocket_reservation(request_state.api_key_reservation)
         request_state.api_key_reservation = None
@@ -7585,6 +7602,7 @@ class ProxyService:
             and error_message == "Upstream websocket closed before response.completed"
         ):
             settlement.account_health_error = False
+        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(
             api_key,
@@ -7776,6 +7794,7 @@ class ProxyService:
 
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):
+            self._cancel_request_state_api_key_reservation_heartbeat(request_state)
             request_error_code = request_state.error_code_override or error_code
             request_error_message = request_state.error_message_override or error_message
             request_error_type = request_state.error_type_override or "server_error"
@@ -7998,6 +8017,45 @@ class ProxyService:
     def _cancel_api_key_reservation_heartbeat_task(task: asyncio.Task[None]) -> None:
         task.add_done_callback(_consume_api_key_reservation_heartbeat_result)
         task.cancel()
+
+    def _start_request_state_api_key_reservation_heartbeat(
+        self,
+        request_state: "_WebSocketRequestState",
+        *,
+        api_key: ApiKeyData | None,
+        surface: str,
+    ) -> None:
+        if request_state.api_key_reservation is None:
+            return
+        if request_state.api_key_reservation_heartbeat_task is not None:
+            return
+        stop_event = asyncio.Event()
+        request_state.api_key_reservation_heartbeat_stop = stop_event
+        request_state.api_key_reservation_heartbeat_task = asyncio.create_task(
+            self._run_api_key_reservation_heartbeat(
+                api_key=api_key,
+                reservation=request_state.api_key_reservation,
+                touch_state=_ApiKeyReservationTouchState(
+                    last_touch_at=request_state.api_key_reservation_last_touch_at,
+                ),
+                request_id=request_state.response_id or request_state.request_log_id or request_state.request_id,
+                surface=surface,
+                stop_event=stop_event,
+            )
+        )
+
+    def _cancel_request_state_api_key_reservation_heartbeat(
+        self,
+        request_state: "_WebSocketRequestState",
+    ) -> None:
+        task = request_state.api_key_reservation_heartbeat_task
+        stop_event = request_state.api_key_reservation_heartbeat_stop
+        request_state.api_key_reservation_heartbeat_task = None
+        request_state.api_key_reservation_heartbeat_stop = None
+        if stop_event is not None:
+            stop_event.set()
+        if task is not None and not task.done():
+            self._cancel_api_key_reservation_heartbeat_task(task)
 
     async def _maybe_touch_request_state_api_key_reservation(
         self,
@@ -9823,6 +9881,8 @@ class _WebSocketRequestState:
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
+    api_key_reservation_heartbeat_stop: asyncio.Event | None = None
+    api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
 
 
 @dataclass(frozen=True, slots=True)

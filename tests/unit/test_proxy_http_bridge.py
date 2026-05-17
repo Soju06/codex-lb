@@ -5756,6 +5756,79 @@ async def test_http_bridge_retire_after_drain_waits_for_queued_submission() -> N
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    api_key = _make_api_key(key_id="key-http-heartbeat", assigned_account_ids=[])
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation-http-heartbeat",
+        key_id=api_key.id,
+        model="gpt-5.5",
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-http-heartbeat",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"new"}',
+        transport="http",
+        api_key=api_key,
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_heartbeat", api_key.id),
+        headers={"x-codex-turn-state": "http_turn_heartbeat"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_heartbeat",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-http-heartbeat", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    started = asyncio.Event()
+    seen: dict[str, object] = {}
+
+    async def fake_heartbeat(**kwargs: object) -> None:
+        seen.update(kwargs)
+        started.set()
+        stop_event = cast(asyncio.Event, kwargs["stop_event"])
+        await stop_event.wait()
+
+    monkeypatch.setattr(service, "_run_api_key_reservation_heartbeat", fake_heartbeat)
+
+    await service._submit_http_bridge_request(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    assert seen["api_key"] is api_key
+    assert seen["reservation"] is reservation
+    assert seen["request_id"] == "req-http-heartbeat"
+    assert seen["surface"] == "http_bridge"
+    assert request_state.api_key_reservation_heartbeat_task is not None
+    send_text.assert_awaited_once_with(request_state.request_text)
+
+    service._cancel_request_state_api_key_reservation_heartbeat(request_state)
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_rejects_retiring_session() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     send_text = AsyncMock()

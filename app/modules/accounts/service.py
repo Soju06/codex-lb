@@ -15,6 +15,7 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -30,12 +31,17 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.settings.service import parse_additional_quota_routing_policies
+from app.modules.usage.additional_quota_keys import (
+    get_additional_display_label_for_quota_key,
+    get_additional_quota_routing_policy,
+)
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
+_ROUTING_POLICIES = frozenset({"normal", "burn_first", "preserve"})
 
 
 class InvalidAuthJsonError(Exception):
@@ -76,6 +82,10 @@ class AccountsService:
         additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] = {}
         additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
         if additional_usage_repo:
+            settings = await get_settings_cache().get()
+            routing_policy_overrides = parse_additional_quota_routing_policies(
+                settings.additional_quota_routing_policies_json
+            )
             quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
             for quota_key in quota_keys:
                 primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
@@ -93,6 +103,10 @@ class AccountsService:
                             metered_feature=reference_entry.metered_feature,
                             display_label=get_additional_display_label_for_quota_key(quota_key)
                             or reference_entry.limit_name,
+                            routing_policy=get_additional_quota_routing_policy(
+                                quota_key,
+                                overrides=routing_policy_overrides,
+                            ),
                             primary_window=AccountAdditionalWindow(
                                 used_percent=primary_entry.used_percent,
                                 reset_at=primary_entry.reset_at,
@@ -201,3 +215,13 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def update_routing_policy(self, account_id: str, routing_policy: str) -> str | None:
+        normalized = routing_policy.strip().lower()
+        if normalized not in _ROUTING_POLICIES:
+            raise ValueError("Invalid account routing policy")
+        result = await self._repo.update_routing_policy(account_id, normalized)
+        if result:
+            get_account_selection_cache().invalidate()
+            return normalized
+        return None

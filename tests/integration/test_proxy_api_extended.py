@@ -77,6 +77,19 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     return generate_unique_account_id(account_id, email)
 
 
+async def _create_api_key_for_account(async_client, account_id: str, name: str) -> str:
+    create = await async_client.post("/api/api-keys/", json={"name": name})
+    assert create.status_code == 200
+    payload = create.json()
+    update = await async_client.patch(
+        f"/api/api-keys/{payload['id']}",
+        json={"assignedAccountIds": [account_id]},
+    )
+    assert update.status_code == 200
+    assert update.json()["assignedAccountIds"] == [account_id]
+    return payload["key"]
+
+
 @pytest.mark.asyncio
 async def test_proxy_compact_not_implemented(async_client, monkeypatch):
     await _import_account(async_client, "acc_compact_ni", "ni@example.com")
@@ -288,6 +301,13 @@ async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):
 @pytest.mark.asyncio
 async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_limit", "limit@example.com")
+    api_key = await _create_api_key_for_account(async_client, expected_account_id, "stream-limit-key")
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    settings_payload = settings.json()
+    settings_payload["apiKeyAuthEnabled"] = True
+    update_settings = await async_client.put("/api/settings", json=settings_payload)
+    assert update_settings.status_code == 200
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         raise ProxyResponseError(
@@ -307,7 +327,16 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    try:
+        response = await async_client.post(
+            "/backend-api/codex/responses",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+    finally:
+        settings_payload["apiKeyAuthEnabled"] = False
+        reset_settings = await async_client.put("/api/settings", json=settings_payload)
+        assert reset_settings.status_code == 200
     assert response.status_code == 429
     error = response.json()["error"]
     assert error["type"] == "usage_limit_reached"

@@ -2,6 +2,14 @@ import { z } from "zod";
 
 export const RoutingStrategySchema = z.enum(["usage_weighted", "round_robin", "capacity_weighted"]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
+export const AdditionalQuotaRoutingPolicySchema = z.enum(["inherit", "burn_first", "normal", "preserve"]);
+
+export const AdditionalQuotaPolicySchema = z.object({
+  quotaKey: z.string(),
+  displayLabel: z.string(),
+  routingPolicy: AdditionalQuotaRoutingPolicySchema,
+  modelIds: z.array(z.string()).default([]),
+});
 
 export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
@@ -10,10 +18,15 @@ export const DashboardSettingsSchema = z.object({
   routingStrategy: RoutingStrategySchema,
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive(),
   dashboardSessionTtlSeconds: z.number().int().min(3600),
+  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100),
+  stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100),
+  stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100),
   importWithoutOverwrite: z.boolean(),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   apiKeyAuthEnabled: z.boolean(),
+  additionalQuotaRoutingPolicies: z.record(z.string(), AdditionalQuotaRoutingPolicySchema).default({}),
+  additionalQuotaPolicies: z.array(AdditionalQuotaPolicySchema).default([]),
 });
 
 export const SettingsUpdateRequestSchema = z.object({
@@ -23,10 +36,15 @@ export const SettingsUpdateRequestSchema = z.object({
   routingStrategy: RoutingStrategySchema.optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
+  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+  stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+  stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  additionalQuotaRoutingPolicies: z.record(z.string(), AdditionalQuotaRoutingPolicySchema).optional(),
 });
 
 export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;

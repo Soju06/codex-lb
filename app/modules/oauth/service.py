@@ -386,9 +386,9 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert(account)
+                await repo.upsert_reauthorized(account)
         else:
-            await self._accounts_repo.upsert(account)
+            await self._accounts_repo.upsert_reauthorized(account)
 
     async def _set_success(self) -> None:
         async with self._store.lock:

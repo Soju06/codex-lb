@@ -52,6 +52,7 @@ class AccountAdditionalQuota(DashboardModel):
     limit_name: str
     metered_feature: str
     display_label: str | None = None
+    routing_policy: str = Field(default="inherit", pattern=r"^(inherit|burn_first|normal|preserve)$")
     primary_window: AccountAdditionalWindow | None = None
     secondary_window: AccountAdditionalWindow | None = None
 
@@ -61,6 +62,7 @@ class AccountSummary(DashboardModel):
     email: str
     display_name: str
     plan_type: str
+    routing_policy: str = "normal"
     status: str
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
@@ -95,6 +97,15 @@ class AccountPauseResponse(DashboardModel):
 
 class AccountReactivateResponse(DashboardModel):
     status: str
+
+
+class AccountRoutingPolicyUpdate(DashboardModel):
+    routing_policy: str
+
+
+class AccountRoutingPolicyResponse(DashboardModel):
+    status: str
+    routing_policy: str
 
 
 class AccountDeleteResponse(DashboardModel):

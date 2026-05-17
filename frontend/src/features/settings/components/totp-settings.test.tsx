@@ -24,10 +24,15 @@ const baseSettings = {
   routingStrategy: "usage_weighted" as const,
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
+  stickyReallocationBudgetThresholdPct: 95,
+  stickyReallocationPrimaryBudgetThresholdPct: 95,
+  stickyReallocationSecondaryBudgetThresholdPct: 100,
   importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
 };
 
 function renderWithClient(ui: React.ReactElement) {
@@ -110,6 +115,9 @@ describe("TotpSettings", () => {
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,

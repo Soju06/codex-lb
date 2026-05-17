@@ -189,6 +189,14 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 }
 
 
+def _is_openai_sdk_request(request: Request) -> bool:
+    for header_name in request.headers:
+        if header_name.lower().startswith("x-stainless-"):
+            return True
+    user_agent = request.headers.get("user-agent", "").lower()
+    return "openai" in user_agent
+
+
 @router.post(
     "/responses",
     responses={
@@ -203,23 +211,31 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    try:
+        responses_payload = payload.to_responses_request()
+        enforce_strict_text_format(responses_payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
         # The Codex CLI consumes codex.* vendor events and the upstream's
-        # native event ordering (it does not use the OpenAI Python SDK parser);
-        # forward the stream verbatim instead of enforcing the OpenAI SDK
-        # contract that /v1/responses applies.
-        enforce_openai_sdk_contract=False,
+        # native event ordering, while OpenAI SDK clients pointed at this
+        # compatibility route need the same SSE contract enforcement as /v1.
+        enforce_openai_sdk_contract=_is_openai_sdk_request(request),
     )
 
 

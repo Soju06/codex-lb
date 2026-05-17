@@ -61,6 +61,58 @@ async def test_openai_client_responses_create(app_instance, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_client_responses_stream_backend_codex_base_url(app_instance, monkeypatch):
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen["instructions"] = payload.instructions
+        seen["input"] = payload.input
+        yield (
+            'data: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":1}},'
+            '"response":{"id":"resp_backend_sdk"}}\n\n'
+        )
+        yield (
+            'data: {"type":"response.created","response":{"id":"resp_backend_sdk","object":"response",'
+            '"status":"in_progress","output":[]}}\n\n'
+        )
+        yield 'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_backend_sdk","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    transport = ASGITransport(app=app_instance)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as admin_client:
+        auth_json = _make_auth_json("acc_openai_backend_resp", "openai-backend-resp@example.com")
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await admin_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver/backend-api/codex",
+    ) as http_client:
+        client = openai.AsyncOpenAI(
+            api_key="test",
+            base_url="http://testserver/backend-api/codex",
+            http_client=http_client,
+        )
+        stream = await client.responses.create(model="gpt-5.5", input="hi", stream=True)
+        events = [event async for event in stream]
+
+    assert [event.type for event in events] == [
+        "response.created",
+        "response.output_text.delta",
+        "response.completed",
+    ]
+    assert seen["instructions"] == ""
+    assert seen["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+@pytest.mark.asyncio
 async def test_openai_client_chat_completions_create(app_instance, monkeypatch):
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'

@@ -6902,3 +6902,113 @@ async def test_maybe_touch_api_key_reservation_keeps_last_touch_when_touch_fails
 
     assert result == 1000.0
     touch_usage_reservation.assert_awaited_once_with("touch-fails")
+
+
+@pytest.mark.asyncio
+async def test_maybe_touch_api_key_reservation_keeps_last_touch_when_reservation_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    api_key = _make_api_key(key_id="key-1", assigned_account_ids=[])
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="touch-missing",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    touch_usage_reservation = AsyncMock(return_value=False)
+
+    class _FakeApiKeysService:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def touch_usage_reservation(self, reservation_id: str) -> bool:
+            return await touch_usage_reservation(reservation_id)
+
+    class _RepoContext:
+        async def __aenter__(self) -> Any:
+            return cast(Any, SimpleNamespace(api_keys=cast(Any, object())))
+
+        async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", _FakeApiKeysService)
+    monkeypatch.setattr(service, "_repo_factory", lambda: _RepoContext())
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 2000.0)
+
+    result = await service._maybe_touch_api_key_reservation(
+        api_key=api_key,
+        reservation=reservation,
+        last_touch_at=1000.0,
+        request_id="req-1",
+        surface="http_bridge",
+    )
+
+    assert result == 1000.0
+    touch_usage_reservation.assert_awaited_once_with("touch-missing")
+
+
+@pytest.mark.asyncio
+async def test_api_key_reservation_background_heartbeat_touches_during_sparse_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    api_key = _make_api_key(key_id="key-sparse", assigned_account_ids=[])
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="sparse-reservation",
+        key_id=api_key.id,
+        model="gpt-5.4",
+    )
+    stop_event = asyncio.Event()
+    touch_state = proxy_service._ApiKeyReservationTouchState(last_touch_at=1.0)
+    touch_calls = 0
+    seen_last_touch_at: list[float] = []
+
+    async def fake_maybe_touch(**kwargs: object) -> float:
+        nonlocal touch_calls
+        touch_calls += 1
+        assert kwargs["api_key"] is api_key
+        assert kwargs["reservation"] is reservation
+        assert kwargs["request_id"] == "req-sparse"
+        assert kwargs["surface"] == "stream"
+        seen_last_touch_at.append(cast(float, kwargs["last_touch_at"]))
+        stop_event.set()
+        return cast(float, kwargs["last_touch_at"]) + 1.0
+
+    monkeypatch.setattr(proxy_service, "_API_KEY_RESERVATION_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_maybe_touch_api_key_reservation", fake_maybe_touch)
+
+    task = asyncio.create_task(
+        service._run_api_key_reservation_heartbeat(
+            api_key=api_key,
+            reservation=reservation,
+            touch_state=touch_state,
+            request_id="req-sparse",
+            surface="stream",
+            stop_event=stop_event,
+        )
+    )
+    touch_state.last_touch_at = 5.0
+    await task
+
+    assert touch_calls == 1
+    assert seen_last_touch_at == [5.0]
+    assert touch_state.last_touch_at == 6.0
+
+
+@pytest.mark.asyncio
+async def test_cancel_api_key_reservation_heartbeat_task_does_not_wait_for_task_completion() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_heartbeat() -> None:
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(blocked_heartbeat())
+    await started.wait()
+
+    service._cancel_api_key_reservation_heartbeat_task(task)
+    await asyncio.sleep(0)
+
+    assert task.cancelled()

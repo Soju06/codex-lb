@@ -7957,7 +7957,9 @@ class ProxyService:
             try:
                 async with self._repo_factory() as repos:
                     service = ApiKeysService(repos.api_keys)
-                    await service.touch_usage_reservation(reservation.reservation_id)
+                    touched = await service.touch_usage_reservation(reservation.reservation_id)
+                    if not touched:
+                        return last_touch_at
             except Exception:
                 logger.warning(
                     "Failed to touch %s API key reservation key_id=%s request_id=%s",
@@ -7968,6 +7970,34 @@ class ProxyService:
                 )
                 return last_touch_at
         return now
+
+    async def _run_api_key_reservation_heartbeat(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        reservation: ApiKeyUsageReservationData | None,
+        touch_state: "_ApiKeyReservationTouchState",
+        request_id: str,
+        surface: str,
+        stop_event: asyncio.Event,
+    ) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=_API_KEY_RESERVATION_HEARTBEAT_SECONDS)
+                return
+            except TimeoutError:
+                touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
+                    api_key=api_key,
+                    reservation=reservation,
+                    last_touch_at=touch_state.last_touch_at,
+                    request_id=request_id,
+                    surface=surface,
+                )
+
+    @staticmethod
+    def _cancel_api_key_reservation_heartbeat_task(task: asyncio.Task[None]) -> None:
+        task.add_done_callback(_consume_api_key_reservation_heartbeat_result)
+        task.cancel()
 
     async def _maybe_touch_request_state_api_key_reservation(
         self,
@@ -8885,7 +8915,20 @@ class ProxyService:
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
         response_create_lease = AdmissionLease(None)
-        api_key_reservation_last_touch_at = start
+        api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
+        api_key_reservation_heartbeat_stop = asyncio.Event()
+        api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
+        if api_key_reservation is not None:
+            api_key_reservation_heartbeat_task = asyncio.create_task(
+                self._run_api_key_reservation_heartbeat(
+                    api_key=api_key,
+                    reservation=api_key_reservation,
+                    touch_state=api_key_reservation_touch_state,
+                    request_id=request_id,
+                    surface="stream",
+                    stop_event=api_key_reservation_heartbeat_stop,
+                )
+            )
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
@@ -8917,10 +8960,10 @@ class ProxyService:
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                api_key_reservation_last_touch_at = await self._maybe_touch_api_key_reservation(
+                api_key_reservation_touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
                     api_key=api_key,
                     reservation=api_key_reservation,
-                    last_touch_at=api_key_reservation_last_touch_at,
+                    last_touch_at=api_key_reservation_touch_state.last_touch_at,
                     request_id=request_id,
                     surface="stream",
                 )
@@ -9028,10 +9071,10 @@ class ProxyService:
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    api_key_reservation_last_touch_at = await self._maybe_touch_api_key_reservation(
+                    api_key_reservation_touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
                         api_key=api_key,
                         reservation=api_key_reservation,
-                        last_touch_at=api_key_reservation_last_touch_at,
+                        last_touch_at=api_key_reservation_touch_state.last_touch_at,
                         request_id=request_id,
                         surface="stream",
                     )
@@ -9176,6 +9219,9 @@ class ProxyService:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
             raise
         finally:
+            api_key_reservation_heartbeat_stop.set()
+            if api_key_reservation_heartbeat_task is not None:
+                self._cancel_api_key_reservation_heartbeat_task(api_key_reservation_heartbeat_task)
             response_create_lease.release()
             input_tokens = usage.input_tokens if usage else None
             output_tokens = usage.output_tokens if usage else None
@@ -9651,6 +9697,11 @@ class _TerminalStreamError(Exception):
 
 
 @dataclass
+class _ApiKeyReservationTouchState:
+    last_touch_at: float
+
+
+@dataclass
 class _StreamSettlement:
     """Populated by _stream_once(), consumed by _stream_with_retry() for reservation settlement."""
 
@@ -9676,6 +9727,15 @@ def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamE
     else:
         payload["message"] = "Upstream error"
     return payload
+
+
+def _consume_api_key_reservation_heartbeat_result(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning("API key reservation heartbeat task failed during cancellation", exc_info=True)
 
 
 def _should_penalize_stream_error(code: str | None) -> bool:

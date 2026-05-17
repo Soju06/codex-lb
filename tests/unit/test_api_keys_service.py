@@ -1351,6 +1351,94 @@ async def test_finalize_usage_reservation_updates_last_used_in_settlement_commit
 
 
 @pytest.mark.asyncio
+async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BusyRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_usage_reservation_calls = 0
+
+        async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
+            self.get_usage_reservation_calls += 1
+            if self.get_usage_reservation_calls < 3:
+                raise OperationalError("settle usage reservation", {}, Exception("database is locked"))
+            return await super().get_usage_reservation(reservation_id)
+
+    repo = _BusyRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-finalize-busy-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=10,
+        output_tokens=5,
+        cached_input_tokens=0,
+    )
+
+    stored = await repo.get_usage_reservation(reservation.reservation_id)
+    limits = await repo.get_limits_by_key(created.id)
+    assert stored is not None
+    assert stored.status == "finalized"
+    assert limits[0].current_value == 15
+    assert repo.get_usage_reservation_calls == 4
+    assert repo.rollback_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_release_usage_reservation_retries_sqlite_busy_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BusyRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_usage_reservation_calls = 0
+
+        async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
+            self.get_usage_reservation_calls += 1
+            if self.get_usage_reservation_calls < 3:
+                raise OperationalError("release usage reservation", {}, Exception("database is locked"))
+            return await super().get_usage_reservation(reservation_id)
+
+    repo = _BusyRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-release-busy-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100),
+            ],
+        )
+    )
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    await service.release_usage_reservation(reservation.reservation_id)
+
+    stored = await repo.get_usage_reservation(reservation.reservation_id)
+    limits = await repo.get_limits_by_key(created.id)
+    assert stored is not None
+    assert stored.status == "released"
+    assert limits[0].current_value == 0
+    assert repo.get_usage_reservation_calls == 4
+    assert repo.rollback_calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_fail_usage_reservation_preserves_failed_request_record() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

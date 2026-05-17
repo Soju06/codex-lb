@@ -9320,6 +9320,13 @@ class ProxyService:
                     request_id,
                     exc_info=True,
                 )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Request log persistence was cancelled account_id=%s request_id=%s",
+                    account_id,
+                    request_id,
+                    exc_info=True,
+                )
 
     async def _write_stream_preflight_error(
         self,

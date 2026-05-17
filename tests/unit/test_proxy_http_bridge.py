@@ -6948,6 +6948,39 @@ async def test_maybe_touch_api_key_reservation_keeps_last_touch_when_reservation
 
 
 @pytest.mark.asyncio
+async def test_write_request_log_swallows_cancelled_persistence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    class _CancelledRequestLogs:
+        async def add_log(self, **kwargs: object) -> None:
+            del kwargs
+            raise asyncio.CancelledError()
+
+    class _RepoContext:
+        async def __aenter__(self) -> Any:
+            return cast(Any, SimpleNamespace(request_logs=_CancelledRequestLogs()))
+
+        async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> bool:
+            return False
+
+    service._repo_factory = lambda: _RepoContext()
+
+    with caplog.at_level(logging.WARNING):
+        await service._write_request_log(
+            account_id="acc-1",
+            api_key=None,
+            request_id="req-cancelled-log",
+            model="gpt-5.4",
+            latency_ms=100,
+            status="error",
+        )
+
+    assert "Request log persistence was cancelled" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_api_key_reservation_background_heartbeat_touches_during_sparse_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

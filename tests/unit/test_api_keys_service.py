@@ -954,12 +954,13 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
     service = ApiKeysService(repo)
     monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
     created = await service.create_key(ApiKeyCreateData(name="busy-retry-key", allowed_models=None, expires_at=None))
+    initial_commit_count = repo.commit_count
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
 
     assert reservation.key_id == created.id
     assert repo.create_usage_reservation_calls == 3
-    assert repo.commit_count == 1
+    assert repo.commit_count == initial_commit_count + 1
 
 
 @pytest.mark.asyncio
@@ -999,6 +1000,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
             ],
         )
     )
+    initial_commit_count = repo.commit_count
 
     limits = await repo.get_limits_by_key(created.id)
     limits[0].current_value = 0
@@ -1009,7 +1011,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
     assert reservation.key_id == created.id
     assert repo.reset_limit_calls == 3
     assert repo.rollback_calls >= 2
-    assert repo.commit_count == 1
+    assert repo.commit_count == initial_commit_count + 1
 
 
 @pytest.mark.asyncio
@@ -1315,9 +1317,10 @@ async def test_finalize_usage_reservation_updates_last_used_in_settlement_commit
             ],
         )
     )
+    initial_commit_count = repo.commit_count
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
-    assert repo.commit_count == 1
+    assert repo.commit_count == initial_commit_count + 1
 
     await service.finalize_usage_reservation(
         reservation.reservation_id,
@@ -1331,7 +1334,7 @@ async def test_finalize_usage_reservation_updates_last_used_in_settlement_commit
     assert stored is not None
     assert stored.last_used_at is not None
     assert repo.update_last_used_commit_flags == [False]
-    assert repo.commit_count == 2
+    assert repo.commit_count == initial_commit_count + 2
 
 
 @pytest.mark.asyncio

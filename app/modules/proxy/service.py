@@ -231,6 +231,7 @@ _TRANSIENT_RETRY_CODES = frozenset(
     {
         "server_error",
         "stream_incomplete",
+        "stream_idle_timeout",
         "upstream_request_timeout",
     }
 )
@@ -1144,6 +1145,7 @@ class ProxyService:
         async with session.pending_lock:
             session.queued_request_count = 0
         await self._fail_pending_websocket_requests(
+            account=session.account,
             account_id_value=session.account.id,
             pending_requests=session.pending_requests,
             pending_lock=session.pending_lock,
@@ -2514,6 +2516,7 @@ class ProxyService:
                     message_type = message["type"]
 
                     if message_type == "websocket.disconnect":
+                        downstream_activity.mark_disconnected()
                         break
                     if message_type != "websocket.receive":
                         continue
@@ -2797,6 +2800,7 @@ class ProxyService:
                         account = None
                         continue
                     await self._fail_pending_websocket_requests(
+                        account=account,
                         account_id_value=account.id if account else None,
                         pending_requests=pending_requests,
                         pending_lock=pending_lock,
@@ -2828,17 +2832,29 @@ class ProxyService:
                     await upstream.close()
                 except Exception:
                     logger.debug("Failed to close upstream websocket", exc_info=True)
+            if replay_request_state is not None:
+                await self._release_websocket_reservation(replay_request_state.api_key_reservation)
+                replay_request_state.api_key_reservation = None
+                _release_websocket_response_create_gate(replay_request_state, response_create_gate)
+            client_disconnected = downstream_activity.disconnected
             await self._fail_pending_websocket_requests(
+                account=None if client_disconnected else account,
                 account_id_value=account.id if account else None,
                 pending_requests=pending_requests,
                 pending_lock=pending_lock,
-                error_code="stream_incomplete",
-                error_message="Upstream websocket closed before response.completed",
+                error_code="client_disconnected" if client_disconnected else "stream_incomplete",
+                error_message=(
+                    "Downstream websocket disconnected before response.completed"
+                    if client_disconnected
+                    else "Upstream websocket closed before response.completed"
+                ),
                 api_key=api_key,
-                websocket=websocket,
-                client_send_lock=client_send_lock,
+                websocket=None if client_disconnected else websocket,
+                client_send_lock=None if client_disconnected else client_send_lock,
                 response_create_gate=response_create_gate,
                 downstream_activity=downstream_activity,
+                status="cancelled" if client_disconnected else "error",
+                penalize_account=not client_disconnected,
             )
 
     async def _prepare_websocket_response_create_request(
@@ -2855,6 +2871,15 @@ class ProxyService:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        previous_response_trimmed_input_count: int | None = None
+        previous_response_trimmed_input_fingerprint: str | None = None
+        if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
+            previous_response_input_items = cast(list[JsonValue], responses_payload.input)
+            trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
+            if len(trimmed_input_items) != len(previous_response_input_items):
+                previous_response_trimmed_input_count = len(previous_response_input_items)
+                previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
+                responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
@@ -2882,6 +2907,19 @@ class ProxyService:
             await self._release_websocket_reservation(reservation)
             raise
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
+        if previous_response_trimmed_input_count is not None:
+            request_state.input_item_count = previous_response_trimmed_input_count
+            request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
+            logger.info(
+                "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                "previous_response_id=%s",
+                request_state.request_id,
+                previous_response_trimmed_input_count,
+                len(cast(list[JsonValue], responses_payload.input))
+                if isinstance(responses_payload.input, list)
+                else None,
+                responses_payload.previous_response_id,
+            )
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
             headers,
@@ -4600,6 +4638,7 @@ class ProxyService:
             async with pending_lock:
                 session.queued_request_count = 0
             await self._fail_pending_websocket_requests(
+                account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=pending_requests,
                 pending_lock=pending_lock,
@@ -5071,6 +5110,7 @@ class ProxyService:
                 request_enqueued=request_enqueued,
             )
             await self._fail_pending_websocket_requests(
+                account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=deque([request_state]),
                 pending_lock=anyio.Lock(),
@@ -5255,6 +5295,7 @@ class ProxyService:
                     async with session.pending_lock:
                         session.queued_request_count = 0
                     await self._fail_pending_websocket_requests(
+                        account=session.account,
                         account_id_value=session.account.id,
                         pending_requests=session.pending_requests,
                         pending_lock=session.pending_lock,
@@ -5278,6 +5319,7 @@ class ProxyService:
                 async with session.pending_lock:
                     session.queued_request_count = 0
                 await self._fail_pending_websocket_requests(
+                    account=session.account,
                     account_id_value=session.account.id,
                     pending_requests=session.pending_requests,
                     pending_lock=session.pending_lock,
@@ -5300,6 +5342,7 @@ class ProxyService:
             async with session.pending_lock:
                 session.queued_request_count = 0
             await self._fail_pending_websocket_requests(
+                account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=session.pending_requests,
                 pending_lock=session.pending_lock,
@@ -5626,6 +5669,14 @@ class ProxyService:
                             error_message=error_message,
                         ),
                     )
+                    if grouped_previous_response_request_states:
+                        session.queued_request_count = max(
+                            0,
+                            session.queued_request_count - len(grouped_previous_response_request_states),
+                        )
+                elif event_type == "error":
+                    grouped_previous_response_request_states = list(session.pending_requests)
+                    session.pending_requests.clear()
                     if grouped_previous_response_request_states:
                         session.queued_request_count = max(
                             0,
@@ -5958,21 +6009,63 @@ class ProxyService:
                     proxy_request_budget_seconds=proxy_request_budget_seconds,
                     stream_idle_timeout_seconds=stream_idle_timeout_seconds,
                 )
+                receive_deadline = (
+                    None if receive_timeout is None else time.monotonic() + receive_timeout.timeout_seconds
+                )
                 try:
-                    if receive_timeout is None:
-                        message = await upstream.receive()
-                    elif receive_timeout.timeout_seconds <= 0:
-                        raise asyncio.TimeoutError()
-                    else:
+                    while True:
+                        wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
+                        if wait_timeout is not None and wait_timeout <= 0:
+                            raise asyncio.TimeoutError()
+                        keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                        if keepalive_interval > 0:
+                            wait_timeout = (
+                                keepalive_interval if wait_timeout is None else min(wait_timeout, keepalive_interval)
+                            )
                         message = await asyncio.wait_for(
                             upstream.receive(),
-                            timeout=receive_timeout.timeout_seconds,
+                            timeout=wait_timeout,
                         )
+                        break
                 except asyncio.TimeoutError:
+                    if receive_deadline is None or time.monotonic() < receive_deadline:
+                        try:
+                            await self._emit_pending_websocket_keepalive(
+                                websocket,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                client_send_lock=client_send_lock,
+                                downstream_activity=downstream_activity,
+                            )
+                        except Exception:
+                            downstream_activity.mark_disconnected()
+                            logger.debug("Downstream websocket disconnected during keepalive", exc_info=True)
+                            await self._fail_pending_websocket_requests(
+                                account=None,
+                                account_id_value=account_id_value,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                error_code="client_disconnected",
+                                error_message="Downstream websocket disconnected before response.completed",
+                                api_key=api_key,
+                                response_create_gate=response_create_gate,
+                                status="cancelled",
+                                penalize_account=False,
+                            )
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                logger.debug(
+                                    "Failed to close upstream websocket after downstream keepalive failure",
+                                    exc_info=True,
+                                )
+                            break
+                        continue
                     if receive_timeout is None:
                         raise
                     if receive_timeout.fail_all_pending:
                         await self._fail_pending_websocket_requests(
+                            account=account,
                             account_id_value=account_id_value,
                             pending_requests=pending_requests,
                             pending_lock=pending_lock,
@@ -6020,19 +6113,69 @@ class ProxyService:
                     upstream_control.downstream_texts = None
                     if downstream_texts is not None:
                         for emitted_text in downstream_texts:
+                            try:
+                                await self._send_downstream_websocket_text(
+                                    websocket,
+                                    client_send_lock=client_send_lock,
+                                    text=emitted_text,
+                                    downstream_activity=downstream_activity,
+                                )
+                            except Exception:
+                                downstream_activity.mark_disconnected()
+                                logger.debug("Downstream websocket disconnected during upstream relay", exc_info=True)
+                                await self._fail_pending_websocket_requests(
+                                    account=None,
+                                    account_id_value=account_id_value,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    error_code="client_disconnected",
+                                    error_message="Downstream websocket disconnected before response.completed",
+                                    api_key=api_key,
+                                    response_create_gate=response_create_gate,
+                                    status="cancelled",
+                                    penalize_account=False,
+                                )
+                                try:
+                                    await upstream.close()
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to close upstream websocket after downstream disconnect",
+                                        exc_info=True,
+                                    )
+                                break
+                        if downstream_activity.disconnected:
+                            break
+                    elif not suppress_downstream_event:
+                        try:
                             await self._send_downstream_websocket_text(
                                 websocket,
                                 client_send_lock=client_send_lock,
-                                text=emitted_text,
+                                text=downstream_text,
                                 downstream_activity=downstream_activity,
                             )
-                    elif not suppress_downstream_event:
-                        await self._send_downstream_websocket_text(
-                            websocket,
-                            client_send_lock=client_send_lock,
-                            text=downstream_text,
-                            downstream_activity=downstream_activity,
-                        )
+                        except Exception:
+                            downstream_activity.mark_disconnected()
+                            logger.debug("Downstream websocket disconnected during upstream relay", exc_info=True)
+                            await self._fail_pending_websocket_requests(
+                                account=None,
+                                account_id_value=account_id_value,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                error_code="client_disconnected",
+                                error_message="Downstream websocket disconnected before response.completed",
+                                api_key=api_key,
+                                response_create_gate=response_create_gate,
+                                status="cancelled",
+                                penalize_account=False,
+                            )
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                logger.debug(
+                                    "Failed to close upstream websocket after downstream disconnect",
+                                    exc_info=True,
+                                )
+                            break
                     if upstream_control.reconnect_requested:
                         should_reconnect = upstream_control.replay_request_state is not None
                         if not should_reconnect:
@@ -6047,12 +6190,36 @@ class ProxyService:
                     continue
                 if message.kind == "binary" and message.data is not None:
                     downstream_activity.mark()
-                    await self._send_downstream_websocket_bytes(
-                        websocket,
-                        client_send_lock=client_send_lock,
-                        data=message.data,
-                        downstream_activity=downstream_activity,
-                    )
+                    try:
+                        await self._send_downstream_websocket_bytes(
+                            websocket,
+                            client_send_lock=client_send_lock,
+                            data=message.data,
+                            downstream_activity=downstream_activity,
+                        )
+                    except Exception:
+                        downstream_activity.mark_disconnected()
+                        logger.debug("Downstream websocket disconnected during upstream binary relay", exc_info=True)
+                        await self._fail_pending_websocket_requests(
+                            account=None,
+                            account_id_value=account_id_value,
+                            pending_requests=pending_requests,
+                            pending_lock=pending_lock,
+                            error_code="client_disconnected",
+                            error_message="Downstream websocket disconnected before response.completed",
+                            api_key=api_key,
+                            response_create_gate=response_create_gate,
+                            status="cancelled",
+                            penalize_account=False,
+                        )
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug(
+                                "Failed to close upstream websocket after downstream disconnect",
+                                exc_info=True,
+                            )
+                        break
                     continue
                 replay_request_state = await _pop_replayable_precreated_websocket_request_state(
                     pending_requests,
@@ -6072,6 +6239,7 @@ class ProxyService:
                         logger.debug("Failed to close upstream websocket for replay", exc_info=True)
                     break
                 await self._fail_pending_websocket_requests(
+                    account=account,
                     account_id_value=account_id_value,
                     pending_requests=pending_requests,
                     pending_lock=pending_lock,
@@ -6093,6 +6261,7 @@ class ProxyService:
                 exc_info=True,
             )
             await self._fail_pending_websocket_requests(
+                account=account,
                 account_id_value=account_id_value,
                 pending_requests=pending_requests,
                 pending_lock=pending_lock,
@@ -6195,6 +6364,9 @@ class ProxyService:
                             error_message=error_message,
                         ),
                     )
+                elif request_state is None and event_type == "error":
+                    grouped_previous_response_request_states = list(pending_requests)
+                    pending_requests.clear()
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
@@ -6341,6 +6513,36 @@ class ProxyService:
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
 
+    async def _emit_pending_websocket_keepalive(
+        self,
+        websocket: WebSocket,
+        *,
+        pending_requests: deque[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
+        client_send_lock: anyio.Lock,
+        downstream_activity: _DownstreamWebSocketActivity,
+    ) -> bool:
+        async with pending_lock:
+            keepalive_ids = [
+                request_state.response_id or request_state.request_id
+                for request_state in pending_requests
+                if request_state.response_id is not None or request_state.request_id
+            ]
+        if not keepalive_ids:
+            return False
+        for response_id in keepalive_ids:
+            event = {
+                "type": "response.in_progress",
+                "response": {"id": response_id, "status": "in_progress"},
+            }
+            await self._send_downstream_websocket_text(
+                websocket,
+                client_send_lock=client_send_lock,
+                text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
+                downstream_activity=downstream_activity,
+            )
+        return True
+
     async def _downstream_websocket_is_idle(
         self,
         pending_requests: deque[_WebSocketRequestState],
@@ -6413,10 +6615,13 @@ class ProxyService:
         response_service_tier = request_state.service_tier
 
         if event_type == "error":
-            status = "error"
             error = event.error if event else None
-            error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            error_message = error.message if error else None
+            status = "error"
+            error_code = _normalize_error_code(
+                error.code if error else _websocket_event_error_code(event_type, payload),
+                error.type if error else _websocket_event_error_type(event_type, payload),
+            )
+            error_message = error.message if error else _websocket_event_error_message(event_type, payload)
             error_payload = _upstream_error_from_openai(error)
         elif event_type in {"response.failed", "response.incomplete"}:
             status = "error"
@@ -6455,6 +6660,12 @@ class ProxyService:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _should_penalize_stream_error(error_code)
+        if (
+            error_code == "stream_incomplete"
+            and request_state.previous_response_id is not None
+            and error_message == "Upstream websocket closed before response.completed"
+        ):
+            settlement.account_health_error = False
         _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(
             api_key,
@@ -6599,6 +6810,7 @@ class ProxyService:
     async def _fail_pending_websocket_requests(
         self,
         *,
+        account: Account | None = None,
         account_id_value: str | None,
         pending_requests: deque[_WebSocketRequestState],
         pending_lock: anyio.Lock,
@@ -6609,10 +6821,39 @@ class ProxyService:
         client_send_lock: anyio.Lock | None = None,
         response_create_gate: asyncio.Semaphore | None = None,
         downstream_activity: _DownstreamWebSocketActivity | None = None,
+        status: str = "error",
+        penalize_account: bool = True,
     ) -> None:
         async with pending_lock:
             remaining = list(pending_requests)
             pending_requests.clear()
+
+        penalty_code: str | None = None
+        penalty_message: str | None = None
+        if penalize_account:
+            for request_state in remaining:
+                request_error_code = request_state.error_code_override or error_code
+                if request_error_code in _TRANSIENT_RETRY_CODES or _should_penalize_stream_error(request_error_code):
+                    penalty_code = request_error_code
+                    penalty_message = request_state.error_message_override or error_message
+                    break
+
+        if (
+            remaining
+            and penalize_account
+            and account is not None
+            and isinstance(account, Account)
+            and penalty_code is not None
+        ):
+            try:
+                await self._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
+            except Exception:
+                logger.warning(
+                    "Failed to record websocket pending-request health penalty account_id=%s error_code=%s",
+                    account_id_value,
+                    penalty_code,
+                    exc_info=True,
+                )
 
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):
@@ -6663,7 +6904,7 @@ class ProxyService:
                 request_id=request_state.response_id or request_state.request_log_id or request_state.request_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
-                status="error",
+                status=status,
                 error_code=request_error_code,
                 error_message=request_error_message,
                 reasoning_effort=request_state.reasoning_effort,
@@ -6672,6 +6913,7 @@ class ProxyService:
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
                 latency_first_token_ms=request_state.latency_first_token_ms,
+                session_id=request_state.session_id,
             )
 
     async def _emit_websocket_terminal_error(
@@ -7750,7 +7992,7 @@ class ProxyService:
                     settlement.account_health_error = _should_penalize_stream_error(code)
                     if allow_retry and _should_retry_stream_error(code):
                         raise _RetryableStreamError(code, settlement.error)
-                    if allow_transient_retry and code in _TRANSIENT_RETRY_CODES:
+                    if allow_transient_retry and code in _TRANSIENT_RETRY_CODES and code != "stream_idle_timeout":
                         raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -7771,7 +8013,7 @@ class ProxyService:
                 if event.type == "response.incomplete":
                     status = "error"
 
-            if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
+            if event_type in _TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
             if not _should_suppress_text_done_event(
                 event_type=event_type,
@@ -7793,7 +8035,7 @@ class ProxyService:
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
-                if suppress_text_done_events and event_type in _TEXT_DELTA_EVENT_TYPES:
+                if event_type in _TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _should_suppress_text_done_event(
                     event_type=event_type,
@@ -7852,7 +8094,9 @@ class ProxyService:
                             error_message = error.message if error else None
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            settlement.account_health_error = _should_penalize_stream_error(error_code)
+                            settlement.account_health_error = (
+                                _should_penalize_stream_error(error_code) and not saw_text_delta
+                            )
                     if event_type in ("response.completed", "response.incomplete"):
                         response = event.response if event is not None else None
                         usage = response.usage if response else None
@@ -8411,7 +8655,7 @@ def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamE
 def _should_penalize_stream_error(code: str | None) -> bool:
     if code is None:
         return False
-    return code in _ACCOUNT_RECOVERY_RETRY_CODES
+    return code in _ACCOUNT_RECOVERY_RETRY_CODES or code in _TRANSIENT_RETRY_CODES
 
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
@@ -8559,9 +8803,14 @@ class _WebSocketUpstreamControl:
 @dataclass(slots=True)
 class _DownstreamWebSocketActivity:
     last_activity_at: float = field(default_factory=time.monotonic)
+    disconnected: bool = False
 
     def mark(self) -> None:
         self.last_activity_at = time.monotonic()
+
+    def mark_disconnected(self) -> None:
+        self.disconnected = True
+        self.mark()
 
 
 @dataclass(slots=True)
@@ -8587,6 +8836,8 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     payload_type = payload.get("type")
     if isinstance(payload_type, str):
         return payload_type
+    if isinstance(payload.get("error"), dict):
+        return "error"
     return None
 
 
@@ -8938,7 +9189,8 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     if not should_rewrite:
         return event, payload, event_type, original_text
 
-    upstream_control.reconnect_requested = True
+    if request_state.preferred_account_id is not None:
+        upstream_control.reconnect_requested = True
     _record_continuity_fail_closed(
         surface="websocket_stream",
         reason="previous_response_not_found",
@@ -9803,6 +10055,41 @@ def _wrapped_websocket_error_event(
 
 def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    first_output_index = next(
+        (
+            index
+            for index, item in enumerate(input_items)
+            if _websocket_input_item_type(item) in {"function_call_output", "custom_tool_call_output"}
+        ),
+        None,
+    )
+    if first_output_index is None or first_output_index == 0:
+        return input_items
+    prefix = input_items[:first_output_index]
+    if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
+        return input_items
+    return input_items[first_output_index:]
+
+
+def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
+    if isinstance(item, dict) and _websocket_input_item_type(item) is None and item.get("role") == "assistant":
+        return True
+    item_type = _websocket_input_item_type(item)
+    if item_type in {"reasoning", "function_call", "custom_tool_call"}:
+        return True
+    if item_type != "message" or not isinstance(item, dict):
+        return False
+    return item.get("role") == "assistant"
+
+
+def _websocket_input_item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
 
 
 def _remaining_budget_seconds(deadline: float) -> float:

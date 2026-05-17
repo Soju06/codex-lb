@@ -49,3 +49,20 @@ When the HTTP responses bridge observes an upstream websocket close with `close_
 - **WHEN** upstream closes the HTTP responses bridge with `close_code = 1000` before any `response.*` event for the pending request
 - **THEN** the proxy returns HTTP 502 with `error.code = "upstream_rejected_input"`
 - **AND** does not transparently replay the pre-created request
+
+### Requirement: Long Codex websocket turns tolerate extended upstream silence
+The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely.
+
+#### Scenario: compact and stream watchdog defaults leave room for long turns
+- **WHEN** the service starts with default configuration
+- **THEN** `compact_request_budget_seconds` is at least 180 seconds
+- **AND** `stream_idle_timeout_seconds` is at least 600 seconds
+
+### Requirement: Upstream websocket drops penalize affected accounts
+When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before surfacing `stream_incomplete` to those pending requests.
+
+#### Scenario: websocket closes before pending responses complete
+- **GIVEN** a streamed response request is pending on an upstream websocket
+- **WHEN** the websocket closes before a terminal response event is observed
+- **THEN** the pending request fails with `stream_incomplete`
+- **AND** the account receives a transient upstream failure signal for routing

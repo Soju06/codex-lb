@@ -175,9 +175,7 @@ def test_apply_api_key_enforcement_default_service_tier_omits_outbound_field():
         }
     )
 
-    proxy_request_policy.apply_api_key_enforcement(
-        payload, _service_tier_enforcement_key("default")
-    )
+    proxy_request_policy.apply_api_key_enforcement(payload, _service_tier_enforcement_key("default"))
 
     assert payload.service_tier is None
 
@@ -192,9 +190,7 @@ def test_apply_api_key_enforcement_auto_service_tier_omits_outbound_field():
         }
     )
 
-    proxy_request_policy.apply_api_key_enforcement(
-        payload, _service_tier_enforcement_key("auto")
-    )
+    proxy_request_policy.apply_api_key_enforcement(payload, _service_tier_enforcement_key("auto"))
 
     assert payload.service_tier is None
 
@@ -211,9 +207,7 @@ def test_apply_api_key_enforcement_priority_service_tier_still_propagates():
         }
     )
 
-    proxy_request_policy.apply_api_key_enforcement(
-        payload, _service_tier_enforcement_key("flex")
-    )
+    proxy_request_policy.apply_api_key_enforcement(payload, _service_tier_enforcement_key("flex"))
 
     assert payload.service_tier == "flex"
 

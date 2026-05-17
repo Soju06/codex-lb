@@ -6397,14 +6397,6 @@ class ProxyService:
                             0,
                             session.queued_request_count - len(grouped_previous_response_request_states),
                         )
-                elif event_type == "error":
-                    grouped_previous_response_request_states = list(session.pending_requests)
-                    session.pending_requests.clear()
-                    if grouped_previous_response_request_states:
-                        session.queued_request_count = max(
-                            0,
-                            session.queued_request_count - len(grouped_previous_response_request_states),
-                        )
                 has_other_pending_requests = bool(session.pending_requests)
 
         if len(grouped_previous_response_request_states) > 1:

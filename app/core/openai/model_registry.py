@@ -50,6 +50,117 @@ class ModelRegistrySnapshot:
 
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.5", "gpt-5.5-*", "gpt-5.4", "gpt-5.4-*")
 
+_REASONING_LEVELS_STANDARD = (
+    ReasoningLevel(effort="low", description="Low reasoning effort"),
+    ReasoningLevel(effort="medium", description="Medium reasoning effort"),
+    ReasoningLevel(effort="high", description="High reasoning effort"),
+)
+
+_REASONING_LEVELS_EXTENDED = (
+    ReasoningLevel(effort="low", description="Low reasoning effort"),
+    ReasoningLevel(effort="medium", description="Medium reasoning effort"),
+    ReasoningLevel(effort="high", description="High reasoning effort"),
+    ReasoningLevel(effort="xhigh", description="Extra high reasoning effort"),
+)
+
+# Static fallback models used before the first upstream registry refresh.
+# These ensure /models and /backend-api/codex/models return known slugs
+# immediately on startup (e.g. before any account is added or the first
+# refresh completes). Values are conservative best-effort approximations;
+# the live upstream data always takes precedence once available.
+_BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
+    UpstreamModel(
+        slug="gpt-5.5",
+        display_name="GPT-5.5",
+        description="GPT-5.5",
+        context_window=1_050_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=_REASONING_LEVELS_EXTENDED,
+        default_reasoning_level="high",
+        supports_reasoning_summaries=True,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=True,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"plus", "pro", "team", "business", "enterprise"}),
+    ),
+    UpstreamModel(
+        slug="gpt-5.5-pro",
+        display_name="GPT-5.5 Pro",
+        description="GPT-5.5 Pro",
+        context_window=1_050_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=_REASONING_LEVELS_EXTENDED,
+        default_reasoning_level="high",
+        supports_reasoning_summaries=True,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=True,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"pro", "enterprise"}),
+    ),
+    UpstreamModel(
+        slug="gpt-5.4",
+        display_name="GPT-5.4",
+        description="GPT-5.4",
+        context_window=1_050_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=_REASONING_LEVELS_EXTENDED,
+        default_reasoning_level="high",
+        supports_reasoning_summaries=True,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=True,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"plus", "pro", "team", "business", "enterprise"}),
+    ),
+    UpstreamModel(
+        slug="gpt-5.4-mini",
+        display_name="GPT-5.4 Mini",
+        description="GPT-5.4 Mini",
+        context_window=400_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=_REASONING_LEVELS_STANDARD,
+        default_reasoning_level="medium",
+        supports_reasoning_summaries=True,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=False,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"free", "plus", "pro", "team", "business", "enterprise"}),
+    ),
+    UpstreamModel(
+        slug="gpt-5.3-codex",
+        display_name="GPT-5.3 Codex",
+        description="GPT-5.3 Codex",
+        context_window=272_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=_REASONING_LEVELS_EXTENDED,
+        default_reasoning_level="high",
+        supports_reasoning_summaries=True,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=True,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"plus", "pro", "team", "business", "enterprise"}),
+    ),
+)
+
 
 class ModelRegistry:
     def __init__(self, *, ttl_seconds: float = 300.0) -> None:
@@ -57,7 +168,7 @@ class ModelRegistry:
             raise ValueError("ttl_seconds must be positive")
         self._ttl_seconds = ttl_seconds
         self._snapshot: ModelRegistrySnapshot | None = None
-        self._bootstrap_models: dict[str, UpstreamModel] = {}
+        self._bootstrap_models: dict[str, UpstreamModel] = {m.slug: m for m in _BOOTSTRAP_STATIC_MODELS}
         self._lock = anyio.Lock()
 
     def get_snapshot(self) -> ModelRegistrySnapshot | None:

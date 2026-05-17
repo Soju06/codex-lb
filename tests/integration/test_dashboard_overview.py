@@ -186,6 +186,42 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_weekly_full", "weekly-full@example.com"))
+        await usage_repo.add_entry(
+            "acc_weekly_full",
+            5.0,
+            window="primary",
+            window_minutes=300,
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await usage_repo.add_entry(
+            "acc_weekly_full",
+            100.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=int(naive_utc_to_epoch(now + timedelta(days=2))),
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+    account = accounts["acc_weekly_full"]
+    assert account["status"] == "quota_exceeded"
+    assert account["usage"]["primaryRemainingPercent"] == pytest.approx(95.0)
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

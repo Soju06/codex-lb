@@ -12,7 +12,13 @@ from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog,
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
-_UNSET = object()
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +243,24 @@ class AccountsRepository:
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
+
+    async def update_upstream_proxy(
+        self,
+        account_id: str,
+        *,
+        upstream_proxy_url_encrypted: bytes | None | _Unset = _UNSET,
+        upstream_proxy_group: str | None | _Unset = _UNSET,
+    ) -> Account | None:
+        account = await self._session.get(Account, account_id)
+        if account is None:
+            return None
+        if not isinstance(upstream_proxy_url_encrypted, _Unset):
+            account.upstream_proxy_url_encrypted = upstream_proxy_url_encrypted
+        if not isinstance(upstream_proxy_group, _Unset):
+            account.upstream_proxy_group = upstream_proxy_group
+        await self._session.commit()
+        await self._session.refresh(account)
+        return account
 
     async def _merge_by_email_enabled(self) -> bool:
         settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)

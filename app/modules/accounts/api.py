@@ -14,6 +14,8 @@ from app.modules.accounts.schemas import (
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
+    AccountUpstreamProxyUpdateRequest,
+    AccountUpstreamProxyUpdateResponse,
 )
 from app.modules.accounts.service import InvalidAuthJsonError
 
@@ -84,6 +86,30 @@ async def pause_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountPauseResponse(status="paused")
+
+
+@router.patch("/{account_id}/upstream-proxy", response_model=AccountUpstreamProxyUpdateResponse)
+async def update_account_upstream_proxy(
+    account_id: str,
+    payload: AccountUpstreamProxyUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUpstreamProxyUpdateResponse:
+    try:
+        account = await context.service.update_upstream_proxy(
+            account_id,
+            upstream_proxy_url=payload.upstream_proxy_url,
+            upstream_proxy_url_set="upstream_proxy_url" in payload.model_fields_set,
+            upstream_proxy_group=payload.upstream_proxy_group,
+            upstream_proxy_group_set="upstream_proxy_group" in payload.model_fields_set,
+        )
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_upstream_proxy") from exc
+    if account is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountUpstreamProxyUpdateResponse(
+        account_id=account.id,
+        upstream_proxy=context.service.upstream_proxy_status(account),
+    )
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

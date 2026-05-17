@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, UpstreamProxyGroup
 
 _SETTINGS_ID = 1
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 
 class SettingsRepository:
@@ -62,6 +70,7 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        upstream_proxy_url_encrypted: bytes | None | _Unset = _UNSET,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -90,9 +99,36 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if not isinstance(upstream_proxy_url_encrypted, _Unset):
+            settings.upstream_proxy_url_encrypted = upstream_proxy_url_encrypted
         await self.commit_refresh(settings)
         return settings
 
     async def commit_refresh(self, settings: DashboardSettings) -> None:
         await self._session.commit()
         await self._session.refresh(settings)
+
+    async def list_upstream_proxy_groups(self) -> list[UpstreamProxyGroup]:
+        result = await self._session.execute(select(UpstreamProxyGroup).order_by(UpstreamProxyGroup.name))
+        return list(result.scalars().all())
+
+    async def get_upstream_proxy_group(self, name: str) -> UpstreamProxyGroup | None:
+        return await self._session.get(UpstreamProxyGroup, name)
+
+    async def upsert_upstream_proxy_group(self, name: str, proxy_url_encrypted: bytes) -> UpstreamProxyGroup:
+        row = await self._session.get(UpstreamProxyGroup, name)
+        if row is None:
+            row = UpstreamProxyGroup(name=name, proxy_url_encrypted=proxy_url_encrypted)
+            self._session.add(row)
+        else:
+            row.proxy_url_encrypted = proxy_url_encrypted
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    async def delete_upstream_proxy_group(self, name: str) -> bool:
+        result = await self._session.execute(
+            delete(UpstreamProxyGroup).where(UpstreamProxyGroup.name == name).returning(UpstreamProxyGroup.name)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None

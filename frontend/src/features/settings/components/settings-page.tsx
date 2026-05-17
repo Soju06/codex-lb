@@ -12,6 +12,7 @@ import { PasswordSettings } from "@/features/settings/components/password-settin
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
+import { UpstreamProxyGroupsSettings } from "@/features/settings/components/upstream-proxy-groups-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useSettings } from "@/features/settings/hooks/use-settings";
@@ -23,14 +24,28 @@ const TotpSettings = lazy(() =>
 );
 
 export function SettingsPage() {
-  const { settingsQuery, updateSettingsMutation } = useSettings();
+  const {
+    settingsQuery,
+    updateSettingsMutation,
+    proxyGroupsQuery,
+    upsertProxyGroupMutation,
+    deleteProxyGroupMutation,
+  } = useSettings();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
 
   const settings = settingsQuery.data;
-  const busy = updateSettingsMutation.isPending;
-  const error = getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error);
+  const busy =
+    updateSettingsMutation.isPending ||
+    upsertProxyGroupMutation.isPending ||
+    deleteProxyGroupMutation.isPending;
+  const error =
+    getErrorMessageOrNull(settingsQuery.error) ||
+    getErrorMessageOrNull(updateSettingsMutation.error) ||
+    getErrorMessageOrNull(proxyGroupsQuery.error) ||
+    getErrorMessageOrNull(upsertProxyGroupMutation.error) ||
+    getErrorMessageOrNull(deleteProxyGroupMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
@@ -74,6 +89,12 @@ export function SettingsPage() {
               settings={settings}
               busy={busy}
               onSave={handleSave}
+            />
+            <UpstreamProxyGroupsSettings
+              groups={proxyGroupsQuery.data ?? []}
+              busy={busy}
+              onSave={(name, proxyUrl) => void upsertProxyGroupMutation.mutateAsync({ name, proxyUrl })}
+              onDelete={(name) => void deleteProxyGroupMutation.mutateAsync(name)}
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />

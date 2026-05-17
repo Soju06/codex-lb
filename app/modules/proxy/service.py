@@ -28,7 +28,9 @@ from app.core import shutdown as shutdown_state
 from app.core import usage as usage_core
 from app.core.auth.refresh import (
     RefreshError,
+    pop_token_refresh_proxy_url_override,
     pop_token_refresh_timeout_override,
+    push_token_refresh_proxy_url_override,
     push_token_refresh_timeout_override,
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
@@ -1543,6 +1545,15 @@ class ProxyService:
                     )
                 create_lease = await self._get_work_admission().acquire_response_create(compact=True)
                 try:
+                    upstream_proxy_url = await self._resolve_upstream_proxy_url(target)
+                    if upstream_proxy_url is not None:
+                        return await core_compact_responses(
+                            payload,
+                            filtered,
+                            access_token,
+                            account_id,
+                            upstream_proxy_url=upstream_proxy_url,
+                        )
                     return await core_compact_responses(payload, filtered, access_token, account_id)
                 finally:
                     create_lease.release()
@@ -1862,6 +1873,18 @@ class ProxyService:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
+                    upstream_proxy_url = await self._resolve_upstream_proxy_url(target)
+                    if upstream_proxy_url is not None:
+                        return await core_transcribe_audio(
+                            audio_bytes,
+                            filename=filename,
+                            content_type=content_type,
+                            prompt=prompt,
+                            headers=filtered,
+                            access_token=access_token,
+                            account_id=account_id,
+                            upstream_proxy_url=upstream_proxy_url,
+                        )
                     return await core_transcribe_audio(
                         audio_bytes,
                         filename=filename,
@@ -3555,9 +3578,21 @@ class ProxyService:
     ) -> UpstreamResponsesWebSocket:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
+        upstream_proxy_url = await self._resolve_upstream_proxy_url(account)
         connect_lease = await self._get_work_admission().acquire_websocket_connect()
         try:
-            return await connect_responses_websocket(headers, access_token, account_id)
+            if upstream_proxy_url is not None:
+                return await connect_responses_websocket(
+                    headers,
+                    access_token,
+                    account_id,
+                    upstream_proxy_url=upstream_proxy_url,
+                )
+            return await connect_responses_websocket(
+                headers,
+                access_token,
+                account_id,
+            )
         finally:
             connect_lease.release()
 
@@ -7667,26 +7702,42 @@ class ProxyService:
         saw_text_delta = False
         latency_first_token_ms: int | None = None
         response_create_lease = AdmissionLease(None)
+        upstream_proxy_url = await self._resolve_upstream_proxy_url(account)
 
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
             if upstream_stream_transport is not None:
-                stream = core_stream_responses(
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    raise_for_status=True,
-                    upstream_stream_transport_override=upstream_stream_transport,
-                )
+                if upstream_proxy_url is not None:
+                    stream = core_stream_responses(
+                        payload,
+                        headers,
+                        access_token,
+                        account_id,
+                        raise_for_status=True,
+                        upstream_stream_transport_override=upstream_stream_transport,
+                        upstream_proxy_url=upstream_proxy_url,
+                    )
+                else:
+                    stream = core_stream_responses(
+                        payload,
+                        headers,
+                        access_token,
+                        account_id,
+                        raise_for_status=True,
+                        upstream_stream_transport_override=upstream_stream_transport,
+                    )
             else:
-                stream = core_stream_responses(
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    raise_for_status=True,
-                )
+                if upstream_proxy_url is not None:
+                    stream = core_stream_responses(
+                        payload,
+                        headers,
+                        access_token,
+                        account_id,
+                        raise_for_status=True,
+                        upstream_proxy_url=upstream_proxy_url,
+                    )
+                else:
+                    stream = core_stream_responses(payload, headers, access_token, account_id, raise_for_status=True)
             iterator = stream.__aiter__()
             try:
                 first = await iterator.__anext__()
@@ -8204,6 +8255,7 @@ class ProxyService:
         timeout_seconds: float | None = None,
     ) -> Account:
         token = push_token_refresh_timeout_override(timeout_seconds)
+        proxy_token = push_token_refresh_proxy_url_override(await self._resolve_upstream_proxy_url(account))
         try:
             async with self._repo_factory() as repos:
                 auth_manager = AuthManager(
@@ -8212,6 +8264,7 @@ class ProxyService:
                 )
                 return await auth_manager.ensure_fresh(account, force=force)
         finally:
+            pop_token_refresh_proxy_url_override(proxy_token)
             pop_token_refresh_timeout_override(token)
 
     async def _ensure_fresh_with_budget(
@@ -8225,6 +8278,22 @@ class ProxyService:
         if "timeout_seconds" in parameters:
             return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
         return await self._ensure_fresh(account, force=force)
+
+    async def _resolve_upstream_proxy_url(self, account: Account) -> str | None:
+        if account.upstream_proxy_url_encrypted is not None:
+            return self._encryptor.decrypt(account.upstream_proxy_url_encrypted)
+        async with self._repo_factory() as repos:
+            settings_repo = getattr(repos, "settings", None)
+            if settings_repo is None:
+                return None
+            if account.upstream_proxy_group:
+                group = await settings_repo.get_upstream_proxy_group(account.upstream_proxy_group)
+                if group is not None:
+                    return self._encryptor.decrypt(group.proxy_url_encrypted)
+            settings = await settings_repo.get_or_create()
+            if settings.upstream_proxy_url_encrypted is not None:
+                return self._encryptor.decrypt(settings.upstream_proxy_url_encrypted)
+        return None
 
     async def _select_account_with_budget(
         self,

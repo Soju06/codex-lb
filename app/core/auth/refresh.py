@@ -12,6 +12,7 @@ from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.http import get_http_client
+from app.core.clients.upstream_proxy import aiohttp_proxy_url, is_socks_upstream_proxy, socks_proxy_connector
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.utils.request_id import get_request_id
@@ -22,6 +23,10 @@ TOKEN_REFRESH_INTERVAL_DAYS = 8
 logger = logging.getLogger(__name__)
 _TOKEN_REFRESH_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "token_refresh_timeout_override",
+    default=None,
+)
+_TOKEN_REFRESH_PROXY_URL_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "token_refresh_proxy_url_override",
     default=None,
 )
 
@@ -72,28 +77,56 @@ async def refresh_access_token(
     }
     timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
 
-    client_session = session or get_http_client().session
+    upstream_proxy_url = _TOKEN_REFRESH_PROXY_URL_OVERRIDE.get()
+    managed_socks_session: aiohttp.ClientSession | None = None
+    if upstream_proxy_url and is_socks_upstream_proxy(upstream_proxy_url):
+        managed_socks_session = aiohttp.ClientSession(
+            connector=socks_proxy_connector(upstream_proxy_url),
+            timeout=aiohttp.ClientTimeout(total=None),
+            trust_env=False,
+        )
+    client_session = managed_socks_session or session or get_http_client().session
     headers: dict[str, str] = {}
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-        data = await _safe_json(resp)
-        try:
-            payload_data = OAuthTokenPayload.model_validate(data)
-        except ValidationError as exc:
-            logger.warning(
-                "Token refresh response invalid request_id=%s",
-                get_request_id(),
-            )
-            raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
-        if resp.status >= 400:
-            logger.warning(
-                "Token refresh failed request_id=%s status=%s",
-                get_request_id(),
-                resp.status,
-            )
-            raise _refresh_error_from_payload(payload_data, resp.status)
+    aiohttp_proxy = aiohttp_proxy_url(upstream_proxy_url)
+    if aiohttp_proxy is None:
+        post_context = client_session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+    else:
+        post_context = client_session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+            proxy=aiohttp_proxy,
+        )
+    try:
+        async with post_context as resp:
+            data = await _safe_json(resp)
+            try:
+                payload_data = OAuthTokenPayload.model_validate(data)
+            except ValidationError as exc:
+                logger.warning(
+                    "Token refresh response invalid request_id=%s",
+                    get_request_id(),
+                )
+                raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
+            if resp.status >= 400:
+                logger.warning(
+                    "Token refresh failed request_id=%s status=%s",
+                    get_request_id(),
+                    resp.status,
+                )
+                raise _refresh_error_from_payload(payload_data, resp.status)
+    finally:
+        if managed_socks_session is not None:
+            await managed_socks_session.close()
 
     if not payload_data.access_token or not payload_data.refresh_token or not payload_data.id_token:
         raise RefreshError("invalid_response", "Refresh response missing tokens", False)
@@ -120,6 +153,14 @@ def push_token_refresh_timeout_override(timeout_seconds: float | None) -> contex
 
 def pop_token_refresh_timeout_override(token: contextvars.Token[float | None]) -> None:
     _TOKEN_REFRESH_TIMEOUT_OVERRIDE.reset(token)
+
+
+def push_token_refresh_proxy_url_override(proxy_url: str | None) -> contextvars.Token[str | None]:
+    return _TOKEN_REFRESH_PROXY_URL_OVERRIDE.set(proxy_url)
+
+
+def pop_token_refresh_proxy_url_override(token: contextvars.Token[str | None]) -> None:
+    _TOKEN_REFRESH_PROXY_URL_OVERRIDE.reset(token)
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:

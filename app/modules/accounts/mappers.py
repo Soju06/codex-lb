@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
+from app.core.clients.upstream_proxy import redact_upstream_proxy_url
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
@@ -15,6 +16,7 @@ from app.modules.accounts.schemas import (
     AccountRequestUsage,
     AccountSummary,
     AccountTokenStatus,
+    AccountUpstreamProxyStatus,
     AccountUsage,
     AccountUsageTrend,
     UsageTrendPoint,
@@ -117,6 +119,7 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+        upstream_proxy=_build_upstream_proxy_status(account, encryptor),
     )
 
 
@@ -162,6 +165,15 @@ def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAu
         access=AccountTokenStatus(expires_at=access_expires),
         refresh=AccountTokenStatus(state=refresh_state),
         id_token=AccountTokenStatus(state=id_state),
+    )
+
+
+def _build_upstream_proxy_status(account: Account, encryptor: TokenEncryptor) -> AccountUpstreamProxyStatus:
+    proxy_url = _decrypt_token(encryptor, account.upstream_proxy_url_encrypted)
+    return AccountUpstreamProxyStatus(
+        configured=proxy_url is not None or account.upstream_proxy_group is not None,
+        proxy_url=redact_upstream_proxy_url(proxy_url),
+        proxy_group=account.upstream_proxy_group,
     )
 
 

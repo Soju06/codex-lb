@@ -14,6 +14,8 @@ export const DashboardSettingsSchema = z.object({
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   apiKeyAuthEnabled: z.boolean(),
+  upstreamProxyConfigured: z.boolean().optional(),
+  upstreamProxyUrl: z.string().nullable().optional(),
 });
 
 export const SettingsUpdateRequestSchema = z.object({
@@ -26,7 +28,18 @@ export const SettingsUpdateRequestSchema = z.object({
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  upstreamProxyUrl: z.string().nullable().optional(),
+});
+
+export const UpstreamProxyGroupSchema = z.object({
+  name: z.string(),
+  proxyUrl: z.string(),
+});
+
+export const UpstreamProxyGroupUpsertRequestSchema = z.object({
+  proxyUrl: z.string(),
 });
 
 export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type UpstreamProxyGroup = z.infer<typeof UpstreamProxyGroupSchema>;

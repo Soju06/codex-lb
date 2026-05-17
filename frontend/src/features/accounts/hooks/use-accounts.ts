@@ -8,6 +8,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccountUpstreamProxy,
 } from "@/features/accounts/api";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
@@ -67,7 +68,26 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation };
+  const updateProxyMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      upstreamProxyUrl,
+      upstreamProxyGroup,
+    }: {
+      accountId: string;
+      upstreamProxyUrl?: string | null;
+      upstreamProxyGroup?: string | null;
+    }) => updateAccountUpstreamProxy(accountId, { upstreamProxyUrl, upstreamProxyGroup }),
+    onSuccess: () => {
+      toast.success("Account proxy saved");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Proxy update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, updateProxyMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

@@ -3,6 +3,7 @@ import { User } from "lucide-react";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
+import { AccountProxySettings } from "@/features/accounts/components/account-proxy-settings";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
@@ -17,6 +18,10 @@ export type AccountDetailProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
+  onProxySave: (
+    accountId: string,
+    payload: { upstreamProxyUrl?: string | null; upstreamProxyGroup?: string | null },
+  ) => void;
 };
 
 export function AccountDetail({
@@ -27,6 +32,7 @@ export function AccountDetail({
   onResume,
   onDelete,
   onReauth,
+  onProxySave,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -67,6 +73,11 @@ export function AccountDetail({
 
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
+      <AccountProxySettings
+        account={account}
+        busy={busy}
+        onSave={(payload) => onProxySave(account.accountId, payload)}
+      />
       <AccountActions
         account={account}
         busy={busy}

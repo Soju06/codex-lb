@@ -33,8 +33,8 @@ async def init_http_client() -> HttpClient:
         trust_env=True,
     )
     try:
-        # Match Codex CLI's direct websocket transport by avoiding env proxies unless operators
-        # explicitly opt in for websocket handshakes.
+        # Match direct Codex transport unless operators explicitly override or
+        # standard outbound proxy env vars are present.
         websocket_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None),
             trust_env=settings.upstream_websocket_trust_env,

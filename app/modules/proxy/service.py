@@ -7519,9 +7519,7 @@ class ProxyService:
     ) -> bool:
         async with pending_lock:
             keepalive_ids = [
-                request_state.response_id
-                for request_state in pending_requests
-                if request_state.response_id is not None
+                request_state.response_id for request_state in pending_requests if request_state.response_id is not None
             ]
         if not keepalive_ids:
             return False

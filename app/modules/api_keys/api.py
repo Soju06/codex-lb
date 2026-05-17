@@ -21,6 +21,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyNotFoundError,
     ApiKeyUpdateData,
+    ApiKeyValidationError,
     LimitRuleInput,
 )
 
@@ -121,7 +122,7 @@ async def create_api_key(
                 limits=limit_inputs,
             )
         )
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     resp = _to_response(created)
     AuditService.log_async(
@@ -180,7 +181,7 @@ async def update_api_key(
         row = await context.service.update_key(key_id, update)
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
         AuditService.log_async(

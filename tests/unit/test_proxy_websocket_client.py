@@ -93,7 +93,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert kwargs["user_agent_header"] == "Codex CLI Test"
     assert kwargs["proxy"] is None
     assert kwargs["open_timeout"] == 7.0
-    assert kwargs["ping_interval"] is None
+    assert "ping_interval" not in kwargs
     assert kwargs["ping_timeout"] is None
     assert kwargs["max_size"] == 4321
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])

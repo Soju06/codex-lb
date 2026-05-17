@@ -97,7 +97,8 @@ def _account_to_summary(
     return AccountSummary(
         account_id=account.id,
         email=account.email,
-        display_name=account.email,
+        alias=account.alias,
+        display_name=account.alias or account.email,
         plan_type=plan_type,
         status=account.status.value,
         usage=AccountUsage(

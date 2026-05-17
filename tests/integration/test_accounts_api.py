@@ -106,3 +106,66 @@ async def test_delete_missing_account_returns_404(async_client):
     assert response.status_code == 404
     payload = response.json()
     assert payload["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_set_alias_missing_account_returns_404(async_client):
+    response = await async_client.put("/api/accounts/missing/alias", json={"alias": "Personal Plus"})
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_set_and_clear_account_alias(async_client):
+    email = "alias@example.com"
+    raw_account_id = "acc_alias"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    # Default summary uses the email since no alias is set yet.
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["alias"] is None
+    assert matched["displayName"] == email
+
+    # Setting an alias updates both `alias` and `displayName`.
+    set_response = await async_client.put(
+        f"/api/accounts/{expected_account_id}/alias",
+        json={"alias": "  Personal Plus  "},
+    )
+    assert set_response.status_code == 200
+    body = set_response.json()
+    assert body["alias"] == "Personal Plus"  # whitespace-trimmed
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["alias"] == "Personal Plus"
+    assert matched["displayName"] == "Personal Plus"
+
+    # Empty alias clears the value and the display name falls back to email.
+    clear_response = await async_client.put(
+        f"/api/accounts/{expected_account_id}/alias",
+        json={"alias": "   "},
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["alias"] is None
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["alias"] is None
+    assert matched["displayName"] == email

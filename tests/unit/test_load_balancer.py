@@ -21,6 +21,7 @@ from app.modules.proxy.load_balancer import (
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
+    background_recovery_state_from_account,
 )
 
 pytestmark = pytest.mark.unit
@@ -772,6 +773,123 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
         runtime=runtime,
     )
     assert state.status == AccountStatus.ACTIVE
+
+
+def test_background_recovery_state_preserves_rate_limit_cooldown_when_reset_is_in_future(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 300.0
+    future_reset = int(now + 1500)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.cooldown_until == pytest.approx(future_reset)
+
+
+def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_background_recovery_state_keeps_rate_limited_when_primary_predates_block(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+    )
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=None,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == pytest.approx(past_reset)
+    assert state.blocked_at == pytest.approx(blocked)
+    assert state.cooldown_until == pytest.approx(past_reset)
+
+
+def test_background_recovery_state_keeps_rate_limited_without_persisted_reset(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=None,
+        blocked_at=int(blocked),
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 300),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at is None
+    assert state.blocked_at == pytest.approx(blocked)
 
 
 def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch):

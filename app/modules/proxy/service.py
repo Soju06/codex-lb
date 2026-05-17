@@ -657,6 +657,8 @@ class ProxyService:
         fresh_upstream_request_text: str | None = None
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        durable_full_resend_anchor_count: int | None = None
+        durable_full_resend_anchor_fingerprint: str | None = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -669,13 +671,18 @@ class ProxyService:
                 api_key=api_key,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
+            durable_anchor_trimmable = _input_prefix_matches_stored_context(
+                payload.input,
+                stored_count=durable_lookup.latest_input_item_count or 0,
+                stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
+            )
             if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
-                and not _http_bridge_payload_looks_like_full_resend(payload)
+                and (not _http_bridge_payload_looks_like_full_resend(payload) or durable_anchor_trimmable)
             ):
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
@@ -698,6 +705,21 @@ class ProxyService:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+                if _http_bridge_payload_looks_like_full_resend(payload):
+                    durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
+                    durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+                    _log_http_bridge_event(
+                        "durable_full_resend_anchor_injected",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=(
+                            f"response_id={durable_lookup.latest_response_id} "
+                            f"stored_items={durable_full_resend_anchor_count}"
+                        ),
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
@@ -950,6 +972,15 @@ class ProxyService:
                             session.last_used_at = time.monotonic()
                 return
         session = session_or_forward
+        if (
+            durable_full_resend_anchor_count is not None
+            and durable_full_resend_anchor_fingerprint is not None
+            and durable_lookup is not None
+            and durable_lookup.latest_response_id is not None
+        ):
+            session.last_completed_response_id = durable_lookup.latest_response_id
+            session.last_completed_input_count = durable_full_resend_anchor_count
+            session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
         # --- Session-level previous_response_id injection ---
         # If the client didn't send previous_response_id and the durable
         # lookup didn't inject one, but this bridge session is carrying
@@ -971,13 +1002,10 @@ class ProxyService:
         incoming_input_preview = effective_payload.input
         stored_count_preview = session.last_completed_input_count
         stored_fingerprint_preview = session.last_completed_input_prefix_fingerprint
-        session_anchor_trimmable = (
-            stored_count_preview > 0
-            and stored_fingerprint_preview is not None
-            and isinstance(incoming_input_preview, list)
-            and len(incoming_input_preview) > stored_count_preview
-            and _fingerprint_input_items(cast(list[JsonValue], incoming_input_preview)[:stored_count_preview])
-            == stored_fingerprint_preview
+        session_anchor_trimmable = _input_prefix_matches_stored_context(
+            incoming_input_preview,
+            stored_count=stored_count_preview,
+            stored_fingerprint=stored_fingerprint_preview,
         )
         if (
             session.codex_session
@@ -3184,6 +3212,31 @@ class ProxyService:
                         payload = None
                         continue
 
+                if request_state is not None and await _websocket_full_resend_conflicts_with_visible_pending(
+                    request_state,
+                    pending_requests,
+                    pending_lock=pending_lock,
+                ):
+                    logger.warning(
+                        "Rejecting websocket full resend while prior response is visible request_id=%s input_items=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        request_state.input_item_count,
+                    )
+                    await self._release_websocket_reservation(request_state.api_key_reservation)
+                    await self._emit_websocket_terminal_error(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        request_state=request_state,
+                        error_code="stream_incomplete",
+                        error_message="Previous response is still streaming; retry after the terminal frame",
+                        error_type="server_error",
+                        downstream_activity=downstream_activity,
+                    )
+                    request_state = None
+                    text_data = None
+                    payload = None
+                    continue
+
                 if request_state is not None and not request_state_registered:
                     try:
                         await self._acquire_request_state_response_create_admission(
@@ -5340,6 +5393,9 @@ class ProxyService:
         self,
         session: "_HTTPBridgeSession",
         response_id: str,
+        *,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
     ) -> None:
         stripped_response_id = response_id.strip()
         if not stripped_response_id:
@@ -5359,6 +5415,8 @@ class ProxyService:
                     owner_epoch=session.durable_owner_epoch,
                     response_id=stripped_response_id,
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                    input_item_count=input_item_count,
+                    input_full_fingerprint=input_full_fingerprint,
                 )
             except Exception:
                 logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
@@ -6592,7 +6650,20 @@ class ProxyService:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
         if response_id is not None and matched_request_state is not None:
-            await self._register_http_bridge_previous_response_id(session, response_id)
+            await self._register_http_bridge_previous_response_id(
+                session,
+                response_id,
+                input_item_count=(
+                    matched_request_state.input_item_count
+                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
+                    else None
+                ),
+                input_full_fingerprint=(
+                    matched_request_state.input_full_fingerprint
+                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
+                    else None
+                ),
+            )
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:
             await matched_request_state.event_queue.put(event_block)
@@ -7184,6 +7255,8 @@ class ProxyService:
                     request_state.suppressed_duplicate_tool_call = True
                     upstream_control.suppress_downstream_event = True
                     return text
+                if event_type in _TEXT_DELTA_EVENT_TYPES:
+                    request_state.downstream_visible = True
                 if payload is not None:
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             if (
@@ -9675,6 +9748,7 @@ class _WebSocketRequestState:
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    downstream_visible: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -10316,6 +10390,24 @@ def _is_missing_tool_output_error(
         return False
     normalized = " ".join(message.lower().split())
     return normalized.startswith("no tool output found for function call call_")
+
+
+async def _websocket_full_resend_conflicts_with_visible_pending(
+    request_state: _WebSocketRequestState,
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    pending_lock: anyio.Lock,
+) -> bool:
+    if request_state.previous_response_id is not None:
+        return False
+    if request_state.input_item_count <= 1:
+        return False
+    async with pending_lock:
+        return any(
+            pending is not request_state
+            and (pending.downstream_visible or pending.response_id is not None or not pending.awaiting_response_created)
+            for pending in pending_requests
+        )
 
 
 def _is_previous_response_not_found_error(
@@ -11658,6 +11750,21 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
             except TypeError:
                 return False
     return False
+
+
+def _input_prefix_matches_stored_context(
+    input_value: JsonValue,
+    *,
+    stored_count: int,
+    stored_fingerprint: str | None,
+) -> bool:
+    if stored_count <= 0 or stored_fingerprint is None:
+        return False
+    if not isinstance(input_value, list):
+        return False
+    if len(input_value) <= stored_count:
+        return False
+    return _fingerprint_input_items(cast(list[JsonValue], input_value)[:stored_count]) == stored_fingerprint
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

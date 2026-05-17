@@ -6139,6 +6139,86 @@ async def test_pop_replayable_precreated_websocket_request_replays_injected_anch
     assert json.loads(pending_request.request_text) == fresh_payload
 
 
+@pytest.mark.asyncio
+async def test_websocket_full_resend_conflicts_with_visible_pending() -> None:
+    pending_lock = anyio.Lock()
+    pending = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_started",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+                response_id="resp_started",
+                awaiting_response_created=False,
+                downstream_visible=True,
+                input_item_count=1,
+            )
+        ]
+    )
+    full_resend = proxy_service._WebSocketRequestState(
+        request_id="ws_full_resend",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id=None,
+        input_item_count=4,
+    )
+
+    assert (
+        await proxy_service._websocket_full_resend_conflicts_with_visible_pending(
+            full_resend,
+            pending,
+            pending_lock=pending_lock,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_full_resend_allows_explicit_previous_response_id() -> None:
+    pending_lock = anyio.Lock()
+    pending = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_started",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+                response_id="resp_started",
+                awaiting_response_created=False,
+                downstream_visible=True,
+                input_item_count=1,
+            )
+        ]
+    )
+    anchored_followup = proxy_service._WebSocketRequestState(
+        request_id="ws_anchored",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_started",
+        input_item_count=4,
+    )
+
+    assert (
+        await proxy_service._websocket_full_resend_conflicts_with_visible_pending(
+            anchored_followup,
+            pending,
+            pending_lock=pending_lock,
+        )
+        is False
+    )
+
+
 def test_slim_response_create_payload_rewrites_top_level_historical_input_image():
     payload: dict[str, JsonValue] = {
         "type": "response.create",

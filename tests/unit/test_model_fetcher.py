@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -42,13 +43,16 @@ async def test_fetch_models_for_plan_maps_read_timeout_to_model_fetch_error(monk
         "app.core.clients.model_fetcher.get_codex_version_cache",
         lambda: _VersionCache(),
     )
-    monkeypatch.setattr(
-        "app.core.clients.model_fetcher.get_http_client",
-        lambda: SimpleNamespace(session=_Session()),
-    )
+
+    @contextlib.asynccontextmanager
+    async def lease_session():
+        yield _Session()
+
+    monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
 
     with pytest.raises(ModelFetchError) as exc_info:
         await fetch_models_for_plan("access-token", "account-id")
 
     assert exc_info.value.status_code == 504
     assert exc_info.value.message == "Upstream models API timed out"
+    assert exc_info.value.transport_error is True

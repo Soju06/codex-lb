@@ -49,14 +49,18 @@ class AccountsRepository:
     ) -> dict[str, AccountRequestUsageSummary]:
         summaries: dict[str, AccountRequestUsageSummary] = {}
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        stmt = select(
-            RequestLog.account_id,
-            func.count(RequestLog.id).label("request_count"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-        ).group_by(RequestLog.account_id)
+        stmt = (
+            select(
+                RequestLog.account_id,
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(RequestLog.request_kind != "warmup")
+            .group_by(RequestLog.account_id)
+        )
         if account_ids:
             stmt = stmt.where(RequestLog.account_id.in_(account_ids))
 

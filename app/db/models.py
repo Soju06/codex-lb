@@ -48,6 +48,11 @@ class StickySessionKind(str, Enum):
     PROMPT_CACHE = "prompt_cache"
 
 
+class RequestKind(str, Enum):
+    NORMAL = "normal"
+    WARMUP = "warmup"
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -128,6 +133,12 @@ class RequestLog(Base):
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    request_kind: Mapped[str] = mapped_column(
+        String,
+        default=RequestKind.NORMAL.value,
+        server_default=text("'normal'"),
+        nullable=False,
+    )
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)

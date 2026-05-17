@@ -144,6 +144,80 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     assert payload.service_tier == "priority"
 
 
+def _service_tier_enforcement_key(enforced: str) -> proxy_service.ApiKeyData:
+    return proxy_service.ApiKeyData(
+        id="key_default",
+        name="service-tier-default-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=enforced,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+
+def test_apply_api_key_enforcement_default_service_tier_omits_outbound_field():
+    # Regression for #546: enforcing ``default`` previously forwarded
+    # the literal string upstream, which the ChatGPT/Codex backend
+    # rejects with ``Unsupported service_tier: default``. The fix maps
+    # ``default``/``auto`` to wire-level absence so enforcement
+    # actually reaches upstream.
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(
+        payload, _service_tier_enforcement_key("default")
+    )
+
+    assert payload.service_tier is None
+
+
+def test_apply_api_key_enforcement_auto_service_tier_omits_outbound_field():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(
+        payload, _service_tier_enforcement_key("auto")
+    )
+
+    assert payload.service_tier is None
+
+
+def test_apply_api_key_enforcement_priority_service_tier_still_propagates():
+    # Sanity: omission only applies to ``auto``/``default``. Real
+    # service tiers (``priority``, ``flex``) MUST still be forwarded
+    # as the literal value the upstream backend recognises.
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(
+        payload, _service_tier_enforcement_key("flex")
+    )
+
+    assert payload.service_tier == "flex"
+
+
 def _build_registry_with_model(slug: str, efforts: list[str]):
     from app.core.openai.model_registry import (
         ModelRegistry,

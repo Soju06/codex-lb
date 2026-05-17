@@ -18,6 +18,15 @@ describe("DashboardSettingsSchema", () => {
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
+      additionalQuotaRoutingPolicies: { codex_spark: "burn_first" },
+      additionalQuotaPolicies: [
+        {
+          quotaKey: "codex_spark",
+          displayLabel: "GPT-5.3-Codex-Spark",
+          routingPolicy: "burn_first",
+          modelIds: ["gpt_5_3_codex_spark"],
+        },
+      ],
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -27,6 +36,26 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
+    expect(parsed.additionalQuotaRoutingPolicies.codex_spark).toBe("burn_first");
+    expect(parsed.additionalQuotaPolicies[0]?.routingPolicy).toBe("burn_first");
+  });
+
+  it("defaults optional additional quota policy fields", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    expect(parsed.additionalQuotaRoutingPolicies).toEqual({});
+    expect(parsed.additionalQuotaPolicies).toEqual([]);
   });
 });
 
@@ -42,6 +71,7 @@ describe("SettingsUpdateRequestSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
+      additionalQuotaRoutingPolicies: { codex_spark: "inherit" },
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
@@ -51,6 +81,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
+    expect(parsed.additionalQuotaRoutingPolicies?.codex_spark).toBe("inherit");
   });
 
   it("accepts long session lifetimes above 30 days", () => {

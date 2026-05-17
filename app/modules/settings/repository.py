@@ -34,6 +34,7 @@ class SettingsRepository:
             api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
+            additional_quota_routing_policies_json="{}",
         )
         self._session.add(row)
         try:
@@ -62,6 +63,7 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        additional_quota_routing_policies_json: str | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -90,6 +92,8 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if additional_quota_routing_policies_json is not None:
+            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         await self.commit_refresh(settings)
         return settings
 

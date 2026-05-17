@@ -12,6 +12,8 @@ from app.modules.accounts.schemas import (
     AccountImportResponse,
     AccountPauseResponse,
     AccountReactivateResponse,
+    AccountRoutingPolicyResponse,
+    AccountRoutingPolicyUpdate,
     AccountsResponse,
     AccountTrendsResponse,
 )
@@ -84,6 +86,21 @@ async def pause_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountPauseResponse(status="paused")
+
+
+@router.patch("/{account_id}/routing-policy", response_model=AccountRoutingPolicyResponse)
+async def update_account_routing_policy(
+    account_id: str,
+    payload: AccountRoutingPolicyUpdate,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountRoutingPolicyResponse:
+    try:
+        routing_policy = await context.service.update_routing_policy(account_id, payload.routing_policy)
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_routing_policy") from exc
+    if routing_policy is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountRoutingPolicyResponse(status="updated", routing_policy=routing_policy)
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

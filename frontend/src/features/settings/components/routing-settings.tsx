@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Route } from "lucide-react";
+import { Flame, Route } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
-import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import type {
+  AdditionalQuotaRoutingPolicy,
+  DashboardSettings,
+  SettingsUpdateRequest,
+} from "@/features/settings/schemas";
 
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
@@ -27,6 +31,14 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
+  const saveAdditionalQuotaPolicy = (quotaKey: string, routingPolicy: AdditionalQuotaRoutingPolicy) => {
+    save({
+      additionalQuotaRoutingPolicies: {
+        ...settings.additionalQuotaRoutingPolicies,
+        [quotaKey]: routingPolicy,
+      },
+    });
+  };
 
   const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
@@ -153,6 +165,49 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               </Button>
             </div>
           </div>
+
+          {settings.additionalQuotaPolicies.length > 0 ? (
+            <div className="space-y-3 p-3">
+              <div className="flex items-center gap-2">
+                <Flame className="h-4 w-4 text-orange-500" aria-hidden="true" />
+                <div>
+                  <p className="text-sm font-medium">Additional quota routing</p>
+                  <p className="text-xs text-muted-foreground">Route separate model pools by their own policy.</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {settings.additionalQuotaPolicies.map((policy) => (
+                  <div
+                    key={policy.quotaKey}
+                    className="flex flex-col gap-3 rounded-md border bg-background/60 p-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{policy.displayLabel}</p>
+                      {policy.modelIds.length > 0 ? (
+                        <p className="truncate text-xs text-muted-foreground">{policy.modelIds.join(", ")}</p>
+                      ) : null}
+                    </div>
+                    <Select
+                      value={policy.routingPolicy}
+                      onValueChange={(value) =>
+                        saveAdditionalQuotaPolicy(policy.quotaKey, value as AdditionalQuotaRoutingPolicy)
+                      }
+                    >
+                      <SelectTrigger className="h-8 w-full text-xs sm:w-40" disabled={busy}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent align="end">
+                        <SelectItem value="inherit">Inherit</SelectItem>
+                        <SelectItem value="burn_first">Burn first</SelectItem>
+                        <SelectItem value="normal">Normal</SelectItem>
+                        <SelectItem value="preserve">Preserve</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

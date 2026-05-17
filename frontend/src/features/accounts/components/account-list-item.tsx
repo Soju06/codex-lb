@@ -1,9 +1,12 @@
+import { Flame, Shield } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
@@ -28,6 +31,30 @@ function MiniQuotaBar({ percent, testId }: { percent: number | null; testId: str
         style={{ width: `${clamped}%` }}
       />
     </div>
+  );
+}
+
+function RoutingPolicyBadge({ policy }: { policy: AccountRoutingPolicy | undefined }) {
+  if (policy === "burn_first") {
+    return (
+      <Badge variant="outline" className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700">
+        <Flame className="h-3 w-3" aria-hidden="true" />
+        Burn first
+      </Badge>
+    );
+  }
+  if (policy === "preserve") {
+    return (
+      <Badge variant="outline" className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700">
+        <Shield className="h-3 w-3" aria-hidden="true" />
+        Preserve
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="shrink-0 px-1.5 text-[11px] text-muted-foreground">
+      Normal
+    </Badge>
   );
 }
 
@@ -71,6 +98,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
           </p>
         </div>
         <StatusBadge status={status} />
+        <RoutingPolicyBadge policy={account.routingPolicy} />
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
         {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}

@@ -45,9 +45,23 @@ describe("AccountSummarySchema", () => {
     });
 
     expect(parsed.accountId).toBe("acc-1");
+    expect(parsed.routingPolicy ?? "normal").toBe("normal");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
+  });
+
+  it("parses manual routing policy", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      routingPolicy: "preserve",
+    });
+
+    expect(parsed.routingPolicy).toBe("preserve");
   });
 });
 

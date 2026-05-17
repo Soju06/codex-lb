@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypedDict
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
+ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
 
 
 def _normalize_identifier(value: str | None) -> str | None:
@@ -22,6 +23,7 @@ def _normalize_identifier(value: str | None) -> str | None:
 class AdditionalQuotaDefinition:
     quota_key: str
     display_label: str
+    routing_policy: str = "inherit"
     model_ids: frozenset[str] = frozenset()
     quota_key_aliases: frozenset[str] = frozenset()
     limit_name_aliases: frozenset[str] = frozenset()
@@ -47,6 +49,7 @@ class AdditionalQuotaRegistryStatus:
 class AdditionalQuotaRegistryEntry(TypedDict, total=False):
     quota_key: str
     display_label: str
+    routing_policy: str
     model_ids: list[str]
     quota_key_aliases: list[str]
     limit_name_aliases: list[str]
@@ -62,6 +65,10 @@ def _registry_path() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return _default_registry_path()
+
+
+def _normalize_routing_policy(value: str | None) -> str:
+    return canonicalize_additional_quota_routing_policy(value) or "inherit"
 
 
 def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuotaDefinition:
@@ -99,6 +106,7 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
     return AdditionalQuotaDefinition(
         quota_key=quota_key,
         display_label=display_label,
+        routing_policy=_normalize_routing_policy(item.get("routing_policy")),
         model_ids=model_ids,
         quota_key_aliases=quota_key_aliases,
         limit_name_aliases=limit_name_aliases,
@@ -195,6 +203,62 @@ def reload_additional_quota_registry() -> AdditionalQuotaRegistryStatus:
         path=Path(path_str),
         definition_count=len(definitions),
     )
+
+
+def list_additional_quota_definitions() -> tuple[AdditionalQuotaDefinition, ...]:
+    return _definitions_for_path(str(_registry_path()))
+
+
+def get_additional_quota_definition_for_key(quota_key: str | None) -> AdditionalQuotaDefinition | None:
+    by_quota_key, _, _, alias_to_quota_key, quota_key_alias_to_quota_key = _definition_maps_for_path(
+        str(_registry_path())
+    )
+    resolved_key = canonicalize_additional_quota_key(quota_key=quota_key)
+    if resolved_key is None or resolved_key not in by_quota_key:
+        normalized_quota_key = _normalize_identifier(quota_key)
+        resolved_key = (
+            alias_to_quota_key.get(normalized_quota_key, resolved_key)
+            if normalized_quota_key is not None
+            else resolved_key
+        )
+    if resolved_key is None:
+        return None
+    return by_quota_key.get(resolved_key)
+
+
+def normalize_additional_quota_routing_policy(value: str | None) -> str:
+    return _normalize_routing_policy(value)
+
+
+def canonicalize_additional_quota_routing_policy(value: str | None) -> str | None:
+    normalized = _normalize_identifier(value)
+    if normalized in ADDITIONAL_QUOTA_ROUTING_POLICIES:
+        return normalized
+    return None
+
+
+def normalize_additional_quota_routing_policy_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
+    if not overrides:
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in overrides.items():
+        definition = get_additional_quota_definition_for_key(key)
+        if definition is None:
+            continue
+        normalized[definition.quota_key] = normalize_additional_quota_routing_policy(value)
+    return normalized
+
+
+def get_additional_quota_routing_policy(
+    quota_key: str | None,
+    *,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    definition = get_additional_quota_definition_for_key(quota_key)
+    if definition is None:
+        return "inherit"
+    normalized_overrides = normalize_additional_quota_routing_policy_overrides(overrides)
+    return normalized_overrides.get(definition.quota_key, definition.routing_policy)
 
 
 def canonicalize_additional_quota_key(

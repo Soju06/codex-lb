@@ -53,6 +53,7 @@ describe("AccountUsagePanel", () => {
         {
           limitName: "codex_spark",
           meteredFeature: "codex_bengalfox",
+          routingPolicy: "inherit",
           primaryWindow: {
             usedPercent: 35,
             resetAt: Math.floor(new Date("2026-01-07T13:00:00.000Z").getTime() / 1000),

@@ -8867,6 +8867,12 @@ class ProxyService:
                     error.code if error else None,
                     error.type if error else None,
                 )
+                if (
+                    event_type == "error"
+                    and code == "error"
+                    and _websocket_event_error_code(event_type, first_payload) is None
+                ):
+                    code = "upstream_error"
                 rewritten_error = _rewrite_previous_response_stream_error(
                     previous_response_id=payload.previous_response_id,
                     preferred_account_id=preferred_account_id,
@@ -8950,6 +8956,18 @@ class ProxyService:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
+                if event_type == "error" and (event is None or event.error is None) and isinstance(event_payload, dict):
+                    message_value = event_payload.get("message")
+                    message = (
+                        message_value.strip()
+                        if isinstance(message_value, str) and message_value.strip()
+                        else "Upstream error"
+                    )
+                    line, event, event_payload, event_type = _build_rewritten_stream_response_failed_event(
+                        response_id=response_id,
+                        error_code="upstream_error",
+                        error_message=message,
+                    )
                 event_service_tier = _service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
@@ -8978,6 +8996,12 @@ class ProxyService:
                             error.code if error else None,
                             error.type if error else None,
                         )
+                        if (
+                            event_type == "error"
+                            and raw_error_code == "error"
+                            and _websocket_event_error_code(event_type, event_payload) is None
+                        ):
+                            raw_error_code = "upstream_error"
                         rewritten_error = _rewrite_previous_response_stream_error(
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
@@ -9988,6 +10012,7 @@ def _normalize_http_bridge_error_event(
     error_type_value: str | None = None
     error_message_value: str | None = None
     error_param_value: str | None = None
+    explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
 
     if event is not None and event.error is not None:
@@ -10003,6 +10028,7 @@ def _normalize_http_bridge_error_event(
                 stripped = code_value.strip()
                 if stripped:
                     error_code_value = stripped
+                    explicit_error_code = True
             type_value = payload_error.get("type")
             if isinstance(type_value, str):
                 stripped = type_value.strip()
@@ -10033,6 +10059,8 @@ def _normalize_http_bridge_error_event(
                 rate_limit_metadata["resets_in_seconds"] = resets_in
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
+    if not explicit_error_code and normalized_error_code == "error":
+        normalized_error_code = "upstream_error"
     normalized_error_type = error_type_value or "server_error"
     normalized_error_message = error_message_value or "Upstream error"
 

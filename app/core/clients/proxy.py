@@ -988,12 +988,16 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
         message = _extract_upstream_message(payload) or "Upstream websocket error"
         code = payload.get("code")
         error_type = payload.get("error_type") or payload.get("type")
+        normalized_code = _normalize_error_code(
+            code if isinstance(code, str) else None,
+            error_type if isinstance(error_type, str) else None,
+        )
+        if not isinstance(code, str) and normalized_code == "error":
+            normalized_code = "upstream_error"
         return cast(
             dict[str, JsonValue],
             response_failed_event(
-                _normalize_error_code(
-                    code if isinstance(code, str) else None, error_type if isinstance(error_type, str) else None
-                ),
+                normalized_code,
                 message,
                 error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
                 response_id=get_request_id(),

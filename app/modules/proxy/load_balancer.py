@@ -673,14 +673,19 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                # Proactively rebind session affinity for prompt-cache and
-                # codex sessions once the pinned account is already above the
-                # configured budget threshold. That preserves continuity below
-                # the threshold while avoiding obvious short-window failures
-                # once the session is skating on the edge of exhaustion.
+                # Proactively rebind session affinity for any sticky kind
+                # once the pinned account is already above the configured
+                # budget threshold. That preserves continuity below the
+                # threshold while avoiding obvious short-window failures once
+                # the session is skating on the edge of exhaustion.
                 now = time.time()
                 budget_pressured = (
-                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
+                    sticky_kind
+                    in (
+                        StickySessionKind.PROMPT_CACHE,
+                        StickySessionKind.CODEX_SESSION,
+                        StickySessionKind.STICKY_THREAD,
+                    )
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )

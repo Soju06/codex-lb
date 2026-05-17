@@ -248,6 +248,9 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
     }
 )
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
+_WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
+_WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
+_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +284,79 @@ def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _response_create_text(
+    payload: ResponsesRequest,
+    *,
+    include_type_field: bool,
+    client_metadata: Mapping[str, JsonValue] | None,
+) -> str:
+    upstream_payload = dict(payload.to_payload())
+    upstream_payload.pop("stream", None)
+    upstream_payload.pop("background", None)
+    if include_type_field:
+        upstream_payload["type"] = "response.create"
+    if client_metadata:
+        upstream_payload["client_metadata"] = client_metadata
+    return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _response_create_text_with_size_guard(
+    payload: ResponsesRequest,
+    *,
+    include_type_field: bool,
+    client_metadata: Mapping[str, JsonValue] | None,
+    request_state: "_WebSocketRequestState",
+    transport: str,
+) -> str | None:
+    upstream_payload = dict(payload.to_payload())
+    upstream_payload.pop("stream", None)
+    upstream_payload.pop("background", None)
+    if include_type_field:
+        upstream_payload["type"] = "response.create"
+    if client_metadata:
+        upstream_payload["client_metadata"] = client_metadata
+    text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+    payload_size = len(text_data.encode("utf-8"))
+    if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+        original_payload_size = payload_size
+        slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
+            upstream_payload,
+            max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
+        )
+        if slim_summary is not None:
+            upstream_payload = slimmed_payload
+            text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+            payload_size = len(text_data.encode("utf-8"))
+            logger.warning(
+                (
+                    "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
+                    "original_bytes=%s slimmed_bytes=%s "
+                    "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
+                ),
+                request_state.request_id,
+                request_state.request_log_id,
+                transport,
+                original_payload_size,
+                payload_size,
+                slim_summary["historical_tool_outputs_slimmed"],
+                slim_summary["historical_images_slimmed"],
+            )
+        if payload_size > _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
+            logger.warning(
+                (
+                    "Skipping oversized response.create retry body request_id=%s request_log_id=%s "
+                    "transport=%s bytes=%s max_bytes=%s"
+                ),
+                request_state.request_id,
+                request_state.request_log_id,
+                transport,
+                payload_size,
+                _UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
+            )
+            return None
+    return text_data
+
+
 class ProxyService:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
@@ -294,6 +370,7 @@ class ProxyService:
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
+        self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         # In-memory pin from upstream-issued file_id -> codex-lb account_id.
         # Used so ``finalize_file`` for a given ``file_id`` is routed to
         # the same account that handled ``create_file``. Cross-instance
@@ -305,6 +382,30 @@ class ProxyService:
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
+
+    def _websocket_continuity_state_for_request(
+        self,
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None,
+        codex_session_affinity: bool,
+    ) -> "_WebSocketContinuityState":
+        if not codex_session_affinity:
+            return _WebSocketContinuityState()
+        session_id = _owner_lookup_session_id_from_headers(headers)
+        if session_id is None:
+            return _WebSocketContinuityState()
+        key = (session_id, api_key.id if api_key is not None else None)
+        continuity_state = self._websocket_continuity_index.get(key)
+        if continuity_state is None:
+            continuity_state = _WebSocketContinuityState()
+            self._websocket_continuity_index[key] = continuity_state
+        else:
+            self._websocket_continuity_index.pop(key, None)
+            self._websocket_continuity_index[key] = continuity_state
+        while len(self._websocket_continuity_index) > _WEBSOCKET_CONTINUITY_CACHE_LIMIT:
+            self._websocket_continuity_index.pop(next(iter(self._websocket_continuity_index)))
+        return continuity_state
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
@@ -2411,6 +2512,11 @@ class ProxyService:
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
+        continuity_state = self._websocket_continuity_state_for_request(
+            headers,
+            api_key=api_key,
+            codex_session_affinity=codex_session_affinity,
+        )
         account: Account | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
         downstream_activity = _DownstreamWebSocketActivity()
@@ -2533,7 +2639,40 @@ class ProxyService:
                                     sticky_threads_enabled=sticky_threads_enabled,
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                     api_key=api_key,
+                                    continuity_state=continuity_state,
                                 )
+                                if await _websocket_full_replay_should_wait_for_continuity(
+                                    prepared_request.request_state,
+                                    pending_requests,
+                                    pending_lock=pending_lock,
+                                    codex_session_affinity=codex_session_affinity,
+                                ):
+                                    await self._release_websocket_reservation(
+                                        prepared_request.request_state.api_key_reservation
+                                    )
+                                    wait_started_at = time.monotonic()
+                                    waited_for_anchor = await _wait_for_websocket_continuity_gap(
+                                        pending_requests,
+                                        pending_lock=pending_lock,
+                                        timeout_seconds=runtime_settings.proxy_request_budget_seconds,
+                                    )
+                                    logger.info(
+                                        "websocket_full_replay_waited_for_continuity waited=%s elapsed_ms=%s "
+                                        "original_items=%s",
+                                        waited_for_anchor,
+                                        int((time.monotonic() - wait_started_at) * 1000),
+                                        prepared_request.request_state.input_item_count,
+                                    )
+                                    prepared_request = await self._prepare_websocket_response_create_request(
+                                        payload,
+                                        headers=headers,
+                                        codex_session_affinity=codex_session_affinity,
+                                        openai_cache_affinity=openai_cache_affinity,
+                                        sticky_threads_enabled=sticky_threads_enabled,
+                                        openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                        api_key=api_key,
+                                        continuity_state=continuity_state,
+                                    )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
@@ -2759,6 +2898,7 @@ class ProxyService:
                             api_key=api_key,
                             upstream_control=upstream_control,
                             response_create_gate=response_create_gate,
+                            continuity_state=continuity_state,
                             proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
@@ -2851,6 +2991,7 @@ class ProxyService:
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
+        continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
@@ -2859,6 +3000,25 @@ class ProxyService:
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
         rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
+        original_full_resend_payload: ResponsesRequest | None = None
+        original_input_item_count: int | None = None
+        original_input_fingerprint: str | None = None
+        session_anchor = _websocket_continuity_anchor_for_payload(
+            continuity_state,
+            responses_payload=responses_payload,
+            codex_session_affinity=codex_session_affinity,
+        )
+        if session_anchor is not None:
+            original_input_items = cast(list[JsonValue], responses_payload.input)
+            original_input_item_count = len(original_input_items)
+            original_input_fingerprint = _fingerprint_input_items(original_input_items)
+            original_full_resend_payload = responses_payload
+            responses_payload = responses_payload.model_copy(
+                update={
+                    "previous_response_id": session_anchor.previous_response_id,
+                    "input": original_input_items[session_anchor.stored_input_item_count :],
+                }
+            )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -2881,6 +3041,28 @@ class ProxyService:
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
             raise
+        if session_anchor is not None:
+            request_state.proxy_injected_previous_response_id = True
+            request_state.input_item_count = original_input_item_count or request_state.input_item_count
+            request_state.input_full_fingerprint = original_input_fingerprint
+            if original_full_resend_payload is not None:
+                request_state.fresh_upstream_request_text = _response_create_text_with_size_guard(
+                    original_full_resend_payload,
+                    include_type_field=True,
+                    client_metadata=client_metadata,
+                    request_state=request_state,
+                    transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                )
+            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            logger.info(
+                "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
+                request_state.request_id,
+                session_anchor.previous_response_id,
+                original_input_item_count,
+                len(cast(list[JsonValue], responses_payload.input))
+                if isinstance(responses_payload.input, list)
+                else None,
+            )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
@@ -4103,6 +4285,24 @@ class ProxyService:
                                                 owner_check_applied=True,
                                             )
                                             force_durable_takeover = True
+                                    elif _http_bridge_endpoint_matches_current_instance(owner_endpoint, settings):
+                                        if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
+                                            bridge_durable_recover_total.labels(path="restart_takeover").inc()
+                                        _log_http_bridge_event(
+                                            "owner_mismatch_local_recover",
+                                            key,
+                                            account_id=None,
+                                            model=request_model,
+                                            detail=(
+                                                "expected_instance="
+                                                f"{owner_instance}, current_instance={current_instance}, "
+                                                "outcome=local_recover_same_endpoint"
+                                            ),
+                                            cache_key_family=key.affinity_kind,
+                                            model_class=_extract_model_class(request_model) if request_model else None,
+                                            owner_check_applied=True,
+                                        )
+                                        force_durable_takeover = True
                                     else:
                                         owner_forward = _HTTPBridgeOwnerForward(
                                             owner_instance=owner_instance,
@@ -5949,6 +6149,7 @@ class ProxyService:
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
         downstream_activity: _DownstreamWebSocketActivity,
+        continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
         try:
             while True:
@@ -6013,6 +6214,7 @@ class ProxyService:
                         api_key=api_key,
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
+                        continuity_state=continuity_state,
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
@@ -6124,6 +6326,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         upstream_control: _WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
+        continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -6311,6 +6514,13 @@ class ProxyService:
                 )
             if retry_error_code is not None:
                 return downstream_text
+
+        if event_type == "response.completed" and continuity_state is not None:
+            _record_websocket_continuity_completion(
+                continuity_state,
+                request_state=request_state,
+                response_id=response_id,
+            )
 
         await self._finalize_websocket_request_state(
             request_state,
@@ -8549,6 +8759,19 @@ class _HTTPBridgeSession:
 
 
 @dataclass(slots=True)
+class _WebSocketContinuityState:
+    last_completed_input_count: int = 0
+    last_completed_response_id: str | None = None
+    last_completed_input_prefix_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WebSocketContinuityAnchor:
+    previous_response_id: str
+    stored_input_item_count: int
+
+
+@dataclass(slots=True)
 class _WebSocketUpstreamControl:
     reconnect_requested: bool = False
     suppress_downstream_event: bool = False
@@ -8588,6 +8811,88 @@ def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonV
     if isinstance(payload_type, str):
         return payload_type
     return None
+
+
+def _websocket_continuity_anchor_for_payload(
+    continuity_state: _WebSocketContinuityState | None,
+    *,
+    responses_payload: ResponsesRequest,
+    codex_session_affinity: bool,
+) -> _WebSocketContinuityAnchor | None:
+    if not codex_session_affinity or continuity_state is None:
+        return None
+    if responses_payload.previous_response_id is not None:
+        return None
+    previous_response_id = continuity_state.last_completed_response_id
+    stored_count = continuity_state.last_completed_input_count
+    stored_fingerprint = continuity_state.last_completed_input_prefix_fingerprint
+    incoming_input = responses_payload.input
+    if (
+        previous_response_id is None
+        or stored_count <= 0
+        or stored_fingerprint is None
+        or not isinstance(incoming_input, list)
+        or len(incoming_input) <= stored_count
+    ):
+        return None
+    incoming_input_list = cast(list[JsonValue], incoming_input)
+    incoming_prefix_fingerprint = _fingerprint_input_items(incoming_input_list[:stored_count])
+    if incoming_prefix_fingerprint != stored_fingerprint:
+        return None
+    return _WebSocketContinuityAnchor(
+        previous_response_id=previous_response_id,
+        stored_input_item_count=stored_count,
+    )
+
+
+def _record_websocket_continuity_completion(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+    response_id: str | None,
+) -> None:
+    if response_id is None or request_state.input_item_count <= 0 or request_state.input_full_fingerprint is None:
+        continuity_state.last_completed_response_id = None
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
+        return
+    continuity_state.last_completed_response_id = response_id
+    continuity_state.last_completed_input_count = request_state.input_item_count
+    continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+
+
+async def _wait_for_websocket_continuity_gap(
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    pending_lock: anyio.Lock,
+    timeout_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        async with pending_lock:
+            if not pending_requests:
+                return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
+
+
+async def _websocket_full_replay_should_wait_for_continuity(
+    request_state: _WebSocketRequestState,
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    pending_lock: anyio.Lock,
+    codex_session_affinity: bool,
+) -> bool:
+    if (
+        not codex_session_affinity
+        or request_state.previous_response_id is not None
+        or request_state.input_item_count < _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS
+    ):
+        return False
+    async with pending_lock:
+        return bool(pending_requests)
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
@@ -8723,6 +9028,11 @@ def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonVal
         return event.response.id
     if not isinstance(payload, dict):
         return None
+    direct_response_id = payload.get("response_id")
+    if isinstance(direct_response_id, str):
+        stripped_direct_response_id = direct_response_id.strip()
+        if stripped_direct_response_id:
+            return stripped_direct_response_id
     response = payload.get("response")
     if not isinstance(response, dict):
         return None
@@ -8880,6 +9190,16 @@ async def _pop_replayable_precreated_websocket_request_state(
         if request_state.replay_count >= 1:
             return None
         pending_requests.popleft()
+    if (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        request_state.request_text = request_state.fresh_upstream_request_text
+        request_state.previous_response_id = None
+        request_state.proxy_injected_previous_response_id = False
+        request_state.fresh_upstream_request_is_retry_safe = False
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_state.replay_count += 1
     request_state.awaiting_response_created = True
     request_state.response_id = None
@@ -8897,6 +9217,30 @@ def _is_previous_response_not_found_error(
     if code != "invalid_request_error" or param != "previous_response_id":
         return False
     return _is_previous_response_not_found_message(message)
+
+
+def _refresh_websocket_request_input_fingerprint_from_text(request_state: _WebSocketRequestState) -> None:
+    if not request_state.request_text:
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    try:
+        payload = json.loads(request_state.request_text)
+    except json.JSONDecodeError:
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    if not isinstance(payload, dict):
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        request_state.input_item_count = 0
+        request_state.input_full_fingerprint = None
+        return
+    request_state.input_item_count = len(input_items)
+    request_state.input_full_fingerprint = _fingerprint_input_items(cast(list[JsonValue], input_items))
 
 
 def _websocket_event_error_payload(
@@ -10605,6 +10949,13 @@ def _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor(
     if ring[0] != current_instance:
         return False
     return owner_instance not in ring
+
+
+def _http_bridge_endpoint_matches_current_instance(owner_endpoint: str, settings: Settings) -> bool:
+    current_endpoint = settings.http_responses_session_bridge_advertise_base_url
+    if current_endpoint is None:
+        return False
+    return owner_endpoint.strip().rstrip("/") == current_endpoint.strip().rstrip("/")
 
 
 def _http_bridge_can_recover_during_drain(

@@ -32,6 +32,7 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/accounts/:accountId/pause",
 	"POST /api/accounts/:accountId/reactivate",
 	"GET /api/accounts/:accountId/trends",
+	"POST /api/accounts/:accountId/export",
 	"DELETE /api/accounts/:accountId",
 	// oauth
 	"POST /api/oauth/start",

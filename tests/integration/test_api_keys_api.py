@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import timedelta
 
@@ -2201,6 +2202,27 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         limits = await repo.get_limits_by_key(created.id)
         assert len(limits) == 1
         assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
+
+
+@pytest.mark.asyncio
+async def test_release_stale_usage_reservations_uses_sqlite_writer_section(async_client, monkeypatch):
+    del async_client
+    entered = False
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal entered
+        entered = True
+        yield
+
+    monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6))
+
+    assert released_count == 0
+    assert entered is True
 
 
 @pytest.mark.asyncio

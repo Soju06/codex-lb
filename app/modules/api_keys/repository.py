@@ -632,7 +632,6 @@ class ApiKeysRepository:
                         .options(selectinload(ApiKeyUsageReservation.items))
                         .where(ApiKeyUsageReservation.status == "reserved")
                         .where(ApiKeyUsageReservation.updated_at < cutoff)
-                        .where(ApiKeyUsageReservation.updated_at != ApiKeyUsageReservation.created_at)
                         .order_by(ApiKeyUsageReservation.updated_at.asc())
                         .limit(batch_size)
                     )
@@ -646,7 +645,6 @@ class ApiKeysRepository:
                             .where(ApiKeyUsageReservation.id == row.id)
                             .where(ApiKeyUsageReservation.status == "reserved")
                             .where(ApiKeyUsageReservation.updated_at < cutoff)
-                            .where(ApiKeyUsageReservation.updated_at != ApiKeyUsageReservation.created_at)
                             .values(
                                 status="released",
                                 input_tokens=None,

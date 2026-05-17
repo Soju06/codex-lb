@@ -1314,7 +1314,12 @@ def _calculate_cost_microdollars(
 
 
 def _is_sqlite_database_locked(exc: OperationalError) -> bool:
-    return "database is locked" in str(exc).lower()
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database schema is locked" in message
+    )
 
 
 def _build_api_key_trends(

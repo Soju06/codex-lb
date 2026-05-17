@@ -2174,7 +2174,7 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         )
         stale = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         stale_second = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
-        non_heartbeated = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        abandoned_before_first_heartbeat = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         await session.execute(
             update(ApiKeyUsageReservation)
@@ -2183,7 +2183,7 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         )
         await session.execute(
             update(ApiKeyUsageReservation)
-            .where(ApiKeyUsageReservation.id == non_heartbeated.reservation_id)
+            .where(ApiKeyUsageReservation.id == abandoned_before_first_heartbeat.reservation_id)
             .values(created_at=now - timedelta(hours=7), updated_at=now - timedelta(hours=7))
         )
         await session.execute(
@@ -2197,15 +2197,15 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
         repo = ApiKeysRepository(session)
         released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
-        assert released_count == 2
+        assert released_count == 3
 
-    assert writer_section_entries == 3
+    assert writer_section_entries == 4
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         stale_reservation = await repo.get_usage_reservation(stale.reservation_id)
         stale_second_reservation = await repo.get_usage_reservation(stale_second.reservation_id)
-        non_heartbeated_reservation = await repo.get_usage_reservation(non_heartbeated.reservation_id)
+        abandoned_reservation = await repo.get_usage_reservation(abandoned_before_first_heartbeat.reservation_id)
         fresh_reservation = await repo.get_usage_reservation(fresh.reservation_id)
         assert stale_reservation is not None
         assert stale_reservation.status == "released"
@@ -2213,16 +2213,15 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         assert stale_second_reservation is not None
         assert stale_second_reservation.status == "released"
         assert stale_second_reservation.items[0].actual_delta == 0
-        assert non_heartbeated_reservation is not None
-        assert non_heartbeated_reservation.status == "reserved"
+        assert abandoned_reservation is not None
+        assert abandoned_reservation.status == "released"
+        assert abandoned_reservation.items[0].actual_delta == 0
         assert fresh_reservation is not None
         assert fresh_reservation.status == "reserved"
 
         limits = await repo.get_limits_by_key(created.id)
         assert len(limits) == 1
-        assert limits[0].current_value == (
-            non_heartbeated_reservation.items[0].reserved_delta + fresh_reservation.items[0].reserved_delta
-        )
+        assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
 
 
 @pytest.mark.asyncio

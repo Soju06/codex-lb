@@ -25,9 +25,22 @@ from app.modules.api_keys.service import (
     ApiKeyUpdateData,
     LimitRuleInput,
     _build_api_key_trends,
+    _is_sqlite_database_locked,
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    ],
+)
+def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
+    assert _is_sqlite_database_locked(OperationalError("sqlite busy", {}, Exception(message))) is True
 
 
 class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):

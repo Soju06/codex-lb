@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
-import { formatCompactNumber } from "@/utils/formatters";
+import { formatCompactNumber, formatNumber } from "@/utils/formatters";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useThemeStore } from "@/hooks/use-theme";
@@ -26,6 +26,16 @@ export type DonutChartProps = {
   title: string;
   subtitle?: string;
   safeLine?: { safePercent: number; riskLevel: "safe" | "warning" | "danger" | "critical" } | null;
+  /**
+   * Layout for the donut center label/value pair.
+   *
+   * - "remaining" (default): renders a "Remaining" caption above a single
+   *   compact-formatted number. Backwards-compatible behavior.
+   * - "credits": renders a "Credits" caption above a raw `remaining/total`
+   *   fraction. Used by the dashboard usage donuts so operators can read
+   *   the absolute credit counts without abbreviation (#371).
+   */
+  centerLayout?: "remaining" | "credits";
 };
 
 function SafeLineTick({
@@ -97,7 +107,7 @@ function formatUsedPercent(percent: number): string {
   return `${percent.toLocaleString("en-US", { maximumFractionDigits })}%`;
 }
 
-export function DonutChart({ items, total, centerValue, title, subtitle, safeLine }: DonutChartProps) {
+export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining" }: DonutChartProps) {
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -213,8 +223,23 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
           ) : null}
           <div className="absolute inset-[22px] flex items-center justify-center rounded-full text-center pointer-events-none">
              <div>
-               <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining</p>
-               <p className="text-base font-semibold tabular-nums">{formatCompactNumber(displayTotal)}</p>
+               {centerLayout === "credits" ? (
+                 <>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Credits</p>
+                   <p
+                     className="text-sm font-semibold tabular-nums leading-tight"
+                     data-testid="donut-center-fraction"
+                   >
+                     {formatNumber(displayTotal)}
+                     <span className="text-muted-foreground">/{formatNumber(safeCapacity)}</span>
+                   </p>
+                 </>
+               ) : (
+                 <>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining</p>
+                   <p className="text-base font-semibold tabular-nums">{formatCompactNumber(displayTotal)}</p>
+                 </>
+               )}
             </div>
           </div>
           </div>

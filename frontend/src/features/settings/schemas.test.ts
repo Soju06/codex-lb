@@ -29,6 +29,8 @@ describe("DashboardSettingsSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
+      guestAccessEnabled: true,
+      guestPasswordConfigured: false,
       apiKeyAuthEnabled: true,
       limitWarmupEnabled: false,
       limitWarmupWindows: "both",
@@ -54,6 +56,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
     expect(parsed.warmupModel).toBe("gpt-5.4-mini");
     expect(parsed.importWithoutOverwrite).toBe(true);
+    expect(parsed.guestAccessEnabled).toBe(true);
+    expect(parsed.guestPasswordConfigured).toBe(false);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");

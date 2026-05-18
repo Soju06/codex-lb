@@ -38,6 +38,8 @@ const baseSettings = {
   apiKeyAuthEnabled: true,
   ...LIMIT_WARMUP_DEFAULTS,
   ...ADDITIONAL_QUOTA_DEFAULTS,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 describe("SessionSettings", () => {
@@ -75,6 +77,7 @@ describe("SessionSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 
@@ -141,6 +144,7 @@ describe("SessionSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 });

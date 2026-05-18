@@ -11,6 +11,11 @@ import bcrypt
 import segno
 
 from app.core.audit.service import AuditService
+from app.core.auth.dashboard_access import (
+    ADMIN_PERMISSIONS,
+    GUEST_PERMISSIONS,
+    DashboardRole,
+)
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.crypto import TokenEncryptor
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
@@ -23,6 +28,8 @@ _TOTP_ACCOUNT = "dashboard"
 
 class DashboardAuthSettingsProtocol(Protocol):
     password_hash: str | None
+    guest_access_enabled: bool
+    guest_password_hash: str | None
     totp_required_on_login: bool
     totp_secret_encrypted: bytes | None
     totp_last_verified_step: int | None
@@ -33,9 +40,15 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def get_password_hash(self) -> str | None: ...
 
+    async def get_guest_password_hash(self) -> str | None: ...
+
     async def try_set_password_hash(self, password_hash: str) -> bool: ...
 
     async def set_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
+
+    async def set_guest_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
+
+    async def clear_guest_password_hash(self) -> DashboardAuthSettingsProtocol: ...
 
     async def clear_password_and_totp(self) -> DashboardAuthSettingsProtocol: ...
 
@@ -72,6 +85,10 @@ class InvalidCredentialsError(ValueError):
     pass
 
 
+class GuestAccessDisabledError(ValueError):
+    pass
+
+
 class PasswordSessionRequiredError(ValueError):
     pass
 
@@ -81,6 +98,7 @@ class DashboardSessionState:
     expires_at: int
     password_verified: bool
     totp_verified: bool
+    role: DashboardRole = DashboardRole.ADMIN
 
 
 class DashboardSessionStore:
@@ -92,10 +110,17 @@ class DashboardSessionStore:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, *, password_verified: bool, totp_verified: bool, ttl_seconds: int) -> str:
+    def create(
+        self,
+        *,
+        password_verified: bool,
+        totp_verified: bool,
+        ttl_seconds: int,
+        role: DashboardRole = DashboardRole.ADMIN,
+    ) -> str:
         expires_at = int(time()) + ttl_seconds
         payload = json.dumps(
-            {"exp": expires_at, "pw": password_verified, "tv": totp_verified},
+            {"exp": expires_at, "pw": password_verified, "tv": totp_verified, "role": role.value},
             separators=(",", ":"),
         )
         return self._get_encryptor().encrypt(payload).decode("ascii")
@@ -117,11 +142,18 @@ class DashboardSessionStore:
         exp = data.get("exp")
         pw = data.get("pw")
         tv = data.get("tv")
+        role_raw = data.get("role", DashboardRole.ADMIN.value)
         if not isinstance(exp, int) or not isinstance(pw, bool) or not isinstance(tv, bool):
+            return None
+        if not isinstance(role_raw, str):
+            return None
+        try:
+            role = DashboardRole(role_raw)
+        except ValueError:
             return None
         if exp < int(time()):
             return None
-        return DashboardSessionState(expires_at=exp, password_verified=pw, totp_verified=tv)
+        return DashboardSessionState(expires_at=exp, password_verified=pw, totp_verified=tv, role=role)
 
     def is_password_verified(self, session_id: str | None) -> bool:
         state = self.get(session_id)
@@ -151,14 +183,37 @@ class DashboardAuthService:
         password_required = settings.password_hash is not None
         totp_required = password_required and settings.totp_required_on_login
         totp_configured = settings.totp_secret_encrypted is not None
-        state = self._session_store.get(session_id) if password_required else None
-        password_authenticated = bool(state and state.password_verified)
-        if not password_required:
+        guest_access_enabled = bool(getattr(settings, "guest_access_enabled", False))
+        guest_password_hash = getattr(settings, "guest_password_hash", None)
+        guest_password_required = guest_access_enabled and guest_password_hash is not None
+        state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
+        guest_authenticated = bool(state and state.role == DashboardRole.GUEST and guest_access_enabled)
+        public_guest_authenticated = bool(guest_access_enabled and not guest_password_required and password_required)
+        password_authenticated = bool(state and state.role == DashboardRole.ADMIN and state.password_verified)
+        if guest_authenticated:
             authenticated = True
+            role = DashboardRole.GUEST
+            permissions = GUEST_PERMISSIONS
+        elif not password_required:
+            authenticated = True
+            role = DashboardRole.ADMIN
+            permissions = ADMIN_PERMISSIONS
+        elif password_authenticated:
+            authenticated = bool(not totp_required or state.totp_verified)
+            role = DashboardRole.ADMIN
+            permissions = ADMIN_PERMISSIONS
+        elif public_guest_authenticated:
+            authenticated = True
+            role = DashboardRole.GUEST
+            permissions = GUEST_PERMISSIONS
         elif totp_required:
             authenticated = bool(state and state.password_verified and state.totp_verified)
+            role = DashboardRole.ADMIN
+            permissions = ADMIN_PERMISSIONS
         else:
             authenticated = password_authenticated
+            role = DashboardRole.ADMIN
+            permissions = ADMIN_PERMISSIONS
 
         # Surface the TOTP prompt only for password-authenticated sessions.
         totp_required_on_login = bool(totp_required and password_authenticated)
@@ -167,6 +222,10 @@ class DashboardAuthService:
             password_required=password_required,
             totp_required_on_login=totp_required_on_login,
             totp_configured=totp_configured,
+            role=role,
+            permissions=sorted(permissions),
+            guest_access_enabled=guest_access_enabled,
+            guest_password_required=guest_password_required,
         )
 
     async def setup_password(self, password: str) -> None:
@@ -185,9 +244,28 @@ class DashboardAuthService:
         if not settings.totp_required_on_login or settings.totp_secret_encrypted is None:
             AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "password"})
 
+    async def verify_guest_password(self, password: str | None, *, actor_ip: str | None = None) -> None:
+        settings = await self._repository.get_settings()
+        if not getattr(settings, "guest_access_enabled", False):
+            raise GuestAccessDisabledError("Guest access is disabled")
+        current = getattr(settings, "guest_password_hash", None)
+        if current is None:
+            AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
+            return
+        if password is None or not _check_password(password, current):
+            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "guest"})
+            raise InvalidCredentialsError("Invalid credentials")
+        AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
+
     async def change_password(self, current_password: str, new_password: str) -> None:
         await self.verify_password(current_password)
         await self._repository.set_password_hash(_hash_password(new_password))
+
+    async def set_guest_password(self, password: str) -> None:
+        await self._repository.set_guest_password_hash(_hash_password(password))
+
+    async def clear_guest_password(self) -> None:
+        await self._repository.clear_guest_password_hash()
 
     async def remove_password(self, password: str) -> None:
         await self.verify_password(password)
@@ -322,6 +400,7 @@ class DashboardAuthService:
 _dashboard_session_store = DashboardSessionStore()
 _totp_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="totp")
 _password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+_guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="guest_password")
 
 
 def get_dashboard_session_store() -> DashboardSessionStore:
@@ -334,6 +413,10 @@ def get_totp_rate_limiter() -> DatabaseRateLimiter:
 
 def get_password_rate_limiter() -> DatabaseRateLimiter:
     return _password_rate_limiter
+
+
+def get_guest_password_rate_limiter() -> DatabaseRateLimiter:
+    return _guest_password_rate_limiter
 
 
 def _qr_svg_data_uri(payload: str) -> str:

@@ -18,6 +18,7 @@ type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
 export type AccountCardProps = {
   account: AccountSummary;
   showAccountId?: boolean;
+  readOnly?: boolean;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
@@ -65,7 +66,7 @@ function QuotaBar({
   );
 }
 
-export function AccountCard({ account, showAccountId = false, onAction }: AccountCardProps) {
+export function AccountCard({ account, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
@@ -188,6 +189,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             size="sm"
             variant="ghost"
             className="h-7 gap-1.5 rounded-lg text-xs text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
+            disabled={readOnly}
             onClick={() => onAction?.(account, "resume")}
           >
             <Play className="h-3 w-3" />
@@ -200,6 +202,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             size="sm"
             variant="ghost"
             className="h-7 gap-1.5 rounded-lg text-xs text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+            disabled={readOnly}
             onClick={() => onAction?.(account, "reauth")}
           >
             <RotateCcw className="h-3 w-3" />

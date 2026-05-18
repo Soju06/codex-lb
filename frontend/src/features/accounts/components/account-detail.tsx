@@ -20,6 +20,7 @@ export type AccountDetailProps = {
   account: AccountSummary | null;
   showAccountId?: boolean;
   busy: boolean;
+  readOnly?: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onProbe: (accountId: string) => void;
@@ -41,6 +42,7 @@ export function AccountDetail({
   account,
   showAccountId = false,
   busy,
+  readOnly = false,
   onPause,
   onResume,
   onProbe,
@@ -136,6 +138,7 @@ export function AccountDetail({
       <AccountActions
         account={account}
         busy={busy}
+        readOnly={readOnly}
         onPause={onPause}
         onResume={onResume}
         onProbe={onProbe}

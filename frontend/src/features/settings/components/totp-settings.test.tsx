@@ -51,6 +51,8 @@ const baseSettings = {
   apiKeyAuthEnabled: true,
   ...LIMIT_WARMUP_DEFAULTS,
   ...ADDITIONAL_QUOTA_DEFAULTS,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 function renderWithClient(ui: React.ReactElement) {

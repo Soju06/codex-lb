@@ -42,6 +42,8 @@ class DashboardSettingsData:
     limit_warmup_cooldown_seconds: int
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
+    guest_access_enabled: bool
+    guest_password_configured: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +77,7 @@ class DashboardSettingsUpdateData:
     limit_warmup_cooldown_seconds: int
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
+    guest_access_enabled: bool
 
 
 class SettingsService:
@@ -118,6 +121,8 @@ class SettingsService:
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
+            guest_access_enabled=row.guest_access_enabled,
+            guest_password_configured=row.guest_password_hash is not None,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -158,6 +163,7 @@ class SettingsService:
             limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
+            guest_access_enabled=payload.guest_access_enabled,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -194,6 +200,8 @@ class SettingsService:
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
+            guest_access_enabled=row.guest_access_enabled,
+            guest_password_configured=row.guest_password_hash is not None,
         )
 
 

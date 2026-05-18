@@ -464,6 +464,13 @@ class DashboardSettings(Base):
         nullable=False,
     )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    guest_access_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    guest_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     bootstrap_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(

@@ -50,6 +50,8 @@ const BASE_SETTINGS: DashboardSettings = {
   additionalQuotaRoutingPolicies: {},
   additionalQuotaPolicies: [],
   ...LIMIT_WARMUP_DEFAULTS,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 describe("RoutingSettings", () => {
@@ -83,6 +85,7 @@ describe("RoutingSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
 
     rerender(
@@ -114,6 +117,7 @@ describe("RoutingSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 
@@ -150,6 +154,7 @@ describe("RoutingSettings", () => {
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 

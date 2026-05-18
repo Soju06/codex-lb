@@ -13,6 +13,7 @@ import { RecentRequestsTable } from "@/features/dashboard/components/recent-requ
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
@@ -35,6 +36,7 @@ export function DashboardPage() {
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
+  const canWrite = useAuthStore((state) => state.canWrite);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
@@ -70,7 +72,9 @@ export function DashboardPage() {
           navigate(`/accounts?selected=${account.accountId}`);
           break;
         case "resume":
-          void resumeMutation.mutateAsync(account.accountId);
+          if (canWrite) {
+            void resumeMutation.mutateAsync(account.accountId);
+          }
           break;
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
@@ -83,7 +87,7 @@ export function DashboardPage() {
           break;
       }
     },
-    [limitWarmupMutation, navigate, resumeMutation],
+    [canWrite, limitWarmupMutation, navigate, resumeMutation],
   );
 
   const overview = dashboardQuery.data;
@@ -221,7 +225,7 @@ export function DashboardPage() {
               <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
               <div className="h-px flex-1 bg-border" />
             </div>
-            <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
           </section>
 
           <section className="space-y-4">

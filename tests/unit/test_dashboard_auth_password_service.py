@@ -36,9 +36,6 @@ class _FakeRepository:
     async def get_password_hash(self) -> str | None:
         return self.settings.password_hash
 
-    async def get_guest_password_hash(self) -> str | None:
-        return self.settings.guest_password_hash
-
     async def set_password_hash(self, password_hash: str) -> _FakeSettings:
         self.settings.password_hash = password_hash
         return self.settings

@@ -40,8 +40,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def get_password_hash(self) -> str | None: ...
 
-    async def get_guest_password_hash(self) -> str | None: ...
-
     async def try_set_password_hash(self, password_hash: str) -> bool: ...
 
     async def set_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
@@ -184,8 +182,7 @@ class DashboardAuthService:
         totp_required = password_required and settings.totp_required_on_login
         totp_configured = settings.totp_secret_encrypted is not None
         guest_access_enabled = settings.guest_access_enabled
-        guest_password_hash = settings.guest_password_hash
-        guest_password_required = guest_access_enabled and guest_password_hash is not None
+        guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
         state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
         public_guest_authenticated = bool(guest_access_enabled and not guest_password_required and password_required)
         if state is not None and state.role == DashboardRole.GUEST and guest_access_enabled:
@@ -246,9 +243,9 @@ class DashboardAuthService:
 
     async def verify_guest_password(self, password: str | None, *, actor_ip: str | None = None) -> None:
         settings = await self._repository.get_settings()
-        if not getattr(settings, "guest_access_enabled", False):
+        if not settings.guest_access_enabled:
             raise GuestAccessDisabledError("Guest access is disabled")
-        current = getattr(settings, "guest_password_hash", None)
+        current = settings.guest_password_hash
         if current is None:
             AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
             return

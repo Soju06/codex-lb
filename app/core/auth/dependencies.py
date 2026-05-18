@@ -149,9 +149,8 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     settings = await get_settings_cache().get()
     password_required = bool(settings.password_hash)
     requires_auth = password_required or settings.totp_required_on_login
-    guest_access_enabled = bool(getattr(settings, "guest_access_enabled", False))
-    guest_password_hash = getattr(settings, "guest_password_hash", None)
-    guest_password_required = guest_access_enabled and guest_password_hash is not None
+    guest_access_enabled = settings.guest_access_enabled
+    guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     state = get_dashboard_session_store().get(session_id)
 

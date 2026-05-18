@@ -1133,7 +1133,8 @@ async def test_write_request_log_continues_after_caller_cancellation() -> None:
     await asyncio.wait_for(started.wait(), timeout=1)
 
     task.cancel()
-    await asyncio.wait_for(task, timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
     release.set()
 
     for _ in range(20):

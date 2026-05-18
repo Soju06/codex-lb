@@ -9185,6 +9185,7 @@ class ProxyService:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             self._track_request_log_task(task, account_id=account_id, request_id=request_id)
+            raise
 
     def _track_request_log_task(
         self,

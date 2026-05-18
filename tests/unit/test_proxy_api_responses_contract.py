@@ -72,6 +72,37 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_preserves_comment_keepalive() -> None:
+    terminal = 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(": keepalive\n\n", terminal),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks[0] == ": keepalive\n\n"
+    assert "response.completed" in blocks[-1]
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_preserves_comment_keepalive_for_public_contract() -> None:
+    terminal = 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(": keepalive\n\n", terminal),
+        )
+    ]
+
+    assert blocks[0] == ": keepalive\n\n"
+    assert "response.completed" in blocks[-1]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_normalizes_unknown_terminal_output_item() -> None:
     blocks = [
         block

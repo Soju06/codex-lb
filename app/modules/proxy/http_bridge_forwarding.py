@@ -294,6 +294,12 @@ def _owner_forward_receive_timeout(
 ) -> _OwnerForwardReceiveTimeout:
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     remaining_budget = _remaining_budget_seconds(request_started_at + proxy_request_budget_seconds)
+    if idle_timeout_seconds == max(0.001, proxy_request_budget_seconds):
+        return _OwnerForwardReceiveTimeout(
+            timeout_seconds=remaining_budget,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
     if remaining_budget <= 0:
         return _OwnerForwardReceiveTimeout(
             timeout_seconds=0.0,

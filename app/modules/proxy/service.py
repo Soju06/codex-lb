@@ -1347,7 +1347,29 @@ class ProxyService:
             assert event_queue is not None
             yielded_any = False
             while True:
-                event_block = await event_queue.get()
+                keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                if keepalive_interval > 0:
+                    try:
+                        event_block = await asyncio.wait_for(event_queue.get(), timeout=keepalive_interval)
+                    except asyncio.TimeoutError:
+                        if request_state.response_id:
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    {
+                                        "type": "response.in_progress",
+                                        "response": {
+                                            "id": request_state.response_id,
+                                            "status": "in_progress",
+                                        },
+                                    },
+                                )
+                            )
+                        else:
+                            yield ": keepalive\n\n"
+                        continue
+                else:
+                    event_block = await event_queue.get()
                 if event_block is None:
                     break
                 block_payload = parse_sse_data_json(event_block)
@@ -11431,8 +11453,22 @@ def _websocket_receive_timeout_for_pending_requests(
 
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
-    remaining_budget = _remaining_budget_seconds(oldest_started_at + proxy_request_budget_seconds)
+    budget_deadline = oldest_started_at + proxy_request_budget_seconds
+    remaining_budget = _remaining_budget_seconds(budget_deadline)
+    idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
 
+    if remaining_budget <= 0 and idle_timeout_matches_request_budget:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=0.0,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
+    if remaining_budget > 0 and idle_timeout_matches_request_budget:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=remaining_budget,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
     if remaining_budget <= 0:
         return _WebSocketReceiveTimeout(
             timeout_seconds=0.0,

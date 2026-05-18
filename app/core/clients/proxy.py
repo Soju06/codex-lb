@@ -2194,6 +2194,21 @@ async def stream_responses(
                 response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
             )
             return
+        elapsed_seconds = max(0.0, time.monotonic() - started_at)
+        if (
+            effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
+            and elapsed_seconds >= effective_idle_timeout
+        ):
+            error_code = "stream_idle_timeout"
+            error_message = "Upstream stream idle timeout"
+            yield format_sse_event(
+                response_failed_event(
+                    "stream_idle_timeout",
+                    "Upstream stream idle timeout",
+                    response_id=get_request_id(),
+                ),
+            )
+            return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
         yield format_sse_event(

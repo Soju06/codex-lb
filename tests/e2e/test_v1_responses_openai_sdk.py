@@ -492,6 +492,41 @@ async def test_sdk_responses_stream_upstream_rejection_synthesizes_created(
 
 
 @pytest.mark.asyncio
+async def test_sdk_responses_stream_buffers_precreated_anonymous_output(
+    sdk_client,
+    monkeypatch,
+) -> None:
+    """Defense-in-depth for cancel/retry demux contamination.
+
+    If an anonymous output-item event reaches /v1 before any response.created,
+    the public stream must still be parseable by the stock OpenAI SDK: emit a
+    response.created envelope first, then replay the buffered output event.
+    """
+    resp_id = "resp_precreated_buffered"
+    _patch_upstream_stream(
+        monkeypatch,
+        [
+            *_message_output_block("msg_precreated", "buffered text", 0, 0),
+            _response_completed_empty(resp_id, 6),
+        ],
+    )
+
+    events_seen: list[str] = []
+    async with sdk_client.responses.stream(
+        model=DEFAULT_MODEL,
+        input=[{"role": "user", "content": "retry after cancel"}],
+    ) as stream:
+        async for event in stream:
+            events_seen.append(event.type)
+        final = await stream.get_final_response()
+
+    assert events_seen[0] == "response.created"
+    assert "response.output_item.done" in events_seen
+    assert final.id == resp_id
+    assert final.output[0].content[0].text == "buffered text"
+
+
+@pytest.mark.asyncio
 async def test_sdk_responses_non_streaming(sdk_client, monkeypatch) -> None:
     """Non-streaming /v1/responses: SDK must parse the returned JSON into a
     valid Response object with populated output. The non-streaming path already

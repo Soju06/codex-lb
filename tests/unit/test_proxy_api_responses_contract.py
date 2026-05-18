@@ -473,6 +473,67 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_buffers_precreated_output_until_created() -> None:
+    """A: public /v1 must never emit output events before response.created.
+
+    A downstream-cancelled HTTP bridge request can leave behind an anonymous
+    output event that has no response envelope. If that event reaches the /v1
+    normalizer before the next response.created, it must be held until a real or
+    synthetic response.created can be emitted first.
+    """
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,'
+                    '"item":{"id":"msg_orphan","type":"message","role":"assistant",'
+                    '"status":"in_progress","content":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_retry","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    event_types = [payload["type"] for payload in payloads if payload is not None]
+    assert event_types[:3] == ["response.created", "response.output_item.added", "response.completed"]
+    assert payloads[0] is not None
+    created_response = payloads[0]["response"]
+    assert isinstance(created_response, dict)
+    assert created_response["id"] == "resp_retry"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_drops_precreated_output_when_no_envelope_arrives() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,'
+                    '"item":{"id":"msg_orphan","type":"message","role":"assistant",'
+                    '"status":"in_progress","content":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    event_types = [payload["type"] for payload in payloads if payload is not None]
+    assert event_types == ["response.failed"]
+    assert payloads[0] is not None
+    response = payloads[0]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "upstream_stream_truncated"
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_does_not_double_emit_response_created() -> None:
     """G4 inverse: when the upstream stream already starts with
     `response.created`, the normalizer MUST NOT emit a second synthesized one."""

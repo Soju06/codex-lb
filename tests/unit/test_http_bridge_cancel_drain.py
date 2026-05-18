@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections import deque
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
+import anyio
+import pytest
+
+from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.db.models import AccountStatus
+from app.modules.proxy import service as proxy_service
+
+pytestmark = pytest.mark.unit
+
+
+def _make_http_bridge_session(
+    pending_requests: deque[proxy_service._WebSocketRequestState],
+    *,
+    queued_request_count: int,
+) -> proxy_service._HTTPBridgeSession:
+    return proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-cancel-drain", None),
+        headers={"x-codex-session-id": "sid-cancel-drain"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-cancel-drain",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-cancel-drain", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=queued_request_count,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+
+def _make_request_state(
+    request_id: str,
+    *,
+    response_id: str | None,
+    awaiting_response_created: bool,
+    event_queue: asyncio.Queue[str | None] | None = None,
+) -> proxy_service._WebSocketRequestState:
+    return proxy_service._WebSocketRequestState(
+        request_id=request_id,
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id=response_id,
+        awaiting_response_created=awaiting_response_created,
+        event_queue=event_queue,
+        transport="http",
+        skip_request_log=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_bridge_request_quarantines_late_anonymous_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled downstream stream is still alive upstream until terminal.
+
+    Late upstream events may be anonymous (no top-level response.id). They must
+    be drained by the cancelled request state, not routed to the next unresolved
+    request on the same HTTP bridge session.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    cancelled_request = _make_request_state(
+        "req-cancelled",
+        response_id="resp-cancelled",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+
+    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
+    assert detached is True
+
+    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    retry_request = _make_request_state(
+        "req-retry",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=retry_queue,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(retry_request)
+        session.queued_request_count += 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 1,
+                "output_index": 0,
+                "item": {
+                    "id": "msg-orphan-from-cancelled-request",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert retry_queue.empty(), "late anonymous output from the cancelled request leaked into the retry queue"
+    assert cancelled_request in session.pending_requests
+    assert retry_request in session.pending_requests
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "sequence_number": 2,
+                "response": {
+                    "id": "resp-cancelled",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert cancelled_request not in session.pending_requests
+    assert retry_request in session.pending_requests
+    assert session.queued_request_count == 1

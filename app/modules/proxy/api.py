@@ -130,6 +130,10 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     }
 )
 _PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})
+_PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
+    {"response.completed", "response.incomplete", "response.failed", "error"}
+)
+_PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -2603,6 +2607,21 @@ async def _normalize_public_responses_stream(
     # we synthesize a ``response.created`` snapshot from the terminal event's
     # ``response`` envelope so the SDK parser can complete the stream.
     created_emitted = False
+    # Anonymous pre-created output/lifecycle events cannot be made SDK-safe
+    # until a response envelope arrives. Buffer them briefly, then replay them
+    # only after a real/synthetic response.created. If no envelope ever arrives,
+    # fail closed instead of leaking output before response.created.
+    pre_created_buffer: list[dict[str, JsonValue]] = []
+
+    def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
+        return [
+            *[
+                format_sse_event(synthetic_payload)
+                for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
+            ],
+            format_sse_event(payload),
+        ]
+
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
             if terminal_seen:
@@ -2643,35 +2662,51 @@ async def _normalize_public_responses_stream(
         event_type = normalized_payload.get("type")
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        # Ensure the public stream always starts with ``response.created``.
-        # When the upstream stream jumps straight to a non-created event
-        # (terminal failure, or any other ordering quirk), synthesize a
-        # ``response.created`` envelope from whatever ``response`` envelope is
-        # available on the current event so the OpenAI SDK parser can begin.
-        # Only enforced on the OpenAI SDK contract path; the Codex CLI route
-        # forwards the upstream sequence verbatim.
-        if (
-            enforce_openai_sdk_contract
-            and not created_emitted
-            and isinstance(event_type, str)
-            and event_type != "response.created"
-        ):
+
+        if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
+            if event_type == "response.created":
+                created_emitted = True
+                yield format_sse_event(normalized_payload)
+                for buffered_payload in pre_created_buffer:
+                    for buffered_block in formatted_payloads_with_synthetic_deltas(buffered_payload):
+                        yield buffered_block
+                pre_created_buffer.clear()
+                continue
+
             synthetic_created = _synthetic_response_created_envelope(normalized_payload)
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True
-        if event_type == "response.created":
-            created_emitted = True
-        for synthetic_payload in _synthetic_text_delta_events(normalized_payload, seen_text_delta_keys):
-            yield format_sse_event(synthetic_payload)
-        if isinstance(event_type, str) and event_type in {
-            "response.completed",
-            "response.incomplete",
-            "response.failed",
-            "error",
-        }:
+                for buffered_payload in pre_created_buffer:
+                    for buffered_block in formatted_payloads_with_synthetic_deltas(buffered_payload):
+                        yield buffered_block
+                pre_created_buffer.clear()
+            elif _should_buffer_public_pre_created_event(event_type):
+                if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
+                    error_kind = contract_violation_kind or "upstream_stream_truncated"
+                    yield format_sse_event(
+                        response_failed_event(
+                            error_kind,
+                            _public_contract_error_message(error_kind),
+                        )
+                    )
+                    return
+                pre_created_buffer.append(normalized_payload)
+                continue
+            elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                error_kind = contract_violation_kind or "upstream_stream_truncated"
+                yield format_sse_event(
+                    response_failed_event(
+                        error_kind,
+                        _public_contract_error_message(error_kind),
+                    )
+                )
+                return
+
+        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+            yield formatted_payload
+        if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
             terminal_seen = True
-        yield format_sse_event(normalized_payload)
     if terminal_seen:
         return
     error_kind = contract_violation_kind or "upstream_stream_truncated"
@@ -2680,6 +2715,14 @@ async def _normalize_public_responses_stream(
             error_kind,
             _public_contract_error_message(error_kind),
         )
+    )
+
+
+def _should_buffer_public_pre_created_event(event_type: str) -> bool:
+    return (
+        event_type.startswith("response.")
+        and event_type != "response.created"
+        and event_type not in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
     )
 
 

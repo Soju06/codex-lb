@@ -52,6 +52,14 @@ def test_main_passes_custom_keep_alive_timeout(monkeypatch):
     assert captured["kwargs"]["timeout_keep_alive"] == 900
 
 
+def test_main_reports_invalid_server_port_env(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setenv("PORT", "not-a-port")
+
+    with pytest.raises(SystemExit, match="--port/PORT must be an integer"):
+        cli.main()
+
+
 def test_codex_sessions_retag_refuses_noninteractive_write_without_yes(monkeypatch, tmp_path):
     class NonInteractiveInput:
         def isatty(self) -> bool:
@@ -72,6 +80,31 @@ def test_codex_sessions_retag_refuses_noninteractive_write_without_yes(monkeypat
                 str(tmp_path),
             ]
         )
+
+
+def test_codex_sessions_retag_ignores_invalid_server_port_env(monkeypatch, capsys, tmp_path):
+    session_file = tmp_path / "sessions" / "session.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text(json.dumps({"model_provider": "openai"}) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PORT", "not-a-port")
+
+    cli.main(
+        [
+            "codex-sessions",
+            "retag",
+            "--from",
+            "openai",
+            "--to",
+            "codex-lb",
+            "--codex-home",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert "Would update JSONL files: 1" in captured.out
+    assert json.loads(session_file.read_text(encoding="utf-8"))["model_provider"] == "openai"
 
 
 def test_codex_sessions_retag_dry_run_skips_confirmation(capsys, tmp_path):

@@ -356,6 +356,15 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
             assert login_payload["role"] == "guest"
             assert login_payload["permissions"] == ["read"]
 
+            refresh = await remote_client.get("/api/dashboard-auth/session")
+            assert refresh.status_code == 200
+            refresh_payload = refresh.json()
+            assert refresh_payload["authenticated"] is True
+            assert refresh_payload["role"] == "guest"
+            assert refresh_payload["permissions"] == ["read"]
+            assert refresh_payload["guestAccessEnabled"] is True
+            assert refresh_payload["guestPasswordRequired"] is True
+
             await _assert_guest_write_denied(remote_client)
 
 

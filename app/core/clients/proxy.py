@@ -35,7 +35,7 @@ from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
-from app.core.clients.http import lease_http_session
+from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -2631,7 +2631,12 @@ async def thread_goal_request(
         sock_connect=connect_timeout,
         sock_read=total_timeout,
     )
-    client_session = session or get_http_client().session
+    if session is None:
+        lease = await acquire_http_client()
+        client_session = lease.client.session
+    else:
+        lease = None
+        client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -2696,16 +2701,20 @@ async def thread_goal_request(
         error_message = message
         raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
     finally:
-        _maybe_log_upstream_request_complete(
-            kind=f"thread_goal_{operation}",
-            url=url,
-            headers=upstream_headers,
-            method=request_method,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        try:
+            _maybe_log_upstream_request_complete(
+                kind=f"thread_goal_{operation}",
+                url=url,
+                headers=upstream_headers,
+                method=request_method,
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        finally:
+            if lease is not None:
+                await lease.close()
 
 
 async def codex_control_request(
@@ -2747,7 +2756,12 @@ async def codex_control_request(
         sock_connect=connect_timeout,
         sock_read=total_timeout,
     )
-    client_session = session or get_http_client().session
+    if session is None:
+        lease = await acquire_http_client()
+        client_session = lease.client.session
+    else:
+        lease = None
+        client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -2806,16 +2820,20 @@ async def codex_control_request(
         error_message = message
         raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
     finally:
-        _maybe_log_upstream_request_complete(
-            kind=f"codex_control_{normalized_path.replace('/', '_')}",
-            url=url,
-            headers=upstream_headers,
-            method=request_method,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        try:
+            _maybe_log_upstream_request_complete(
+                kind=f"codex_control_{normalized_path.replace('/', '_')}",
+                url=url,
+                headers=upstream_headers,
+                method=request_method,
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        finally:
+            if lease is not None:
+                await lease.close()
 
 
 async def transcribe_audio(

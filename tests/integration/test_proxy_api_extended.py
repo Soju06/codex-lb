@@ -944,10 +944,12 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
             yield ""
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    # PostgreSQL-backed startup failures can need a DB round trip to mark the
+    # PostgreSQL-backed startup failures can need DB round trips to mark the
     # first account unhealthy and attempt the next selection before the
-    # ProxyResponseError becomes visible to the startup probe.
-    monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.5)
+    # ProxyResponseError becomes visible to the startup probe. Use a generous
+    # budget here because the full PostgreSQL CI run is slower than this focused
+    # integration file.
+    monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 5.0)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     response = await async_client.post("/backend-api/codex/responses", json=payload)

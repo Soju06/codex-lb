@@ -4408,7 +4408,7 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
-    events = [json.loads(line[6:]) for line in lines]
+    events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
     _assert_created_text_delta_completed(events)
     assert connect_count == 1
 
@@ -6764,7 +6764,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
-    events = [json.loads(line[6:]) for line in lines]
+    events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
     assert [event["type"] for event in events] == ["response.created", "response.failed"]
     assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
 

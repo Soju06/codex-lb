@@ -879,6 +879,8 @@ async def test_v1_responses_stream_preserves_done_text_events(async_client, monk
     for line in lines:
         if not line.startswith("data: "):
             continue
+        if line.startswith("data: [DONE]"):
+            continue
         data = json.loads(line[6:])
         event_type = data.get("type")
         if isinstance(event_type, str):

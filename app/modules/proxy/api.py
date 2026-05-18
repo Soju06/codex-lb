@@ -2608,6 +2608,9 @@ async def _normalize_public_responses_stream(
             if terminal_seen:
                 yield event_block
             continue
+        if _looks_like_sse_comment_block(event_block):
+            yield event_block
+            continue
         payload = _parse_sse_payload(event_block)
         if payload is None:
             if _looks_like_sse_data_block(event_block):
@@ -2973,6 +2976,12 @@ def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | Non
 
 def _looks_like_sse_data_block(event_block: str) -> bool:
     return "data:" in event_block
+
+
+def _looks_like_sse_comment_block(event_block: str) -> bool:
+    return bool(event_block.strip()) and all(
+        not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
+    )
 
 
 def _public_contract_error_message(kind: str) -> str:

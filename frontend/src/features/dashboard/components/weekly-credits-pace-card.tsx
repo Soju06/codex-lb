@@ -31,19 +31,32 @@ function statusLabel(pace: WeeklyCreditPace): string {
   if (pace.status === "on_track") return "On pace";
   const direction = pace.deltaPercent > 0 ? "above schedule" : "below schedule";
   if (pace.paceMultiplier != null && pace.paceMultiplier > 0) {
-    return `${pace.paceMultiplier.toFixed(2)}x scheduled pace`;
+    return `${pace.paceMultiplier.toFixed(2)}x recent/scheduled`;
   }
   return `${formatSignedPercent(pace.deltaPercent)} ${direction}`;
 }
 
 function scheduleGapLine(pace: WeeklyCreditPace): string {
-  if (pace.overPlanCredits > 0) {
-    return `${formatCompactNumber(pace.overPlanCredits)} credits short before reset`;
+  if (pace.scheduleGapCredits > 0) {
+    return `${formatCompactNumber(pace.scheduleGapCredits)} credits behind schedule now`;
+  }
+  if (pace.deltaPercent < 0) {
+    return `${formatSignedPercent(pace.deltaPercent)} ahead of schedule now`;
+  }
+  return "On the current linear weekly schedule";
+}
+
+function forecastLine(pace: WeeklyCreditPace): string {
+  if (pace.projectedShortfallCredits > 0) {
+    return `${formatCompactNumber(pace.projectedShortfallCredits)} credits projected short before reset`;
+  }
+  if (pace.forecastBurnRateCreditsPerHour === 0) {
+    return "No weekly shortfall projected at recent pace";
   }
   if (pace.projectedMinimumRemainingCredits != null) {
     return `${formatCompactNumber(pace.projectedMinimumRemainingCredits)} credits projected low-water mark`;
   }
-  return "Pool covers current pace through upcoming resets";
+  return "Pool covers recent pace through upcoming resets";
 }
 
 function formatDurationHours(hours: number): string {
@@ -62,7 +75,7 @@ function formatDurationHours(hours: number): string {
 }
 
 function breakEvenLine(pace: WeeklyCreditPace): string {
-  if (pace.overPlanCredits <= 0) {
+  if (pace.projectedShortfallCredits <= 0) {
     return "No pause needed";
   }
   if (pace.pauseForBreakEvenHours == null) {
@@ -106,7 +119,7 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
     pace.status === "danger" ? "bg-red-500" : pace.status === "ahead" ? "bg-amber-500" : "bg-primary";
   const throttle = throttleLine(pace);
   const proAccounts = proAccountsLine(pace);
-  const showRecovery = pace.overPlanCredits > 0 || Boolean(throttle) || Boolean(proAccounts);
+  const showRecovery = pace.projectedShortfallCredits > 0 || Boolean(throttle) || Boolean(proAccounts);
 
   return (
     <section className="rounded-xl border bg-card p-5" aria-label="Weekly credits pace">
@@ -152,6 +165,10 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
               Schedule marker
             </span>
           </div>
+          <div className="rounded-lg border bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+            <p>{scheduleGapLine(pace)}</p>
+            <p className="mt-1">{forecastLine(pace)}</p>
+          </div>
         </div>
 
         {showRecovery ? (
@@ -175,7 +192,6 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
                 </div>
               ) : null}
             </div>
-            <p className="mt-2 text-muted-foreground">{scheduleGapLine(pace)}</p>
           </div>
         ) : null}
       </div>

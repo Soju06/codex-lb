@@ -228,11 +228,11 @@ def select_account(
                 reset_candidates = [s.reset_at for s in quota_exceeded if s.reset_at]
                 if reset_candidates:
                     wait_seconds = max(0, min(reset_candidates) - int(current))
-                    return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
+                    return SelectionResult(None, _format_retry_hint(wait_seconds))
             cooldowns = [s.cooldown_until for s in all_states if s.cooldown_until and s.cooldown_until > current]
             if cooldowns:
                 wait_seconds = max(0.0, min(cooldowns) - current)
-                return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
+                return SelectionResult(None, _format_retry_hint(wait_seconds))
             return SelectionResult(None, "No available accounts")
 
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
@@ -321,6 +321,22 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
 
 
 QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
+
+# Upper bound for the user-visible "Try again in {N}s" hint that
+# ``select_account`` surfaces when zero candidates are selectable. The clamp
+# protects clients from waiting the worst-case persisted ``reset_at`` after
+# OpenAI-side reset events that propagate lazily through ``/wham/usage`` (see
+# https://github.com/Soju06/codex-lb/issues/676). codex-lb's background usage
+# refresh runs every ``usage_refresh_interval_seconds`` (default 60s) and the
+# per-status cooldowns are 120s, so a 300s ceiling lets clients reattempt
+# inside the auto-recovery window. The underlying ``AccountState.reset_at``
+# and ``AccountState.cooldown_until`` fields are not clamped.
+SELECTOR_RETRY_HINT_MAX_SECONDS = 300
+
+
+def _format_retry_hint(wait_seconds: float) -> str:
+    capped = min(max(0.0, wait_seconds), float(SELECTOR_RETRY_HINT_MAX_SECONDS))
+    return f"Rate limit exceeded. Try again in {capped:.0f}s"
 
 
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:

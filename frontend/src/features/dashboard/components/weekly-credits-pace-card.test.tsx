@@ -11,7 +11,9 @@ const BASE_PACE: WeeklyCreditPace = {
   actualUsedPercent: 50,
   scheduledUsedPercent: 14,
   deltaPercent: 36,
+  scheduleGapCredits: 360_000,
   overPlanCredits: 360_000,
+  projectedShortfallCredits: 360_000,
   pauseForBreakEvenHours: 60.5,
   paceMultiplier: 50 / 14,
   throttleToPercent: 28,
@@ -20,12 +22,17 @@ const BASE_PACE: WeeklyCreditPace = {
   proAccountsToCoverOverPlan: 8,
   projectedDepletionHours: 8,
   projectedMinimumRemainingCredits: 0,
+  forecastBurnRateCreditsPerHour: 12_000,
+  scheduledBurnRateCreditsPerHour: 3_000,
   status: "danger",
   accountCount: 2,
+  staleAccountCount: 0,
+  inactiveAccountCount: 0,
+  confidence: "high",
 };
 
 describe("WeeklyCreditsPaceCard", () => {
-  it("renders weekly pace percentages and over-plan credits", () => {
+  it("renders weekly pace percentages and separates schedule gap from forecast shortfall", () => {
     render(<WeeklyCreditsPaceCard pace={BASE_PACE} />);
 
     expect(screen.getByText("Weekly credits pace")).toBeInTheDocument();
@@ -35,7 +42,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Pace gap")).toBeInTheDocument();
     expect(screen.getByText("50%")).toBeInTheDocument();
     expect(screen.getByText("14%")).toBeInTheDocument();
-    expect(screen.getByText("3.57x scheduled pace")).toBeInTheDocument();
+    expect(screen.getByText("3.57x recent/scheduled")).toBeInTheDocument();
     expect(screen.getByText("Recovery options")).toBeInTheDocument();
     expect(screen.getByText("Pause")).toBeInTheDocument();
     expect(screen.getByText("2d 12h until reset")).toBeInTheDocument();
@@ -43,7 +50,8 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Reduce ongoing weekly-credit load by ~72%")).toBeInTheDocument();
     expect(screen.getByText("Add capacity")).toBeInTheDocument();
     expect(screen.getByText("7.1x Pro weekly pool (~8 accounts)")).toBeInTheDocument();
-    expect(screen.getByText("360K credits short before reset")).toBeInTheDocument();
+    expect(screen.getByText("360K credits behind schedule now")).toBeInTheDocument();
+    expect(screen.getByText("360K credits projected short before reset")).toBeInTheDocument();
     expect(screen.queryByText("500K")).not.toBeInTheDocument();
     expect(screen.getByText("Schedule marker")).toBeInTheDocument();
   });
@@ -54,7 +62,9 @@ describe("WeeklyCreditsPaceCard", () => {
         pace={{
           ...BASE_PACE,
           deltaPercent: -8,
-          overPlanCredits: -80_000,
+          scheduleGapCredits: 0,
+          overPlanCredits: 0,
+          projectedShortfallCredits: 0,
           pauseForBreakEvenHours: null,
           paceMultiplier: null,
           throttleToPercent: null,
@@ -62,6 +72,7 @@ describe("WeeklyCreditsPaceCard", () => {
           proAccountEquivalentToCoverOverPlan: null,
           proAccountsToCoverOverPlan: null,
           projectedMinimumRemainingCredits: 80_000,
+          forecastBurnRateCreditsPerHour: 0,
           status: "behind",
         }}
       />,
@@ -86,6 +97,32 @@ describe("WeeklyCreditsPaceCard", () => {
     );
 
     expect(screen.getByText("0.53x Pro weekly pool (~1 account)")).toBeInTheDocument();
+  });
+
+  it("shows schedule gap without recovery when recent forecast is safe", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...BASE_PACE,
+          scheduleGapCredits: 3_096,
+          overPlanCredits: 3_096,
+          projectedShortfallCredits: 0,
+          pauseForBreakEvenHours: null,
+          paceMultiplier: 0,
+          throttleToPercent: null,
+          reduceByPercent: null,
+          proAccountEquivalentToCoverOverPlan: null,
+          proAccountsToCoverOverPlan: null,
+          forecastBurnRateCreditsPerHour: 0,
+          status: "ahead",
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Pause")).not.toBeInTheDocument();
+    expect(screen.queryByText("Throttle")).not.toBeInTheDocument();
+    expect(screen.getByText("3.1K credits behind schedule now")).toBeInTheDocument();
+    expect(screen.getByText("No weekly shortfall projected at recent pace")).toBeInTheDocument();
   });
 
   it("does not render fake pace when data is unavailable", () => {

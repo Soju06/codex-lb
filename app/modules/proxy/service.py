@@ -205,6 +205,10 @@ _TaskResultT = TypeVar("_TaskResultT")
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
+# Keep the first HTTP bridge liveness frame behind the API layer's startup
+# error probe window. If a keepalive becomes the first yielded chunk, the HTTP
+# status is committed as 200 and startup ProxyResponseError handling is masked.
+_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 
 
 async def _await_cancelled_task(
@@ -399,6 +403,7 @@ class ProxyService:
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
+        self._request_log_tasks: set[asyncio.Task[None]] = set()
 
     def _websocket_continuity_state_for_request(
         self,
@@ -658,6 +663,8 @@ class ProxyService:
         fresh_upstream_request_text: str | None = None
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        durable_full_resend_anchor_count: int | None = None
+        durable_full_resend_anchor_fingerprint: str | None = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -670,13 +677,18 @@ class ProxyService:
                 api_key=api_key,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
+            durable_anchor_trimmable = _input_prefix_matches_stored_context(
+                payload.input,
+                stored_count=durable_lookup.latest_input_item_count or 0,
+                stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
+            )
             if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
-                and not _http_bridge_payload_looks_like_full_resend(payload)
+                and (not _http_bridge_payload_looks_like_full_resend(payload) or durable_anchor_trimmable)
             ):
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
@@ -699,6 +711,21 @@ class ProxyService:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+                if _http_bridge_payload_looks_like_full_resend(payload):
+                    durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
+                    durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+                    _log_http_bridge_event(
+                        "durable_full_resend_anchor_injected",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=(
+                            f"response_id={durable_lookup.latest_response_id} "
+                            f"stored_items={durable_full_resend_anchor_count}"
+                        ),
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
@@ -827,7 +854,15 @@ class ProxyService:
                 return
             except ProxyResponseError as exc:
                 if forwarded_any:
-                    raise
+                    yield _partial_output_proxy_error_event_block(
+                        exc,
+                        response_id=request_state.response_id or request_id,
+                        previous_response_id=request_state.previous_response_id,
+                        preferred_account_id=request_state.preferred_account_id,
+                        default_code="bridge_owner_unreachable",
+                        default_message="HTTP bridge owner request failed",
+                    )
+                    return
                 should_attempt_previous_response_recovery = (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
@@ -951,6 +986,15 @@ class ProxyService:
                             session.last_used_at = time.monotonic()
                 return
         session = session_or_forward
+        if (
+            durable_full_resend_anchor_count is not None
+            and durable_full_resend_anchor_fingerprint is not None
+            and durable_lookup is not None
+            and durable_lookup.latest_response_id is not None
+        ):
+            session.last_completed_response_id = durable_lookup.latest_response_id
+            session.last_completed_input_count = durable_full_resend_anchor_count
+            session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
         # --- Session-level previous_response_id injection ---
         # If the client didn't send previous_response_id and the durable
         # lookup didn't inject one, but this bridge session is carrying
@@ -972,13 +1016,10 @@ class ProxyService:
         incoming_input_preview = effective_payload.input
         stored_count_preview = session.last_completed_input_count
         stored_fingerprint_preview = session.last_completed_input_prefix_fingerprint
-        session_anchor_trimmable = (
-            stored_count_preview > 0
-            and stored_fingerprint_preview is not None
-            and isinstance(incoming_input_preview, list)
-            and len(incoming_input_preview) > stored_count_preview
-            and _fingerprint_input_items(cast(list[JsonValue], incoming_input_preview)[:stored_count_preview])
-            == stored_fingerprint_preview
+        session_anchor_trimmable = _input_prefix_matches_stored_context(
+            incoming_input_preview,
+            stored_count=stored_count_preview,
+            stored_fingerprint=stored_fingerprint_preview,
         )
         if (
             session.codex_session
@@ -1095,9 +1136,21 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
         )
         try:
+            yielded_any = False
             async for event_block in session_events:
                 yield event_block
+                yielded_any = True
         except ProxyResponseError as exc:
+            if yielded_any:
+                yield _partial_output_proxy_error_event_block(
+                    exc,
+                    response_id=request_state.response_id or request_id,
+                    previous_response_id=request_state.previous_response_id,
+                    preferred_account_id=request_state.preferred_account_id,
+                    default_code="upstream_error",
+                    default_message="Upstream error",
+                )
+                return
             is_context_overflow = _http_bridge_is_context_overflow_error(exc)
             should_rollover_after_context_overflow = _http_bridge_should_rollover_after_context_overflow(
                 exc,
@@ -1319,25 +1372,49 @@ class ProxyService:
             event_queue = request_state.event_queue
             assert event_queue is not None
             yielded_any = False
+            keepalive_sent = False
             while True:
-                event_block = await event_queue.get()
+                keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                if keepalive_interval > 0:
+                    wait_timeout = keepalive_interval
+                    if not yielded_any and not keepalive_sent:
+                        wait_timeout = max(wait_timeout, _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS)
+                    try:
+                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
+                    except asyncio.TimeoutError:
+                        keepalive_sent = True
+                        yielded_any = True
+                        if request_state.response_id:
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    {
+                                        "type": "response.in_progress",
+                                        "response": {
+                                            "id": request_state.response_id,
+                                            "status": "in_progress",
+                                        },
+                                    },
+                                )
+                            )
+                        else:
+                            yield ": keepalive\n\n"
+                        continue
+                else:
+                    event_block = await event_queue.get()
                 if event_block is None:
                     break
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
                     request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
-                if (
-                    not propagate_http_errors
-                    and request_state.previous_response_id is not None
-                    and _is_previous_response_not_found_error(
-                        code=_normalize_error_code(
-                            _websocket_event_error_code(block_event_type, block_payload),
-                            _websocket_event_error_type(block_event_type, block_payload),
-                        ),
-                        param=_websocket_event_error_param(block_event_type, block_payload),
-                        message=_websocket_event_error_message(block_event_type, block_payload),
-                    )
+                if not propagate_http_errors and _is_previous_response_not_found_error(
+                    code=_normalize_error_code(
+                        _websocket_event_error_code(block_event_type, block_payload),
+                        _websocket_event_error_type(block_event_type, block_payload),
+                    ),
+                    param=_websocket_event_error_param(block_event_type, block_payload),
+                    message=_websocket_event_error_message(block_event_type, block_payload),
                 ):
                     session.upstream_control.reconnect_requested = True
                     request_state.error_http_status_override = 502
@@ -1511,6 +1588,7 @@ class ProxyService:
         )
 
         forwarded_any = False
+        forwarded_response_id: str | None = None
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -1520,6 +1598,11 @@ class ProxyService:
                 request_started_at=request_started_at,
             ):
                 forwarded_any = True
+                event_payload = parse_sse_data_json(event_block)
+                event_type = _event_type_from_payload(None, event_payload)
+                forwarded_response_id = _websocket_response_id(None, event_payload) or forwarded_response_id
+                if event_type == "response.failed" and forwarded_response_id is None:
+                    forwarded_response_id = get_request_id()
                 yield event_block
         except OwnerForwardRelayFailure as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1548,7 +1631,7 @@ class ProxyService:
                     error_type="server_error",
                 ),
             ) from exc
-        except ProxyResponseError:
+        except ProxyResponseError as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
             _log_http_bridge_event(
@@ -1561,6 +1644,17 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                terminal_response_id = forwarded_response_id or get_request_id() or "unknown"
+                yield _partial_output_proxy_error_event_block(
+                    exc,
+                    response_id=terminal_response_id,
+                    previous_response_id=payload.previous_response_id,
+                    preferred_account_id=None,
+                    default_code="bridge_owner_unreachable",
+                    default_message="HTTP bridge owner request failed",
+                )
+                return
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1577,6 +1671,16 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                terminal_response_id = forwarded_response_id or get_request_id() or "unknown"
+                yield format_sse_event(
+                    response_failed_event(
+                        "bridge_owner_unreachable",
+                        "HTTP bridge owner request failed",
+                        response_id=terminal_response_id,
+                    )
+                )
+                return
             raise ProxyResponseError(
                 503,
                 openai_error(
@@ -1753,6 +1857,22 @@ class ProxyService:
                         log_status = "success"
                         return response
                     except ProxyResponseError as exc:
+                        compact_continuity_error = _compact_previous_response_not_found_error(exc)
+                        if compact_continuity_error is not None:
+                            await self._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            _record_continuity_fail_closed(
+                                surface="compact",
+                                reason="previous_response_not_found",
+                                previous_response_id=None,
+                                session_id=_owner_lookup_session_id_from_headers(headers),
+                                upstream_error_code=_proxy_response_error_code(exc),
+                            )
+                            raise compact_continuity_error from exc
                         if exc.status_code == 401:
                             if refresh_retry_used:
                                 await self._settle_compact_api_key_usage(
@@ -3190,6 +3310,32 @@ class ProxyService:
                         payload = None
                         continue
 
+                if request_state is not None and await _websocket_full_resend_conflicts_with_visible_pending(
+                    request_state,
+                    pending_requests,
+                    pending_lock=pending_lock,
+                    codex_session_affinity=codex_session_affinity,
+                ):
+                    logger.warning(
+                        "Rejecting websocket full resend while prior response is visible request_id=%s input_items=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        request_state.input_item_count,
+                    )
+                    await self._release_websocket_reservation(request_state.api_key_reservation)
+                    await self._emit_websocket_terminal_error(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        request_state=request_state,
+                        error_code="stream_incomplete",
+                        error_message="Previous response is still streaming; retry after the terminal frame",
+                        error_type="server_error",
+                        downstream_activity=downstream_activity,
+                    )
+                    request_state = None
+                    text_data = None
+                    payload = None
+                    continue
+
                 if request_state is not None and not request_state_registered:
                     try:
                         await self._acquire_request_state_response_create_admission(
@@ -4404,6 +4550,7 @@ class ProxyService:
             force_durable_takeover = False
             missing_turn_state_alias = False
             used_session_header_fallback = False
+            session_to_return_after_close: _HTTPBridgeSession | None = None
             preserve_durable_canonical_key = (
                 incoming_turn_state is not None
                 and forwarded_affinity is None
@@ -4951,11 +5098,12 @@ class ProxyService:
                                         if previous_session.request_model
                                         else None,
                                     )
-                                    return previous_session
+                                    session_to_return_after_close = previous_session
                             else:
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                     if (
-                        previous_response_id is not None
+                        session_to_return_after_close is None
+                        and previous_response_id is not None
                         and not used_session_header_fallback
                         and not allow_previous_response_recovery_rebind
                         and durable_lookup is None
@@ -5076,6 +5224,9 @@ class ProxyService:
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
+
+            if session_to_return_after_close is not None:
+                return session_to_return_after_close
 
             if owner_forward is not None:
                 return owner_forward
@@ -5354,6 +5505,9 @@ class ProxyService:
         self,
         session: "_HTTPBridgeSession",
         response_id: str,
+        *,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
     ) -> None:
         stripped_response_id = response_id.strip()
         if not stripped_response_id:
@@ -5373,6 +5527,8 @@ class ProxyService:
                     owner_epoch=session.durable_owner_epoch,
                     response_id=stripped_response_id,
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                    input_item_count=input_item_count,
+                    input_full_fingerprint=input_full_fingerprint,
                 )
             except Exception:
                 logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
@@ -6344,6 +6500,7 @@ class ProxyService:
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                 )
                 release_create_gate = False
             else:
@@ -6375,6 +6532,7 @@ class ProxyService:
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                     allow_precreated_terminal_fallback=event_type
                     in {
                         "response.failed",
@@ -6391,6 +6549,7 @@ class ProxyService:
                             session.pending_requests,
                             previous_response_id_hint=previous_response_id_hint,
                             error_message=error_message,
+                            allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                         ),
                     )
                     if not grouped_previous_response_request_states and is_missing_tool_output_event:
@@ -6510,11 +6669,7 @@ class ProxyService:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
-        if (
-            status_request_state is not None
-            and status_request_state.previous_response_id is not None
-            and is_previous_response_not_found_event
-        ):
+        if status_request_state is not None and is_previous_response_not_found_event:
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
                 response_id is None and not has_other_pending_requests
@@ -6625,7 +6780,20 @@ class ProxyService:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
         if response_id is not None and matched_request_state is not None:
-            await self._register_http_bridge_previous_response_id(session, response_id)
+            await self._register_http_bridge_previous_response_id(
+                session,
+                response_id,
+                input_item_count=(
+                    matched_request_state.input_item_count
+                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
+                    else None
+                ),
+                input_full_fingerprint=(
+                    matched_request_state.input_full_fingerprint
+                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
+                    else None
+                ),
+            )
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:
             await matched_request_state.event_queue.put(event_block)
@@ -7199,6 +7367,7 @@ class ProxyService:
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                 )
                 release_create_gate = False
             else:
@@ -7217,6 +7386,8 @@ class ProxyService:
                     request_state.suppressed_duplicate_tool_call = True
                     upstream_control.suppress_downstream_event = True
                     return text
+                if event_type in _TEXT_DELTA_EVENT_TYPES:
+                    request_state.downstream_visible = True
                 if payload is not None:
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             if (
@@ -7231,6 +7402,7 @@ class ProxyService:
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                     allow_precreated_terminal_fallback=event_type
                     in {
                         "response.failed",
@@ -7245,6 +7417,7 @@ class ProxyService:
                             pending_requests,
                             previous_response_id_hint=previous_response_id_hint,
                             error_message=error_message,
+                            allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                         ),
                     )
                     if not grouped_previous_response_request_states and is_missing_tool_output_event:
@@ -7328,7 +7501,23 @@ class ProxyService:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
-            if is_previous_response_not_found_event or is_missing_tool_output_event:
+            if is_previous_response_not_found_event and not pending_requests:
+                upstream_control.reconnect_requested = True
+                downstream_text = json.dumps(
+                    cast(
+                        dict[str, JsonValue],
+                        response_failed_event(
+                            "stream_incomplete",
+                            "Upstream websocket closed before response.completed",
+                            error_type="server_error",
+                            response_id=get_request_id(),
+                        ),
+                    ),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                return downstream_text
+            if is_missing_tool_output_event:
                 upstream_control.suppress_downstream_event = True
             return text
 
@@ -9350,37 +9539,118 @@ class ProxyService:
         actual_service_tier: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(
+            self._persist_request_log(
+                account_id=account_id,
+                api_key_id=api_key.id if api_key else None,
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                status=status,
+                latency_first_token_ms=latency_first_token_ms,
+                error_code=error_code,
+                error_message=error_message,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
+                reasoning_effort=reasoning_effort,
+                transport=transport,
+                service_tier=service_tier,
+                requested_service_tier=requested_service_tier,
+                actual_service_tier=actual_service_tier,
+                session_id=session_id,
+            ),
+            name=f"proxy-request-log-{request_id}",
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_request_log_task(task, account_id=account_id, request_id=request_id)
+            raise
+
+    def _track_request_log_task(
+        self,
+        task: asyncio.Task[None],
+        *,
+        account_id: str | None,
+        request_id: str,
+    ) -> None:
+        self._request_log_tasks.add(task)
+
+        def _request_log_done(done_task: asyncio.Task[None]) -> None:
+            self._request_log_tasks.discard(done_task)
             try:
-                async with self._repo_factory() as repos:
-                    await repos.request_logs.add_log(
-                        account_id=account_id,
-                        api_key_id=api_key.id if api_key else None,
-                        session_id=_normalize_session_id(session_id),
-                        request_id=request_id,
-                        model=model or "",
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cached_input_tokens=cached_input_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        reasoning_effort=reasoning_effort,
-                        transport=transport,
-                        service_tier=service_tier,
-                        requested_service_tier=requested_service_tier,
-                        actual_service_tier=actual_service_tier,
-                        latency_ms=latency_ms,
-                        latency_first_token_ms=latency_first_token_ms,
-                        status=status,
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
-            except Exception:
+                done_task.result()
+            except asyncio.CancelledError:
                 logger.warning(
-                    "Failed to persist request log account_id=%s request_id=%s",
+                    "Request log persistence task cancelled account_id=%s request_id=%s",
                     account_id,
                     request_id,
-                    exc_info=True,
                 )
+            except Exception as exc:
+                logger.warning(
+                    "Request log persistence task failed account_id=%s request_id=%s",
+                    account_id,
+                    request_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_request_log_done)
+
+    async def _persist_request_log(
+        self,
+        *,
+        account_id: str | None,
+        api_key_id: str | None,
+        request_id: str,
+        model: str | None,
+        latency_ms: int,
+        status: str,
+        latency_first_token_ms: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        transport: str | None = None,
+        service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        try:
+            async with self._repo_factory() as repos:
+                await repos.request_logs.add_log(
+                    account_id=account_id,
+                    api_key_id=api_key_id,
+                    session_id=_normalize_session_id(session_id),
+                    request_id=request_id,
+                    model=model or "",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    reasoning_effort=reasoning_effort,
+                    transport=transport,
+                    service_tier=service_tier,
+                    requested_service_tier=requested_service_tier,
+                    actual_service_tier=actual_service_tier,
+                    latency_ms=latency_ms,
+                    latency_first_token_ms=latency_first_token_ms,
+                    status=status,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to persist request log account_id=%s request_id=%s",
+                account_id,
+                request_id,
+                exc_info=True,
+            )
 
     async def _write_stream_preflight_error(
         self,
@@ -9886,6 +10156,7 @@ class _WebSocketRequestState:
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
     api_key_reservation_heartbeat_stop: asyncio.Event | None = None
     api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
+    downstream_visible: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -10529,6 +10800,23 @@ def _is_missing_tool_output_error(
     return normalized.startswith("no tool output found for function call call_")
 
 
+async def _websocket_full_resend_conflicts_with_visible_pending(
+    request_state: _WebSocketRequestState,
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    pending_lock: anyio.Lock,
+    codex_session_affinity: bool,
+) -> bool:
+    if (
+        not codex_session_affinity
+        or request_state.previous_response_id is not None
+        or request_state.input_item_count < _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS
+    ):
+        return False
+    async with pending_lock:
+        return any(pending is not request_state and pending.downstream_visible for pending in pending_requests)
+
+
 def _is_previous_response_not_found_error(
     *,
     code: str | None,
@@ -10540,6 +10828,39 @@ def _is_previous_response_not_found_error(
     if code != "invalid_request_error" or param != "previous_response_id":
         return False
     return _is_previous_response_not_found_message(message)
+
+
+def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> ProxyResponseError | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    code = _normalize_error_code(error.code, error.type)
+    if not _is_previous_response_not_found_error(
+        code=code,
+        param=error.param,
+        message=error.message,
+    ):
+        return None
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "stream_incomplete",
+            "Upstream websocket closed before response.completed",
+            error_type="server_error",
+        ),
+        failure_phase=exc.failure_phase,
+        retryable_same_contract=False,
+        failure_detail="previous_response_not_found",
+        failure_exception_type=exc.failure_exception_type,
+        upstream_status_code=exc.upstream_status_code or exc.status_code,
+    )
+
+
+def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    return _normalize_error_code(error.code, error.type)
 
 
 def _refresh_websocket_request_input_fingerprint_from_text(request_state: _WebSocketRequestState) -> None:
@@ -10591,9 +10912,6 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     upstream_control: _WebSocketUpstreamControl,
     original_text: str,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
-    if request_state.previous_response_id is None:
-        return event, payload, event_type, original_text
-
     error_code = _websocket_event_error_code(event_type, payload)
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)
@@ -10604,6 +10922,8 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     )
     reason = "previous_response_not_found"
     if not should_rewrite:
+        if request_state.previous_response_id is None:
+            return event, payload, event_type, original_text
         should_rewrite = _is_missing_tool_output_error(
             code=error_code,
             param=error_param,
@@ -10808,6 +11128,53 @@ def _rewrite_previous_response_stream_error(
     return None
 
 
+def _partial_output_proxy_error_event_block(
+    exc: ProxyResponseError,
+    *,
+    response_id: str,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    default_code: str,
+    default_message: str,
+) -> str:
+    error = _parse_openai_error(exc.payload)
+    error_code = _normalize_error_code(
+        error.code if error else None,
+        error.type if error else None,
+    )
+    error_message = error.message if error else None
+    effective_previous_response_id = previous_response_id or _previous_response_id_from_not_found_message(
+        error_message,
+    )
+    rewritten_error = _rewrite_previous_response_stream_error(
+        previous_response_id=effective_previous_response_id,
+        preferred_account_id=preferred_account_id,
+        error_code=error_code,
+        error_type=error.type if error else None,
+        error_message=error_message,
+        error_param=error.param if error else None,
+    )
+    if rewritten_error is not None:
+        rewritten_code, rewritten_message, upstream_error_code = rewritten_error
+        if upstream_error_code is None:
+            event = response_failed_event(
+                rewritten_code,
+                rewritten_message,
+                error_type="server_error",
+                response_id=response_id,
+            )
+            return format_sse_event(event)
+    event = response_failed_event(
+        error_code or default_code,
+        error_message or default_message,
+        error_type=(error.type if error and error.type else "server_error"),
+        response_id=response_id,
+        error_param=error.param if error else None,
+    )
+    _apply_error_metadata(event["response"]["error"], error)
+    return format_sse_event(event)
+
+
 def _build_rewritten_stream_response_failed_event(
     *,
     response_id: str,
@@ -10859,12 +11226,14 @@ def _match_websocket_request_state_for_anonymous_event(
     prefer_previous_response_not_found: bool,
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
+    allow_unanchored_previous_response_error: bool = False,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
             pending_requests,
             previous_response_id_hint=previous_response_id_hint,
             error_message=error_message,
+            allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
 
     if len(pending_requests) == 1:
@@ -10894,11 +11263,13 @@ def _match_websocket_request_state_for_previous_response_error(
     *,
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
+    allow_unanchored_previous_response_error: bool = False,
 ) -> _WebSocketRequestState | None:
     matching_requests = _matching_websocket_request_states_for_previous_response_error(
         pending_requests,
         previous_response_id_hint=previous_response_id_hint,
         error_message=error_message,
+        allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
     )
     if len(matching_requests) == 1:
         return matching_requests[0]
@@ -10910,11 +11281,14 @@ def _matching_websocket_request_states_for_previous_response_error(
     *,
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
+    allow_unanchored_previous_response_error: bool = False,
 ) -> list[_WebSocketRequestState]:
     followup_requests = [
         request_state for request_state in pending_requests if request_state.previous_response_id is not None
     ]
     if not followup_requests:
+        if allow_unanchored_previous_response_error and len(pending_requests) == 1:
+            return [pending_requests[0]]
         return []
     if previous_response_id_hint is not None:
         matching_requests = [
@@ -11433,6 +11807,7 @@ def _pop_terminal_websocket_request_state(
     prefer_previous_response_not_found: bool = False,
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
+    allow_unanchored_previous_response_error: bool = False,
     allow_precreated_terminal_fallback: bool = False,
 ) -> _WebSocketRequestState | None:
     if response_id is not None:
@@ -11453,6 +11828,7 @@ def _pop_terminal_websocket_request_state(
             pending_requests,
             previous_response_id_hint=previous_response_id_hint,
             error_message=error_message,
+            allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
         if request_state is not None and request_state in pending_requests:
             pending_requests.remove(request_state)
@@ -11463,6 +11839,7 @@ def _pop_terminal_websocket_request_state(
             prefer_previous_response_not_found=prefer_previous_response_not_found,
             previous_response_id_hint=previous_response_id_hint,
             error_message=error_message,
+            allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
         if request_state is not None and request_state in pending_requests:
             pending_requests.remove(request_state)
@@ -11489,8 +11866,22 @@ def _websocket_receive_timeout_for_pending_requests(
 
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
-    remaining_budget = _remaining_budget_seconds(oldest_started_at + proxy_request_budget_seconds)
+    budget_deadline = oldest_started_at + proxy_request_budget_seconds
+    remaining_budget = _remaining_budget_seconds(budget_deadline)
+    idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
 
+    if remaining_budget <= 0 and idle_timeout_matches_request_budget:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=0.0,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
+    if idle_timeout_matches_request_budget and remaining_budget >= idle_timeout_seconds:
+        return _WebSocketReceiveTimeout(
+            timeout_seconds=remaining_budget,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
     if remaining_budget <= 0:
         return _WebSocketReceiveTimeout(
             timeout_seconds=0.0,
@@ -11869,6 +12260,21 @@ def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bo
             except TypeError:
                 return False
     return False
+
+
+def _input_prefix_matches_stored_context(
+    input_value: JsonValue,
+    *,
+    stored_count: int,
+    stored_fingerprint: str | None,
+) -> bool:
+    if stored_count <= 0 or stored_fingerprint is None:
+        return False
+    if not isinstance(input_value, list):
+        return False
+    if len(input_value) <= stored_count:
+        return False
+    return _fingerprint_input_items(cast(list[JsonValue], input_value)[:stored_count]) == stored_fingerprint
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

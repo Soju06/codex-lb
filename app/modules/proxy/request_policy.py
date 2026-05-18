@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
+# Service tier values codex-lb accepts at the API-key surface but that the
+# ChatGPT/Codex backend rejects with ``Unsupported service_tier: <value>``.
+# Semantically both ``auto`` and ``default`` mean "let upstream pick" -- the
+# same thing as omitting the field entirely -- so when an enforced API-key
+# policy resolves to one of these, we forward the request without a
+# ``service_tier`` instead of sending a literal that fails upstream. See
+# https://github.com/Soju06/codex-lb/issues/546
+_UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
+
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
@@ -79,15 +88,27 @@ def apply_api_key_enforcement(
 
     if api_key.enforced_service_tier is not None:
         requested_service_tier = getattr(payload, "service_tier", None)
-        setattr(payload, "service_tier", api_key.enforced_service_tier)
+        # ``auto``/``default`` are accepted at the API-key surface but
+        # the ChatGPT/Codex backend rejects them as literal values. Map
+        # them onto the wire-level absence of ``service_tier`` (which
+        # already means "use upstream default") so the enforcement
+        # actually reaches upstream instead of failing with
+        # ``Unsupported service_tier``. See issue #546.
+        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+            effective_service_tier: str | None = None
+        else:
+            effective_service_tier = api_key.enforced_service_tier
+        setattr(payload, "service_tier", effective_service_tier)
         if requested_service_tier != api_key.enforced_service_tier:
             logger.info(
                 "api_key_service_tier_enforced request_id=%s key_id=%s "
-                "requested_service_tier=%s enforced_service_tier=%s",
+                "requested_service_tier=%s enforced_service_tier=%s "
+                "outbound_service_tier=%s",
                 get_request_id(),
                 api_key.id,
                 requested_service_tier,
                 api_key.enforced_service_tier,
+                effective_service_tier,
             )
 
 

@@ -522,6 +522,8 @@ class HttpBridgeSessionRecord(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

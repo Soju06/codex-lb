@@ -18,11 +18,13 @@ from app.modules.accounts.schemas import (
     AccountLimitWarmupUpdateResponse,
     AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
+    AccountProbeRequest,
+    AccountProbeResponse,
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
 )
-from app.modules.accounts.service import InvalidAuthJsonError
+from app.modules.accounts.service import AccountNotProbableError, InvalidAuthJsonError
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -143,6 +145,32 @@ async def reactivate_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
+
+
+@router.post("/{account_id}/probe", response_model=AccountProbeResponse)
+async def probe_account(
+    request: Request,
+    account_id: str,
+    body: AccountProbeRequest | None = None,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountProbeResponse:
+    requested_model = body.model if body is not None else None
+    try:
+        result = await context.service.probe_account(account_id, model=requested_model)
+    except AccountNotProbableError as exc:
+        raise DashboardConflictError(str(exc), code="account_not_probable") from exc
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_probed",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "probe_status_code": result.probe_status_code,
+            "model": requested_model,
+        },
+    )
+    return result
 
 
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)

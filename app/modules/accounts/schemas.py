@@ -175,6 +175,28 @@ class AccountExportResponse(DashboardModel):
     auth_json: str
 
 
+class AccountProbeRequest(DashboardModel):
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model slug for the probe request. Defaults to the service's"
+            " configured fallback when omitted."
+        ),
+    )
+
+
+class AccountProbeResponse(DashboardModel):
+    status: str
+    account_id: str
+    probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
+
+
 class AccountTrendsResponse(DashboardModel):
     account_id: str
     primary: list[UsageTrendPoint] = Field(default_factory=list)

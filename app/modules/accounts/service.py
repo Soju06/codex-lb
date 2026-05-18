@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import timedelta
 from typing import cast
 
+import aiohttp
 from pydantic import ValidationError
 
 from app.core.auth import (
@@ -16,6 +19,7 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -31,6 +35,7 @@ from app.modules.accounts.schemas import (
     AccountImportResponse,
     AccountOpenCodeAuthExportAccount,
     AccountOpenCodeAuthExportResponse,
+    AccountProbeResponse,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
@@ -45,12 +50,26 @@ from app.modules.usage.additional_quota_keys import get_additional_display_label
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
+logger = logging.getLogger(__name__)
+
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
+
+DEFAULT_PROBE_MODEL = "gpt-5.5"
+PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
+PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
+# Network/upstream failure sentinel for ``probe_status_code`` — kept as ``0`` so
+# the value is distinguishable from any real HTTP status the upstream might
+# return.
+PROBE_NETWORK_FAILURE_STATUS = 0
 
 
 class InvalidAuthJsonError(Exception):
     pass
+
+
+class AccountNotProbableError(Exception):
+    """Raised when an account is in a status that disallows probing."""
 
 
 class AccountsService:
@@ -338,6 +357,129 @@ class AccountsService:
             status=account.status.value,
             auth_json=json.dumps(auth_json, indent=2),
         )
+
+    async def probe_account(
+        self,
+        account_id: str,
+        model: str | None = None,
+    ) -> AccountProbeResponse | None:
+        """Send a minimal upstream ``responses.create`` pinned to one account.
+
+        Bypasses load-balancer scoring so an operator can wake the upstream
+        rate-limiter for a stuck account (see upstream issues #676 / #677).
+        Triggers an immediate usage refresh after the probe and returns the
+        before/after snapshot so the operator can see whether the upstream
+        state changed.
+        """
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+            raise AccountNotProbableError(
+                f"Account is {account.status.value} and cannot be probed"
+            )
+
+        primary_before, secondary_before = await self._latest_usage_percents(account_id)
+        status_before = account.status.value
+
+        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        probe_model = model or DEFAULT_PROBE_MODEL
+        probe_status = await self._send_probe_request(
+            access_token=access_token,
+            chatgpt_account_id=account.chatgpt_account_id,
+            model=probe_model,
+        )
+
+        if self._usage_repo and self._usage_updater:
+            primary_entry = await self._usage_repo.latest_entry_for_account(
+                account_id, window="primary"
+            )
+            latest_usage = {account_id: primary_entry} if primary_entry else {}
+            await self._usage_updater.refresh_accounts([account], latest_usage)
+            get_account_selection_cache().invalidate()
+
+        refreshed = await self._repo.get_by_id(account_id) or account
+        primary_after, secondary_after = await self._latest_usage_percents(account_id)
+
+        return AccountProbeResponse(
+            status="probed",
+            account_id=account_id,
+            probe_status_code=probe_status,
+            primary_used_percent_before=primary_before,
+            primary_used_percent_after=primary_after,
+            secondary_used_percent_before=secondary_before,
+            secondary_used_percent_after=secondary_after,
+            account_status_before=status_before,
+            account_status_after=refreshed.status.value,
+        )
+
+    async def _latest_usage_percents(
+        self, account_id: str
+    ) -> tuple[float | None, float | None]:
+        if self._usage_repo is None:
+            return None, None
+        primary_entry = await self._usage_repo.latest_entry_for_account(
+            account_id, window="primary"
+        )
+        secondary_entry = await self._usage_repo.latest_entry_for_account(
+            account_id, window="secondary"
+        )
+        return (
+            primary_entry.used_percent if primary_entry is not None else None,
+            secondary_entry.used_percent if secondary_entry is not None else None,
+        )
+
+    async def _send_probe_request(
+        self,
+        *,
+        access_token: str,
+        chatgpt_account_id: str | None,
+        model: str,
+    ) -> int:
+        settings = get_settings()
+        base = settings.upstream_base_url.rstrip("/")
+        if "/backend-api" not in base:
+            base = f"{base}/backend-api"
+        url = f"{base}/codex/responses"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        }
+        if chatgpt_account_id and not chatgpt_account_id.startswith(("email_", "local_")):
+            headers["chatgpt-account-id"] = chatgpt_account_id
+        body = {
+            "model": model,
+            "instructions": "Respond with a single dot.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "."}],
+                }
+            ],
+            "max_output_tokens": 1,
+            "stream": True,
+            "store": False,
+        }
+        timeout = aiohttp.ClientTimeout(
+            total=PROBE_REQUEST_TIMEOUT_SECONDS,
+            connect=PROBE_CONNECT_TIMEOUT_SECONDS,
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers, json=body, timeout=timeout
+                ) as resp:
+                    # Initiating the request is enough to wake the upstream
+                    # rate-limiter; we do not consume the SSE body.
+                    return resp.status
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                "Probe upstream request failed account=%s error=%s",
+                chatgpt_account_id,
+                exc,
+            )
+            return PROBE_NETWORK_FAILURE_STATUS
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

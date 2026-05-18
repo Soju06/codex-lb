@@ -6265,7 +6265,24 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
         stop_event = cast(asyncio.Event, kwargs["stop_event"])
         await stop_event.wait()
 
+    admission_saw_heartbeat = False
+
+    async def fake_acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        compact: bool = False,
+    ) -> None:
+        del compact
+        nonlocal admission_saw_heartbeat
+        admission_saw_heartbeat = state.api_key_reservation_heartbeat_task is not None
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
     monkeypatch.setattr(service, "_run_api_key_reservation_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire_admission)
 
     await service._submit_http_bridge_request(
         session,
@@ -6279,6 +6296,7 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
     assert seen["reservation"] is reservation
     assert seen["request_id"] == "req-http-heartbeat"
     assert seen["surface"] == "http_bridge"
+    assert admission_saw_heartbeat is True
     assert request_state.api_key_reservation_heartbeat_task is not None
     send_text.assert_awaited_once_with(request_state.request_text)
 

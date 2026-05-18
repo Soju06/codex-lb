@@ -3338,17 +3338,17 @@ class ProxyService:
 
                 if request_state is not None and not request_state_registered:
                     try:
+                        self._start_request_state_api_key_reservation_heartbeat(
+                            request_state,
+                            api_key=request_state.api_key or api_key,
+                            surface="websocket",
+                        )
                         await self._acquire_request_state_response_create_admission(
                             request_state,
                             response_create_gate=response_create_gate,
                         )
                         async with pending_lock:
                             pending_requests.append(request_state)
-                        self._start_request_state_api_key_reservation_heartbeat(
-                            request_state,
-                            api_key=request_state.api_key or api_key,
-                            surface="websocket",
-                        )
                         request_state_registered = True
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
@@ -5882,6 +5882,11 @@ class ProxyService:
                 )
             session.queued_request_count += 1
         try:
+            self._start_request_state_api_key_reservation_heartbeat(
+                request_state,
+                api_key=request_state.api_key,
+                surface="http_bridge",
+            )
             await self._acquire_request_state_response_create_admission(
                 request_state,
                 response_create_gate=session.response_create_gate,
@@ -5889,11 +5894,6 @@ class ProxyService:
             gate_acquired = True
             async with session.pending_lock:
                 session.pending_requests.append(request_state)
-            self._start_request_state_api_key_reservation_heartbeat(
-                request_state,
-                api_key=request_state.api_key,
-                surface="http_bridge",
-            )
             request_enqueued = True
             await session.upstream.send_text(text_data)
             session.last_used_at = time.monotonic()

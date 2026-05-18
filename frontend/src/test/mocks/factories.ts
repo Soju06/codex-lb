@@ -409,8 +409,15 @@ export function createDashboardAuthSession(
 		passwordRequired: true,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
+		bootstrapRequired: false,
+		bootstrapTokenConfigured: false,
 		authMode: "standard",
 		passwordManagementEnabled: true,
+		passwordSessionActive: false,
+		role: "admin",
+		permissions: ["read", "write"],
+		guestAccessEnabled: false,
+		guestPasswordRequired: false,
 		...overrides,
 	});
 }

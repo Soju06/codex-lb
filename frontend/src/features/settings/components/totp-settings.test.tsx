@@ -10,6 +10,7 @@ import {
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TotpSettings } from "@/features/settings/components/totp-settings";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
   startTotpSetup: vi.fn(),
@@ -17,43 +18,7 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-};
-const ADDITIONAL_QUOTA_DEFAULTS = {
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-};
-
-const baseSettings = {
-  stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
-  upstreamProxyRoutingEnabled: false,
-  upstreamProxyDefaultPoolId: null,
-  preferEarlierResetAccounts: false,
-  preferEarlierResetWindow: "secondary" as const,
-  routingStrategy: "usage_weighted" as const,
-  relativeAvailabilityPower: 2,
-  relativeAvailabilityTopK: 5,
-  singleAccountId: null,
-  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  warmupModel: "gpt-5.4-mini",
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
-  totpConfigured: false,
-  apiKeyAuthEnabled: true,
-  ...LIMIT_WARMUP_DEFAULTS,
-  ...ADDITIONAL_QUOTA_DEFAULTS,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-};
+const baseSettings = createDashboardSettings({ totpConfigured: false });
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({

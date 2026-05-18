@@ -3,8 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
-import type { DashboardSettings } from "@/features/settings/schemas";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
   HTMLElement.prototype.hasPointerCapture = () => false;
@@ -28,31 +27,11 @@ const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupMinAvailablePercent: 100,
 };
 
-const BASE_SETTINGS: DashboardSettings = {
+const BASE_SETTINGS = createDashboardSettings({
   stickyThreadsEnabled: false,
-  upstreamStreamTransport: "default",
-  upstreamProxyRoutingEnabled: false,
-  upstreamProxyDefaultPoolId: null,
   preferEarlierResetAccounts: true,
-  preferEarlierResetWindow: "secondary",
-  routingStrategy: "usage_weighted",
-  relativeAvailabilityPower: 2,
-  relativeAvailabilityTopK: 5,
-  singleAccountId: null,
-  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  warmupModel: "gpt-5.4-mini",
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
   totpConfigured: false,
-  apiKeyAuthEnabled: true,
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-  ...LIMIT_WARMUP_DEFAULTS,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-};
+});
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
@@ -68,23 +47,9 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
 
     expect(onSave).toHaveBeenCalledWith({
+      ...BASE_SETTINGS,
       stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 180,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
       guestAccessEnabled: false,
     });
 
@@ -100,23 +65,9 @@ describe("RoutingSettings", () => {
     await user.type(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }), "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
+      ...BASE_SETTINGS,
       stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 240,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
       guestAccessEnabled: false,
     });
   });
@@ -137,23 +88,9 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("switch", { name: "Enable sticky threads" }));
 
     expect(onSave).toHaveBeenCalledWith({
+      ...BASE_SETTINGS,
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
       guestAccessEnabled: false,
     });
   });

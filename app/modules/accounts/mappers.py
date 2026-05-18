@@ -6,9 +6,10 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, UsageHistory
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
@@ -94,12 +95,19 @@ def _account_to_summary(
         secondary_used_percent,
         capacity_secondary,
     )
+    effective_status = _effective_status_from_usage(
+        account,
+        effective_primary_usage,
+        primary_used_percent,
+        effective_secondary_usage,
+        secondary_used_percent,
+    )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
         display_name=account.email,
         plan_type=plan_type,
-        status=account.status.value,
+        status=effective_status.value,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
@@ -118,6 +126,25 @@ def _account_to_summary(
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
     )
+
+
+def _effective_status_from_usage(
+    account: Account,
+    primary_usage: UsageHistory | None,
+    primary_used_percent: float | None,
+    secondary_usage: UsageHistory | None,
+    secondary_used_percent: float | None,
+) -> AccountStatus:
+    status, _, _ = apply_usage_quota(
+        status=account.status,
+        primary_used=primary_used_percent,
+        primary_reset=primary_usage.reset_at if primary_usage is not None else None,
+        primary_window_minutes=primary_usage.window_minutes if primary_usage is not None else None,
+        runtime_reset=float(account.reset_at) if account.reset_at else None,
+        secondary_used=secondary_used_percent,
+        secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+    )
+    return status
 
 
 def _effective_usage_windows(

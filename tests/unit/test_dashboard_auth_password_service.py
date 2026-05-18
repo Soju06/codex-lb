@@ -19,6 +19,8 @@ pytestmark = pytest.mark.unit
 @dataclass(slots=True)
 class _FakeSettings:
     password_hash: str | None = None
+    guest_access_enabled: bool = False
+    guest_password_hash: str | None = None
     totp_required_on_login: bool = False
     totp_secret_encrypted: bytes | None = None
     totp_last_verified_step: int | None = None
@@ -34,8 +36,19 @@ class _FakeRepository:
     async def get_password_hash(self) -> str | None:
         return self.settings.password_hash
 
+    async def get_guest_password_hash(self) -> str | None:
+        return self.settings.guest_password_hash
+
     async def set_password_hash(self, password_hash: str) -> _FakeSettings:
         self.settings.password_hash = password_hash
+        return self.settings
+
+    async def set_guest_password_hash(self, password_hash: str) -> _FakeSettings:
+        self.settings.guest_password_hash = password_hash
+        return self.settings
+
+    async def clear_guest_password_hash(self) -> _FakeSettings:
+        self.settings.guest_password_hash = None
         return self.settings
 
     async def try_set_password_hash(self, password_hash: str) -> bool:

@@ -500,6 +500,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "jgorostegui",
+      "name": "Josu Gorostegui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9865435?v=4",
+      "profile": "https://jgorostegui.github.io/",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

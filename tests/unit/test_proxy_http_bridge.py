@@ -7652,7 +7652,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         del queue_limit, propagate_http_errors, downstream_turn_state
         captured_request_states.append(request_state)
         captured_text_data.append(text_data)
-        yield "data: {\"type\":\"response.completed\"}\n\n"
+        yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(
         proxy_service,
@@ -7697,7 +7697,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         )
     ]
 
-    assert chunks == ["data: {\"type\":\"response.completed\"}\n\n"]
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert get_or_create.await_count == 2
     first_call = get_or_create.await_args_list[0]
     second_call = get_or_create.await_args_list[1]

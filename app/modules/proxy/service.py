@@ -1464,6 +1464,7 @@ class ProxyService:
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
+            session_to_return: _HTTPBridgeSession | None = None
 
             async with self._http_bridge_lock:
                 if incoming_turn_state is not None:
@@ -1660,7 +1661,7 @@ class ProxyService:
                                     if previous_session.request_model
                                     else None,
                                 )
-                                return previous_session
+                                session_to_return = previous_session
                         else:
                             self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                 if previous_response_id is not None:
@@ -1734,6 +1735,9 @@ class ProxyService:
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
+
+            if session_to_return is not None:
+                return session_to_return
 
             if continuity_error is not None:
                 raise continuity_error
@@ -2556,7 +2560,10 @@ class ProxyService:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None:
+        if response_id is not None and (
+            matched_request_state is not None
+            or (event_type == "response.completed" and terminal_request_state is not None)
+        ):
             await self._register_http_bridge_previous_response_id(session, response_id)
 
         if matched_request_state is not None and matched_request_state.event_queue is not None:

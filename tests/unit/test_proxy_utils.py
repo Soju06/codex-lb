@@ -6418,6 +6418,40 @@ def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    draining_request = proxy_service._WebSocketRequestState(
+        request_id="req_draining_near_budget",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=90.0,
+        draining_until_terminal=True,
+    )
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="req_active_fresh",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.0,
+    )
+
+    timeout = await service._next_websocket_receive_timeout(
+        deque([draining_request, active_request]),
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=11.0,
+        stream_idle_timeout_seconds=5.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == pytest.approx(5.0)
+    assert timeout.error_code == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
 async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

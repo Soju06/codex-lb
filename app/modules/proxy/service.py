@@ -7518,7 +7518,11 @@ class ProxyService:
         stream_idle_timeout_seconds: float,
     ) -> _WebSocketReceiveTimeout | None:
         async with pending_lock:
-            started_ats = [request_state.started_at for request_state in pending_requests]
+            started_ats = [
+                request_state.started_at
+                for request_state in pending_requests
+                if _http_bridge_request_counts_against_queue(request_state)
+            ]
         return _websocket_receive_timeout_for_pending_requests(
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,

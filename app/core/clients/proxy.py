@@ -1910,7 +1910,7 @@ async def stream_responses(
 
     seen_terminal = False
     status_code: int | None = None
-    response_started_at: float | None = None
+    last_stream_activity_at: float | None = None
     error_code: str | None = None
     error_message: str | None = None
     client_session = session or get_http_client().session
@@ -1958,7 +1958,7 @@ async def stream_responses(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
-        nonlocal status_code, response_started_at, error_code, error_message, seen_terminal
+        nonlocal status_code, last_stream_activity_at, error_code, error_message, seen_terminal
 
         async with _service_circuit_breaker_context(
             client_session.post(
@@ -1971,7 +1971,7 @@ async def stream_responses(
             account_id=account_id,
         ) as resp:
             status_code = resp.status
-            response_started_at = time.monotonic()
+            last_stream_activity_at = time.monotonic()
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
@@ -2011,6 +2011,7 @@ async def stream_responses(
                 effective_idle_timeout,
                 settings.max_sse_event_bytes,
             ):
+                last_stream_activity_at = time.monotonic()
                 event_block = _normalize_sse_event_block(event_block)
                 event = parse_sse_event(event_block)
                 if event:
@@ -2197,11 +2198,11 @@ async def stream_responses(
             )
             return
         now = time.monotonic()
-        body_elapsed_seconds = max(0.0, now - response_started_at) if response_started_at is not None else None
+        idle_elapsed_seconds = max(0.0, now - last_stream_activity_at) if last_stream_activity_at is not None else None
         if (
-            body_elapsed_seconds is not None
+            idle_elapsed_seconds is not None
             and effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
-            and body_elapsed_seconds >= effective_idle_timeout
+            and idle_elapsed_seconds >= effective_idle_timeout
         ):
             error_code = "stream_idle_timeout"
             error_message = "Upstream stream idle timeout"

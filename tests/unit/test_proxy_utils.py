@@ -1308,6 +1308,60 @@ class _TimeoutAfterHeadersSseSession:
         return _TimeoutAfterHeadersSseResponse()
 
 
+class _ActiveThenTotalTimeoutChunkIterator:
+    def __init__(self, clock: dict[str, float]) -> None:
+        self._clock = clock
+        self._sent_chunk = False
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._sent_chunk:
+            self._sent_chunk = True
+            self._clock["now"] = 650.0
+            return b'data: {"type":"response.output_text.delta","delta":"still active"}\n\n'
+        self._clock["now"] = 700.01
+        raise asyncio.TimeoutError
+
+
+class _ActiveThenTotalTimeoutContent(proxy_module.SSEContentProtocol):
+    def __init__(self, clock: dict[str, float]) -> None:
+        self._clock = clock
+
+    def iter_chunked(self, size: int) -> _ActiveThenTotalTimeoutChunkIterator:
+        del size
+        return _ActiveThenTotalTimeoutChunkIterator(self._clock)
+
+
+class _ActiveThenTotalTimeoutSseResponse:
+    status = 200
+
+    def __init__(self, clock: dict[str, float]) -> None:
+        self.content = _ActiveThenTotalTimeoutContent(clock)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ActiveThenTotalTimeoutSseSession:
+    def __init__(self, clock: dict[str, float]) -> None:
+        self._clock = clock
+
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        return _ActiveThenTotalTimeoutSseResponse(self._clock)
+
+
 class _TimeoutCompactSession:
     def post(
         self,
@@ -2083,6 +2137,46 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_af
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "Upstream stream idle timeout"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_budget_timeout_after_recent_body_activity(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 600.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 600.0
+        upstream_stream_transport = "http"
+
+    clock = {"now": 100.0}
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _ActiveThenTotalTimeoutSseSession(clock)),
+        )
+    ]
+
+    assert "response.output_text.delta" in events[0]
+    event = json.loads(events[-1].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert event["response"]["error"]["message"] == "Proxy request budget exhausted"
 
 
 @pytest.mark.asyncio

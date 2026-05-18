@@ -191,6 +191,94 @@ async def test_http_bridge_stream_masks_single_top_level_previous_response_error
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0.001),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-keepalive-first", None),
+        headers={"session_id": "sid-keepalive-first"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-keepalive-first",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Any, SimpleNamespace(id="acc-keepalive-first", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keepalive-first",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        response_id="resp_keepalive_first",
+    )
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        target_session.pending_requests.append(request_state)
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+    )
+
+    keepalive = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert "response.in_progress" in keepalive
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    request_state.error_http_status_override = 502
+    await event_queue.put(
+        proxy_service.format_sse_event(
+            proxy_service.response_failed_event(
+                "upstream_unavailable",
+                "upstream failed after keepalive",
+                response_id="resp_keepalive_first",
+            )
+        )
+    )
+    failed = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert "response.failed" in failed
+    assert "upstream_unavailable" in failed
+
+    await event_queue.put(None)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_reuses_live_local_session_without_ring_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

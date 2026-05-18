@@ -1361,6 +1361,7 @@ class ProxyService:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
                         keepalive_sent = True
+                        yielded_any = True
                         if request_state.response_id:
                             yield format_sse_event(
                                 cast(

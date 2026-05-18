@@ -85,6 +85,7 @@ migration-check-postgres:
 package: frontend-build
 	uv sync --frozen --no-dev
 	uv run python -c "import app; import app.main; print('import ok')"
+	rm -rf build dist *.egg-info
 	uvx --from build python -m build
 	python scripts/verify-wheel-assets.py
 

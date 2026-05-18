@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import glob
 import zipfile
+from pathlib import Path
 
-wheels = glob.glob("dist/*.whl")
+wheels = sorted(Path("dist").glob("*.whl"))
 if not wheels:
     raise SystemExit("no wheel found in dist/")
+if len(wheels) != 1:
+    wheel_list = ", ".join(str(wheel) for wheel in wheels)
+    raise SystemExit(f"expected exactly one wheel in dist/, found {len(wheels)}: {wheel_list}")
 
 wheel = wheels[0]
 with zipfile.ZipFile(wheel) as zf:

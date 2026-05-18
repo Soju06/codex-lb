@@ -182,7 +182,7 @@ def _make_session(upstream: _CancelThenRetryUpstreamWebSocket) -> proxy_service.
 
 
 @pytest.mark.asyncio
-async def test_cancelled_http_bridge_stream_drains_orphan_before_retry_stream() -> None:
+async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstream() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     service._finalize_websocket_request_state = AsyncMock()  # type: ignore[method-assign]
     upstream = _CancelThenRetryUpstreamWebSocket()
@@ -205,25 +205,18 @@ async def test_cancelled_http_bridge_stream_drains_orphan_before_retry_stream() 
         assert first_payload["type"] == "response.created"
 
         # Simulate downstream cancellation before request #1 reaches terminal.
+        # The bridge must retire the shared upstream instead of sending a retry
+        # behind the unterminated upstream response and guessing anonymous-frame
+        # ownership.
         await first_stream.aclose()
-
-        retry_request = _make_request_state("req-retry")
-        retry_stream = service._stream_http_bridge_session_events(
-            session,
-            request_state=retry_request,
-            text_data=retry_request.request_text or "{}",
-            queue_limit=8,
-            propagate_http_errors=True,
-            downstream_turn_state=None,
-        )
-        retry_blocks = [block async for block in retry_stream]
     finally:
         if session.upstream_reader is not None:
             session.upstream_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await session.upstream_reader
 
-    retry_payloads = [proxy_service.parse_sse_data_json(block) for block in retry_blocks]
-    retry_events = [payload["type"] for payload in retry_payloads if isinstance(payload, dict)]
-    assert retry_events[0] == "response.created"
-    assert "msg_orphan_from_cancelled_request" not in json.dumps(retry_payloads)
+    assert upstream.sent_text == [first_request.request_text]
+    assert upstream.closed is True
+    assert session.closed is True
+    assert session.upstream_control.retire_after_drain is True
+    assert not session.pending_requests

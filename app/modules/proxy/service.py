@@ -5988,6 +5988,8 @@ class ProxyService:
                 request_state.draining_until_terminal = True
                 request_state.downstream_visible = False
                 session.queued_request_count = max(0, session.queued_request_count - 1)
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
                 detached = True
         request_state.event_queue = None
         if not detached:
@@ -10817,6 +10819,10 @@ def _assign_websocket_response_id(
     if existing is not None:
         return existing
     for request_state in pending_requests:
+        if request_state.response_id is None and request_state.draining_until_terminal:
+            request_state.response_id = response_id
+            return request_state
+    for request_state in pending_requests:
         if request_state.response_id is None and _http_bridge_request_counts_against_queue(request_state):
             request_state.response_id = response_id
             return request_state
@@ -12214,6 +12220,8 @@ def _http_bridge_session_reusable_for_request(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
 ) -> bool:
+    if session.upstream_control.retire_after_drain:
+        return False
     if key.affinity_kind != "prompt_cache":
         return True
     if incoming_turn_state is not None:

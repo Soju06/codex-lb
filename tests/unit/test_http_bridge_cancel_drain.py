@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections import deque
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -66,18 +64,18 @@ def _make_request_state(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_http_bridge_request_quarantines_late_anonymous_events(
+async def test_cancelled_http_bridge_request_retires_session_before_retry_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cancelled downstream stream is still alive upstream until terminal.
+    """A cancelled downstream stream is an upstream ownership barrier.
 
-    Late upstream events may be anonymous (no top-level response.id). They must
-    be drained by the cancelled request state, not routed to the next unresolved
-    request on the same HTTP bridge session.
+    Rather than guessing whether later anonymous frames belong to the cancelled
+    upstream response or to a retry, the bridge retires the shared upstream so a
+    follow-up request is forced onto a fresh bridge/session path.
     """
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
 
     cancelled_request = _make_request_state(
         "req-cancelled",
@@ -86,275 +84,77 @@ async def test_cancelled_http_bridge_request_quarantines_late_anonymous_events(
         event_queue=asyncio.Queue(),
     )
     session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+    upstream_close = cast(Any, session.upstream).close
 
     detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
+
     assert detached is True
+    assert cancelled_request.draining_until_terminal is True
+    assert cancelled_request.event_queue is None
+    assert session.queued_request_count == 0
+    assert not session.pending_requests
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    assert session.closed is True
+    upstream_close.assert_awaited_once()
+    release_reservation.assert_awaited_once_with(cancelled_request.api_key_reservation)
 
-    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    retry_request = _make_request_state(
-        "req-retry",
-        response_id=None,
-        awaiting_response_created=True,
-        event_queue=retry_queue,
-    )
-    async with session.pending_lock:
-        session.pending_requests.append(retry_request)
-        session.queued_request_count += 1
 
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.output_item.added",
-                "sequence_number": 1,
-                "output_index": 0,
-                "item": {
-                    "id": "msg-orphan-from-cancelled-request",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
+def test_retiring_http_bridge_session_is_not_reusable() -> None:
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    session.upstream_control.retire_after_drain = True
+
+    assert not proxy_service._http_bridge_session_reusable_for_request(
+        session=session,
+        key=session.key,
+        incoming_turn_state=None,
+        previous_response_id=None,
     )
 
-    assert retry_queue.empty(), "late anonymous output from the cancelled request leaked into the retry queue"
-    assert cancelled_request in session.pending_requests
-    assert retry_request in session.pending_requests
 
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.completed",
-                "sequence_number": 2,
-                "response": {
-                    "id": "resp-cancelled",
-                    "object": "response",
-                    "status": "completed",
-                    "output": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
-    )
-
-    assert cancelled_request not in session.pending_requests
-    assert retry_request in session.pending_requests
-    assert session.queued_request_count == 1
-
-
-@pytest.mark.asyncio
-async def test_cancelled_http_bridge_request_does_not_steal_active_response_created(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
-
-    cancelled_request = _make_request_state(
+def test_response_created_prefers_draining_owner_in_illegal_overlap() -> None:
+    draining_request = _make_request_state(
         "req-cancelled-before-created",
         response_id=None,
         awaiting_response_created=True,
-        event_queue=asyncio.Queue(),
     )
-    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
-
-    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
-    assert detached is True
-
-    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    retry_request = _make_request_state(
+    draining_request.draining_until_terminal = True
+    active_request = _make_request_state(
         "req-active-created",
         response_id=None,
         awaiting_response_created=True,
-        event_queue=retry_queue,
-    )
-    async with session.pending_lock:
-        session.pending_requests.append(retry_request)
-        session.queued_request_count += 1
-
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.created",
-                "sequence_number": 1,
-                "response": {
-                    "id": "resp-active-created",
-                    "object": "response",
-                    "status": "in_progress",
-                    "output": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
     )
 
-    retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
-    assert retry_event is not None
-    assert "resp-active-created" in retry_event
-    assert cancelled_request.response_id is None
-    assert retry_request.response_id == "resp-active-created"
-    assert cancelled_request in session.pending_requests
-    assert retry_request in session.pending_requests
-    assert session.queued_request_count == 1
+    matched_request = proxy_service._assign_websocket_response_id(
+        deque([draining_request, active_request]),
+        "resp-late-cancelled",
+    )
+
+    assert matched_request is draining_request
+    assert draining_request.response_id == "resp-late-cancelled"
+    assert active_request.response_id is None
 
 
-@pytest.mark.asyncio
-async def test_cancelled_http_bridge_request_quarantines_anonymous_delta_while_drain_pending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
-
-    cancelled_request = _make_request_state(
+def test_anonymous_event_prefers_draining_owner_in_illegal_overlap() -> None:
+    draining_request = _make_request_state(
         "req-cancelled-draining",
         response_id="resp-cancelled-draining",
         awaiting_response_created=False,
-        event_queue=asyncio.Queue(),
     )
-    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
-
-    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
-    assert detached is True
-
-    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    retry_request = _make_request_state(
+    draining_request.draining_until_terminal = True
+    active_request = _make_request_state(
         "req-active-delta",
         response_id="resp-active-delta",
         awaiting_response_created=False,
-        event_queue=retry_queue,
-    )
-    async with session.pending_lock:
-        session.pending_requests.append(retry_request)
-        session.queued_request_count += 1
-
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.output_item.added",
-                "sequence_number": 2,
-                "output_index": 0,
-                "item": {
-                    "id": "msg-draining-delta",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
     )
 
-    assert retry_queue.empty(), "anonymous output must be quarantined while a cancelled drain is pending"
-    assert cancelled_request in session.pending_requests
-    assert retry_request in session.pending_requests
-    assert session.queued_request_count == 1
-
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.completed",
-                "sequence_number": 3,
-                "response": {
-                    "id": "resp-cancelled-draining",
-                    "object": "response",
-                    "status": "completed",
-                    "output": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([draining_request, active_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
     )
 
-    assert cancelled_request not in session.pending_requests
-    assert retry_request in session.pending_requests
-
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.output_item.added",
-                "sequence_number": 2,
-                "output_index": 0,
-                "item": {
-                    "id": "msg-active-after-drain",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                },
-            },
-            separators=(",", ":"),
-        ),
-    )
-
-    retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
-    assert retry_event is not None
-    assert "msg-active-after-drain" in retry_event
-
-
-@pytest.mark.asyncio
-async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_terminal_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A draining cancelled request should quarantine data deltas, not active terminal errors."""
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
-
-    cancelled_request = _make_request_state(
-        "req-cancelled-precreated",
-        response_id=None,
-        awaiting_response_created=True,
-        event_queue=asyncio.Queue(),
-    )
-    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
-
-    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
-    assert detached is True
-
-    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    retry_request = _make_request_state(
-        "req-active-retry",
-        response_id=None,
-        awaiting_response_created=True,
-        event_queue=retry_queue,
-    )
-    async with session.pending_lock:
-        session.pending_requests.append(retry_request)
-        session.queued_request_count += 1
-
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "error",
-                "status": 502,
-                "error": {
-                    "code": "upstream_error",
-                    "type": "server_error",
-                    "message": "pre-created request failed",
-                },
-            },
-            separators=(",", ":"),
-        ),
-    )
-
-    retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
-    assert retry_event is not None
-    assert "pre-created request failed" in retry_event
-    assert await asyncio.wait_for(retry_queue.get(), timeout=0.1) is None
-    assert cancelled_request in session.pending_requests
-    assert retry_request not in session.pending_requests
-    assert session.queued_request_count == 0
+    assert matched_request is draining_request
 
 
 def test_anonymous_event_prefers_unresolved_visible_request_before_active_response() -> None:
@@ -379,3 +179,25 @@ def test_anonymous_event_prefers_unresolved_visible_request_before_active_respon
     )
 
     assert matched_request is waiting_request
+
+
+def test_anonymous_terminal_errors_can_target_visible_retry_when_drain_exists() -> None:
+    draining_request = _make_request_state(
+        "req-cancelled-precreated",
+        response_id=None,
+        awaiting_response_created=True,
+    )
+    draining_request.draining_until_terminal = True
+    retry_request = _make_request_state(
+        "req-visible-retry",
+        response_id=None,
+        awaiting_response_created=True,
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([draining_request, retry_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=False,
+    )
+
+    assert matched_request is retry_request

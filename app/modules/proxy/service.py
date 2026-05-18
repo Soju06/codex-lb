@@ -7700,7 +7700,7 @@ class ProxyService:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
-            if is_previous_response_not_found_event and not pending_requests:
+            if is_previous_response_not_found_event:
                 upstream_control.reconnect_requested = True
                 downstream_text = json.dumps(
                     cast(

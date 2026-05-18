@@ -7765,10 +7765,13 @@ async def test_process_upstream_websocket_text_skips_foreign_prev_nf_for_mismatc
         response_create_gate=asyncio.Semaphore(1),
     )
 
-    assert downstream_text == json.dumps(payload, separators=(",", ":"))
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "resp_anchor_a" not in downstream_text
     finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is False
+    assert upstream_control.reconnect_requested is True
     assert list(pending_requests) == [pending_request]
 
 
@@ -8098,10 +8101,13 @@ async def test_process_upstream_websocket_text_skips_anonymous_prev_nf_for_misma
         response_create_gate=asyncio.Semaphore(1),
     )
 
-    assert downstream_text == json.dumps(payload, separators=(",", ":"))
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "resp_anchor_a" not in downstream_text
     finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is False
+    assert upstream_control.reconnect_requested is True
     assert list(pending_requests) == [followup_request]
 
 
@@ -8647,6 +8653,63 @@ async def test_process_upstream_websocket_text_masks_unmatched_previous_response
     finalize_request_state.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
     assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_masks_unmatched_previous_response_not_found_with_pending(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_unmatched_previous_response_not_found_pending")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="req-unrelated-pending",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_different_anchor",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create"}',
+    )
+    pending_requests: deque[proxy_service._WebSocketRequestState] = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_unmatched_anchor' not found.",
+            "param": "previous_response_id",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "resp_unmatched_anchor" not in downstream_text
+    assert list(pending_requests) == []
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio

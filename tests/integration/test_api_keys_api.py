@@ -2197,9 +2197,9 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
         repo = ApiKeysRepository(session)
         released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
-        assert released_count == 2
+        assert released_count == 3
 
-    assert writer_section_entries == 3
+    assert writer_section_entries == 4
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
@@ -2214,15 +2214,14 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         assert stale_second_reservation.status == "released"
         assert stale_second_reservation.items[0].actual_delta == 0
         assert abandoned_reservation is not None
-        assert abandoned_reservation.status == "reserved"
+        assert abandoned_reservation.status == "released"
+        assert abandoned_reservation.items[0].actual_delta == 0
         assert fresh_reservation is not None
         assert fresh_reservation.status == "reserved"
 
         limits = await repo.get_limits_by_key(created.id)
         assert len(limits) == 1
-        assert limits[0].current_value == (
-            abandoned_reservation.items[0].reserved_delta + fresh_reservation.items[0].reserved_delta
-        )
+        assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
 
 
 @pytest.mark.asyncio

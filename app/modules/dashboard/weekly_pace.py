@@ -200,7 +200,7 @@ def _weekly_timing(summary: AccountSummary, now_ms: float) -> tuple[float, float
     full_credits = float(raw_full_credits)
     remaining_credits = float(raw_remaining_credits)
     window_minutes = float(raw_window_minutes)
-    reset_at_ms = reset_at.timestamp() * 1000.0
+    reset_at_ms = naive_utc_to_epoch(reset_at) * 1000.0
     window_ms = window_minutes * 60_000.0
     if not _is_finite_positive(reset_at_ms) or not _is_finite_positive(window_ms):
         return None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -9,6 +11,8 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.schemas import AccountSummary
+from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -33,6 +37,42 @@ def _make_account(
         status=status,
         deactivation_reason=None,
     )
+
+
+def test_weekly_credit_pace_timing_treats_naive_reset_as_utc():
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset is required to simulate non-UTC local time")
+
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    try:
+        fixed_now = datetime(2026, 5, 18, 12, 0, 0)
+        reset_at = fixed_now + timedelta(days=4)
+        now_ms = naive_utc_to_epoch(fixed_now) * 1000.0
+        timing = _weekly_timing(
+            AccountSummary(
+                account_id="acc_tz",
+                email="tz@example.com",
+                display_name="tz@example.com",
+                plan_type="pro",
+                status="active",
+                reset_at_secondary=reset_at,
+                window_minutes_secondary=10080,
+                capacity_credits_secondary=50_400.0,
+                remaining_credits_secondary=40_320.0,
+            ),
+            now_ms,
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
+
+    assert timing is not None
+    assert timing[2] == pytest.approx(naive_utc_to_epoch(reset_at) * 1000.0)
 
 
 @pytest.mark.asyncio

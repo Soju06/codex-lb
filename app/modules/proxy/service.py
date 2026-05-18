@@ -4608,7 +4608,16 @@ class ProxyService:
             reallocate_sticky=affinity.reallocate_sticky,
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
-            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_primary_budget_threshold_pct",
+                settings.sticky_reallocation_budget_threshold_pct,
+            ),
+            secondary_budget_threshold_pct=getattr(
+                settings,
+                "sticky_reallocation_secondary_budget_threshold_pct",
+                100.0,
+            ),
         )
         if selection.account is None:
             return None

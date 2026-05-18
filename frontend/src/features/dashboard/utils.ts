@@ -604,6 +604,9 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),
-    weeklyCreditPace: overview.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
+    weeklyCreditPace:
+      overview.weeklyCreditPace !== undefined
+        ? overview.weeklyCreditPace
+        : buildWeeklyCreditPace(overview.accounts),
   };
 }

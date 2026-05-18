@@ -696,6 +696,33 @@ describe("buildDashboardView", () => {
     expect(view.weeklyCreditPace).toBe(serverPace);
   });
 
+  it("keeps an explicit null backend weekly credit pace instead of falling back locally", () => {
+    const weeklyResetAt = new Date(Date.now() + 3.5 * 24 * 60 * 60 * 1000).toISOString();
+    const overview = createDashboardOverview({
+      weeklyCreditPace: null,
+      accounts: [
+        account({
+          accountId: "acc-null-server-pace",
+          email: "null-pace@example.com",
+          usage: {
+            primaryRemainingPercent: null,
+            secondaryRemainingPercent: 50,
+          },
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 25_200,
+          resetAtSecondary: weeklyResetAt,
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+    });
+
+    expect(buildWeeklyCreditPace(overview.accounts)).not.toBeNull();
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    expect(view.weeklyCreditPace).toBeNull();
+  });
+
   it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {
     const overview = createDashboardOverview({
       accounts: [

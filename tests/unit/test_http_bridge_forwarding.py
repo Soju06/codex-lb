@@ -222,6 +222,36 @@ def test_owner_forward_receive_timeout_clamps_to_remaining_budget(monkeypatch: p
     assert timeout.error_code == "upstream_request_timeout"
 
 
+def test_owner_forward_receive_timeout_prefers_idle_after_scheduler_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 610.01)
+
+    timeout = _owner_forward_receive_timeout(
+        request_started_at=10.0,
+        proxy_request_budget_seconds=600.0,
+        stream_idle_timeout_seconds=600.0,
+    )
+
+    assert timeout.timeout_seconds == pytest.approx(0.0)
+    assert timeout.error_code == "stream_idle_timeout"
+
+
+def test_owner_forward_receive_timeout_uses_budget_when_equal_budget_is_sooner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 400.0)
+
+    timeout = _owner_forward_receive_timeout(
+        request_started_at=100.0,
+        proxy_request_budget_seconds=600.0,
+        stream_idle_timeout_seconds=600.0,
+    )
+
+    assert timeout.timeout_seconds == pytest.approx(300.0)
+    assert timeout.error_code == "upstream_request_timeout"
+
+
 @pytest.mark.asyncio
 async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}

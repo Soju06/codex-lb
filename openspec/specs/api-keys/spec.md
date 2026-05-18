@@ -3,13 +3,37 @@
 ## Purpose
 
 Define API key lifecycle, enforcement, accounting, and dashboard management contracts for downstream clients.
-
 ## Requirements
-
 ### Requirement: API Key creation
-The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), and `expires_at` (optional ISO 8601 datetime). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
+
+The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), `expires_at` (optional ISO 8601 datetime), and `assigned_account_ids` (optional list). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
+
+When `assigned_account_ids` is omitted or empty, the created key SHALL remain unscoped and apply to all accounts. When `assigned_account_ids` is provided with one or more valid account IDs, the created key SHALL enable account-assignment scope and persist those assignments.
+
+#### Scenario: Create unscoped key without assigned accounts
+
+- **WHEN** admin submits `POST /api/api-keys` without `assignedAccountIds`
+- **THEN** the created key returns `accountAssignmentScopeEnabled = false`
+- **AND** `assignedAccountIds = []`
+
+#### Scenario: Create scoped key with assigned accounts
+
+- **WHEN** admin submits `POST /api/api-keys` with `assignedAccountIds` containing valid account IDs
+- **THEN** the created key returns `accountAssignmentScopeEnabled = true`
+- **AND** `assignedAccountIds` matches the supplied accounts
+
+#### Scenario: Reject unknown assigned account IDs on create
+
+- **WHEN** admin submits `POST /api/api-keys` with an unknown account ID in `assignedAccountIds`
+- **THEN** the system returns 400
+
+#### Scenario: Create key and show plain key
+
+- **WHEN** admin submits `POST /api/api-keys` with a valid payload
+- **THEN** the response contains the full plain key exactly once and the system never returns the plain key on subsequent reads
 
 #### Scenario: Create key with timezone-aware expiration
+
 - **WHEN** admin submits `POST /api/api-keys` with `{ "name": "dev-key", "expiresAt": "2025-12-31T00:00:00Z" }`
 - **THEN** the system persists the expiration successfully without PostgreSQL datetime binding errors
 - **AND** the response returns `expiresAt` representing the same UTC instant
@@ -51,8 +75,7 @@ The system SHALL allow regenerating an API key via `POST /api/api-keys/{id}/rege
 - **THEN** the system returns the updated key object with a new `key` and `keyPrefix`; the old key immediately stops authenticating
 
 ### Requirement: API Key authentication global switch
-
-The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key via `Authorization: Bearer <key>`.
+The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key in the `Authorization` header using the Bearer authentication scheme.
 
 #### Scenario: Enable API key auth
 
@@ -72,18 +95,27 @@ The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings
 - **THEN** the request is rejected with 401 until proxy authentication is configured
 
 #### Scenario: Disable API key auth for an explicitly allowlisted proxy client
-
 - **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
 - **AND** the request socket peer IP belongs to configured `proxy_unauthenticated_client_cidrs`
 - **THEN** the protected proxy route proceeds without API key authentication
+
+#### Scenario: Disable API key auth for a non-local request outside the explicit allowlist
+- **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
+- **AND** a non-local client calls a protected proxy route
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the request is rejected with 401 until proxy authentication is configured
 
 #### Scenario: Enable without any keys created
 
 - **WHEN** admin enables API key auth but no keys exist
 - **THEN** all proxy requests are rejected with 401 (the system SHALL NOT prevent enabling even if no keys exist)
 
-### Requirement: API Key Bearer authentication guard
+#### Scenario: Toggle API key auth
 
+- **WHEN** admin toggles `apiKeyAuthEnabled` in settings
+- **THEN** the system calls `PUT /api/settings` and reflects the new state
+
+### Requirement: API Key Bearer authentication guard
 The system SHALL validate API keys on protected proxy routes (`/v1/*`, `/backend-api/codex/*`, `/backend-api/transcribe`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
 
 The dependency SHALL return a typed `ApiKeyData` value directly to the route handler. Route handlers MUST NOT access API key data via `request.state`.
@@ -91,6 +123,13 @@ The dependency SHALL return a typed `ApiKeyData` value directly to the route han
 `/api/codex/usage` SHALL NOT be covered by the API key auth guard scope.
 
 The dependency SHALL raise a domain exception on validation failure. The exception handler SHALL format the response using the OpenAI error envelope.
+
+#### Scenario: Disabled auth allowlist uses raw socket peer only
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** forwarded headers claim a different client IP
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the dependency rejects the request with 401
+- **AND** forwarded headers do not satisfy the explicit allowlist
 
 #### Scenario: API key guard route scope
 
@@ -119,14 +158,6 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 - **AND** the request is classified as non-local
 - **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
 - **THEN** the dependency rejects the request with 401
-
-#### Scenario: Disabled auth allowlist uses raw socket peer only
-
-- **WHEN** `api_key_auth_enabled` is false
-- **AND** forwarded headers claim a different client IP
-- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
-- **THEN** the dependency rejects the request with 401
-- **AND** forwarded headers do not satisfy the explicit allowlist
 
 ### Requirement: Model restriction enforcement
 
@@ -213,17 +244,19 @@ The system SHALL record the `api_key_id` in the `request_logs` table for proxy r
 
 ### Requirement: Frontend API Key management
 
-The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again.
+The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, assigned-account selection, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again.
+
+#### Scenario: Create key with optional account scoping
+
+- **WHEN** an admin opens the create API key dialog
+- **THEN** the dialog shows the Assigned accounts picker
+- **AND** leaving the picker at `All accounts` creates an unscoped key
+- **AND** selecting one or more accounts creates a scoped key for only those accounts
 
 #### Scenario: Create key and show plain key
 
 - **WHEN** admin creates a key via the UI
 - **THEN** a dialog shows the full plain key with a copy button and a warning message
-
-#### Scenario: Toggle API key auth
-
-- **WHEN** admin toggles `apiKeyAuthEnabled` in settings
-- **THEN** the system calls `PUT /api/settings` and reflects the new state
 
 ### Requirement: Cost accounting uses model and service-tier pricing
 When computing API key `cost_usd` usage, the system MUST price requests using the resolved model pricing and the authoritative `service_tier` reported by the upstream response when available, falling back to the forwarded request `service_tier` only when the response omits it. Requests sent with non-standard service tiers MUST use the published pricing for the tier actually used instead of falling back to standard-tier pricing.
@@ -463,3 +496,75 @@ The system MUST recognize `gpt-5.4-mini` pricing when computing request costs. S
 - **WHEN** a request for `gpt-5.4-mini-2026-03-17` completes
 - **THEN** the system resolves the snapshot alias to `gpt-5.4-mini`
 - **AND** the system applies the same standard rates
+
+### Requirement: API keys can read their own `/v1/usage`
+
+The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
+
+- `request_count`
+- `total_tokens`
+- `cached_input_tokens`
+- `total_cost_usd`
+- `limits[]` containing only limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`
+- `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`
+
+Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
+
+#### Scenario: Missing API key is rejected
+
+- **WHEN** a client calls `GET /v1/usage` without a Bearer token
+- **THEN** the system returns 401 in the OpenAI error format
+
+#### Scenario: Invalid API key is rejected
+
+- **WHEN** a client calls `GET /v1/usage` with an unknown, expired, or inactive Bearer key
+- **THEN** the system returns 401 in the OpenAI error format
+
+#### Scenario: Key with no usage returns zero totals
+
+- **WHEN** a valid API key with no request-log usage calls `GET /v1/usage`
+- **THEN** the system returns `request_count: 0`, `total_tokens: 0`, `cached_input_tokens: 0`, `total_cost_usd: 0.0`
+
+#### Scenario: Usage is scoped to the authenticated key
+
+- **WHEN** multiple API keys have request-log history and one of them calls `GET /v1/usage`
+- **THEN** the response includes only the usage totals and limits for that authenticated key
+
+#### Scenario: Upstream limits are separate from API-key limits
+
+- **WHEN** an API key with its own limit calls `GET /v1/usage`
+- **AND** upstream Codex aggregate usage data exists
+- **THEN** `limits[]` contains the API-key limit values
+- **AND** `upstream_limits[]` contains the aggregate Codex credit windows
+
+#### Scenario: Self-usage works while global proxy auth is disabled
+
+- **WHEN** `api_key_auth_enabled` is false and a client calls `GET /v1/usage` with a valid Bearer key
+- **THEN** the system still authenticates that key and returns the self-usage payload
+
+### Requirement: API key cost accounting uses the billable service tier
+API key cost accounting MUST continue to use the effective billable `service_tier` chosen for the request log and MUST NOT derive pricing from the operator-requested tier when the upstream reports a different actual tier.
+
+#### Scenario: Requested and actual tiers differ
+- **WHEN** a priced request is sent with `requested_service_tier: "priority"`
+- **AND** the upstream reports `actual_service_tier: "default"`
+- **THEN** the persisted billable `service_tier` is `default`
+- **AND** API key cost accounting uses the `default` tier rate for that request
+
+### Requirement: API keys can enforce a service tier
+
+The dashboard API key CRUD surface MUST allow callers to persist an optional enforced service tier. The service MUST normalize `fast` to the canonical upstream value `priority` before persistence and before returning the API key payload.
+
+#### Scenario: Create API key with fast service tier alias
+
+- **WHEN** a dashboard client creates an API key with `enforcedServiceTier: "fast"`
+- **THEN** the request is accepted
+- **AND** the persisted API key stores the canonical value `priority`
+- **AND** the response returns `enforcedServiceTier: "priority"`
+
+#### Scenario: Update API key with canonical service tier
+
+- **WHEN** a dashboard client updates an API key with `enforcedServiceTier: "flex"`
+- **THEN** the persisted API key stores `flex`
+- **AND** subsequent reads return `flex`
+

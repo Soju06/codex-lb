@@ -208,6 +208,7 @@ jobs:
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
+          category: .github/workflows/release.yml:docker-image
 
   helm-chart:
     name: Publish Helm chart to GHCR

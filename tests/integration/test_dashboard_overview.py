@@ -15,7 +15,12 @@ from app.modules.usage.repository import UsageRepository
 pytestmark = pytest.mark.integration
 
 
-def _make_account(account_id: str, email: str, plan_type: str = "plus") -> Account:
+def _make_account(
+    account_id: str,
+    email: str,
+    plan_type: str = "plus",
+    status: AccountStatus = AccountStatus.ACTIVE,
+) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=account_id,
@@ -25,7 +30,7 @@ def _make_account(account_id: str, email: str, plan_type: str = "plus") -> Accou
         refresh_token_encrypted=encryptor.encrypt("refresh"),
         id_token_encrypted=encryptor.encrypt("id"),
         last_refresh=utcnow(),
-        status=AccountStatus.ACTIVE,
+        status=status,
         deactivation_reason=None,
     )
 
@@ -223,6 +228,127 @@ async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup
     assert payload["summary"]["primaryWindow"]["remainingCredits"] == pytest.approx(1125.0)
     assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(37800.0)
     assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(37800.0)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_weekly_credit_pace_excludes_inactive_and_stale_accounts(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 5, 18, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    reset_at = int(naive_utc_to_epoch(fixed_now + timedelta(days=4)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_active_fresh", "fresh@example.com", plan_type="pro"))
+        await accounts_repo.upsert(_make_account("acc_active_stale", "stale@example.com", plan_type="pro"))
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_inactive_fresh",
+                "inactive@example.com",
+                plan_type="pro",
+                status=AccountStatus.DEACTIVATED,
+            )
+        )
+
+        await usage_repo.add_entry(
+            "acc_active_fresh",
+            20.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_active_stale",
+            80.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=10),
+        )
+        await usage_repo.add_entry(
+            "acc_inactive_fresh",
+            90.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    pace = payload["weeklyCreditPace"]
+    assert pace["accountCount"] == 1
+    assert pace["staleAccountCount"] == 1
+    assert pace["inactiveAccountCount"] == 1
+    assert pace["totalFullCredits"] == pytest.approx(50_400.0)
+    assert pace["actualUsedPercent"] == pytest.approx(20.0)
+    assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
+    assert pace["scheduleGapCredits"] == 0
+    assert pace["status"] == "behind"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_weekly_credit_pace_forecast_uses_recent_slope_not_full_window_average(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 5, 18, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    reset_at = int(naive_utc_to_epoch(fixed_now + timedelta(days=5, hours=18)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_recent_flat", "flat@example.com", plan_type="pro"))
+        await usage_repo.add_entry(
+            "acc_recent_flat",
+            0.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(days=1),
+        )
+        await usage_repo.add_entry(
+            "acc_recent_flat",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_recent_flat",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    pace = payload["weeklyCreditPace"]
+    assert pace["accountCount"] == 1
+    assert pace["actualUsedPercent"] == pytest.approx(24.0)
+    assert pace["scheduledUsedPercent"] == pytest.approx(17.857, abs=0.01)
+    assert pace["scheduleGapCredits"] == pytest.approx(3_096.0, abs=1.0)
+    assert pace["projectedShortfallCredits"] == 0
+    assert pace["forecastBurnRateCreditsPerHour"] == pytest.approx(0.0)
+    assert pace["paceMultiplier"] == pytest.approx(0.0)
+    assert pace["pauseForBreakEvenHours"] is None
+    assert pace["status"] == "ahead"
 
 
 @pytest.mark.asyncio

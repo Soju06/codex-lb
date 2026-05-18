@@ -6,11 +6,36 @@ import pytest
 
 from app.core.openai.chat_responses import (
     ChatCompletion,
+    ChatMessageToolCall,
     collect_chat_completion,
     iter_chat_chunks,
     stream_chat_chunks,
 )
 from app.core.openai.models import OpenAIErrorEnvelope
+
+
+def _tool_call_args(tool_call: ChatMessageToolCall) -> str:
+    """Type-narrowing accessor for ``tool_call.function.arguments`` in tests.
+
+    The pydantic model declares both ``function`` and ``arguments`` as
+    ``Optional`` for upstream compatibility, but the streaming/non-streaming
+    adapters always populate them by the time a tool call is surfaced to the
+    client. The helper makes that invariant explicit so ``ty`` does not flag
+    every ``tool_call.function.arguments`` access as a possibly-missing
+    attribute, without weakening the production model definitions.
+    """
+
+    assert tool_call.function is not None
+    assert tool_call.function.arguments is not None
+    return tool_call.function.arguments
+
+
+def _tool_call_name(tool_call: ChatMessageToolCall) -> str:
+    """Type-narrowing accessor for ``tool_call.function.name`` in tests."""
+
+    assert tool_call.function is not None
+    assert tool_call.function.name is not None
+    return tool_call.function.name
 
 
 def test_output_text_delta_to_chat_chunk():
@@ -477,3 +502,299 @@ async def test_collect_completion_zero_token_preserves_empty_content():
     message = result.choices[0].message
     assert message.content == ""
     assert message.refusal is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Parallel tool-call tests (item_id-based routing, bug fix verification)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_parallel_tool_calls_distinct_arguments():
+    """Two parallel calls to the SAME function with different args.
+
+    Verifies that function_call_arguments.delta/done events routed via
+    item_id produce distinct arguments per tool call.
+    """
+    lines = [
+        (
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"fc_001","type":"function_call","call_id":"call_aaa",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"fc_002","type":"function_call","call_id":"call_bbb",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.delta","output_index":0,'
+            '"item_id":"fc_001","delta":"{\\"category\\":\\"activity\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.delta","output_index":1,'
+            '"item_id":"fc_002","delta":"{\\"category\\":\\"food\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":0,'
+            '"item_id":"fc_001","arguments":"{\\"category\\":\\"activity\\",\\"content\\":\\"Biked 20km\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":1,'
+            '"item_id":"fc_002","arguments":"{\\"category\\":\\"food\\",\\"content\\":\\"Had pasta\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,'
+            '"item":{"id":"fc_001","type":"function_call","call_id":"call_aaa",'
+            '"name":"record_observation",'
+            '"arguments":"{\\"category\\":\\"activity\\",\\"content\\":\\"Biked 20km\\"}"}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":1,'
+            '"item":{"id":"fc_002","type":"function_call","call_id":"call_bbb",'
+            '"name":"record_observation",'
+            '"arguments":"{\\"category\\":\\"food\\",\\"content\\":\\"Had pasta\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"resp_001"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    choice = result.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    tool_calls = choice.message.tool_calls
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+
+    args_0 = json.loads(_tool_call_args(tool_calls[0]))
+    args_1 = json.loads(_tool_call_args(tool_calls[1]))
+    assert args_0["category"] == "activity"
+    assert args_0["content"] == "Biked 20km"
+    assert args_1["category"] == "food"
+    assert args_1["content"] == "Had pasta"
+    assert tool_calls[0].id == "call_aaa"
+    assert tool_calls[1].id == "call_bbb"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_three_parallel_tool_calls():
+    """Three parallel tool calls to verify indexing beyond 2."""
+    lines = [
+        (
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"fc_A","type":"function_call","call_id":"call_1",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"fc_B","type":"function_call","call_id":"call_2",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":2,'
+            '"item":{"id":"fc_C","type":"function_call","call_id":"call_3",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":0,'
+            '"item_id":"fc_A","arguments":"{\\"cat\\":\\"activity\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":1,'
+            '"item_id":"fc_B","arguments":"{\\"cat\\":\\"food\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":2,'
+            '"item_id":"fc_C","arguments":"{\\"cat\\":\\"mood\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,'
+            '"item":{"id":"fc_A","type":"function_call","call_id":"call_1",'
+            '"name":"record_observation","arguments":"{\\"cat\\":\\"activity\\"}"}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":1,'
+            '"item":{"id":"fc_B","type":"function_call","call_id":"call_2",'
+            '"name":"record_observation","arguments":"{\\"cat\\":\\"food\\"}"}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":2,'
+            '"item":{"id":"fc_C","type":"function_call","call_id":"call_3",'
+            '"name":"record_observation","arguments":"{\\"cat\\":\\"mood\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"resp_003"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    assert len(tool_calls) == 3
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"cat": "activity"}
+    assert json.loads(_tool_call_args(tool_calls[1])) == {"cat": "food"}
+    assert json.loads(_tool_call_args(tool_calls[2])) == {"cat": "mood"}
+    assert tool_calls[0].id == "call_1"
+    assert tool_calls[1].id == "call_2"
+    assert tool_calls[2].id == "call_3"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_parallel_different_functions():
+    """Two parallel calls with DIFFERENT function names via item_id routing."""
+    lines = [
+        (
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"fc_w","type":"function_call","call_id":"call_weather",'
+            '"name":"get_weather","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"fc_r","type":"function_call","call_id":"call_record",'
+            '"name":"record_observation","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":0,'
+            '"item_id":"fc_w","arguments":"{\\"city\\":\\"Zurich\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":1,'
+            '"item_id":"fc_r","arguments":"{\\"category\\":\\"activity\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,'
+            '"item":{"id":"fc_w","type":"function_call","call_id":"call_weather",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Zurich\\"}"}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":1,'
+            '"item":{"id":"fc_r","type":"function_call","call_id":"call_record",'
+            '"name":"record_observation","arguments":"{\\"category\\":\\"activity\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"resp_diff"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+    assert _tool_call_name(tool_calls[0]) == "get_weather"
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"city": "Zurich"}
+    assert _tool_call_name(tool_calls[1]) == "record_observation"
+    assert json.loads(_tool_call_args(tool_calls[1])) == {"category": "activity"}
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_parallel_calls_item_id_equals_call_id():
+    """Edge case: item.id == item.call_id (some models emit identical values)."""
+    lines = [
+        (
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"call_same_1","type":"function_call","call_id":"call_same_1",'
+            '"name":"get_weather","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.added","output_index":1,'
+            '"item":{"id":"call_same_2","type":"function_call","call_id":"call_same_2",'
+            '"name":"get_weather","arguments":""}}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":0,'
+            '"item_id":"call_same_1","arguments":"{\\"city\\":\\"Paris\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.function_call_arguments.done","output_index":1,'
+            '"item_id":"call_same_2","arguments":"{\\"city\\":\\"London\\"}"}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":0,'
+            '"item":{"id":"call_same_1","type":"function_call","call_id":"call_same_1",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"Paris\\"}"}}\n\n'
+        ),
+        (
+            'data: {"type":"response.output_item.done","output_index":1,'
+            '"item":{"id":"call_same_2","type":"function_call","call_id":"call_same_2",'
+            '"name":"get_weather","arguments":"{\\"city\\":\\"London\\"}"}}\n\n'
+        ),
+        'data: {"type":"response.completed","response":{"id":"resp_same"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+    args_paris = _tool_call_args(tool_calls[0])
+    args_london = _tool_call_args(tool_calls[1])
+    assert json.loads(args_paris) == {"city": "Paris"}
+    assert json.loads(args_london) == {"city": "London"}
+    assert args_paris != args_london
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_registers_call_id_when_output_index_already_mapped():
+    """Regression: a stream that first routes a tool call via item_id + output_index
+    (no call_id yet) and later emits a call_id-only event without output_index
+    must NOT split the call into two tool_calls[] slots.
+
+    Mirrors codex review P2 (chat_responses.py:139): index_for_output_index
+    used to return early on a known output_index without registering the
+    newly observed call_id/name key, so a follow-up call_id-only event was
+    assigned a fresh index, fragmenting the arguments.
+    """
+
+    lines = [
+        'data: {"type":"response.created","response":{"id":"resp_split"}}\n\n',
+        # First: an output_item.added that exposes both item.id and item.call_id.
+        # This is enough for the indexer to associate output_index=0 with the
+        # call_id-keyed slot.
+        'data: {"type":"response.output_item.added","output_index":0,'
+        '"item":{"id":"fc_001","call_id":"call_001","type":"function_call",'
+        '"name":"get_weather","arguments":""}}\n\n',
+        # Then: an argument event that carries item_id + output_index (no call_id).
+        # This locks in output_index_map[0] -> the same slot.
+        'data: {"type":"response.function_call_arguments.delta",'
+        '"item_id":"fc_001","output_index":0,"delta":"{\\"city\\":\\"Paris\\"}"}\n\n',
+        # Then: a legacy-style tool_call delta event that carries only the
+        # call_id+name (no output_index, no item_id). Previously this fell into
+        # `if key not in self.indexes:` and got a fresh next_index, splitting
+        # the call into a second tool_calls[] slot.
+        'data: {"type":"response.output_tool_call.delta","call_id":"call_001","name":"get_weather","delta":""}\n\n',
+        # Final completion.
+        'data: {"type":"response.function_call_arguments.done",'
+        '"item_id":"fc_001","output_index":0,'
+        '"arguments":"{\\"city\\":\\"Paris\\"}"}\n\n',
+        'data: {"type":"response.output_item.done","output_index":0,'
+        '"item":{"id":"fc_001","call_id":"call_001","type":"function_call",'
+        '"name":"get_weather","arguments":"{\\"city\\":\\"Paris\\"}"}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_split"}}\n\n',
+    ]
+
+    async def _stream():
+        for line in lines:
+            yield line
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+    assert isinstance(result, ChatCompletion)
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls is not None
+    # The call_id-only legacy event must not have allocated a new slot.
+    assert len(tool_calls) == 1
+    assert _tool_call_name(tool_calls[0]) == "get_weather"
+    assert json.loads(_tool_call_args(tool_calls[0])) == {"city": "Paris"}

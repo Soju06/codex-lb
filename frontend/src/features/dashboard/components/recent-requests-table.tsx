@@ -30,6 +30,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
+import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
 import { RequestVisibilityDrawer } from "@/features/dashboard/components/request-visibility-drawer";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
@@ -144,7 +145,7 @@ export function RecentRequestsTable({
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
-              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
+              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Details</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -295,7 +296,15 @@ export function RecentRequestsTable({
                         </Button>
                       </div>
                     ) : (
-                      <span className="text-xs text-muted-foreground">-</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        onClick={() => setSelectedRequest(request)}
+                      >
+                        View Details
+                      </Button>
                     )}
                   </TableCell>
                   </TableRow>
@@ -342,6 +351,11 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Error Code" value={viewingErrorRequest?.errorCode ?? "—"} mono />
               </div>
             </div>
+
+            <RequestArchivePanel
+              requestId={viewingErrorRequest?.requestId}
+              requestedAt={viewingErrorRequest?.requestedAt}
+            />
 
             <div className="space-y-2">
               <div className="flex items-center gap-2">

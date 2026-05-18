@@ -290,6 +290,7 @@ class RequestLogsRepository:
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
+            exclude_soft_deleted=True,
         )
 
         total_col = func.count().over().label("_total")
@@ -343,6 +344,7 @@ class RequestLogsRepository:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            exclude_soft_deleted=True,
         )
         api_key_facet_filters = self._build_filters(
             since=since,
@@ -356,6 +358,7 @@ class RequestLogsRepository:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            exclude_soft_deleted=True,
         )
 
         account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
@@ -430,8 +433,11 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        exclude_soft_deleted: bool = False,
     ) -> _RequestLogFilters:
         conditions = []
+        if exclude_soft_deleted:
+            conditions.append(RequestLog.deleted_at.is_(None))
         if since is not None:
             conditions.append(RequestLog.requested_at >= since)
         if until is not None:

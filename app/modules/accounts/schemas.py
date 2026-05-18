@@ -16,6 +16,7 @@ class UsageTrendPoint(DashboardModel):
 class AccountUsageTrend(DashboardModel):
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)
 
 
 class AccountUsage(DashboardModel):
@@ -105,3 +106,4 @@ class AccountTrendsResponse(DashboardModel):
     account_id: str
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)

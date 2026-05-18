@@ -42,6 +42,7 @@ const OauthStartPayloadSchema = z
 const ApiKeyCreatePayloadSchema = z
 	.object({
 		name: z.string().optional(),
+		assignedAccountIds: z.array(z.string()).optional(),
 	})
 	.passthrough();
 
@@ -818,6 +819,8 @@ export const handlers = [
 			...createApiKey({
 				id: `key_${sequence}`,
 				name: payload?.name ?? `API Key ${sequence}`,
+				accountAssignmentScopeEnabled: (payload?.assignedAccountIds?.length ?? 0) > 0,
+				assignedAccountIds: payload?.assignedAccountIds ?? [],
 			}),
 			key: `sk-test-generated-${sequence}`,
 		});

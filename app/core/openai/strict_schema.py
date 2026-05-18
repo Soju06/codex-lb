@@ -67,6 +67,46 @@ def validate_strict_json_schema(
     )
 
 
+def validate_strict_function_tool_schema(
+    schema: JsonValue,
+    *,
+    name: str | None,
+    param: str,
+) -> StrictSchemaError | None:
+    """Return the first strict-mode violation in a function tool's parameters.
+
+    The returned envelope mirrors what real OpenAI emits for the same
+    payload — see the ``invalid_function_parameters`` error in their
+    Structured Outputs guide. Specifically:
+
+    * ``code = "invalid_function_parameters"`` (distinct from the
+      ``invalid_json_schema`` envelope used by ``response_format`` /
+      ``text.format``);
+    * ``message`` is rendered as
+      ``Invalid schema for function '<name>': In context=<path>, <reason>.``;
+    * ``param`` is supplied by the caller so chat-completions can point
+      at ``tools[i].function.parameters`` while native Responses-API
+      callers point at ``tools[i].parameters``.
+
+    Re-uses the shared ``_find_violation`` walker so the strict-mode
+    rules stay in lockstep with ``response_format`` / ``text.format``
+    validation.
+    """
+
+    label = name or "function"
+    violation = _find_violation(schema, ())
+    if violation is None:
+        return None
+    context_path, reason = violation
+    rendered_context = _render_context(context_path)
+    message = f"Invalid schema for function '{label}': In context={rendered_context}, {reason}."
+    return StrictSchemaError(
+        code="invalid_function_parameters",
+        message=message,
+        param=param,
+    )
+
+
 def _render_context(path: tuple[str, ...]) -> str:
     if not path:
         return "()"

@@ -369,11 +369,59 @@ async def test_internal_drain_start_rejects_non_loopback_clients():
     from app.modules.health.api import start_internal_drain
 
     request = SimpleNamespace(
-        client=SimpleNamespace(host="10.0.0.5"),
+        client=SimpleNamespace(host="8.8.8.8"),
         app=SimpleNamespace(state=SimpleNamespace(proxy_service=None)),
     )
 
     with pytest.raises(HTTPException) as exc_info:
         await start_internal_drain(cast(Any, request))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_start_rejects_private_network_clients():
+    from app.modules.health.api import start_internal_drain
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="10.42.0.12"),
+        app=SimpleNamespace(state=SimpleNamespace(proxy_service=None)),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await start_internal_drain(cast(Any, request))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_status_reports_shutdown_state():
+    from app.modules.health.api import internal_drain_status
+
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    with (
+        patch("app.core.shutdown.is_draining", return_value=True),
+        patch("app.core.shutdown.is_bridge_drain_active", return_value=True),
+        patch("app.core.shutdown.get_in_flight", return_value=2),
+    ):
+        response = await internal_drain_status(cast(Any, request))
+
+    assert response.status == "ok"
+    assert response.checks == {
+        "draining": "true",
+        "bridge_drain_active": "true",
+        "in_flight": "2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_status_rejects_non_loopback_clients():
+    from app.modules.health.api import internal_drain_status
+
+    request = SimpleNamespace(client=SimpleNamespace(host="8.8.8.8"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await internal_drain_status(cast(Any, request))
 
     assert exc_info.value.status_code == 403

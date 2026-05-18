@@ -183,6 +183,29 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_persists_assigned_account_ids(async_client):
+    first_account_id = await _import_account(async_client, "acc-create-a", "create-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-create-b", "create-b@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "assigned-create-key",
+            "assignedAccountIds": [first_account_id, second_account_id],
+        },
+    )
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["accountAssignmentScopeEnabled"] is True
+    assert payload["assignedAccountIds"] == [first_account_id, second_account_id]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
+
+
+@pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
     monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
@@ -257,6 +280,16 @@ async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client)
     )
     assert update.status_code == 400
     assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_create_rejects_unknown_assigned_account_ids(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "invalid-create-assignment-key", "assignedAccountIds": ["missing-account"]},
+    )
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
 
 
 @pytest.mark.asyncio

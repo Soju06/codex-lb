@@ -14,6 +14,12 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_expired": "Refresh token expired - re-login required",
     "refresh_token_reused": "Refresh token was reused - re-login required",
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
+    # ``token_expired`` from the OAuth refresh endpoint means the refresh
+    # request itself failed because the refresh token (or the session it
+    # belonged to) is no longer usable -- access-token-only expiry would have
+    # returned a fresh token pair instead. Treat it as a permanent failure so
+    # the account stops being routed to until it is re-authenticated.
+    "token_expired": "Authentication token expired - re-login required",
     "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
@@ -77,6 +83,13 @@ def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
     return secondary_used, primary_used, last_selected, state.account_id
 
 
+def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    last_selected = state.last_selected_at or 0.0
+    return primary_used, secondary_used, last_selected, state.account_id
+
+
 def _reset_bucket_days(state: AccountState, current: float) -> int:
     if state.secondary_reset_at is None:
         return UNKNOWN_RESET_BUCKET_DAYS
@@ -105,6 +118,7 @@ def select_account(
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
+    primary_first_usage_weighted: bool = False,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -127,6 +141,8 @@ def select_account(
             account exists.
         deterministic_probe: Whether capacity-weighted routing should use a
             deterministic probe order instead of random weighted choice.
+        primary_first_usage_weighted: Whether usage-weighted routing should
+            rank by primary-window pressure before secondary-window pressure.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -224,6 +240,11 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
+    def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
+        reset_bucket_days = _reset_bucket_days(state, current)
+        primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
+        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
+
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
@@ -244,7 +265,10 @@ def select_account(
         else:
             selected = _select_capacity_weighted(candidate_pool)
     else:
-        selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
+        if primary_first_usage_weighted:
+            selected = min(effective_pool, key=_primary_usage_sort_key)
+        else:
+            selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
 
 

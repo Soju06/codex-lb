@@ -384,6 +384,479 @@ async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkey
     assert [call["account_id"] for call in calls] == [shared, shared, "workspace_unique"]
 
 
+@pytest.mark.asyncio
+async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_available(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_recovered", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_keeps_recent_quota_exceeded_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: 1735600060.0)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_recent_cooldown", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == 1735689600
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_bypasses_freshness_after_quota_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: 1735601000.0)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_fresh_after_cooldown", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+    fresh_usage = UsageHistory(
+        id=1,
+        account_id=account.id,
+        used_percent=100.0,
+        input_tokens=None,
+        output_tokens=None,
+        recorded_at=datetime.fromtimestamp(1735600500),
+        window="primary",
+    )
+
+    await updater.refresh_accounts([account], latest_usage={account.id: fresh_usage})
+
+    assert account.status == AccountStatus.ACTIVE
+    assert account.blocked_at is None
+    assert len(usage_repo.entries) == 2
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_preserves_freshness_after_failed_quota_recovery_probe(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        raise AssertionError("fresh post-cooldown quota probe should not refetch")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: 1735601000.0)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_fresh_probe", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+    fresh_usage = UsageHistory(
+        id=1,
+        account_id=account.id,
+        used_percent=100.0,
+        input_tokens=None,
+        output_tokens=None,
+        recorded_at=datetime.fromtimestamp(1735600950),
+        window="primary",
+    )
+
+    await updater.refresh_accounts([account], latest_usage={account.id: fresh_usage})
+
+    assert usage_repo.entries == []
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_does_not_overwrite_newer_status_change(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_paused_during_refresh", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    async def pause_before_compare(*args: Any, **kwargs: Any) -> bool:
+        account.status = AccountStatus.PAUSED
+        return False
+
+    monkeypatch.setattr(accounts_repo, "update_status_if_current", pause_before_compare)
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.PAUSED
+    assert account.reset_at == 1735689600
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_syncs_blocked_at_after_compare_failure(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_blocked_at_changed", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1735689600
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    async def change_blocked_at_before_compare(*args: Any, **kwargs: Any) -> bool:
+        account.blocked_at = 1735601234
+        return False
+
+    monkeypatch.setattr(accounts_repo, "update_status_if_current", change_blocked_at_before_compare)
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == 1735689600
+    assert account.blocked_at == 1735601234
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_does_not_recover_when_secondary_quota_is_missing(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 5.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": None,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_unknown_secondary", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1736208000
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == 1736208000
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_does_not_recover_when_secondary_quota_is_still_exhausted(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 5.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_still_exhausted", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1736208000
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == 1736208000
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_demotes_quota_exceeded_to_rate_limited_when_primary_is_exhausted(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_quota_primary_still_limited", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = 1736208000
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 1735689600
+    assert account.blocked_at is None
+    assert accounts_repo.status_updates[-1] == {
+        "account_id": account.id,
+        "status": AccountStatus.RATE_LIMITED,
+        "deactivation_reason": None,
+        "reset_at": 1735689600,
+        "blocked_at": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 604800,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_free_weekly_recovered", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.plan_type = "free"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.status == AccountStatus.ACTIVE
+    assert usage_repo.entries[-1].window == "secondary"
+
+
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
@@ -417,6 +890,30 @@ class StubAccountsRepository:
             }
         )
         return True
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+        expected_blocked_at: int | None = None,
+    ) -> bool:
+        account = self.accounts_by_id.get(account_id)
+        if (
+            account is None
+            or account.status != expected_status
+            or account.deactivation_reason != expected_deactivation_reason
+            or account.reset_at != expected_reset_at
+            or account.blocked_at != expected_blocked_at
+        ):
+            return False
+        return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
 
     async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
         account_id = args[0] if args else kwargs.get("account_id")

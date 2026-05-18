@@ -7173,6 +7173,60 @@ async def test_process_http_bridge_upstream_text_scopes_tool_dedupe_to_request_s
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_marks_text_delta_downstream_visible() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-visible",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_bridge_visible",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-visible", None),
+        headers={"x-codex-session-id": "sid-visible"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-visible",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-visible", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_text.delta",
+                "response_id": "resp_bridge_visible",
+                "delta": "I started",
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.downstream_visible is True
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    forwarded = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert forwarded is not None
+    assert proxy_service.parse_sse_data_json(forwarded)["delta"] == "I started"
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_request_on_fresh_upstream_refuses_to_resend_previous_response_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

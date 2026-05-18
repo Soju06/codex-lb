@@ -6420,7 +6420,7 @@ class ProxyService:
                 return False
             if request_state.replay_count >= 1:
                 return False
-            if request_state.response_event_count > 0:
+            if request_state.response_event_count > 0 or request_state.downstream_visible:
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
@@ -6680,6 +6680,8 @@ class ProxyService:
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
+                if event_type in _TEXT_DELTA_EVENT_TYPES:
+                    matched_request_state.downstream_visible = True
                 if payload is not None:
                     event_block = format_sse_event(payload)
 

@@ -6465,16 +6465,19 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_pendi
 
     upstream_payload = json.loads(prepared.text_data)
     assert upstream_payload["previous_response_id"] == "resp_pending_tool_calls"
+    interrupted_tool_output = (
+        "Tool call was not executed because the previous turn was interrupted before tool output was available."
+    )
     assert upstream_payload["input"][:2] == [
         {
             "type": "function_call_output",
             "call_id": "call_missing_a",
-            "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+            "output": interrupted_tool_output,
         },
         {
             "type": "function_call_output",
             "call_id": "call_missing_b",
-            "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+            "output": interrupted_tool_output,
         },
     ]
     assert upstream_payload["input"][2:] == interrupted_input
@@ -13868,6 +13871,45 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_after_respo
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_after_downstream_text():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    send_text = AsyncMock()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_visible_retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"full resend"}',
+        downstream_visible=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_visible_retry"),
+        upstream=AsyncMock(send_text=send_text),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is False
+    assert request_state.replay_count == 0
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_preserves_reconnect_timeout_cause(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13930,3 +13972,4 @@ async def test_pop_replayable_precreated_request_suppresses_replay_after_respons
 
     assert replayed is None
     assert pending_requests == deque([request_state])
+

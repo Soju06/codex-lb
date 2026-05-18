@@ -4459,6 +4459,7 @@ class ProxyService:
             force_durable_takeover = False
             missing_turn_state_alias = False
             used_session_header_fallback = False
+            session_to_return_after_close: _HTTPBridgeSession | None = None
             preserve_durable_canonical_key = (
                 incoming_turn_state is not None
                 and forwarded_affinity is None
@@ -5006,11 +5007,12 @@ class ProxyService:
                                         if previous_session.request_model
                                         else None,
                                     )
-                                    return previous_session
+                                    session_to_return_after_close = previous_session
                             else:
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                     if (
-                        previous_response_id is not None
+                        session_to_return_after_close is None
+                        and previous_response_id is not None
                         and not used_session_header_fallback
                         and not allow_previous_response_recovery_rebind
                         and durable_lookup is None
@@ -5131,6 +5133,9 @@ class ProxyService:
 
             for stale_session in sessions_to_close:
                 await self._close_http_bridge_session(stale_session)
+
+            if session_to_return_after_close is not None:
+                return session_to_return_after_close
 
             if owner_forward is not None:
                 return owner_forward

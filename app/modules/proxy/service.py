@@ -10859,7 +10859,9 @@ def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonV
     return {
         "type": "function_call_output",
         "call_id": call_id,
-        "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+        "output": (
+            "Tool call was not executed because the previous turn was interrupted before tool output was available."
+        ),
     }
 
 

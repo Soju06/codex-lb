@@ -56,9 +56,7 @@ def _build_service(
     primary_entry = _make_usage_row(primary_pct) if primary_pct is not None else None
     secondary_entry = _make_usage_row(secondary_pct) if secondary_pct is not None else None
 
-    async def _latest_entry_for_account(
-        requested_account_id: str, *, window: str
-    ) -> Any:
+    async def _latest_entry_for_account(requested_account_id: str, *, window: str) -> Any:
         if requested_account_id != _ACCOUNT_ID:
             return None
         return primary_entry if window == "primary" else secondary_entry
@@ -69,7 +67,7 @@ def _build_service(
     # Stop the real UsageUpdater from running — the unit test asserts the
     # service-level orchestration, not the refresh internals.
     usage_updater = AsyncMock()
-    usage_updater.refresh_accounts = AsyncMock(return_value=None)
+    usage_updater.force_refresh = AsyncMock(return_value=True)
     service._usage_updater = usage_updater
     return service
 
@@ -128,9 +126,9 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert captured_kwargs["model"] == "gpt-5.5-test"
 
     assert service._usage_updater is not None
-    refresh_accounts_mock = service._usage_updater.refresh_accounts
-    assert isinstance(refresh_accounts_mock, AsyncMock)
-    refresh_accounts_mock.assert_awaited_once()
+    force_refresh_mock = service._usage_updater.force_refresh
+    assert isinstance(force_refresh_mock, AsyncMock)
+    force_refresh_mock.assert_awaited_once_with(account)
 
 
 @pytest.mark.asyncio
@@ -181,3 +179,43 @@ async def test_probe_account_surfaces_network_failure_status(monkeypatch):
     result = await service.probe_account(_ACCOUNT_ID)
     assert result is not None
     assert result.probe_status_code == 0
+
+
+@pytest.mark.asyncio
+async def test_send_probe_request_uses_shared_http_client(monkeypatch):
+    account = _make_account()
+    service = _build_service(account=account)
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        status = 204
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Session:
+        def post(self, url: str, **kwargs: Any):
+            captured["url"] = url
+            captured.update(kwargs)
+            return _Response()
+
+    monkeypatch.setattr(
+        "app.modules.accounts.service.get_http_client",
+        lambda: SimpleNamespace(session=_Session()),
+    )
+
+    status = await service._send_probe_request(
+        access_token=_PROBE_TOKEN_PLAINTEXT,
+        chatgpt_account_id=_CHATGPT_ACCOUNT_ID,
+        model="gpt-5.5-test",
+    )
+
+    assert status == 204
+    assert captured["url"].endswith("/backend-api/codex/responses")
+    assert captured["headers"]["Authorization"] == f"Bearer {_PROBE_TOKEN_PLAINTEXT}"
+    assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID
+    assert captured["json"]["model"] == "gpt-5.5-test"
+    assert captured["timeout"].total == 30.0

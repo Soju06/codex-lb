@@ -18,6 +18,7 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.clients.http import get_http_client
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -266,9 +267,7 @@ class AccountsService:
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
-            raise AccountNotProbableError(
-                f"Account is {account.status.value} and cannot be probed"
-            )
+            raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
@@ -282,11 +281,7 @@ class AccountsService:
         )
 
         if self._usage_repo and self._usage_updater:
-            primary_entry = await self._usage_repo.latest_entry_for_account(
-                account_id, window="primary"
-            )
-            latest_usage = {account_id: primary_entry} if primary_entry else {}
-            await self._usage_updater.refresh_accounts([account], latest_usage)
+            await self._usage_updater.force_refresh(account)
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
@@ -304,17 +299,11 @@ class AccountsService:
             account_status_after=refreshed.status.value,
         )
 
-    async def _latest_usage_percents(
-        self, account_id: str
-    ) -> tuple[float | None, float | None]:
+    async def _latest_usage_percents(self, account_id: str) -> tuple[float | None, float | None]:
         if self._usage_repo is None:
             return None, None
-        primary_entry = await self._usage_repo.latest_entry_for_account(
-            account_id, window="primary"
-        )
-        secondary_entry = await self._usage_repo.latest_entry_for_account(
-            account_id, window="secondary"
-        )
+        primary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="primary")
+        secondary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="secondary")
         return (
             primary_entry.used_percent if primary_entry is not None else None,
             secondary_entry.used_percent if secondary_entry is not None else None,
@@ -357,13 +346,10 @@ class AccountsService:
             connect=PROBE_CONNECT_TIMEOUT_SECONDS,
         )
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, json=body, timeout=timeout
-                ) as resp:
-                    # Initiating the request is enough to wake the upstream
-                    # rate-limiter; we do not consume the SSE body.
-                    return resp.status
+            async with get_http_client().session.post(url, headers=headers, json=body, timeout=timeout) as resp:
+                # Initiating the request is enough to wake the upstream
+                # rate-limiter; we do not consume the SSE body.
+                return resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning(
                 "Probe upstream request failed account=%s error=%s",

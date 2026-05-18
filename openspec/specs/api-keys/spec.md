@@ -27,6 +27,17 @@ When `assigned_account_ids` is omitted or empty, the created key SHALL remain un
 - **WHEN** admin submits `POST /api/api-keys` with an unknown account ID in `assignedAccountIds`
 - **THEN** the system returns 400
 
+#### Scenario: Create key and show plain key
+
+- **WHEN** admin submits `POST /api/api-keys` with a valid payload
+- **THEN** the response contains the full plain key exactly once and the system never returns the plain key on subsequent reads
+
+#### Scenario: Create key with timezone-aware expiration
+
+- **WHEN** admin submits `POST /api/api-keys` with `{ "name": "dev-key", "expiresAt": "2025-12-31T00:00:00Z" }`
+- **THEN** the system persists the expiration successfully without PostgreSQL datetime binding errors
+- **AND** the response returns `expiresAt` representing the same UTC instant
+
 ### Requirement: API Key update
 The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence.
 
@@ -64,7 +75,24 @@ The system SHALL allow regenerating an API key via `POST /api/api-keys/{id}/rege
 - **THEN** the system returns the updated key object with a new `key` and `keyPrefix`; the old key immediately stops authenticating
 
 ### Requirement: API Key authentication global switch
-The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key via `Authorization: Bearer <key>`.
+The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key in the `Authorization` header using the Bearer authentication scheme.
+
+#### Scenario: Enable API key auth
+
+- **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": true }`
+- **THEN** subsequent proxy requests without a valid Bearer token are rejected with 401
+
+#### Scenario: Disable API key auth for a local request
+
+- **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
+- **AND** a local client calls a protected proxy route
+- **THEN** the request is allowed without API key authentication
+
+#### Scenario: Disable API key auth for a non-local request
+
+- **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
+- **AND** a non-local client calls a protected proxy route
+- **THEN** the request is rejected with 401 until proxy authentication is configured
 
 #### Scenario: Disable API key auth for an explicitly allowlisted proxy client
 - **WHEN** admin submits `PUT /api/settings` with `{ "apiKeyAuthEnabled": false }`
@@ -76,6 +104,16 @@ The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings
 - **AND** a non-local client calls a protected proxy route
 - **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
 - **THEN** the request is rejected with 401 until proxy authentication is configured
+
+#### Scenario: Enable without any keys created
+
+- **WHEN** admin enables API key auth but no keys exist
+- **THEN** all proxy requests are rejected with 401 (the system SHALL NOT prevent enabling even if no keys exist)
+
+#### Scenario: Toggle API key auth
+
+- **WHEN** admin toggles `apiKeyAuthEnabled` in settings
+- **THEN** the system calls `PUT /api/settings` and reflects the new state
 
 ### Requirement: API Key Bearer authentication guard
 The system SHALL validate API keys on protected proxy routes (`/v1/*`, `/backend-api/codex/*`, `/backend-api/transcribe`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
@@ -92,6 +130,34 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 - **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
 - **THEN** the dependency rejects the request with 401
 - **AND** forwarded headers do not satisfy the explicit allowlist
+
+#### Scenario: API key guard route scope
+
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/v1/responses`, `/backend-api/codex/responses`, `/v1/audio/transcriptions`, or `/backend-api/transcribe`
+- **THEN** the API key guard validation is applied
+
+#### Scenario: Codex usage excluded from API key guard scope
+
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/api/codex/usage`
+- **THEN** API key guard validation is not applied
+
+#### Scenario: Valid API key injected into handler
+
+- **WHEN** `api_key_auth_enabled` is true and a valid Bearer token is provided
+- **THEN** the route handler receives a typed `ApiKeyData` parameter (not `request.state`)
+
+#### Scenario: API key auth disabled returns None for local requests
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** the request is classified as local
+- **THEN** the dependency returns `None` and the request proceeds without authentication
+
+#### Scenario: API key auth disabled rejects non-local requests
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** the request is classified as non-local
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the dependency rejects the request with 401
 
 ### Requirement: Model restriction enforcement
 
@@ -186,6 +252,11 @@ The SPA settings page SHALL include an API Key management section with: a toggle
 - **THEN** the dialog shows the Assigned accounts picker
 - **AND** leaving the picker at `All accounts` creates an unscoped key
 - **AND** selecting one or more accounts creates a scoped key for only those accounts
+
+#### Scenario: Create key and show plain key
+
+- **WHEN** admin creates a key via the UI
+- **THEN** a dialog shows the full plain key with a copy button and a warning message
 
 ### Requirement: Cost accounting uses model and service-tier pricing
 When computing API key `cost_usd` usage, the system MUST price requests using the resolved model pricing and the authoritative `service_tier` reported by the upstream response when available, falling back to the forwarded request `service_tier` only when the response omits it. Requests sent with non-standard service tiers MUST use the published pricing for the tier actually used instead of falling back to standard-tier pricing.
@@ -428,7 +499,7 @@ The system MUST recognize `gpt-5.4-mini` pricing when computing request costs. S
 
 ### Requirement: API keys can read their own `/v1/usage`
 
-The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid `Authorization: Bearer sk-clb-...` header even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
+The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
 
 - `request_count`
 - `total_tokens`

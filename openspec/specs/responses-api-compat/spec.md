@@ -5,12 +5,16 @@
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
 ## Requirements
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
-For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default.
+For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
 #### Scenario: OpenAI-style route ignores session header for durable codex-session pinning
 - **WHEN** a client sends `/v1/responses` or `/v1/responses/compact` with a non-empty `session_id` header and no explicit sticky-thread mode
 - **THEN** the service does not persist a durable `codex_session` mapping solely from that header
 - **AND** bounded prompt-cache affinity behavior remains in effect
+
+#### Scenario: dashboard prompt-cache affinity TTL is applied
+- **WHEN** an operator updates the dashboard prompt-cache affinity TTL
+- **THEN** subsequent OpenAI-style prompt-cache affinity decisions use the new freshness window
 
 ### Requirement: Responses requests reject uploaded input_image references
 

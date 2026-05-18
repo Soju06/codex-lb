@@ -17,6 +17,18 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 - **AND** another eligible account remains below that threshold
 - **THEN** selection rebinds the durable `codex_session` mapping to the healthier account before sending the request upstream
 
+#### Scenario: Dashboard sticky thread routing is stored as durable
+- **WHEN** sticky-thread routing creates or refreshes stickiness from a prompt-derived key
+- **THEN** the stored mapping kind is `sticky_thread`
+
+#### Scenario: OpenAI prompt-cache affinity is stored as bounded
+- **WHEN** an OpenAI-style request creates or refreshes prompt-cache affinity
+- **THEN** the stored mapping kind is `prompt_cache`
+
+#### Scenario: Identical keys remain isolated across sticky-session kinds
+- **WHEN** the same sticky-session key value is used for more than one kind
+- **THEN** each `(key, kind)` mapping is stored and managed independently without overwriting the others
+
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
 

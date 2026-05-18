@@ -326,7 +326,10 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/1785495?v=4",
       "profile": "https://ximatai.net",
       "contributions": [
-        "doc"
+        "doc",
+        "code",
+        "test",
+        "bug"
       ]
     },
     {
@@ -351,12 +354,13 @@
     },
     {
       "login": "balakumardev",
-      "name": "balakumardev",
-      "avatar_url": "https://avatars.githubusercontent.com/u/45328806?v=4",
-      "profile": "https://github.com/balakumardev",
+      "name": "Bala Kumar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/20134279?v=4",
+      "profile": "http://balakumar.dev",
       "contributions": [
         "code",
-        "test"
+        "test",
+        "ideas"
       ]
     },
     {

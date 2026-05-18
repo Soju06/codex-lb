@@ -1,0 +1,5 @@
+- [x] 1. Update the API key create request contracts in frontend and backend to accept optional assigned account IDs.
+- [x] 2. Persist assigned account IDs and `account_assignment_scope_enabled` during API key creation when scoped accounts are supplied.
+- [x] 3. Add the Assigned accounts picker to the API key create dialog while keeping the unscoped default when no accounts are selected.
+- [x] 4. Add or update backend and frontend tests covering create-time account assignment and the unscoped default.
+- [x] 5. Run `openspec validate --specs` and the relevant backend/frontend test suites.

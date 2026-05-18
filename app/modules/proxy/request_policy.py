@@ -9,7 +9,10 @@ from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
-from app.core.openai.strict_schema import validate_strict_json_schema
+from app.core.openai.strict_schema import (
+    validate_strict_function_tool_schema,
+    validate_strict_json_schema,
+)
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
@@ -194,6 +197,7 @@ def normalize_responses_request_payload(
     else:
         responses = ResponsesRequest.model_validate(payload)
     enforce_strict_text_format(responses)
+    enforce_strict_function_tools_format(responses.tools)
     return responses
 
 
@@ -228,3 +232,94 @@ def enforce_strict_text_format(request: ResponsesRequest) -> None:
         code=violation.code,
         error_type="invalid_request_error",
     )
+
+
+def enforce_strict_function_tools_format(
+    tools: list[JsonValue] | None,
+    *,
+    param_template: str = "tools[{index}].parameters",
+    nested: bool = False,
+) -> None:
+    """Reject strict-mode function tools whose parameter schemas violate OpenAI rules.
+
+    Mirrors :func:`enforce_strict_text_format` for function tools that
+    set ``strict: true``. The Codex backend rejects an invalid strict
+    tool schema by closing the WebSocket with ``close_code=1000``; the
+    surfaced error is a generic ``upstream_rejected_input`` 502, which
+    well-behaved retry loops misclassify as transient. Real OpenAI
+    returns a deterministic ``400 invalid_function_parameters`` for the
+    same payload, so codex-lb pre-validates here.
+
+    ``param_template`` controls how the rejected parameter is named in
+    the error envelope: native ``/v1/responses`` callers see
+    ``tools[<i>].parameters``; chat-completions callers pass
+    ``"tools[{index}].function.parameters"`` to mirror the inbound
+    shape.
+
+    ``nested`` selects the shape of an inbound function tool:
+
+    * ``False`` (default) — flat ``{"type": "function", "name": ...,
+      "parameters": ..., "strict": ...}``. This is the
+      ``/v1/responses`` request shape (and the shape produced by
+      ``_normalize_chat_tools``).
+    * ``True`` — chat-completions shape with the function payload
+      wrapped under ``"function"``:
+      ``{"type": "function", "function": {"name": ..., "parameters":
+      ..., "strict": ...}}``. The chat handler MUST pass ``True`` and
+      hand in the *original* request payload's ``tools`` list (not the
+      list returned by ``ChatCompletionsRequest.to_responses_request``,
+      which may drop or reorder entries) so the ``{index}`` slot in
+      ``param_template`` lines up with the inbound payload.
+
+      A tool is treated as a function tool whenever ``tool["function"]``
+      is a dict — the same rule ``_normalize_chat_tools`` uses, where
+      missing or other ``type`` values get coerced to ``"function"``
+      (``"type": tool_type or "function"``). Anchoring on the wrapper
+      key keeps pre-validation in lockstep with normalization; otherwise
+      a payload like ``{"function": {"strict": true, "parameters":
+      <invalid>}}`` (no top-level ``type``) bypasses the local 400 and
+      surfaces as a misleading upstream 5xx.
+    """
+    if not tools:
+        return
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            continue
+        if nested:
+            # Chat path: detect function tools the same way
+            # ``_normalize_chat_tools`` does — presence of a ``"function"``
+            # dict is the signal, not a strict ``"type" == "function"``
+            # check. The normalizer coerces missing or other ``type``
+            # values to ``"function"`` whenever ``tool["function"]`` is a
+            # dict (`"type": tool_type or "function"`), so pre-validation
+            # must mirror that or strict violations on type-omitted
+            # nested tools bypass the local 400 and surface as upstream
+            # 5xx instead.
+            function_value = tool.get("function")
+            if not isinstance(function_value, dict):
+                continue
+            descriptor = function_value
+        else:
+            if tool.get("type") != "function":
+                continue
+            descriptor = tool
+        if descriptor.get("strict") is not True:
+            continue
+        parameters = descriptor.get("parameters")
+        if parameters is None:
+            continue
+        raw_name = descriptor.get("name")
+        name = raw_name if isinstance(raw_name, str) else None
+        violation = validate_strict_function_tool_schema(
+            parameters,
+            name=name,
+            param=param_template.format(index=index),
+        )
+        if violation is None:
+            continue
+        raise ClientPayloadError(
+            violation.message,
+            param=violation.param,
+            code=violation.code,
+            error_type="invalid_request_error",
+        )

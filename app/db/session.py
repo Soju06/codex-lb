@@ -53,6 +53,12 @@ def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, ob
         kwargs["pool_size"] = _database_pool_size(background=background)
         kwargs["max_overflow"] = _database_max_overflow(background=background)
         kwargs["pool_timeout"] = _settings.database_pool_timeout_seconds
+        # Detect server-side connection drops (idle timeout, restart, network reset)
+        # before the first real query, and cycle long-lived connections so they
+        # never reach an upstream keep-alive boundary. SQLite paths do not need
+        # either knob — aiosqlite has no analogous server-side disconnect.
+        kwargs["pool_pre_ping"] = True
+        kwargs["pool_recycle"] = _settings.database_pool_recycle_seconds
     return kwargs
 
 

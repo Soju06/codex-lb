@@ -114,7 +114,8 @@ async def test_normalize_public_responses_stream_preserves_comment_keepalive() -
     ]
 
     assert blocks[0] == ": keepalive\n\n"
-    assert "response.completed" in blocks[-1]
+    assert "response.completed" in blocks[-2]
+    assert blocks[-1] == "data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio

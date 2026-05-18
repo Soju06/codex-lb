@@ -3607,6 +3607,32 @@ class ProxyService:
                     "input": original_input_items[session_anchor.stored_input_item_count :],
                 }
             )
+        if (
+            continuity_state is not None
+            and responses_payload.previous_response_id is not None
+            and responses_payload.previous_response_id == continuity_state.last_completed_response_id
+            and continuity_state.last_pending_function_call_ids
+            and isinstance(responses_payload.input, list)
+        ):
+            input_items = cast(list[JsonValue], responses_payload.input)
+            missing_call_ids = _missing_function_call_outputs_for_previous_response(
+                input_items,
+                pending_call_ids=continuity_state.last_pending_function_call_ids,
+            )
+            if missing_call_ids:
+                responses_payload = responses_payload.model_copy(
+                    update={
+                        "input": _inject_missing_interrupted_function_call_outputs(
+                            input_items,
+                            missing_call_ids=missing_call_ids,
+                        )
+                    }
+                )
+                logger.warning(
+                    "websocket_interrupted_tool_outputs_injected previous_response_id=%s missing_call_count=%s",
+                    responses_payload.previous_response_id,
+                    len(missing_call_ids),
+                )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -6578,6 +6604,12 @@ class ProxyService:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
+                completed_function_call_id = _response_output_item_done_function_call_id(payload)
+                if (
+                    completed_function_call_id is not None
+                    and completed_function_call_id not in matched_request_state.pending_function_call_ids
+                ):
+                    matched_request_state.pending_function_call_ids.append(completed_function_call_id)
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=matched_request_state.seen_tool_call_keys,
@@ -7474,6 +7506,12 @@ class ProxyService:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+                completed_function_call_id = _response_output_item_done_function_call_id(payload)
+                if (
+                    completed_function_call_id is not None
+                    and completed_function_call_id not in request_state.pending_function_call_ids
+                ):
+                    request_state.pending_function_call_ids.append(completed_function_call_id)
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=request_state.seen_tool_call_keys,
@@ -10506,6 +10544,7 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
+    pending_function_call_ids: list[str] = field(default_factory=list)
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -10579,6 +10618,7 @@ class _WebSocketContinuityState:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    last_pending_function_call_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -10680,10 +10720,12 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_response_id = None
         continuity_state.last_completed_input_count = 0
         continuity_state.last_completed_input_prefix_fingerprint = None
+        continuity_state.last_pending_function_call_ids = []
         return
     continuity_state.last_completed_response_id = response_id
     continuity_state.last_completed_input_count = request_state.input_item_count
     continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
 
 
 async def _wait_for_websocket_continuity_gap(
@@ -10727,6 +10769,60 @@ def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int
     if isinstance(status, int):
         return status
     return None
+
+
+def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
+    call_ids: set[str] = set()
+    for item in input_items:
+        if not isinstance(item, dict) or _websocket_input_item_type(item) != "function_call_output":
+            continue
+        call_id = item.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            call_ids.add(call_id)
+    return call_ids
+
+
+def _missing_function_call_outputs_for_previous_response(
+    input_items: list[JsonValue],
+    *,
+    pending_call_ids: list[str],
+) -> list[str]:
+    if not pending_call_ids:
+        return []
+    present_call_ids = _function_call_output_call_ids(input_items)
+    return [call_id for call_id in pending_call_ids if call_id not in present_call_ids]
+
+
+def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonValue]:
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+    }
+
+
+def _inject_missing_interrupted_function_call_outputs(
+    input_items: list[JsonValue],
+    *,
+    missing_call_ids: list[str],
+) -> list[JsonValue]:
+    if not missing_call_ids:
+        return input_items
+    return [
+        *[_synthetic_interrupted_function_call_output(call_id) for call_id in missing_call_ids],
+        *input_items,
+    ]
+
+
+def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return None
+    call_id = item.get("call_id")
+    return call_id if isinstance(call_id, str) and call_id else None
+
 
 
 def _openai_error_envelope_from_response_failed_payload(

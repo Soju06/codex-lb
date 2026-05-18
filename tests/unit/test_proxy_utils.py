@@ -6398,6 +6398,90 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_fills_interrupted_pending_tool_outputs(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_interrupted_tools",
+        name="ws-interrupted-tools",
+        key_prefix="sk-ws-tools",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_response_id="resp_pending_tool_calls",
+        last_pending_function_call_ids=["call_missing_a", "call_missing_b"],
+    )
+    interrupted_input: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+                }
+            ],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "Write tests for @filename"}]},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_pending_tool_calls",
+                "input": interrupted_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_interrupted_tools"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_pending_tool_calls"
+    assert upstream_payload["input"][:2] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_missing_a",
+            "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_missing_b",
+            "output": "Tool call was not executed because the previous turn was interrupted before tool output was available.",
+        },
+    ]
+    assert upstream_payload["input"][2:] == interrupted_input
+    assert prepared.request_state.input_item_count == 4
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

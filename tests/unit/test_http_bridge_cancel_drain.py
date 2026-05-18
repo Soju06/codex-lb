@@ -314,3 +314,27 @@ async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_t
     assert cancelled_request in session.pending_requests
     assert retry_request not in session.pending_requests
     assert session.queued_request_count == 0
+
+
+def test_anonymous_event_prefers_unresolved_visible_request_before_active_response() -> None:
+    """A normal pipelined request awaiting response.created owns pre-created anonymous events."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+    )
+
+    assert matched_request is waiting_request

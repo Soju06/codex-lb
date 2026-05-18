@@ -6417,6 +6417,36 @@ def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeyp
     assert timeout.error_message == "Upstream stream idle timeout"
 
 
+def test_anonymous_websocket_event_prefers_active_request_over_draining_owner() -> None:
+    draining_request = proxy_service._WebSocketRequestState(
+        request_id="req_cancelled_draining",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=90.0,
+        draining_until_terminal=True,
+        event_queue=None,
+    )
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="req_active_visible",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.0,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([draining_request, active_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+    )
+
+    assert matched is active_request
+
+
 @pytest.mark.asyncio
 async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)

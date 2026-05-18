@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.7
+FROM ghcr.io/astral-sh/uv:0.10.9 AS uv-bin
+
 FROM oven/bun:1.3.14-alpine AS frontend-build
 
 WORKDIR /app/frontend
@@ -19,10 +21,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
 
-RUN pip install --no-cache-dir uv
+RUN python -m venv --without-pip /opt/venv
+ENV PATH="/opt/venv/bin:/usr/local/bin:$PATH"
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -35,6 +37,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        libc-bin libc6 libcap2 libsystemd0 libudev1 sed \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip uninstall -y pip setuptools wheel || true \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 \
+    && rm -rf /usr/local/lib/python*/site-packages/pip* \
+        /usr/local/lib/python*/site-packages/setuptools* \
+        /usr/local/lib/python*/site-packages/wheel*
 
 RUN adduser --disabled-password --gecos "" app \
     && mkdir -p /var/lib/codex-lb \

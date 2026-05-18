@@ -351,6 +351,9 @@ jobs:
   docker:
     name: Docker build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: Checkout repository
@@ -370,13 +373,28 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Scan Docker image with Trivy
+      - name: Scan Docker image with Trivy (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: codex-lb:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Enforce Trivy high-severity gate
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: codex-lb:ci
           format: table
           exit-code: 1
-          severity: CRITICAL
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
 
   helm-lint:

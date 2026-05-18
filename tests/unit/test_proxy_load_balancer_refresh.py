@@ -856,6 +856,71 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
 
 
 @pytest.mark.asyncio
+async def test_additional_quota_selection_does_not_persist_canonical_account_status() -> None:
+    account = _make_account("acc-additional-canonical", email="canonical@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = now_epoch + 100
+    account.blocked_at = now_epoch - 3600
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=21,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                22,
+                account_id=account.id,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={
+            account.id: _additional_entry(
+                23,
+                account_id=account.id,
+                window="secondary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.account.status == AccountStatus.ACTIVE
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == now_epoch + 100
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
 async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.core.config.settings.get_settings",

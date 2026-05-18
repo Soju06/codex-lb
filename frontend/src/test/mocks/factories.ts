@@ -367,6 +367,8 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		guestAccessEnabled: false,
+		guestPasswordConfigured: false,
 		...overrides,
 	});
 }

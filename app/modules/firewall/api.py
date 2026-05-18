@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.cache.invalidation import NAMESPACE_FIREWALL, get_cache_invalidation_poller
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.core.middleware.firewall_cache import get_firewall_ip_cache
@@ -38,6 +42,7 @@ async def list_firewall_ips(
 @router.post("/ips", response_model=FirewallIpEntry)
 async def add_firewall_ip(
     payload: FirewallIpCreateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: FirewallContext = Depends(get_firewall_context),
 ) -> FirewallIpEntry:
     try:
@@ -56,6 +61,7 @@ async def add_firewall_ip(
 @router.delete("/ips/{ip_address}", response_model=FirewallDeleteResponse)
 async def delete_firewall_ip(
     ip_address: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: FirewallContext = Depends(get_firewall_context),
 ) -> FirewallDeleteResponse:
     try:

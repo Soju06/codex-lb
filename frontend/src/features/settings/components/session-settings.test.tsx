@@ -15,6 +15,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: true,
   apiKeyAuthEnabled: true,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 describe("SessionSettings", () => {
@@ -44,6 +46,7 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
   });
 
@@ -102,6 +105,7 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
   });
 });

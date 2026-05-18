@@ -3,7 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 
 from app.core.audit.service import AuditService
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
@@ -69,6 +73,7 @@ async def export_account(
 async def import_account(
     request: Request,
     auth_json: UploadFile = File(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse:
     raw = await auth_json.read()
@@ -89,6 +94,7 @@ async def import_account(
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)
 async def reactivate_account(
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountReactivateResponse:
     success = await context.service.reactivate_account(account_id)
@@ -100,6 +106,7 @@ async def reactivate_account(
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)
 async def pause_account(
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountPauseResponse:
     success = await context.service.pause_account(account_id)
@@ -112,6 +119,7 @@ async def pause_account(
 async def delete_account(
     request: Request,
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
     success = await context.service.delete_account(account_id)

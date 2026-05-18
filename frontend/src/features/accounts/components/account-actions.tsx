@@ -6,6 +6,7 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 export type AccountActionsProps = {
   account: AccountSummary;
   busy: boolean;
+  readOnly?: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
@@ -16,6 +17,7 @@ export type AccountActionsProps = {
 export function AccountActions({
   account,
   busy,
+  readOnly = false,
   onPause,
   onResume,
   onDelete,
@@ -30,7 +32,7 @@ export function AccountActions({
           size="sm"
           className="h-8 gap-1.5 text-xs"
           onClick={() => onResume(account.accountId)}
-          disabled={busy}
+          disabled={busy || readOnly}
         >
           <Play className="h-3.5 w-3.5" />
           Resume
@@ -42,7 +44,7 @@ export function AccountActions({
           variant="outline"
           className="h-8 gap-1.5 text-xs"
           onClick={() => onPause(account.accountId)}
-          disabled={busy}
+          disabled={busy || readOnly}
         >
           <Pause className="h-3.5 w-3.5" />
           Pause
@@ -56,7 +58,7 @@ export function AccountActions({
           variant="outline"
           className="h-8 gap-1.5 text-xs"
           onClick={onReauth}
-          disabled={busy}
+          disabled={busy || readOnly}
         >
           <RefreshCw className="h-3.5 w-3.5" />
           Re-authenticate
@@ -81,7 +83,7 @@ export function AccountActions({
         variant="destructive"
         className="h-8 gap-1.5 text-xs"
         onClick={() => onDelete(account.accountId)}
-        disabled={busy}
+        disabled={busy || readOnly}
       >
         <Trash2 className="h-3.5 w-3.5" />
         Delete

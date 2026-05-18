@@ -8,6 +8,7 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
+import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
@@ -27,9 +28,11 @@ export function SettingsPage() {
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
+  const canWrite = useAuthStore((state) => state.canWrite);
 
   const settings = settingsQuery.data;
   const busy = updateSettingsMutation.isPending;
+  const controlsDisabled = busy || !canWrite;
   const error = getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
@@ -52,6 +55,11 @@ export function SettingsPage() {
       ) : (
         <>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          {!canWrite ? (
+            <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
+              You are viewing the dashboard with read-only guest access. Admin controls are disabled.
+            </div>
+          ) : null}
 
           {authMode === "trusted_header" ? (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
@@ -72,15 +80,23 @@ export function SettingsPage() {
             <RoutingSettings
               key={settings.openaiCacheAffinityMaxAgeSeconds}
               settings={settings}
-              busy={busy}
+              busy={controlsDisabled}
               onSave={handleSave}
             />
-            <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
-            <PasswordSettings disabled={busy} />
-            {passwordManagementEnabled ? (
+            <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+            {canWrite ? (
+              <GuestAccessSettings
+                settings={settings}
+                busy={busy}
+                onSave={handleSave}
+                onRefresh={() => settingsQuery.refetch()}
+              />
+            ) : null}
+            {canWrite ? <PasswordSettings disabled={busy} /> : null}
+            {canWrite && passwordManagementEnabled ? (
               <SessionSettings settings={settings} busy={busy} onSave={handleSave} />
             ) : null}
-            {passwordManagementEnabled && passwordSessionActive ? (
+            {canWrite && passwordManagementEnabled && passwordSessionActive ? (
               <Suspense fallback={null}>
                 <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
               </Suspense>
@@ -88,13 +104,13 @@ export function SettingsPage() {
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
-              disabled={busy}
+              disabled={controlsDisabled}
               onApiKeyAuthEnabledChange={(enabled) =>
                 void handleSave(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: enabled }))
               }
             />
-            <FirewallSection />
-            <StickySessionsSection />
+            <FirewallSection disabled={controlsDisabled} />
+            <StickySessionsSection disabled={controlsDisabled} />
           </div>
 
           <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />

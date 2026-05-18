@@ -14,6 +14,8 @@ export const DashboardSettingsSchema = z.object({
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   apiKeyAuthEnabled: z.boolean(),
+  guestAccessEnabled: z.boolean(),
+  guestPasswordConfigured: z.boolean(),
 });
 
 export const SettingsUpdateRequestSchema = z.object({
@@ -26,6 +28,7 @@ export const SettingsUpdateRequestSchema = z.object({
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  guestAccessEnabled: z.boolean().optional(),
 });
 
 export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;

@@ -84,6 +84,7 @@ const SettingsPayloadSchema = z
 		totpRequiredOnLogin: z.boolean().optional(),
 		totpConfigured: z.boolean().optional(),
 		apiKeyAuthEnabled: z.boolean().optional(),
+		guestAccessEnabled: z.boolean().optional(),
 	})
 	.passthrough();
 
@@ -706,11 +707,48 @@ export const handlers = [
 		state.authSession = createDashboardAuthSession({
 			...state.authSession,
 			authenticated: !state.authSession.totpRequiredOnLogin,
+			role: "admin",
+			permissions: ["read", "write"],
+		});
+		return HttpResponse.json(state.authSession);
+	}),
+
+	http.post("/api/dashboard-auth/guest/login", () => {
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			authenticated: true,
+			role: "guest",
+			permissions: ["read"],
+			guestAccessEnabled: true,
 		});
 		return HttpResponse.json(state.authSession);
 	}),
 
 	http.post("/api/dashboard-auth/password/change", () => {
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.post("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: true,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: true,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.delete("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: false,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: false,
+		});
 		return HttpResponse.json({ status: "ok" });
 	}),
 

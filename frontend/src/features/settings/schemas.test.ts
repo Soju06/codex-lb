@@ -17,6 +17,8 @@ describe("DashboardSettingsSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
+      guestAccessEnabled: true,
+      guestPasswordConfigured: false,
       apiKeyAuthEnabled: true,
     });
 
@@ -26,6 +28,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.importWithoutOverwrite).toBe(true);
+    expect(parsed.guestAccessEnabled).toBe(true);
+    expect(parsed.guestPasswordConfigured).toBe(false);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
   });
 

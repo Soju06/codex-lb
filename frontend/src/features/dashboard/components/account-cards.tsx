@@ -13,10 +13,11 @@ const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
   const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
   if (accounts.length === 0) {
@@ -42,6 +43,7 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
           <AccountCard
             account={account}
             showAccountId={duplicateAccountIds.has(account.accountId)}
+            readOnly={readOnly}
             onAction={onAction}
           />
         </div>

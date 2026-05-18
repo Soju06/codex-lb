@@ -29,6 +29,8 @@ class SettingsRepository:
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
+            guest_access_enabled=False,
+            guest_password_hash=None,
             bootstrap_token_encrypted=None,
             bootstrap_token_hash=None,
             api_key_auth_enabled=False,
@@ -62,6 +64,7 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        guest_access_enabled: bool | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -90,6 +93,8 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if guest_access_enabled is not None:
+            settings.guest_access_enabled = guest_access_enabled
         await self.commit_refresh(settings)
         return settings
 

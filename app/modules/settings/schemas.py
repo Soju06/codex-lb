@@ -19,6 +19,8 @@ class DashboardSettingsResponse(DashboardModel):
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    guest_access_enabled: bool
+    guest_password_configured: bool
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
@@ -37,6 +39,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+    guest_access_enabled: bool | None = None
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

@@ -14,6 +14,7 @@ export function buildSettingsUpdateRequest(
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+    guestAccessEnabled: settings.guestAccessEnabled,
     ...patch,
   };
 }

@@ -28,6 +28,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 function renderWithClient(ui: React.ReactElement) {
@@ -113,6 +115,7 @@ describe("TotpSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
   });
 

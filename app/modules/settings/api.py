@@ -7,7 +7,11 @@ import socket
 from fastapi import APIRouter, Body, Depends, Request
 
 from app.core.audit.service import AuditService
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import SettingsContext, get_settings_context
@@ -89,6 +93,8 @@ async def get_settings(
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        guest_access_enabled=settings.guest_access_enabled,
+        guest_password_configured=settings.guest_password_configured,
     )
 
 
@@ -101,6 +107,7 @@ async def get_runtime_connect_address(request: Request) -> RuntimeConnectAddress
 async def update_settings(
     request: Request,
     payload: DashboardSettingsUpdateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
@@ -151,6 +158,11 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                guest_access_enabled=(
+                    payload.guest_access_enabled
+                    if payload.guest_access_enabled is not None
+                    else current.guest_access_enabled
+                ),
             )
         )
     except ValueError as exc:
@@ -170,6 +182,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "guest_access_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -192,4 +205,6 @@ async def update_settings(
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
         api_key_auth_enabled=updated.api_key_auth_enabled,
+        guest_access_enabled=updated.guest_access_enabled,
+        guest_password_configured=updated.guest_password_configured,
     )

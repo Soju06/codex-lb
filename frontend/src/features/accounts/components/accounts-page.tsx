@@ -13,6 +13,7 @@ import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -31,6 +32,7 @@ export function AccountsPage() {
     exportMutation,
   } = useAccounts();
   const oauth = useOauth();
+  const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
@@ -103,6 +105,7 @@ export function AccountsPage() {
               onSelect={handleSelectAccount}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
+              readOnly={!canWrite}
             />
           </div>
 
@@ -110,6 +113,7 @@ export function AccountsPage() {
             account={selectedAccount}
             showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
             busy={mutationBusy}
+            readOnly={!canWrite}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onDelete={(accountId) => deleteDialog.show(accountId)}

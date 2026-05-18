@@ -16,6 +16,8 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  guestAccessEnabled: false,
+  guestPasswordConfigured: false,
 };
 
 describe("RoutingSettings", () => {
@@ -41,6 +43,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
 
     rerender(
@@ -64,6 +67,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
   });
 
@@ -92,6 +96,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      guestAccessEnabled: false,
     });
   });
 

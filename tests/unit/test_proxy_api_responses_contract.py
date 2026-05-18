@@ -814,7 +814,7 @@ async def test_normalize_public_responses_stream_codex_route_truncated_stream_do
 async def test_normalize_public_responses_stream_codex_route_does_not_backfill_output() -> None:
     """`enforce_openai_sdk_contract=False` MUST NOT backfill terminal
     `response.completed.output` from streamed item events. The Codex CLI
-    expects upstream's exact shape."""
+    expects upstream's native item shape."""
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
@@ -842,6 +842,47 @@ async def test_normalize_public_responses_stream_codex_route_does_not_backfill_o
     # Output stays empty — Codex CLI handles its own assembly.
     response_obj = cast(dict[str, Any], completed["response"])
     assert response_obj["output"] == []
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_appends_done_after_terminal() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_does_not_duplicate_done() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+                "data: [DONE]\n\n",
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks.count("data: [DONE]\n\n") == 1
 
 
 # ----------------------------------------------------------------------------

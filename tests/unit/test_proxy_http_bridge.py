@@ -6309,8 +6309,14 @@ def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_rele
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
     branch = source[start_index : source.index("await self._emit_websocket_terminal_error", start_index)]
 
-    assert "self._cancel_request_state_api_key_reservation_heartbeat(request_state)" in branch
-    assert branch.index("_cancel_request_state_api_key_reservation_heartbeat") < branch.index(
+    assert "self._release_websocket_request_state_reservation(request_state)" in branch
+    assert "_release_websocket_reservation(request_state.api_key_reservation)" not in source
+
+
+def test_websocket_request_state_reservation_release_cancels_heartbeat_before_release() -> None:
+    source = inspect.getsource(proxy_service.ProxyService._release_websocket_request_state_reservation)
+
+    assert source.index("_cancel_request_state_api_key_reservation_heartbeat") < source.index(
         "_release_websocket_reservation"
     )
 

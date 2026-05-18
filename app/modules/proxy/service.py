@@ -875,6 +875,11 @@ class ProxyService:
             request_state.preferred_account_id = rewritten_file_account_id
             if request_state.preferred_account_id is None:
                 request_state.preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
+            effective_payload = payload
+            untrimmed_effective_payload = payload
+            proxy_injected_previous_response_id = False
+            previous_response_trimmed_input_count = None
+            previous_response_trimmed_input_fingerprint = None
             durable_full_resend_anchor_count = None
             durable_full_resend_anchor_fingerprint = None
             session_or_forward = await self._get_or_create_http_bridge_session(

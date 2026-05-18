@@ -8755,6 +8755,12 @@ class ProxyService:
         deadline = start + base_settings.proxy_request_budget_seconds
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
+        if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
+            # HTTP/SSE clients can retry a half-rendered turn after an upstream
+            # websocket close, making the same visible message restart. Keep
+            # native websocket clients on their dedicated path, but use upstream
+            # HTTP/SSE for downstream HTTP streams.
+            upstream_stream_transport = "http"
         if rewritten_file_account_id is None:
             self._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)

@@ -179,8 +179,7 @@ class AccountProbeRequest(DashboardModel):
     model: str | None = Field(
         default=None,
         description=(
-            "Optional model slug for the probe request. Defaults to the service's"
-            " configured fallback when omitted."
+            "Optional model slug for the probe request. Defaults to the service's configured fallback when omitted."
         ),
     )
 

@@ -135,17 +135,19 @@ def test_response_created_prefers_draining_owner_in_illegal_overlap() -> None:
     assert active_request.response_id is None
 
 
-def test_anonymous_event_prefers_draining_owner_in_illegal_overlap() -> None:
+def test_anonymous_event_prefers_active_request_over_draining_owner_in_illegal_overlap() -> None:
     draining_request = _make_request_state(
         "req-cancelled-draining",
         response_id="resp-cancelled-draining",
         awaiting_response_created=False,
+        event_queue=None,
     )
     draining_request.draining_until_terminal = True
     active_request = _make_request_state(
         "req-active-delta",
         response_id="resp-active-delta",
         awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
     )
 
     matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
@@ -154,7 +156,7 @@ def test_anonymous_event_prefers_draining_owner_in_illegal_overlap() -> None:
         prefer_draining_requests=True,
     )
 
-    assert matched_request is draining_request
+    assert matched_request is active_request
 
 
 def test_anonymous_event_prefers_unresolved_visible_request_before_active_response() -> None:

@@ -204,7 +204,7 @@ async def test_cancelled_http_bridge_request_does_not_steal_active_response_crea
 
 
 @pytest.mark.asyncio
-async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_delta(
+async def test_cancelled_http_bridge_request_quarantines_anonymous_delta_while_drain_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -213,8 +213,8 @@ async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_d
 
     cancelled_request = _make_request_state(
         "req-cancelled-draining",
-        response_id=None,
-        awaiting_response_created=True,
+        response_id="resp-cancelled-draining",
+        awaiting_response_created=False,
         event_queue=asyncio.Queue(),
     )
     session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
@@ -241,7 +241,51 @@ async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_d
                 "sequence_number": 2,
                 "output_index": 0,
                 "item": {
-                    "id": "msg-active-delta",
+                    "id": "msg-draining-delta",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert retry_queue.empty(), "anonymous output must be quarantined while a cancelled drain is pending"
+    assert cancelled_request in session.pending_requests
+    assert retry_request in session.pending_requests
+    assert session.queued_request_count == 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "sequence_number": 3,
+                "response": {
+                    "id": "resp-cancelled-draining",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert cancelled_request not in session.pending_requests
+    assert retry_request in session.pending_requests
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 2,
+                "output_index": 0,
+                "item": {
+                    "id": "msg-active-after-drain",
                     "type": "message",
                     "role": "assistant",
                     "status": "in_progress",
@@ -254,10 +298,7 @@ async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_d
 
     retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
     assert retry_event is not None
-    assert "msg-active-delta" in retry_event
-    assert cancelled_request in session.pending_requests
-    assert retry_request in session.pending_requests
-    assert session.queued_request_count == 1
+    assert "msg-active-after-drain" in retry_event
 
 
 @pytest.mark.asyncio

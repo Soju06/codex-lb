@@ -2197,9 +2197,7 @@ async def stream_responses(
             )
             return
         now = time.monotonic()
-        body_elapsed_seconds = (
-            max(0.0, now - response_started_at) if response_started_at is not None else None
-        )
+        body_elapsed_seconds = max(0.0, now - response_started_at) if response_started_at is not None else None
         if (
             body_elapsed_seconds is not None
             and effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)

@@ -83,13 +83,41 @@ def build_request_visibility_document(
     if len(summarized_serialized.encode("utf-8")) <= max_bytes:
         return summarized_document
 
-    return {
+    return _build_fallback_document(captured_headers, body, max_bytes=max_bytes)
+
+
+def _build_fallback_document(
+    captured_headers: dict[str, JsonValue],
+    body: object,
+    *,
+    max_bytes: int,
+) -> RequestVisibilityDocument:
+    fallback_body: RequestVisibilityDocument = {
+        "_truncated": True,
+        "kind": _json_kind(body),
+        "message": f"request visibility truncated at {max_bytes} bytes",
+    }
+    fallback_document: RequestVisibilityDocument = {
         "headers": captured_headers,
-        "body": {
-            "_truncated": True,
-            "kind": _json_kind(body),
-            "message": f"request visibility truncated at {max_bytes} bytes",
-        },
+        "body": fallback_body,
+        "truncated": True,
+    }
+    serialized = json.dumps(fallback_document, separators=(",", ":"), sort_keys=True)
+    if len(serialized.encode("utf-8")) <= max_bytes:
+        return fallback_document
+
+    headerless_document: RequestVisibilityDocument = {
+        "headers": {},
+        "body": fallback_body,
+        "truncated": True,
+    }
+    serialized = json.dumps(headerless_document, separators=(",", ":"), sort_keys=True)
+    if len(serialized.encode("utf-8")) <= max_bytes:
+        return headerless_document
+
+    return {
+        "headers": {},
+        "body": {"_truncated": True},
         "truncated": True,
     }
 

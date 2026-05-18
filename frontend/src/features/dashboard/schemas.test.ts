@@ -118,6 +118,7 @@ describe("RequestLogsResponseSchema", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [
         {
+          id: 1,
           requestedAt: ISO,
           accountId: "acc-1",
           apiKeyName: "Key A",
@@ -139,6 +140,7 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
+    expect(parsed.requests[0]?.id).toBe(1);
     expect(parsed.requests[0]?.transport).toBe("websocket");
   });
 });

@@ -83,6 +83,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert body["hasMore"] is False
 
     latest = payload[0]
+    assert isinstance(latest["id"], int)
     assert latest["status"] == "rate_limit"
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
@@ -133,6 +134,85 @@ async def test_request_log_visibility_api_returns_captured_blob(async_client, db
         "body": {"input": "hello", "apiKey": "[REDACTED]"},
     }
     assert "authorization" not in body["headers"]
+
+
+@pytest.mark.asyncio
+async def test_request_log_visibility_api_can_lookup_duplicate_request_ids_by_row_id(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_visibility_dupe", "visibility-dupe@example.com"))
+        older = await logs_repo.add_log(
+            account_id="acc_visibility_dupe",
+            request_id="req_visibility_dupe",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=2,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=utcnow() - timedelta(minutes=2),
+            request_visibility=json.dumps(
+                {
+                    "headers": {"content-type": "application/json"},
+                    "body": {"input": "older row"},
+                    "truncated": False,
+                }
+            ),
+        )
+        await logs_repo.add_log(
+            account_id="acc_visibility_dupe",
+            request_id="req_visibility_dupe",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=2,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=utcnow() - timedelta(minutes=1),
+            request_visibility=json.dumps(
+                {
+                    "headers": {"content-type": "application/json"},
+                    "body": {"input": "newer row"},
+                    "truncated": False,
+                }
+            ),
+        )
+        older_id = older.id
+
+    response = await async_client.get(f"/api/request-logs/by-id/{older_id}/visibility")
+    assert response.status_code == 200
+    assert response.json()["body"] == {"input": "older row"}
+
+
+@pytest.mark.asyncio
+async def test_request_log_visibility_api_treats_malformed_blob_as_not_captured(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_visibility_malformed", "visibility-malformed@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_visibility_malformed",
+            request_id="req_visibility_malformed",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=0,
+            latency_ms=25,
+            status="success",
+            error_code=None,
+            request_visibility="{not-json",
+        )
+
+    response = await async_client.get("/api/request-logs/req_visibility_malformed/visibility")
+    assert response.status_code == 200
+    assert response.json() == {
+        "requestId": "req_visibility_malformed",
+        "captured": False,
+        "unavailableReason": "not_captured",
+        "truncated": False,
+        "headers": {},
+        "body": None,
+    }
 
 
 @pytest.mark.asyncio

@@ -253,6 +253,11 @@ class RequestLogsRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, log_id: int) -> RequestLog | None:
+        stmt = select(RequestLog).where(RequestLog.id == log_id).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     def _build_filters(
         self,
         *,

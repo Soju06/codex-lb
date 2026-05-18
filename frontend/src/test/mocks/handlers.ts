@@ -332,9 +332,9 @@ export const handlers = [
 		return HttpResponse.json(requestLogOptionsFromEntries(filtered));
 	}),
 
-	http.get("/api/request-logs/:requestId/visibility", ({ params }) => {
-		const requestId = String(params.requestId);
-		const entry = state.requestLogs.find((requestLog) => requestLog.requestId === requestId);
+	http.get("/api/request-logs/by-id/:logId/visibility", ({ params }) => {
+		const logId = Number(params.logId);
+		const entry = state.requestLogs.find((requestLog) => requestLog.id === logId);
 		if (!entry) {
 			return HttpResponse.json(
 				{ error: { code: "request_log_not_found", message: "Request log not found" } },
@@ -342,10 +342,10 @@ export const handlers = [
 			);
 		}
 
-		if (requestId === "req_1") {
+		if (entry.requestId === "req_1") {
 			return HttpResponse.json(
 				createRequestLogVisibilityResponse({
-					requestId,
+					requestId: entry.requestId,
 					body: {
 						input: "Explain the weather.",
 						metadata: { sessionToken: "[REDACTED]" },
@@ -356,7 +356,7 @@ export const handlers = [
 
 		return HttpResponse.json(
 			createRequestLogVisibilityResponse({
-				requestId,
+				requestId: entry.requestId,
 				captured: false,
 				unavailableReason: "not_captured",
 				headers: {},

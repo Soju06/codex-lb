@@ -128,6 +128,12 @@ class RequestLogsService:
             return None
         return to_request_log_visibility(log)
 
+    async def get_visibility_by_id(self, log_id: int) -> RequestLogVisibilityResponse | None:
+        log = await self._repo.get_by_id(log_id)
+        if log is None:
+            return None
+        return to_request_log_visibility(log)
+
 
 def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
     if not status:

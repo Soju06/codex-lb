@@ -15,7 +15,7 @@ import { renderWithProviders } from "@/test/utils";
 describe("RequestVisibilityDrawer", () => {
   it("renders a loading state while the drawer query is pending", () => {
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", async () => {
+      http.get("/api/request-logs/by-id/:logId/visibility", async () => {
         await delay(100);
         return HttpResponse.json(createRequestLogVisibilityResponse());
       }),
@@ -34,7 +34,7 @@ describe("RequestVisibilityDrawer", () => {
 
   it("renders captured headers and body details", async () => {
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           createRequestLogVisibilityResponse({
             requestId: "req_1",
@@ -75,7 +75,7 @@ describe("RequestVisibilityDrawer", () => {
 
   it("renders an unavailable state for uncaptured requests", async () => {
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           createRequestLogVisibilityResponse({
             requestId: "req_2",
@@ -105,7 +105,7 @@ describe("RequestVisibilityDrawer", () => {
     const user = userEvent.setup();
 
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           createRequestLogVisibilityResponse({
             requestId: "req_enable",
@@ -144,7 +144,7 @@ describe("RequestVisibilityDrawer", () => {
           }),
         ),
       ),
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           createRequestLogVisibilityResponse({
             requestId: "req_enabled",
@@ -173,7 +173,7 @@ describe("RequestVisibilityDrawer", () => {
 
   it("renders an API error state", async () => {
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           { error: { code: "request_visibility_failed", message: "Drawer load failed" } },
           { status: 500 },
@@ -195,7 +195,7 @@ describe("RequestVisibilityDrawer", () => {
 
   it("renders request error details when the row has an error", async () => {
     server.use(
-      http.get("/api/request-logs/:requestId/visibility", () =>
+      http.get("/api/request-logs/by-id/:logId/visibility", () =>
         HttpResponse.json(
           createRequestLogVisibilityResponse({
             requestId: "req_error",

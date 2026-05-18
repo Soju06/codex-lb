@@ -52,6 +52,7 @@ describe("RecentRequestsTable", () => {
         ]}
         requests={[
           {
+            id: 1,
             requestedAt: ISO,
             accountId: "acc-primary",
             apiKeyName: "Key Alpha",
@@ -71,6 +72,7 @@ describe("RecentRequestsTable", () => {
             latencyMs: 1000,
           },
           {
+            id: 2,
             requestedAt: ISO,
             accountId: "acc-primary",
             apiKeyName: "Key Beta",
@@ -135,6 +137,7 @@ describe("RecentRequestsTable", () => {
         accounts={[]}
         requests={[
           {
+            id: 1,
             requestedAt: ISO,
             accountId: null,
             apiKeyName: null,
@@ -197,6 +200,7 @@ describe("RecentRequestsTable", () => {
         accounts={[]}
         requests={[
           {
+            id: 1,
             requestedAt: ISO,
             accountId: "acc-legacy",
             apiKeyName: null,
@@ -229,6 +233,7 @@ describe("RecentRequestsTable", () => {
         accounts={[]}
         requests={[
           {
+            id: 1,
             requestedAt: ISO,
             accountId: "acc-legacy",
             apiKeyName: null,

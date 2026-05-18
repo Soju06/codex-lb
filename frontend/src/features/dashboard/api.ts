@@ -81,6 +81,6 @@ export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
 }
 
-export function getRequestLogVisibility(requestId: string) {
-  return get(`${REQUEST_LOGS_PATH}/${encodeURIComponent(requestId)}/visibility`, RequestLogVisibilityResponseSchema);
+export function getRequestLogVisibility(logId: number) {
+  return get(`${REQUEST_LOGS_PATH}/by-id/${encodeURIComponent(String(logId))}/visibility`, RequestLogVisibilityResponseSchema);
 }

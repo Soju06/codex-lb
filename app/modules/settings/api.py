@@ -152,7 +152,9 @@ async def update_settings(
             )
         )
     except ValueError as exc:
-        raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
+        message = str(exc)
+        code = "invalid_request_visibility_config" if "request visibility" in message.lower() else "invalid_totp_config"
+        raise DashboardBadRequestError(message, code=code) from exc
 
     await get_settings_cache().invalidate()
     changed_fields = [

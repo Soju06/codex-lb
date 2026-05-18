@@ -74,6 +74,17 @@ async def list_request_logs(
     )
 
 
+@router.get("/by-id/{log_id}/visibility", response_model=RequestLogVisibilityResponse)
+async def get_request_log_visibility_by_id(
+    log_id: int,
+    context: RequestLogsContext = Depends(get_request_logs_context),
+) -> RequestLogVisibilityResponse:
+    visibility = await context.service.get_visibility_by_id(log_id)
+    if visibility is None:
+        raise HTTPException(status_code=404, detail="Request log not found")
+    return visibility
+
+
 @router.get("/{request_id}/visibility", response_model=RequestLogVisibilityResponse)
 async def get_request_log_visibility(
     request_id: str,

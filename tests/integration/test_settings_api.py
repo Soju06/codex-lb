@@ -114,3 +114,20 @@ async def test_settings_api_temporary_request_visibility_expiry_disables_capture
     assert payload["requestVisibilityMode"] == "temporary"
     assert payload["requestVisibilityEnabled"] is False
     assert payload["requestVisibilityExpiresAt"] == expired_at.isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.asyncio
+async def test_settings_api_reports_request_visibility_validation_code(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "requestVisibilityMode": "temporary",
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request_visibility_config"
+    assert body["error"]["message"] == "Temporary request visibility requires a duration"

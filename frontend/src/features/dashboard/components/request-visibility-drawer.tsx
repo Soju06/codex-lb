@@ -50,8 +50,8 @@ function prettyJson(value: unknown): string {
 }
 
 export function RequestVisibilityDrawer({ request, open, onOpenChange }: RequestVisibilityDrawerProps) {
-  const requestId = request?.requestId ?? null;
-  const visibilityQuery = useRequestLogVisibility(requestId, open);
+  const logId = request?.id ?? null;
+  const visibilityQuery = useRequestLogVisibility(logId, open);
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const [temporaryDuration, setTemporaryDuration] = useState<string>(String(TEMPORARY_OPTIONS[1].minutes));
 

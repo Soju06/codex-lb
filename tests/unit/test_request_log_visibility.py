@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.modules.request_logs.visibility import (
     build_request_visibility_document,
 )
@@ -114,6 +116,19 @@ def test_build_request_visibility_document_marks_truncation_explicitly():
         "items": 24,
         "sample": {"role": "user", "content": "x" * 80 + "… [320 chars truncated]"},
     }
+
+
+def test_build_request_visibility_document_drops_oversized_headers_to_honor_cap():
+    document = build_request_visibility_document(
+        {"Content-Type": "application/json", "User-Agent": "x" * 5000},
+        {"input": "hello"},
+        max_bytes=512,
+    )
+
+    assert document is not None
+    assert document["truncated"] is True
+    assert document["headers"] == {}
+    assert len(json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")) <= 512
 
 
 def test_build_request_visibility_document_skips_unsupported_binary_bodies():

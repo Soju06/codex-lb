@@ -28,6 +28,7 @@ def log_status(log: RequestLog) -> str:
 def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) -> RequestLogEntry:
     log_like = typing_cast(RequestLogLike, log)
     return RequestLogEntry(
+        id=log.id,
         requested_at=log.requested_at,
         account_id=log.account_id,
         api_key_name=api_key_name,
@@ -57,11 +58,26 @@ def to_request_log_visibility(log: RequestLog) -> RequestLogVisibilityResponse:
             unavailable_reason="not_captured",
         )
 
-    payload = json.loads(log.request_visibility)
+    try:
+        payload = json.loads(log.request_visibility)
+    except (TypeError, json.JSONDecodeError):
+        return RequestLogVisibilityResponse(
+            request_id=log.request_id,
+            captured=False,
+            unavailable_reason="not_captured",
+        )
+    if not isinstance(payload, dict):
+        return RequestLogVisibilityResponse(
+            request_id=log.request_id,
+            captured=False,
+            unavailable_reason="not_captured",
+        )
+    raw_headers = payload.get("headers") or {}
+    headers = raw_headers if isinstance(raw_headers, dict) else {}
     return RequestLogVisibilityResponse(
         request_id=log.request_id,
         captured=True,
         truncated=bool(payload.get("truncated", False)),
-        headers={str(key): str(value) for key, value in dict(payload.get("headers") or {}).items()},
+        headers={str(key): str(value) for key, value in headers.items()},
         body=payload.get("body"),
     )

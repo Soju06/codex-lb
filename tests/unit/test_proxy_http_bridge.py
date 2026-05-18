@@ -3528,7 +3528,7 @@ async def test_stream_via_http_bridge_does_not_rebind_after_downstream_visible(
     assert chunks[0] == 'data: {"type":"response.output_text.delta","delta":"already visible"}\n\n'
     terminal = proxy_service.parse_sse_data_json(chunks[1])
     assert terminal["type"] == "response.failed"
-    assert terminal["response"]["error"]["code"] == "previous_response_not_found"
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

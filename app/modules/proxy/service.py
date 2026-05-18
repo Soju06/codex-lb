@@ -815,29 +815,91 @@ class ProxyService:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
-        session_or_forward = await self._get_or_create_http_bridge_session(
-            bridge_session_key,
-            headers=dict(headers),
-            affinity=affinity,
-            api_key=api_key,
-            request_model=effective_payload.model,
-            idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+        try:
+            session_or_forward = await self._get_or_create_http_bridge_session(
+                bridge_session_key,
+                headers=dict(headers),
                 affinity=affinity,
-                idle_ttl_seconds=idle_ttl_seconds,
-                codex_idle_ttl_seconds=codex_idle_ttl_seconds,
-                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
-            ),
-            max_sessions=max_sessions,
-            previous_response_id=request_state.previous_response_id,
-            gateway_safe_mode=runtime_config.gateway_safe_mode,
-            allow_forward_to_owner=True,
-            forwarded_request=forwarded_request,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            durable_lookup=durable_lookup,
-            request_stage=request_state.request_stage,
-            preferred_account_id=request_state.preferred_account_id,
-        )
+                api_key=api_key,
+                request_model=effective_payload.model,
+                idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                    affinity=affinity,
+                    idle_ttl_seconds=idle_ttl_seconds,
+                    codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                    prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                ),
+                max_sessions=max_sessions,
+                previous_response_id=request_state.previous_response_id,
+                gateway_safe_mode=runtime_config.gateway_safe_mode,
+                allow_forward_to_owner=True,
+                forwarded_request=forwarded_request,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                durable_lookup=durable_lookup,
+                request_stage=request_state.request_stage,
+                preferred_account_id=request_state.preferred_account_id,
+            )
+        except ProxyResponseError as exc:
+            if not (
+                _http_bridge_is_previous_response_owner_unavailable(exc)
+                and proxy_injected_previous_response_id
+                and fresh_upstream_request_text is not None
+                and durable_full_resend_anchor_count is not None
+                and durable_full_resend_anchor_fingerprint is not None
+            ):
+                raise
+            _log_http_bridge_event(
+                "owner_unavailable_fresh_resend",
+                bridge_session_key,
+                account_id=request_state.preferred_account_id,
+                model=payload.model,
+                detail="outcome=fresh_full_resend_without_anchor",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+            )
+            request_state, text_data = self._prepare_http_bridge_request(
+                payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
+            if downstream_turn_state is not None:
+                request_state.session_id = _normalize_session_id(downstream_turn_state)
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=payload,
+                durable_lookup=None,
+            )
+            request_state.preferred_account_id = rewritten_file_account_id
+            if request_state.preferred_account_id is None:
+                request_state.preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
+            durable_full_resend_anchor_count = None
+            durable_full_resend_anchor_fingerprint = None
+            session_or_forward = await self._get_or_create_http_bridge_session(
+                bridge_session_key,
+                headers=dict(headers),
+                affinity=affinity,
+                api_key=api_key,
+                request_model=payload.model,
+                idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                    affinity=affinity,
+                    idle_ttl_seconds=idle_ttl_seconds,
+                    codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                    prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                ),
+                max_sessions=max_sessions,
+                previous_response_id=None,
+                gateway_safe_mode=runtime_config.gateway_safe_mode,
+                allow_forward_to_owner=True,
+                forwarded_request=forwarded_request,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                durable_lookup=None,
+                request_stage=request_state.request_stage,
+                preferred_account_id=request_state.preferred_account_id,
+            )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
             forwarded_any = False
             try:
@@ -13553,6 +13615,21 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param, message=message)
+
+
+def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:
+    if exc.status_code != 502:
+        return False
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    return (
+        error.get("code") == "upstream_unavailable"
+        and error.get("message") == "Previous response owner account is unavailable; retry later."
+    )
 
 
 def _http_bridge_is_context_overflow_error(exc: ProxyResponseError) -> bool:

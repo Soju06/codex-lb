@@ -7520,6 +7520,143 @@ async def test_create_http_bridge_session_fails_closed_when_previous_response_ow
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    historical_input: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {"type": "function_call_output", "call_id": "call_old", "output": "old output"},
+    ]
+    new_input: proxy_service.JsonValue = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "next question"}],
+    }
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [*historical_input, new_input],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-owner-unavailable",
+        canonical_kind="session_header",
+        canonical_key="sid-owner-unavailable",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="sid-owner-unavailable",
+        latest_response_id="resp_completed_anchor",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+    owner_unavailable = ProxyResponseError(
+        502,
+        proxy_service.openai_error(
+            "upstream_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+            error_type="server_error",
+        ),
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-owner-unavailable", None),
+        headers={"session_id": "sid-owner-unavailable"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-owner-unavailable",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-fallback", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    get_or_create = AsyncMock(side_effect=[owner_unavailable, session])
+    captured_request_states: list[proxy_service._WebSocketRequestState] = []
+    captured_text_data: list[str] = []
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+    ):
+        del queue_limit, propagate_http_errors, downstream_turn_state
+        captured_request_states.append(request_state)
+        captured_text_data.append(text_data)
+        yield "data: {\"type\":\"response.completed\"}\n\n"
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sid-owner-unavailable"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ["data: {\"type\":\"response.completed\"}\n\n"]
+    assert get_or_create.await_count == 2
+    first_call = get_or_create.await_args_list[0]
+    second_call = get_or_create.await_args_list[1]
+    assert first_call.kwargs["previous_response_id"] == "resp_completed_anchor"
+    assert first_call.kwargs["preferred_account_id"] == "acc-owner"
+    assert second_call.kwargs["previous_response_id"] is None
+    assert second_call.kwargs["preferred_account_id"] is None
+    assert second_call.kwargs["durable_lookup"] is None
+    assert captured_request_states[0].previous_response_id is None
+    replay_payload = json.loads(captured_text_data[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == [*historical_input, new_input]
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_prompt_cache_mismatch_stays_local_when_gateway_safe_mode_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

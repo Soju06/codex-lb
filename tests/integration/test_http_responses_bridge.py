@@ -80,7 +80,7 @@ async def _collect_sse_events(
     async with async_client.stream("POST", path, json=json_body, headers=headers) as response:
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines]
+    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
 
 
 async def _collect_sse_events_with_headers(
@@ -94,7 +94,7 @@ async def _collect_sse_events_with_headers(
         assert response.status_code == 200
         response_headers = dict(response.headers)
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines], response_headers
+    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"], response_headers
 
 
 def _assert_created_text_delta_completed(events: list[dict]) -> None:

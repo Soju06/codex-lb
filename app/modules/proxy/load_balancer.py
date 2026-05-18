@@ -107,6 +107,7 @@ class _SelectionInputs:
     error_message: str | None = None
     error_code: str | None = None
     ignore_standard_quota_status: bool = False
+    persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
 
 
@@ -246,10 +247,14 @@ class LoadBalancer:
                 pre_persist_cache_generation = self._selection_inputs_cache.generation
 
                 async with self._repo_factory() as repos:
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
+                    stale_account_ids = (
+                        await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
+                        if selection_inputs.persist_standard_quota_status
+                        else set()
                     )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
@@ -371,10 +376,14 @@ class LoadBalancer:
                     else:
                         error_message = result.error_message
 
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
+                    stale_account_ids = (
+                        await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
+                        if selection_inputs.persist_standard_quota_status
+                        else set()
                     )
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
@@ -546,6 +555,7 @@ class LoadBalancer:
                 },
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_status=ignore_standard_quota_status,
+                persist_standard_quota_status=not ignore_standard_quota_status,
                 routing_policy_override=routing_policy_override,
             )
             await self._selection_inputs_cache.set(
@@ -1331,6 +1341,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
         ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+        persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
         routing_policy_override=selection_inputs.routing_policy_override,
     )
 

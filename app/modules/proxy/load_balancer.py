@@ -334,17 +334,17 @@ class LoadBalancer:
                             len(states),
                         )
                         _record_account_cap_rejection(lease_kind)
-                else:
-                    selection_error_code = None
-                    result = _select_account_preferring_budget_safe(
-                        selection_states,
-                        prefer_earlier_reset=prefer_earlier_reset_accounts,
-                        routing_strategy=routing_strategy,
-                        relative_availability_power=relative_availability_power,
-                        relative_availability_top_k=relative_availability_top_k,
-                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-                        budget_threshold_pct=budget_threshold_pct,
-                    )
+                    else:
+                        selection_error_code = None
+                        result = _select_account_preferring_budget_safe(
+                            selection_states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            budget_threshold_pct=budget_threshold_pct,
+                        )
 
                     selected_account_map = account_map
                     selected_states = []
@@ -919,7 +919,6 @@ class LoadBalancer:
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
-                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -998,6 +997,7 @@ class LoadBalancer:
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
                             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            apply_secondary_budget_threshold=True,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
@@ -1079,6 +1079,7 @@ class LoadBalancer:
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=True,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1814,11 +1815,23 @@ def _select_account_preferring_budget_safe(
     relative_availability_top_k: int = 5,
     budget_threshold_pct: float,
     secondary_budget_threshold_pct: float = 100.0,
+    apply_secondary_budget_threshold: bool = False,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
-    preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
+    state_budget_threshold = (
+        (
+            lambda state: _state_above_sticky_budget_threshold(
+                state,
+                budget_threshold_pct,
+                secondary_budget_threshold_pct,
+            )
+        )
+        if apply_secondary_budget_threshold
+        else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
+    )
+    preferred_states = [state for state in state_list if not state_budget_threshold(state)]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
         preferred = select_account(

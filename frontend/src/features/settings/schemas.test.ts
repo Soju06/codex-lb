@@ -52,6 +52,7 @@ describe("DashboardSettingsSchema", () => {
       preferEarlierResetAccounts: false,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
+      stickyReallocationBudgetThresholdPct: 95,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
     });
@@ -65,6 +66,27 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupPrompt).toBe("Say OK.");
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
+    expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
+    expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
+  });
+
+  it("falls back to the legacy sticky threshold during mixed-version rollout", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
+    expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
   });
 });
 

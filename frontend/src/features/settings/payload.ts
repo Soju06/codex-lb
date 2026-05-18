@@ -4,7 +4,7 @@ export function buildSettingsUpdateRequest(
   settings: DashboardSettings,
   patch: Partial<SettingsUpdateRequest>,
 ): SettingsUpdateRequest {
-  return {
+  const payload: SettingsUpdateRequest = {
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
@@ -27,4 +27,17 @@ export function buildSettingsUpdateRequest(
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     ...patch,
   };
+  if (
+    settings.__stickyReallocationPrimaryBudgetThresholdPctProvided === false &&
+    !("stickyReallocationPrimaryBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationPrimaryBudgetThresholdPct;
+  }
+  if (
+    settings.__stickyReallocationSecondaryBudgetThresholdPctProvided === false &&
+    !("stickyReallocationSecondaryBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationSecondaryBudgetThresholdPct;
+  }
+  return payload;
 }

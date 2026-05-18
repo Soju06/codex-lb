@@ -17,7 +17,9 @@ from app.core.balancer import (
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
+    LoadBalancer,
     RuntimeState,
+    SelectionInputs,
     _additional_quota_applies_to_plan,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
@@ -1272,6 +1274,52 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert result.latest_secondary == {}
 
 
+@pytest.mark.asyncio
+async def test_non_sticky_selection_keeps_secondary_threshold_out_of_global_budget_gate(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    secondary_over = _make_test_account("secondary-over")
+    secondary_safe = _make_test_account("secondary-safe")
+    mock_repos = MagicMock()
+    mock_repos.accounts.update_status_if_current = AsyncMock(return_value=True)
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+
+    async def load_selection_inputs(**kwargs):  # noqa: ARG001
+        return SelectionInputs(
+            accounts=[secondary_over, secondary_safe],
+            latest_primary={},
+            latest_secondary={},
+            runtime_accounts=None,
+        )
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_selection_inputs)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer._build_states",
+        lambda **_: (
+            [
+                AccountState("secondary-over", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+                AccountState("secondary-safe", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=10.0),
+            ],
+            {
+                secondary_over.id: secondary_over,
+                secondary_safe.id: secondary_safe,
+            },
+        ),
+    )
+
+    result = await balancer.select_account(
+        sticky_key=None,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+        routing_strategy="round_robin",
+    )
+
+    assert result.account is not None
+    assert result.account.id == "secondary-over"
+
+
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():
     random.seed(11)
     n = 2000
@@ -1569,7 +1617,7 @@ def test_all_primary_pressured_fallback_skips_unavailable_account():
     result = _select_account_preferring_budget_safe(
         states,
         prefer_earlier_reset=False,
-        routing_strategy="usage_weighted",
+        routing_strategy="round_robin",
         budget_threshold_pct=95.0,
     )
 
@@ -1592,6 +1640,45 @@ def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe()
 
     assert result.account is not None
     assert result.account.account_id == "secondary-low"
+
+
+def test_budget_safe_selection_filters_secondary_pressure_with_split_threshold():
+    states = [
+        AccountState("secondary-over", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+        AccountState("secondary-safe", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=10.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="round_robin",
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+        apply_secondary_budget_threshold=True,
+        deterministic_probe=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "secondary-safe"
+
+
+def test_budget_safe_selection_ignores_secondary_pressure_for_global_gate():
+    states = [
+        AccountState("secondary-over", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+        AccountState("secondary-safe", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=10.0),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="round_robin",
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+        deterministic_probe=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "secondary-over"
 
 
 def test_all_primary_pressured_fallback_prefers_healthy_over_draining():

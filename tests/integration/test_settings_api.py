@@ -47,7 +47,7 @@ async def test_settings_api_get_and_update(async_client):
             "dashboardSessionTtlSeconds": 31536000,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
             "httpResponsesSessionBridgeGatewaySafeMode": True,
-            "stickyReallocationBudgetThresholdPct": 90.0,
+            "stickyReallocationBudgetThresholdPct": 85.0,
             "stickyReallocationPrimaryBudgetThresholdPct": 85.0,
             "stickyReallocationSecondaryBudgetThresholdPct": 98.0,
             "importWithoutOverwrite": False,
@@ -152,7 +152,7 @@ async def test_settings_primary_sticky_threshold_updates_legacy_threshold(async_
 
 
 @pytest.mark.asyncio
-async def test_settings_full_put_honors_changed_legacy_sticky_threshold(async_client):
+async def test_settings_full_put_rejects_conflicting_sticky_threshold_aliases(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     payload = response.json()
@@ -160,8 +160,5 @@ async def test_settings_full_put_honors_changed_legacy_sticky_threshold(async_cl
 
     response = await async_client.put("/api/settings", json=payload)
 
-    assert response.status_code == 200
-    updated = response.json()
-    assert updated["stickyReallocationBudgetThresholdPct"] == 86.0
-    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 86.0
-    assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "conflicting_sticky_reallocation_thresholds"

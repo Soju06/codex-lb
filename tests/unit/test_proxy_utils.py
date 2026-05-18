@@ -1443,6 +1443,10 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
     selected_account = _make_account("acc_codex_balanced")
     select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sticky_reallocation_primary_budget_threshold_pct = 81.0
+    settings.sticky_reallocation_secondary_budget_threshold_pct = 82.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
     result = await service._select_codex_control_account_without_budget(
         affinity=proxy_service._AffinityPolicy(
@@ -1461,7 +1465,8 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         reallocate_sticky=False,
         sticky_max_age_seconds=123,
         account_ids=None,
-        budget_threshold_pct=95.0,
+        budget_threshold_pct=81.0,
+        secondary_budget_threshold_pct=82.0,
     )
 
 

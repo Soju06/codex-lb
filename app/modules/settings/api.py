@@ -117,20 +117,17 @@ async def update_settings(
     try:
         legacy_threshold_provided = payload.sticky_reallocation_budget_threshold_pct is not None
         primary_threshold_provided = payload.sticky_reallocation_primary_budget_threshold_pct is not None
-        legacy_threshold_changed = (
-            legacy_threshold_provided
-            and payload.sticky_reallocation_budget_threshold_pct != current.sticky_reallocation_budget_threshold_pct
-        )
-        primary_threshold_changed = (
-            primary_threshold_provided
-            and payload.sticky_reallocation_primary_budget_threshold_pct
-            != current.sticky_reallocation_primary_budget_threshold_pct
-        )
         if legacy_threshold_provided and primary_threshold_provided:
-            if legacy_threshold_changed and not primary_threshold_changed:
-                resolved_primary_threshold = payload.sticky_reallocation_budget_threshold_pct
-            else:
-                resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
+            if (
+                payload.sticky_reallocation_budget_threshold_pct
+                != payload.sticky_reallocation_primary_budget_threshold_pct
+            ):
+                raise DashboardBadRequestError(
+                    "stickyReallocationBudgetThresholdPct and "
+                    "stickyReallocationPrimaryBudgetThresholdPct must match when both are provided",
+                    code="conflicting_sticky_reallocation_thresholds",
+                )
+            resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
         elif primary_threshold_provided:
             resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
         elif legacy_threshold_provided:

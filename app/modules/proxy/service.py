@@ -205,6 +205,10 @@ _TaskResultT = TypeVar("_TaskResultT")
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
+# Keep the first HTTP bridge liveness frame behind the API layer's startup
+# error probe window. If a keepalive becomes the first yielded chunk, the HTTP
+# status is committed as 200 and startup ProxyResponseError handling is masked.
+_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 
 
 async def _await_cancelled_task(
@@ -1346,12 +1350,17 @@ class ProxyService:
             event_queue = request_state.event_queue
             assert event_queue is not None
             yielded_any = False
+            keepalive_sent = False
             while True:
                 keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
+                    wait_timeout = keepalive_interval
+                    if not yielded_any and not keepalive_sent:
+                        wait_timeout = max(wait_timeout, _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS)
                     try:
-                        event_block = await asyncio.wait_for(event_queue.get(), timeout=keepalive_interval)
+                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
+                        keepalive_sent = True
                         if request_state.response_id:
                             yield format_sse_event(
                                 cast(

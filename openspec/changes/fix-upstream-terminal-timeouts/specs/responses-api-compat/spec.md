@@ -1,13 +1,20 @@
 ## ADDED Requirements
 
 ### Requirement: Equal idle and request-budget stream deadlines preserve idle classification
-When the configured upstream stream idle timeout is equal to the proxy request budget, and a streaming Responses request reaches that shared deadline, the system MUST classify the timeout as `stream_idle_timeout` even if scheduler jitter observes the deadline after it has elapsed. When the request budget is strictly shorter than the stream idle timeout, the system MUST continue to classify the timeout as `upstream_request_timeout`.
+When the configured upstream stream idle timeout is equal to the proxy request budget, and an already-started streaming Responses body reaches that shared deadline, the system MUST classify the timeout as `stream_idle_timeout` even if scheduler jitter observes the deadline after it has elapsed. When the request budget is strictly shorter than the stream idle timeout, or when the generic total timeout fires before an upstream response has started, the system MUST continue to classify the timeout as `upstream_request_timeout`.
 
-#### Scenario: Direct HTTP stream deadline tie is classified as idle
+#### Scenario: Direct HTTP stream body deadline tie is classified as idle
 - **GIVEN** `stream_idle_timeout_seconds` equals `proxy_request_budget_seconds`
-- **WHEN** a direct HTTP/SSE Responses stream times out just after that shared deadline
+- **AND** the upstream HTTP response headers have been received
+- **WHEN** reading the response body times out just after that shared deadline
 - **THEN** the downstream failure event uses `error.code = "stream_idle_timeout"`
 - **AND** the error message is `"Upstream stream idle timeout"`
+
+#### Scenario: Pre-response total timeout remains request-timeout classified
+- **GIVEN** `stream_idle_timeout_seconds` equals `proxy_request_budget_seconds`
+- **WHEN** the generic request total timeout fires before an upstream response has started
+- **THEN** the downstream failure event uses `error.code = "upstream_request_timeout"`
+- **AND** the error message is `"Proxy request budget exhausted"`
 
 #### Scenario: Shorter request budget remains request-timeout classified
 - **GIVEN** `proxy_request_budget_seconds` is strictly shorter than `stream_idle_timeout_seconds`
@@ -34,7 +41,7 @@ When an upstream websocket or HTTP bridge session has multiple pending Responses
 - **AND** the younger request remains pending
 
 ### Requirement: HTTP bridge streams emit downstream liveness frames while pending
-When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the liveness frame MUST be an SSE comment block. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data.
+When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the liveness frame MUST be an SSE comment block. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data.
 
 #### Scenario: HTTP bridge emits response in-progress keepalive after response id is known
 - **GIVEN** an HTTP bridge request has a known response id
@@ -47,6 +54,13 @@ When an HTTP bridge Responses request is waiting for upstream queue events, the 
 - **WHEN** no upstream event arrives before the SSE keepalive interval elapses
 - **THEN** the downstream stream emits an SSE comment keepalive block
 - **AND** the request remains pending
+
+#### Scenario: First HTTP bridge keepalive is delayed past startup probe
+- **GIVEN** an HTTP bridge request is waiting for upstream queue events
+- **AND** `sse_keepalive_interval_seconds` is shorter than the bridge startup-error probe window
+- **WHEN** no upstream event arrives before the configured keepalive interval
+- **THEN** the first generated keepalive is not emitted until the startup-error probe window has elapsed
+- **AND** a startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response before any keepalive commits the stream
 
 #### Scenario: Public Responses normalizer preserves comment keepalive blocks
 - **WHEN** the public `/v1/responses` stream normalizer receives an SSE comment keepalive block before a terminal event

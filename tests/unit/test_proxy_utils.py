@@ -1271,6 +1271,43 @@ class _TimeoutSseSession:
         raise asyncio.TimeoutError
 
 
+class _TimeoutChunkIterator:
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
+        raise asyncio.TimeoutError
+
+
+class _TimeoutContent(proxy_module.SSEContentProtocol):
+    def iter_chunked(self, size: int) -> _TimeoutChunkIterator:
+        del size
+        return _TimeoutChunkIterator()
+
+
+class _TimeoutAfterHeadersSseResponse:
+    status = 200
+    content = _TimeoutContent()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _TimeoutAfterHeadersSseSession:
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        return _TimeoutAfterHeadersSseResponse()
+
+
 class _TimeoutCompactSession:
     def post(
         self,
@@ -1971,7 +2008,7 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties(monkeypatch):
+async def test_stream_responses_keeps_pre_response_total_timeout_as_request_timeout_when_deadline_ties(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -2001,6 +2038,45 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties(mo
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+        )
+    ]
+
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert event["response"]["error"]["message"] == "Proxy request budget exhausted"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_after_headers(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 600.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 600.0
+        upstream_stream_transport = "http"
+
+    monotonic_values = iter([100.0, 100.0, 100.0, 700.01])
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module.time, "monotonic", lambda: next(monotonic_values, 700.01))
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _TimeoutAfterHeadersSseSession()),
         )
     ]
 
@@ -12771,6 +12847,70 @@ async def test_http_bridge_session_events_emit_comment_keepalive_before_response
         await events.aclose()
 
     assert keepalive == ": keepalive\n\n"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_session_events_delays_first_keepalive_until_startup_probe_window(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sse_keepalive_interval_seconds = 0.01
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_keepalive_delayed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_bridge_keepalive_delayed",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_keepalive_delayed"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    first_event = asyncio.create_task(events.__anext__())
+    try:
+        await asyncio.sleep(0.02)
+        assert first_event.done() is False
+        keepalive = await asyncio.wait_for(first_event, timeout=0.2)
+    finally:
+        await events.aclose()
+
+    assert proxy_service.parse_sse_data_json(keepalive) == {
+        "type": "response.in_progress",
+        "response": {
+            "id": "resp_bridge_keepalive_delayed",
+            "status": "in_progress",
+        },
+    }
 
 
 @pytest.mark.asyncio

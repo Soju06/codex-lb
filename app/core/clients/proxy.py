@@ -2196,7 +2196,8 @@ async def stream_responses(
             return
         elapsed_seconds = max(0.0, time.monotonic() - started_at)
         if (
-            effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
+            status_code is not None
+            and effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
             and elapsed_seconds >= effective_idle_timeout
         ):
             error_code = "stream_idle_timeout"

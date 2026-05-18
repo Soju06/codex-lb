@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -6301,6 +6302,17 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
     send_text.assert_awaited_once_with(request_state.request_text)
 
     service._cancel_request_state_api_key_reservation_heartbeat(request_state)
+
+
+def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_release() -> None:
+    source = inspect.getsource(proxy_service.ProxyService.proxy_responses_websocket)
+    start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
+    branch = source[start_index : source.index("await self._emit_websocket_terminal_error", start_index)]
+
+    assert "self._cancel_request_state_api_key_reservation_heartbeat(request_state)" in branch
+    assert branch.index("_cancel_request_state_api_key_reservation_heartbeat") < branch.index(
+        "_release_websocket_reservation"
+    )
 
 
 @pytest.mark.asyncio

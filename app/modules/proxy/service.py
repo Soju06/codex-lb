@@ -3358,6 +3358,7 @@ class ProxyService:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
+                        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         await self._release_websocket_reservation(request_state.api_key_reservation)
                         await self._write_websocket_connect_failure(
                             account_id=account.id if account else None,

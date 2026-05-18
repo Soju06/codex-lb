@@ -7223,7 +7223,9 @@ async def test_process_http_bridge_upstream_text_marks_text_delta_downstream_vis
     assert event_queue is not None
     forwarded = await asyncio.wait_for(event_queue.get(), timeout=1.0)
     assert forwarded is not None
-    assert proxy_service.parse_sse_data_json(forwarded)["delta"] == "I started"
+    forwarded_payload = proxy_service.parse_sse_data_json(forwarded)
+    assert forwarded_payload is not None
+    assert forwarded_payload["delta"] == "I started"
 
 
 @pytest.mark.asyncio

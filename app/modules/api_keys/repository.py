@@ -628,21 +628,44 @@ class ApiKeysRepository:
             while True:
                 async with sqlite_writer_section():
                     result = await self._session.execute(
-                        select(ApiKeyUsageReservation)
-                        .options(selectinload(ApiKeyUsageReservation.items))
+                        select(ApiKeyUsageReservation.id)
                         .where(ApiKeyUsageReservation.status == "reserved")
                         .where(ApiKeyUsageReservation.updated_at < cutoff)
                         .order_by(ApiKeyUsageReservation.updated_at.asc())
                         .limit(batch_size)
                     )
-                    rows = list(result.scalars().unique().all())
-                    if not rows:
+                    reservation_ids = list(result.scalars().all())
+                    if not reservation_ids:
                         break
 
-                    for row in rows:
+                    item_result = await self._session.execute(
+                        select(
+                            ApiKeyUsageReservationItem.reservation_id,
+                            ApiKeyUsageReservationItem.limit_id,
+                            ApiKeyUsageReservationItem.limit_type,
+                            ApiKeyUsageReservationItem.reserved_delta,
+                            ApiKeyUsageReservationItem.expected_reset_at,
+                            ApiKeyUsageReservationItem.actual_delta,
+                        ).where(ApiKeyUsageReservationItem.reservation_id.in_(reservation_ids))
+                    )
+                    items_by_reservation_id: dict[str, list[UsageReservationItemData]] = {
+                        reservation_id: [] for reservation_id in reservation_ids
+                    }
+                    for item in item_result.all():
+                        items_by_reservation_id[item.reservation_id].append(
+                            UsageReservationItemData(
+                                limit_id=item.limit_id,
+                                limit_type=LimitType(item.limit_type),
+                                reserved_delta=item.reserved_delta,
+                                expected_reset_at=item.expected_reset_at,
+                                actual_delta=item.actual_delta,
+                            )
+                        )
+
+                    for reservation_id in reservation_ids:
                         claimed = await self._session.execute(
                             update(ApiKeyUsageReservation)
-                            .where(ApiKeyUsageReservation.id == row.id)
+                            .where(ApiKeyUsageReservation.id == reservation_id)
                             .where(ApiKeyUsageReservation.status == "reserved")
                             .where(ApiKeyUsageReservation.updated_at < cutoff)
                             .values(
@@ -657,17 +680,17 @@ class ApiKeysRepository:
                         if claimed.scalar_one_or_none() is None:
                             continue
 
-                        for item in row.items:
+                        for item in items_by_reservation_id[reservation_id]:
                             await self.adjust_reserved_usage(
                                 item.limit_id,
                                 delta=-item.reserved_delta,
                                 expected_reset_at=item.expected_reset_at,
                             )
                             await self.upsert_reservation_item_actual(
-                                row.id,
+                                reservation_id,
                                 item=UsageReservationItemData(
                                     limit_id=item.limit_id,
-                                    limit_type=LimitType(item.limit_type),
+                                    limit_type=item.limit_type,
                                     reserved_delta=item.reserved_delta,
                                     expected_reset_at=item.expected_reset_at,
                                     actual_delta=item.actual_delta,

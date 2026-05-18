@@ -2198,6 +2198,7 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         repo = ApiKeysRepository(session)
         released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
         assert released_count == 3
+        assert len(session.identity_map) == 0
 
     assert writer_section_entries == 4
 

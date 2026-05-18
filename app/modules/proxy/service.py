@@ -1615,8 +1615,10 @@ class ProxyService:
                     sessions_to_close.append(existing)
 
                 inflight_future = self._http_bridge_inflight_sessions.get(key)
-                if previous_response_id is not None and inflight_future is None and (
-                    existing is None or existing.closed or existing.account.status != AccountStatus.ACTIVE
+                if (
+                    previous_response_id is not None
+                    and inflight_future is None
+                    and (existing is None or existing.closed or existing.account.status != AccountStatus.ACTIVE)
                 ):
                     previous_alias_key = _http_bridge_previous_response_alias_key(previous_response_id, api_key_id)
                     previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)

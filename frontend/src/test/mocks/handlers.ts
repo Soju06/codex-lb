@@ -947,6 +947,27 @@ export const handlers = [
     return HttpResponse.json(created);
   }),
 
+	http.post("/api/dashboard-auth/password/login", () => {
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			authenticated: !state.authSession.totpRequiredOnLogin,
+			role: "admin",
+			permissions: ["read", "write"],
+		});
+		return HttpResponse.json(state.authSession);
+	}),
+
+	http.post("/api/dashboard-auth/guest/login", () => {
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			authenticated: true,
+			role: "guest",
+			permissions: ["read"],
+			guestAccessEnabled: true,
+		});
+		return HttpResponse.json(state.authSession);
+	}),
+
   http.delete("/api/firewall/ips/:ipAddress", ({ params }) => {
     const ipAddress = decodeURIComponent(String(params.ipAddress));
     const exists = state.firewallEntries.some(
@@ -967,6 +988,40 @@ export const handlers = [
   http.get("/api/quota-planner/settings", () =>
     HttpResponse.json(state.quotaPlannerSettings),
   ),
+
+	http.post("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: true,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: true,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.delete("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: false,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: false,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.delete("/api/dashboard-auth/password", () => {
+		state.authSession = createDashboardAuthSession({
+			authenticated: false,
+			passwordRequired: false,
+			totpRequiredOnLogin: false,
+			totpConfigured: false,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
 
   http.put("/api/quota-planner/settings", async ({ request }) => {
     const payload = await parseJsonBody(

@@ -1,8 +1,10 @@
 import { Users } from "lucide-react";
+import { useMemo } from "react";
 
 import { EmptyState } from "@/components/empty-state";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 
 const ACCOUNT_CARD_VISIBLE_ROWS = 2;
 // Account cards can grow when the optional email row is rendered.
@@ -11,10 +13,13 @@ const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
+  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
+
   if (accounts.length === 0) {
     return (
       <EmptyState
@@ -37,7 +42,8 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
         <div key={account.accountId} className="animate-fade-in-up" style={{ animationDelay: `${index * 75}ms` }}>
           <AccountCard
             account={account}
-            showAccountId={account.isEmailDuplicate === true}
+            showAccountId={duplicateAccountIds.has(account.accountId)}
+            readOnly={readOnly}
             onAction={onAction}
           />
         </div>

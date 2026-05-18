@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.audit.service import AuditService
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
@@ -132,6 +136,8 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
         weekly_pace_working_days=settings.weekly_pace_working_days,
+        guest_access_enabled=settings.guest_access_enabled,
+        guest_password_configured=settings.guest_password_configured,
     )
 
 
@@ -393,6 +399,7 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
 async def update_settings(
     request: Request,
     payload: DashboardSettingsUpdateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
@@ -546,6 +553,11 @@ async def update_settings(
                     if payload.weekly_pace_working_days is not None
                     else current.weekly_pace_working_days
                 ),
+                guest_access_enabled=(
+                    payload.guest_access_enabled
+                    if payload.guest_access_enabled is not None
+                    else current.guest_access_enabled
+                ),
             )
         )
     except ValueError as exc:
@@ -584,6 +596,8 @@ async def update_settings(
             "limit_warmup_cooldown_seconds",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
+            "weekly_pace_working_days",
+            "guest_access_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

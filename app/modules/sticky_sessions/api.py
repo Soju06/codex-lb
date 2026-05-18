@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Query
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.exceptions import DashboardNotFoundError
 from app.db.models import StickySessionKind
 from app.dependencies import StickySessionsContext, get_sticky_sessions_context
@@ -73,6 +77,7 @@ async def list_sticky_sessions(
 @router.post("/purge", response_model=StickySessionsPurgeResponse)
 async def purge_sticky_sessions(
     payload: StickySessionsPurgeRequest = Body(default=StickySessionsPurgeRequest()),
+    _write_access=Depends(require_dashboard_write_access),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsPurgeResponse:
     deleted_count = await context.service.purge_entries()
@@ -82,6 +87,7 @@ async def purge_sticky_sessions(
 @router.post("/delete", response_model=StickySessionsDeleteResponse)
 async def delete_sticky_sessions(
     payload: StickySessionsDeleteRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsDeleteResponse:
     result = await context.service.delete_entries([(entry.key, entry.kind) for entry in payload.sessions])
@@ -97,6 +103,7 @@ async def delete_sticky_sessions(
 @router.post("/delete-filtered", response_model=StickySessionsDeleteFilteredResponse)
 async def delete_filtered_sticky_sessions(
     payload: StickySessionsDeleteFilteredRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsDeleteFilteredResponse:
     deleted_count = await context.service.delete_filtered_entries(
@@ -111,6 +118,7 @@ async def delete_filtered_sticky_sessions(
 async def delete_sticky_session(
     kind: StickySessionKind,
     key: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionDeleteResponse:
     deleted = await context.service.delete_entry(key, kind=kind)

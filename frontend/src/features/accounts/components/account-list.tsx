@@ -33,6 +33,7 @@ export type AccountListProps = {
   onOpenOauth: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
+  readOnly?: boolean;
 };
 
 export function AccountList({
@@ -43,6 +44,7 @@ export function AccountList({
   onOpenOauth,
   sortMode,
   onSortModeChange,
+  readOnly = false,
 }: AccountListProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -134,6 +136,7 @@ export function AccountList({
           type="button"
           size="sm"
           className="gap-1.5"
+          disabled={readOnly}
           onClick={() => setChooserOpen(true)}
         >
           <Plus className="h-3.5 w-3.5" />

@@ -16,6 +16,7 @@ import { RecentRequestsTable } from "@/features/dashboard/components/recent-requ
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
@@ -40,6 +41,7 @@ export function DashboardPage() {
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
+  const canWrite = useAuthStore((state) => state.canWrite);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
@@ -75,7 +77,9 @@ export function DashboardPage() {
           navigate(`/accounts?selected=${account.accountId}`);
           break;
         case "resume":
-          void resumeMutation.mutateAsync(account.accountId);
+          if (canWrite) {
+            void resumeMutation.mutateAsync(account.accountId);
+          }
           break;
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
@@ -88,7 +92,7 @@ export function DashboardPage() {
           break;
       }
     },
-    [limitWarmupMutation, navigate, resumeMutation],
+    [canWrite, limitWarmupMutation, navigate, resumeMutation],
   );
 
   const overview = dashboardQuery.data;
@@ -231,9 +235,9 @@ export function DashboardPage() {
               <AccountViewModeToggle value={accountViewMode} onChange={setAccountViewMode} />
             </div>
             {accountViewMode === "list" ? (
-              <AccountList accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+              <AccountList accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
             ) : (
-              <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+              <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
             )}
           </section>
 

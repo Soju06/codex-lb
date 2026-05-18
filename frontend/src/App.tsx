@@ -16,7 +16,11 @@ import { useTimeFormatStore } from "@/hooks/use-time-format";
 function AppLayout() {
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
+  const role = useAuthStore((state) => state.role);
+  const guestPasswordRequired = useAuthStore((state) => state.guestPasswordRequired);
+  const startAdminLogin = useAuthStore((state) => state.startAdminLogin);
   const timeFormat = useTimeFormatStore((state) => state.timeFormat);
+  const isGuest = role === "guest";
 
   return (
     <div className="flex min-h-screen flex-col bg-background pb-10" data-time-format={timeFormat}>
@@ -24,7 +28,9 @@ function AppLayout() {
         onLogout={() => {
           void logout();
         }}
-        showLogout={passwordRequired}
+        onAdminLogin={startAdminLogin}
+        showAdminLogin={isGuest && passwordRequired}
+        showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
       />
       <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
         <Outlet />

@@ -827,7 +827,15 @@ class ProxyService:
                 return
             except ProxyResponseError as exc:
                 if forwarded_any:
-                    raise
+                    yield _partial_output_proxy_error_event_block(
+                        exc,
+                        response_id=request_state.response_id or request_id,
+                        previous_response_id=request_state.previous_response_id,
+                        preferred_account_id=request_state.preferred_account_id,
+                        default_code="bridge_owner_unreachable",
+                        default_message="HTTP bridge owner request failed",
+                    )
+                    return
                 should_attempt_previous_response_recovery = (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
@@ -1095,9 +1103,21 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
         )
         try:
+            yielded_any = False
             async for event_block in session_events:
                 yield event_block
+                yielded_any = True
         except ProxyResponseError as exc:
+            if yielded_any:
+                yield _partial_output_proxy_error_event_block(
+                    exc,
+                    response_id=request_state.response_id or request_id,
+                    previous_response_id=request_state.previous_response_id,
+                    preferred_account_id=request_state.preferred_account_id,
+                    default_code="upstream_error",
+                    default_message="Upstream error",
+                )
+                return
             is_context_overflow = _http_bridge_is_context_overflow_error(exc)
             should_rollover_after_context_overflow = _http_bridge_should_rollover_after_context_overflow(
                 exc,
@@ -1327,17 +1347,13 @@ class ProxyService:
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
                     request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
-                if (
-                    not propagate_http_errors
-                    and request_state.previous_response_id is not None
-                    and _is_previous_response_not_found_error(
-                        code=_normalize_error_code(
-                            _websocket_event_error_code(block_event_type, block_payload),
-                            _websocket_event_error_type(block_event_type, block_payload),
-                        ),
-                        param=_websocket_event_error_param(block_event_type, block_payload),
-                        message=_websocket_event_error_message(block_event_type, block_payload),
-                    )
+                if not propagate_http_errors and _is_previous_response_not_found_error(
+                    code=_normalize_error_code(
+                        _websocket_event_error_code(block_event_type, block_payload),
+                        _websocket_event_error_type(block_event_type, block_payload),
+                    ),
+                    param=_websocket_event_error_param(block_event_type, block_payload),
+                    message=_websocket_event_error_message(block_event_type, block_payload),
                 ):
                     session.upstream_control.reconnect_requested = True
                     request_state.error_http_status_override = 502
@@ -1511,6 +1527,7 @@ class ProxyService:
         )
 
         forwarded_any = False
+        forwarded_response_id: str | None = None
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -1520,6 +1537,11 @@ class ProxyService:
                 request_started_at=request_started_at,
             ):
                 forwarded_any = True
+                event_payload = parse_sse_data_json(event_block)
+                event_type = _event_type_from_payload(None, event_payload)
+                forwarded_response_id = _websocket_response_id(None, event_payload) or forwarded_response_id
+                if event_type == "response.failed" and forwarded_response_id is None:
+                    forwarded_response_id = get_request_id()
                 yield event_block
         except OwnerForwardRelayFailure as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1548,7 +1570,7 @@ class ProxyService:
                     error_type="server_error",
                 ),
             ) from exc
-        except ProxyResponseError:
+        except ProxyResponseError as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
             _log_http_bridge_event(
@@ -1561,6 +1583,17 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                terminal_response_id = forwarded_response_id or get_request_id() or "unknown"
+                yield _partial_output_proxy_error_event_block(
+                    exc,
+                    response_id=terminal_response_id,
+                    previous_response_id=payload.previous_response_id,
+                    preferred_account_id=None,
+                    default_code="bridge_owner_unreachable",
+                    default_message="HTTP bridge owner request failed",
+                )
+                return
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
@@ -1577,6 +1610,16 @@ class ProxyService:
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
             )
+            if forwarded_any:
+                terminal_response_id = forwarded_response_id or get_request_id() or "unknown"
+                yield format_sse_event(
+                    response_failed_event(
+                        "bridge_owner_unreachable",
+                        "HTTP bridge owner request failed",
+                        response_id=terminal_response_id,
+                    )
+                )
+                return
             raise ProxyResponseError(
                 503,
                 openai_error(
@@ -7296,7 +7339,23 @@ class ProxyService:
         _record_response_event(request_state, event_type)
 
         if request_state is None:
-            if is_previous_response_not_found_event or is_missing_tool_output_event:
+            if is_previous_response_not_found_event and not pending_requests:
+                upstream_control.reconnect_requested = True
+                downstream_text = json.dumps(
+                    cast(
+                        dict[str, JsonValue],
+                        response_failed_event(
+                            "stream_incomplete",
+                            "Upstream websocket closed before response.completed",
+                            error_type="server_error",
+                            response_id=get_request_id(),
+                        ),
+                    ),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                return downstream_text
+            if is_missing_tool_output_event:
                 upstream_control.suppress_downstream_event = True
             return text
 
@@ -10677,6 +10736,53 @@ def _rewrite_previous_response_stream_error(
             normalized_code,
         )
     return None
+
+
+def _partial_output_proxy_error_event_block(
+    exc: ProxyResponseError,
+    *,
+    response_id: str,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    default_code: str,
+    default_message: str,
+) -> str:
+    error = _parse_openai_error(exc.payload)
+    error_code = _normalize_error_code(
+        error.code if error else None,
+        error.type if error else None,
+    )
+    error_message = error.message if error else None
+    effective_previous_response_id = previous_response_id or _previous_response_id_from_not_found_message(
+        error_message,
+    )
+    rewritten_error = _rewrite_previous_response_stream_error(
+        previous_response_id=effective_previous_response_id,
+        preferred_account_id=preferred_account_id,
+        error_code=error_code,
+        error_type=error.type if error else None,
+        error_message=error_message,
+        error_param=error.param if error else None,
+    )
+    if rewritten_error is not None:
+        rewritten_code, rewritten_message, upstream_error_code = rewritten_error
+        if upstream_error_code is None:
+            event = response_failed_event(
+                rewritten_code,
+                rewritten_message,
+                error_type="server_error",
+                response_id=response_id,
+            )
+            return format_sse_event(event)
+    event = response_failed_event(
+        error_code or default_code,
+        error_message or default_message,
+        error_type=(error.type if error and error.type else "server_error"),
+        response_id=response_id,
+        error_param=error.param if error else None,
+    )
+    _apply_error_metadata(event["response"]["error"], error)
+    return format_sse_event(event)
 
 
 def _build_rewritten_stream_response_failed_event(

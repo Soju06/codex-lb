@@ -2759,26 +2759,98 @@ async def test_stream_via_http_bridge_does_not_rebind_after_forwarded_bytes(
     monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", fake_forward)
 
     seen: list[str] = []
-    with pytest.raises(ProxyResponseError):
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            {"x-codex-session-id": "sid-123"},
-            codex_session_affinity=True,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            propagate_http_errors=False,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=900.0,
-            max_sessions=8,
-            queue_limit=4,
-        ):
-            seen.append(chunk)
+    async for chunk in service._stream_via_http_bridge(
+        payload,
+        {"x-codex-session-id": "sid-123"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        propagate_http_errors=False,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=900.0,
+        max_sessions=8,
+        queue_limit=4,
+    ):
+        seen.append(chunk)
 
-    assert seen == ["data: first\n\n"]
+    assert len(seen) == 2
+    assert seen[0] == "data: first\n\n"
+    terminal_payload = proxy_service.parse_sse_data_json(seen[1])
+    assert isinstance(terminal_payload, dict)
+    terminal_response = terminal_payload["response"]
+    assert isinstance(terminal_response, dict)
+    terminal_error = terminal_response["error"]
+    assert isinstance(terminal_error, dict)
+    assert terminal_error["code"] == "bridge_owner_unreachable"
     assert forward_calls["count"] == 1
     service._get_or_create_http_bridge_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_masks_partial_previous_response_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hi",
+            "previous_response_id": "resp_partial_anchor",
+        }
+    )
+
+    async def fake_stream_responses(**kwargs: object):
+        del kwargs
+        yield "data: first\n\n"
+        error_payload = proxy_service.openai_error(
+            "previous_response_not_found",
+            "Previous response with id 'resp_partial_anchor' not found.",
+            error_type="invalid_request_error",
+        )
+        error_payload["error"]["param"] = "previous_response_id"
+        raise ProxyResponseError(400, error_payload)
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={"x-codex-session-id": "sid-123"},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks[0] == "data: first\n\n"
+    terminal_payload = proxy_service.parse_sse_data_json(chunks[1])
+    assert isinstance(terminal_payload, dict)
+    terminal_response = terminal_payload["response"]
+    assert isinstance(terminal_response, dict)
+    terminal_error = terminal_response["error"]
+    assert isinstance(terminal_error, dict)
+    assert terminal_payload["type"] == "response.failed"
+    assert terminal_error["code"] == "stream_incomplete"
+    assert terminal_error["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in chunks[1]
+    assert "resp_partial_anchor" not in chunks[1]
 
 
 @pytest.mark.asyncio

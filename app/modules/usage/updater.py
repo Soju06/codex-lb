@@ -284,6 +284,35 @@ class UsageUpdater:
                 continue
         return refreshed
 
+    async def force_refresh(self, account: Account) -> bool:
+        """Refresh one account regardless of cached/fresh usage rows."""
+        if account.status == AccountStatus.DEACTIVATED:
+            return False
+        if _is_usage_refresh_in_cooldown(account.id):
+            return False
+        try:
+            result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
+                account.id,
+                lambda: self._refresh_account(
+                    account,
+                    usage_account_id=account.chatgpt_account_id,
+                ),
+            )
+            await self._sync_account_from_repo(account)
+            if result.fetch_succeeded:
+                _last_successful_refresh[account.id] = utcnow()
+                _clear_usage_refresh_auth_cooldown(account.id)
+            return result.usage_written
+        except Exception as exc:
+            logger.warning(
+                "Forced usage refresh failed account_id=%s request_id=%s error=%s",
+                account.id,
+                get_request_id(),
+                exc,
+                exc_info=True,
+            )
+            return False
+
     async def _refresh_account_if_stale(
         self,
         account: Account,

@@ -61,7 +61,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         await logs_repo.add_log(
             account_id="acc_logs",
             request_id="req_logs_2",
-            model="gpt-5.1",
+            model="legacy-model",
             input_tokens=50,
             output_tokens=0,
             latency_ms=300,
@@ -87,6 +87,12 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
+    assert latest["costBreakdown"] == {
+        "inputUsd": None,
+        "cachedInputUsd": None,
+        "outputUsd": None,
+        "totalUsd": None,
+    }
     assert latest["transport"] == "websocket"
 
     older = payload[1]
@@ -94,5 +100,13 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["apiKeyId"] is None
     assert older["apiKeyName"] is None
     assert older["tokens"] == 300
+    assert older["inputTokens"] == 100
+    assert older["outputTokens"] == 200
     assert older["cachedInputTokens"] is None
+    assert older["costBreakdown"] == {
+        "inputUsd": pytest.approx(0.000125),
+        "cachedInputUsd": pytest.approx(0.0),
+        "outputUsd": pytest.approx(0.002),
+        "totalUsd": pytest.approx(0.002125),
+    }
     assert older["transport"] == "http"

@@ -262,9 +262,17 @@ export function createRequestLogEntry(
 		errorCode: null,
 		errorMessage: null,
 		tokens: 1800,
+		inputTokens: 1200,
+		outputTokens: 600,
 		cachedInputTokens: 320,
 		reasoningEffort: null,
 		costUsd: 0.0132,
+		costBreakdown: {
+			inputUsd: 0.0054,
+			cachedInputUsd: 0.0012,
+			outputUsd: 0.0066,
+			totalUsd: 0.0132,
+		},
 		latencyMs: 920,
 		...overrides,
 	});

@@ -7,6 +7,13 @@ from pydantic import Field
 from app.modules.shared.schemas import DashboardModel
 
 
+class RequestLogCostBreakdown(DashboardModel):
+    input_usd: float | None = None
+    cached_input_usd: float | None = None
+    output_usd: float | None = None
+    total_usd: float | None = None
+
+
 class RequestLogEntry(DashboardModel):
     requested_at: datetime
     account_id: str | None = None
@@ -23,9 +30,12 @@ class RequestLogEntry(DashboardModel):
     error_code: str | None = None
     error_message: str | None = None
     tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_effort: str | None = None
     cost_usd: float | None = None
+    cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
 

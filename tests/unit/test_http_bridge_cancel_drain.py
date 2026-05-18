@@ -147,6 +147,63 @@ async def test_cancelled_http_bridge_request_quarantines_late_anonymous_events(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_http_bridge_request_does_not_steal_active_response_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    cancelled_request = _make_request_state(
+        "req-cancelled-before-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+
+    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
+    assert detached is True
+
+    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    retry_request = _make_request_state(
+        "req-active-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=retry_queue,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(retry_request)
+        session.queued_request_count += 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.created",
+                "sequence_number": 1,
+                "response": {
+                    "id": "resp-active-created",
+                    "object": "response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
+    assert retry_event is not None
+    assert "resp-active-created" in retry_event
+    assert cancelled_request.response_id is None
+    assert retry_request.response_id == "resp-active-created"
+    assert cancelled_request in session.pending_requests
+    assert retry_request in session.pending_requests
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_terminal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

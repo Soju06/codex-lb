@@ -10817,6 +10817,10 @@ def _assign_websocket_response_id(
     if existing is not None:
         return existing
     for request_state in pending_requests:
+        if request_state.response_id is None and _http_bridge_request_counts_against_queue(request_state):
+            request_state.response_id = response_id
+            return request_state
+    for request_state in pending_requests:
         if request_state.response_id is None:
             request_state.response_id = response_id
             return request_state

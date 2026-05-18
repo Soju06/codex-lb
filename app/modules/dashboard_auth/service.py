@@ -183,14 +183,12 @@ class DashboardAuthService:
         password_required = settings.password_hash is not None
         totp_required = password_required and settings.totp_required_on_login
         totp_configured = settings.totp_secret_encrypted is not None
-        guest_access_enabled = bool(getattr(settings, "guest_access_enabled", False))
-        guest_password_hash = getattr(settings, "guest_password_hash", None)
+        guest_access_enabled = settings.guest_access_enabled
+        guest_password_hash = settings.guest_password_hash
         guest_password_required = guest_access_enabled and guest_password_hash is not None
         state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
-        guest_authenticated = bool(state and state.role == DashboardRole.GUEST and guest_access_enabled)
         public_guest_authenticated = bool(guest_access_enabled and not guest_password_required and password_required)
-        password_authenticated = bool(state and state.role == DashboardRole.ADMIN and state.password_verified)
-        if guest_authenticated:
+        if state is not None and state.role == DashboardRole.GUEST and guest_access_enabled:
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
@@ -198,7 +196,7 @@ class DashboardAuthService:
             authenticated = True
             role = DashboardRole.ADMIN
             permissions = ADMIN_PERMISSIONS
-        elif password_authenticated:
+        elif state is not None and state.role == DashboardRole.ADMIN and state.password_verified:
             authenticated = bool(not totp_required or state.totp_verified)
             role = DashboardRole.ADMIN
             permissions = ADMIN_PERMISSIONS
@@ -206,17 +204,19 @@ class DashboardAuthService:
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
-        elif totp_required:
-            authenticated = bool(state and state.password_verified and state.totp_verified)
-            role = DashboardRole.ADMIN
-            permissions = ADMIN_PERMISSIONS
         else:
-            authenticated = password_authenticated
+            authenticated = False
             role = DashboardRole.ADMIN
             permissions = ADMIN_PERMISSIONS
 
         # Surface the TOTP prompt only for password-authenticated sessions.
-        totp_required_on_login = bool(totp_required and password_authenticated)
+        totp_required_on_login = bool(
+            totp_required
+            and state is not None
+            and state.role == DashboardRole.ADMIN
+            and state.password_verified
+            and not state.totp_verified
+        )
         return DashboardAuthSessionResponse(
             authenticated=authenticated,
             password_required=password_required,

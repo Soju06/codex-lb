@@ -10225,7 +10225,7 @@ def test_http_bridge_should_rollover_after_context_overflow():
     assert proxy_service._http_bridge_should_rollover_after_context_overflow(unrelated_error) is False
 
 
-def test_maybe_rewrite_websocket_previous_response_not_found_leaves_non_previous_request_unchanged():
+def test_maybe_rewrite_websocket_previous_response_not_found_masks_lost_local_anchor():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_plain",
         model="gpt-5.1",
@@ -10262,9 +10262,14 @@ def test_maybe_rewrite_websocket_previous_response_not_found_leaves_non_previous
     )
 
     assert upstream_control.reconnect_requested is False
-    assert rewritten_event_type == original_event_type
-    assert rewritten_payload == original_payload
-    assert rewritten_text == original_text
+    assert rewritten_event_type == "response.failed"
+    assert rewritten_payload is not None
+    response_payload = cast(dict[str, JsonValue], rewritten_payload.get("response"))
+    error_payload = cast(dict[str, JsonValue], response_payload.get("error"))
+    assert error_payload["code"] == "stream_incomplete"
+    assert error_payload["message"] == "Upstream websocket closed before response.completed"
+    assert "previous_response_not_found" not in rewritten_text
+    assert "resp_any" not in rewritten_text
 
 
 def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found(monkeypatch, caplog):

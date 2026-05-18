@@ -226,6 +226,8 @@ def _is_openai_sdk_request(request: Request) -> bool:
             return True
     user_agent = request.headers.get("user-agent", "").lower()
     return "openai" in user_agent
+
+
 async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
     if request.method.upper() == "GET":
         return {key: value for key, value in request.query_params.multi_items()}

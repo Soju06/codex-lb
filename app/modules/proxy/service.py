@@ -10427,8 +10427,7 @@ async def _websocket_full_resend_conflicts_with_visible_pending(
         return False
     async with pending_lock:
         return any(
-            pending is not request_state
-            and (pending.downstream_visible or pending.response_id is not None or not pending.awaiting_response_created)
+            pending is not request_state and pending.downstream_visible
             for pending in pending_requests
         )
 

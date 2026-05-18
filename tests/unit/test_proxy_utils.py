@@ -6222,6 +6222,47 @@ async def test_websocket_full_resend_allows_fresh_multi_item_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_websocket_full_resend_allows_pending_before_downstream_visible() -> None:
+    pending_lock = anyio.Lock()
+    pending = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_started",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+                response_id="resp_started",
+                awaiting_response_created=False,
+                downstream_visible=False,
+                input_item_count=1,
+            )
+        ]
+    )
+    full_resend_shaped_request = proxy_service._WebSocketRequestState(
+        request_id="ws_full_resend_shaped",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id=None,
+        input_item_count=proxy_service._WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
+    )
+
+    assert (
+        await proxy_service._websocket_full_resend_conflicts_with_visible_pending(
+            full_resend_shaped_request,
+            pending,
+            pending_lock=pending_lock,
+            codex_session_affinity=True,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_websocket_full_resend_allows_explicit_previous_response_id() -> None:
     pending_lock = anyio.Lock()
     pending = deque(

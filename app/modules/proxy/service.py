@@ -6451,9 +6451,8 @@ class ProxyService:
                         "error",
                     },
                 )
-                if (
-                    terminal_request_state is not None
-                    and _http_bridge_request_counts_against_queue(terminal_request_state)
+                if terminal_request_state is not None and _http_bridge_request_counts_against_queue(
+                    terminal_request_state
                 ):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
                 elif is_previous_response_not_found_event or is_missing_tool_output_event:

@@ -86,6 +86,33 @@ def _set_proxy_unauthenticated_client_cidrs_env(
     get_settings.cache_clear()
 
 
+async def _enable_guest_access(client: AsyncClient) -> dict[str, object]:
+    read_settings = await client.get("/api/settings")
+    assert read_settings.status_code == 200
+    current = read_settings.json()
+    assert isinstance(current, dict)
+    current["guestAccessEnabled"] = True
+
+    response = await client.put("/api/settings", json=current)
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload, dict)
+    assert payload["guestAccessEnabled"] is True
+    return payload
+
+
+async def _assert_guest_write_denied(client: AsyncClient) -> None:
+    read_settings = await client.get("/api/settings")
+    assert read_settings.status_code == 200
+    payload = read_settings.json()
+    assert isinstance(payload, dict)
+    payload["guestAccessEnabled"] = False
+
+    blocked_update = await client.put("/api/settings", json=payload)
+    assert blocked_update.status_code == 403
+    assert blocked_update.json()["error"]["code"] == "read_only_access"
+
+
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):
     public_mode = await async_client.get("/api/settings")
@@ -228,12 +255,8 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
     async with app_instance.router.lifespan_context(app_instance):
         local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
         async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
-            current = (await local_client.get("/api/settings")).json()
-            current["guestAccessEnabled"] = True
-            enable = await local_client.put("/api/settings", json=current)
-            assert enable.status_code == 200
-            assert enable.json()["guestAccessEnabled"] is True
-            assert enable.json()["guestPasswordConfigured"] is False
+            enabled_settings = await _enable_guest_access(local_client)
+            assert enabled_settings["guestPasswordConfigured"] is False
 
         remote_transport = ASGITransport(app=app_instance, client=("203.0.113.20", 50001))
         async with AsyncClient(transport=remote_transport, base_url="http://lb.example") as remote_client:
@@ -246,14 +269,7 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
             assert session_payload["guestAccessEnabled"] is True
             assert session_payload["guestPasswordRequired"] is False
 
-            read_settings = await remote_client.get("/api/settings")
-            assert read_settings.status_code == 200
-
-            blocked_update_payload = read_settings.json()
-            blocked_update_payload["guestAccessEnabled"] = False
-            blocked_update = await remote_client.put("/api/settings", json=blocked_update_payload)
-            assert blocked_update.status_code == 403
-            assert blocked_update.json()["error"]["code"] == "read_only_access"
+            await _assert_guest_write_denied(remote_client)
 
 
 @pytest.mark.asyncio
@@ -267,11 +283,7 @@ async def test_passwordless_guest_access_does_not_shadow_admin_session(app_insta
             )
             assert setup.status_code == 200
 
-            current = (await local_client.get("/api/settings")).json()
-            current["guestAccessEnabled"] = True
-            enable = await local_client.put("/api/settings", json=current)
-            assert enable.status_code == 200
-            assert enable.json()["guestAccessEnabled"] is True
+            await _enable_guest_access(local_client)
 
         remote_transport = ASGITransport(app=app_instance, client=("203.0.113.22", 50001))
         async with AsyncClient(transport=remote_transport, base_url="http://lb.example") as remote_client:
@@ -303,10 +315,7 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
     async with app_instance.router.lifespan_context(app_instance):
         local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
         async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
-            current = (await local_client.get("/api/settings")).json()
-            current["guestAccessEnabled"] = True
-            enable = await local_client.put("/api/settings", json=current)
-            assert enable.status_code == 200
+            await _enable_guest_access(local_client)
 
             set_password = await local_client.post(
                 "/api/dashboard-auth/guest/password",
@@ -347,14 +356,7 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
             assert login_payload["role"] == "guest"
             assert login_payload["permissions"] == ["read"]
 
-            read_settings = await remote_client.get("/api/settings")
-            assert read_settings.status_code == 200
-
-            blocked_update_payload = read_settings.json()
-            blocked_update_payload["guestAccessEnabled"] = False
-            blocked_update = await remote_client.put("/api/settings", json=blocked_update_payload)
-            assert blocked_update.status_code == 403
-            assert blocked_update.json()["error"]["code"] == "read_only_access"
+            await _assert_guest_write_denied(remote_client)
 
 
 @pytest.mark.asyncio

@@ -62,10 +62,6 @@ class DashboardAuthRepository:
         row = await self._settings_repository.get_or_create()
         return row.password_hash
 
-    async def get_guest_password_hash(self) -> str | None:
-        row = await self._settings_repository.get_or_create()
-        return row.guest_password_hash
-
     async def clear_password_and_totp(self) -> DashboardSettings:
         row = await self._settings_repository.get_or_create()
         row.password_hash = None

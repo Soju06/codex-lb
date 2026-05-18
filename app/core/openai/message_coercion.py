@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
+from app.core.openai.contracts import (
+    FunctionCallInputItem,
+    FunctionCallOutputInputItem,
+    InputFileItem,
+    OpenAIMessage,
+    RefusalContentPart,
+    TextContentPart,
+)
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict, is_json_list
@@ -9,7 +18,7 @@ from app.core.utils.json_guards import is_json_dict, is_json_list
 _SUPPORTED_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
 
 
-def _json_dict_or_none(value: object) -> dict[str, JsonValue] | None:
+def _json_dict_or_none(value: JsonValue) -> dict[str, JsonValue] | None:
     if not is_json_dict(value):
         return None
     return value
@@ -41,16 +50,16 @@ def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -
                 instruction_parts.append(content_text)
             continue
         if role == "tool":
-            input_messages.append(_convert_tool_message(message_dict))
+            input_messages.append(cast(JsonValue, _convert_tool_message(cast(OpenAIMessage, message_dict))))
             continue
         if role == "assistant":
             tool_calls = message_dict.get("tool_calls")
             if is_json_list(tool_calls) and tool_calls:
-                input_messages.extend(_decompose_assistant_tool_calls(message_dict))
+                input_messages.extend(_decompose_assistant_tool_calls(cast(OpenAIMessage, message_dict)))
             else:
-                input_messages.append(_normalize_message_content(message_dict))
+                input_messages.append(cast(JsonValue, _normalize_message_content(cast(OpenAIMessage, message_dict))))
             continue
-        input_messages.append(_normalize_message_content(message_dict))
+        input_messages.append(cast(JsonValue, _normalize_message_content(cast(OpenAIMessage, message_dict))))
     merged = _merge_instructions(existing_instructions, instruction_parts)
     return merged, input_messages
 
@@ -123,16 +132,16 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
     raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
 
 
-def _decompose_assistant_tool_calls(message: dict[str, JsonValue]) -> list[JsonValue]:
+def _decompose_assistant_tool_calls(message: OpenAIMessage) -> list[JsonValue]:
     items: list[JsonValue] = []
     content = message.get("content")
     refusal = _get_assistant_refusal(message)
     if content is not None or refusal is not None:
         parts = _to_content_list(_normalize_content_parts(content, "assistant")) if content is not None else []
         if refusal is not None:
-            parts.append({"type": "refusal", "refusal": refusal})
-        msg_item: dict[str, JsonValue] = {"role": "assistant", "content": parts}
-        items.append(msg_item)
+            parts.append(RefusalContentPart(type="refusal", refusal=refusal))
+        msg_item: OpenAIMessage = {"role": "assistant", "content": parts}
+        items.append(cast(JsonValue, msg_item))
     tool_calls = message.get("tool_calls")
     if is_json_list(tool_calls):
         for tc in _content_parts(tool_calls):
@@ -155,17 +164,15 @@ def _decompose_assistant_tool_calls(message: dict[str, JsonValue]) -> list[JsonV
                     param="messages",
                 )
             items.append(
-                {
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": arguments,
-                }
+                cast(
+                    JsonValue,
+                    FunctionCallInputItem(type="function_call", call_id=call_id, name=name, arguments=arguments),
+                )
             )
     return items
 
 
-def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _convert_tool_message(message: OpenAIMessage) -> FunctionCallOutputInputItem:
     tool_call_id = message.get("tool_call_id")
     tool_call_id_camel = message.get("toolCallId")
     call_id = message.get("call_id")
@@ -193,7 +200,7 @@ def _convert_tool_message(message: dict[str, JsonValue]) -> dict[str, JsonValue]
             "tool message content must be a string or array.",
             param="messages",
         )
-    return {"type": "function_call_output", "call_id": resolved_call_id, "output": output}
+    return FunctionCallOutputInputItem(type="function_call_output", call_id=resolved_call_id, output=output)
 
 
 def _concat_text_parts(content: list[JsonValue]) -> str:
@@ -211,7 +218,7 @@ def _concat_text_parts(content: list[JsonValue]) -> str:
     return "".join(parts)
 
 
-def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _normalize_message_content(message: OpenAIMessage) -> OpenAIMessage:
     content = message.get("content")
     role = message.get("role")
     role_str = role if isinstance(role, str) else "user"
@@ -232,10 +239,10 @@ def _normalize_message_content(message: dict[str, JsonValue]) -> dict[str, JsonV
     updated["content"] = normalized
     if refusal is not None:
         updated.pop("refusal", None)
-    return updated
+    return cast(OpenAIMessage, updated)
 
 
-def _get_assistant_refusal(message: dict[str, JsonValue]) -> str | None:
+def _get_assistant_refusal(message: OpenAIMessage) -> str | None:
     refusal = message.get("refusal")
     if isinstance(refusal, str) and refusal:
         return refusal
@@ -259,11 +266,11 @@ def _normalize_content_parts(content: JsonValue, role: str = "user") -> JsonValu
         return None
     text_type = _text_type_for_role(role)
     if isinstance(content, str):
-        return [{"type": text_type, "text": content}]
+        return cast(JsonValue, [TextContentPart(type=text_type, text=content)])
     normalized_parts: list[JsonValue] = []
     for part in _content_parts(content):
         if isinstance(part, str):
-            normalized_parts.append({"type": text_type, "text": part})
+            normalized_parts.append(cast(JsonValue, TextContentPart(type=text_type, text=part)))
             continue
         part_dict = _json_dict_or_none(part)
         if part_dict is None:
@@ -281,7 +288,7 @@ def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> J
     if part_type in ("text", "input_text", "output_text"):
         text = part.get("text")
         if isinstance(text, str):
-            return {"type": text_type, "text": text}
+            return cast(JsonValue, TextContentPart(type=text_type, text=text))
         return part
     if role == "assistant":
         return part
@@ -298,10 +305,7 @@ def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> J
         else:
             url = None
         if isinstance(url, str):
-            normalized: dict[str, JsonValue] = {"type": "input_image", "image_url": url}
-            if detail is not None:
-                normalized["detail"] = detail
-            return normalized
+            return {"type": "input_image", "image_url": url, **({"detail": detail} if detail is not None else {})}
         return part
     if part_type == "input_image":
         return part
@@ -311,7 +315,7 @@ def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> J
             return {"type": "input_file", "file_url": data_url}
         return part
     if part_type == "file":
-        return _file_part_to_input_file(part.get("file"))
+        return cast(JsonValue, _file_part_to_input_file(part.get("file")))
     return part
 
 
@@ -335,16 +339,16 @@ def _audio_mime_type(audio_format: str) -> str:
     return f"audio/{audio_format}"
 
 
-def _file_part_to_input_file(file_info: JsonValue) -> dict[str, JsonValue]:
+def _file_part_to_input_file(file_info: JsonValue) -> InputFileItem:
     file_info_dict = _json_dict_or_none(file_info)
     if file_info_dict is None:
-        return {"type": "input_file"}
+        return InputFileItem(type="input_file")
     file_id = file_info_dict.get("file_id")
     if isinstance(file_id, str) and file_id:
-        return {"type": "input_file", "file_id": file_id}
+        return InputFileItem(type="input_file", file_id=file_id)
     file_url = file_info_dict.get("file_url")
     if isinstance(file_url, str) and file_url:
-        return {"type": "input_file", "file_url": file_url}
+        return InputFileItem(type="input_file", file_url=file_url)
     file_data = file_info_dict.get("file_data")
     if not isinstance(file_data, str):
         data = file_info_dict.get("data")
@@ -355,5 +359,5 @@ def _file_part_to_input_file(file_info: JsonValue) -> dict[str, JsonValue]:
             mime_type = file_info_dict.get("content_type")
         if not isinstance(mime_type, str) or not mime_type:
             mime_type = "application/octet-stream"
-        return {"type": "input_file", "file_url": f"data:{mime_type};base64,{file_data}"}
-    return {"type": "input_file"}
+        return InputFileItem(type="input_file", file_url=f"data:{mime_type};base64,{file_data}")
+    return InputFileItem(type="input_file")

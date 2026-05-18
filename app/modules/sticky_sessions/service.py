@@ -8,6 +8,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import StickySessionKind
 from app.modules.proxy.sticky_repository import StickySessionListEntryRecord, StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,23 @@ class StickySessionListData:
     has_more: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StickySessionDeleteFailureData:
+    key: str
+    kind: StickySessionKind
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class StickySessionsDeleteData:
+    deleted: list[tuple[str, StickySessionKind]]
+    failed: list[StickySessionDeleteFailureData]
+
+    @property
+    def deleted_count(self) -> int:
+        return len(self.deleted)
+
+
 class StickySessionsService:
     def __init__(
         self,
@@ -43,12 +61,18 @@ class StickySessionsService:
         *,
         kind: StickySessionKind | None = None,
         stale_only: bool = False,
+        account_query: str | None = None,
+        key_query: str | None = None,
+        sort_by: StickySessionSortBy = "updated_at",
+        sort_dir: StickySessionSortDir = "desc",
         offset: int = 0,
         limit: int = 100,
     ) -> StickySessionListData:
         settings = await self._settings_repository.get_or_create()
         ttl_seconds = settings.openai_cache_affinity_max_age_seconds
         stale_cutoff = utcnow() - timedelta(seconds=ttl_seconds)
+        normalized_account_query = account_query.strip() if account_query else None
+        normalized_key_query = key_query.strip() if key_query else None
         stale_prompt_cache_count = await self._count_stale_prompt_cache_entries(kind=kind, stale_cutoff=stale_cutoff)
         if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
             return StickySessionListData(
@@ -61,10 +85,16 @@ class StickySessionsService:
         total = await self._repository.count_entries(
             kind=effective_kind,
             updated_before=stale_cutoff if stale_only else None,
+            account_query=normalized_account_query,
+            key_query=normalized_key_query,
         )
         rows = await self._repository.list_entries(
             kind=effective_kind,
             updated_before=stale_cutoff if stale_only else None,
+            account_query=normalized_account_query,
+            key_query=normalized_key_query,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
             offset=offset,
             limit=limit,
         )
@@ -79,8 +109,52 @@ class StickySessionsService:
     async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
         return await self._repository.delete(key, kind=kind)
 
-    async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> int:
-        return await self._repository.delete_entries(entries)
+    async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> StickySessionsDeleteData:
+        failed: list[StickySessionDeleteFailureData] = []
+        seen: set[tuple[str, StickySessionKind]] = set()
+        targets: list[tuple[str, StickySessionKind]] = []
+
+        for key, kind in entries:
+            if not key:
+                continue
+            target = (key, kind)
+            if target in seen:
+                continue
+            seen.add(target)
+            targets.append(target)
+
+        deleted = await self._repository.delete_entries(targets)
+        deleted_set = set(deleted)
+
+        for key, kind in targets:
+            if (key, kind) not in deleted_set:
+                failed.append(StickySessionDeleteFailureData(key=key, kind=kind, reason="not_found"))
+
+        return StickySessionsDeleteData(deleted=deleted, failed=failed)
+
+    async def delete_filtered_entries(
+        self,
+        *,
+        kind: StickySessionKind | None = None,
+        stale_only: bool = False,
+        account_query: str | None = None,
+        key_query: str | None = None,
+    ) -> int:
+        settings = await self._settings_repository.get_or_create()
+        stale_cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+        if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
+            return 0
+        effective_kind = StickySessionKind.PROMPT_CACHE if stale_only else kind
+        normalized_account_query = account_query.strip() if account_query else None
+        normalized_key_query = key_query.strip() if key_query else None
+        targets = await self._repository.list_entry_identifiers(
+            kind=effective_kind,
+            updated_before=stale_cutoff if stale_only else None,
+            account_query=normalized_account_query,
+            key_query=normalized_key_query,
+        )
+        deleted = await self._repository.delete_entries(targets)
+        return len(deleted)
 
     async def purge_entries(self) -> int:
         settings = await self._settings_repository.get_or_create()

@@ -20,6 +20,10 @@ def set_draining(val: bool = True) -> None:
     _draining = val
 
 
+def is_draining() -> bool:
+    return _draining
+
+
 def set_bridge_drain_active(val: bool = True) -> None:
     global _bridge_drain_active
     _bridge_drain_active = val

@@ -233,6 +233,32 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
         assert "transport" in columns
 
 
+def test_request_logs_response_lookup_migration_handles_preexisting_session_id_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "request-logs-session-id-drift.db"
+    url = _db_url(db_path)
+    pre_revision = "20260413_000000_add_accounts_blocked_at"
+    target_revision = "20260415_160000_add_request_logs_response_lookup_index"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "session_id" not in columns
+        connection.execute(text("ALTER TABLE request_logs ADD COLUMN session_id VARCHAR"))
+        connection.commit()
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+        assert "session_id" in columns
+        index_names = {index["name"] for index in inspect(connection).get_indexes("request_logs")}
+        assert "idx_logs_request_status_api_key_time" in index_names
+        assert "idx_logs_request_status_api_key_session_time" in index_names
+
+
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     db_path = tmp_path / "drift.db"
     url = _db_url(db_path)
@@ -665,7 +691,7 @@ def test_ensure_alembic_version_table_capacity_creates_table_when_missing(monkey
     inspector = _FakeInspector(has_table=False)
     monkeypatch.setattr("app.db.migrate.inspect", lambda _: inspector)
 
-    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)  # type: ignore[arg-type]
+    _ensure_alembic_version_table_capacity_for_connection(cast(Connection, connection), required_length=64)
 
     assert connection.executed_sql == [
         "CREATE TABLE alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
@@ -677,7 +703,7 @@ def test_ensure_alembic_version_table_capacity_alters_short_column(monkeypatch) 
     inspector = _FakeInspector(has_table=True, version_num_length=32)
     monkeypatch.setattr("app.db.migrate.inspect", lambda _: inspector)
 
-    _ensure_alembic_version_table_capacity_for_connection(connection, required_length=64)  # type: ignore[arg-type]
+    _ensure_alembic_version_table_capacity_for_connection(cast(Connection, connection), required_length=64)
 
     assert connection.executed_sql == ["ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"]
 

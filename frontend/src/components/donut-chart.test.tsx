@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
 
@@ -8,7 +8,17 @@ const BASE_ITEMS = [
   { label: "Account B", value: 80, color: "#d9a441" },
 ];
 
+let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+
 describe("DonutChart", () => {
+  beforeEach(() => {
+    scrollIntoViewMock = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoViewMock,
+    });
+  });
+
   it("renders chart title, subtitle, legend, and SVG", () => {
     const { container } = render(
       <DonutChart
@@ -24,6 +34,8 @@ describe("DonutChart", () => {
     expect(screen.getByText("Account A")).toBeInTheDocument();
     expect(screen.getByText("Account B")).toBeInTheDocument();
     expect(screen.getByText("Remaining")).toBeInTheDocument();
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 200 · 0% used");
+    expect(screen.getByTestId("donut-used-row")).toHaveTextContent("Used0");
 
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
@@ -41,6 +53,135 @@ describe("DonutChart", () => {
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
     expect(screen.getByText("A")).toBeInTheDocument();
+  });
+
+  it("does not render a consumed segment when total equals sum of items", () => {
+    const items = [
+      { label: "Account A", value: 120, color: "#7bb661" },
+      { label: "Account B", value: 80, color: "#d9a441" },
+    ];
+    const { container } = render(
+      <DonutChart title="No Consumed" total={200} items={items} />,
+    );
+
+    // When total = sum(items), there should be exactly 2 cells (no gray consumed cell)
+    const cells = container.querySelectorAll(".recharts-pie-sector");
+    expect(cells).toHaveLength(2);
+  });
+
+  it("renders consumed gray segment when total exceeds sum of items", () => {
+    const items = [
+      { label: "Account A", value: 120, color: "#7bb661" },
+      { label: "Account B", value: 80, color: "#d9a441" },
+    ];
+    const { container } = render(
+      <DonutChart title="With Consumed" total={500} items={items} />,
+    );
+
+    // When total > sum(items), there should be 3 cells (2 items + 1 consumed gray)
+    const cells = container.querySelectorAll(".recharts-pie-sector");
+    expect(cells).toHaveLength(3);
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 500 · 60% used");
+    expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
+  });
+
+  it("can show remaining in the center while consumed uses full capacity", () => {
+    render(
+      <DonutChart
+        title="Remaining vs Consumed"
+        total={500}
+        centerValue={200}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    expect(screen.getByText("200")).toBeInTheDocument();
+    expect(screen.getByTestId("donut-caption")).toHaveTextContent("Total 500 · 60% used");
+  });
+
+  it("renders a gray Used row beneath the account legend", () => {
+    render(
+      <DonutChart
+        title="Used Legend"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    expect(screen.getByText(/^Used$/)).toBeInTheDocument();
+    expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
+  });
+
+  it("highlights the matching legend row when a legend item is hovered", () => {
+    render(
+      <DonutChart
+        title="Legend Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const legendRow = screen.getByTestId("donut-legend-0");
+    fireEvent.mouseEnter(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+
+    fireEvent.mouseLeave(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "false");
+  });
+
+  it("highlights the matching legend row when a pie slice is hovered", () => {
+    const { container } = render(
+      <DonutChart
+        title="Slice Hover"
+        total={500}
+        items={BASE_ITEMS}
+      />,
+    );
+
+    const sectors = container.querySelectorAll(".recharts-pie-sector");
+    const legendRow = screen.getByTestId("donut-legend-0");
+
+    fireEvent.mouseEnter(sectors[0]!);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+  });
+
+  it("limits the legend list to five visible rows before scrolling", () => {
+    render(
+      <DonutChart
+        title="Many Legends"
+        total={1000}
+        items={Array.from({ length: 5 }, (_, index) => ({
+          label: `Account ${index + 1}`,
+          value: 100,
+          color: `#00000${index}`,
+        }))}
+      />,
+    );
+
+    expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
+      maxHeight: "calc(5 * 1.75rem)",
+    });
+  });
+
+  it("scrolls the hovered pie item into view in the legend list", async () => {
+    const items = Array.from({ length: 5 }, (_, index) => ({
+      label: `Account ${index + 1}`,
+      value: 100,
+      color: `#12345${index}`,
+    }));
+    const { container } = render(
+      <DonutChart title="Scrollable Legends" total={1000} items={items} />,
+    );
+
+    const sectors = container.querySelectorAll(".recharts-pie-sector");
+    const lastLegendRow = screen.getByTestId("donut-legend-4");
+
+    fireEvent.mouseEnter(sectors[4]!);
+
+    await waitFor(() => {
+      expect(lastLegendRow).toHaveAttribute("data-active", "true");
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+    });
   });
 
   it("renders empty state when total is zero", () => {

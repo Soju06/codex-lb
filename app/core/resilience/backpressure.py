@@ -4,15 +4,13 @@ import asyncio
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-
-async def _reject_websocket(receive: Receive, send: Send, *, reason: str) -> None:
-    try:
-        event = await receive()
-        if event.get("type") != "websocket.connect":
-            return
-    except Exception:
-        return
-    await send({"type": "websocket.close", "code": 1013, "reason": reason})
+from app.core.resilience.overload import (
+    deny_websocket_with_http_response,
+    is_proxy_path,
+    local_overload_error,
+    merge_retry_after_headers,
+    send_json_http_response,
+)
 
 
 class BackpressureMiddleware:
@@ -30,18 +28,23 @@ class BackpressureMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if self._semaphore._value <= 0:
+        if self._semaphore.locked():
+            message = "codex-lb is temporarily overloaded by local backpressure"
             if scope["type"] == "websocket":
-                await _reject_websocket(receive, send, reason="Too Many Requests")
+                await deny_websocket_with_http_response(
+                    receive,
+                    send,
+                    status_code=429,
+                    payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
+                    headers=merge_retry_after_headers(),
+                )
                 return
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 429,
-                    "headers": [(b"retry-after", b"5"), (b"content-type", b"application/json")],
-                }
+            await send_json_http_response(
+                send,
+                status_code=429,
+                payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
+                headers=merge_retry_after_headers(),
             )
-            await send({"type": "http.response.body", "body": b'{"detail":"Too Many Requests"}'})
             return
 
         await self._semaphore.acquire()

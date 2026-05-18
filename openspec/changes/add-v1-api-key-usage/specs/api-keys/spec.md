@@ -8,7 +8,8 @@ The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key
 - `total_tokens`
 - `cached_input_tokens`
 - `total_cost_usd`
-- `limits[]` containing `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, and `reset_at`
+- `limits[]` containing only limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`
+- `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`
 
 Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
 
@@ -31,6 +32,13 @@ Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` 
 
 - **WHEN** multiple API keys have request-log history and one of them calls `GET /v1/usage`
 - **THEN** the response includes only the usage totals and limits for that authenticated key
+
+#### Scenario: Upstream limits are separate from API-key limits
+
+- **WHEN** an API key with its own limit calls `GET /v1/usage`
+- **AND** upstream Codex aggregate usage data exists
+- **THEN** `limits[]` contains the API-key limit values
+- **AND** `upstream_limits[]` contains the aggregate Codex credit windows
 
 #### Scenario: Self-usage works while global proxy auth is disabled
 

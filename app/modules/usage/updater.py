@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import math
+import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.models import UsagePayload
+from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -119,6 +122,7 @@ class _MergedAdditionalWindow:
 # entry). Used as a fast path to avoid DB queries on every pass within the same
 # process. Updated only after a successful refresh that wrote data.
 _last_successful_refresh: dict[str, datetime] = {}
+_usage_refresh_auth_cooldowns: dict[str, float] = {}
 
 
 class _UsageRefreshSingleflight:
@@ -151,6 +155,24 @@ class _UsageRefreshSingleflight:
         current = self._inflight.get(account_id)
         if current is task:
             self._inflight.pop(account_id, None)
+        if task.cancelled():
+            return
+        with contextlib.suppress(BaseException):
+            task.exception()
+
+    def clear(self) -> None:
+        self._inflight.clear()
+
+    async def cancel_all(self) -> None:
+        async with self._lock:
+            tasks = list(self._inflight.values())
+            self._inflight.clear()
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        with contextlib.suppress(BaseException):
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
@@ -183,8 +205,11 @@ class UsageUpdater:
         refreshed = False
         now = utcnow()
         interval = settings.usage_refresh_interval_seconds
+        _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
             if account.status == AccountStatus.DEACTIVATED:
+                continue
+            if _is_usage_refresh_in_cooldown(account.id):
                 continue
             latest = latest_usage.get(account.id)
             if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
@@ -226,6 +251,7 @@ class UsageUpdater:
                 # suppress retries within the interval.
                 if result.fetch_succeeded:
                     _last_successful_refresh[account.id] = now
+                    _clear_usage_refresh_auth_cooldown(account.id)
             except Exception as exc:
                 logger.warning(
                     "Usage refresh failed account_id=%s request_id=%s error=%s",
@@ -267,14 +293,16 @@ class UsageUpdater:
                 account_id=usage_account_id,
             )
         except UsageFetchError as exc:
-            if _should_deactivate_for_usage_error(exc.status_code):
+            if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:
                 account = await self._auth_manager.ensure_fresh(account, force=True)
             except RefreshError:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
@@ -283,8 +311,10 @@ class UsageUpdater:
                     account_id=usage_account_id,
                 )
             except UsageFetchError as retry_exc:
-                if _should_deactivate_for_usage_error(retry_exc.status_code):
+                if _should_deactivate_for_usage_error(retry_exc):
                     await self._deactivate_for_client_error(account, retry_exc)
+                else:
+                    _mark_usage_refresh_auth_cooldown(account.id, retry_exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
         if payload is None:
@@ -503,7 +533,7 @@ def _prefer_merged_additional_window(
 
 
 def _merge_additional_rate_limits(
-    additional_rate_limits: Collection[object],
+    additional_rate_limits: Collection[AdditionalRateLimitPayload],
     *,
     account_id: str,
     now_epoch: int,
@@ -674,7 +704,52 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
 # for proxy traffic, so treat it as a refresh failure instead of a permanent
 # account-level deactivation signal.
 _DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
+_DEACTIVATING_USAGE_MESSAGE_HINTS = (
+    "your openai account has been deactivated",
+    "account has been deactivated",
+)
 
 
-def _should_deactivate_for_usage_error(status_code: int) -> bool:
-    return status_code in _DEACTIVATING_USAGE_STATUS_CODES
+def _should_deactivate_for_usage_error(exc: UsageFetchError) -> bool:
+    if exc.status_code in _DEACTIVATING_USAGE_STATUS_CODES:
+        return True
+    if exc.code in PERMANENT_FAILURE_CODES:
+        return True
+    lowered = exc.message.lower()
+    return any(hint in lowered for hint in _DEACTIVATING_USAGE_MESSAGE_HINTS)
+
+
+def _mark_usage_refresh_auth_cooldown(account_id: str, status_code: int) -> None:
+    if status_code not in {401, 403}:
+        return
+    cooldown_seconds = max(0.0, float(get_settings().usage_refresh_auth_failure_cooldown_seconds))
+    if cooldown_seconds <= 0:
+        return
+    _usage_refresh_auth_cooldowns[account_id] = time.monotonic() + cooldown_seconds
+
+
+def _is_usage_refresh_in_cooldown(account_id: str) -> bool:
+    expires_at = _usage_refresh_auth_cooldowns.get(account_id)
+    if expires_at is None:
+        return False
+    if expires_at > time.monotonic():
+        return True
+    _usage_refresh_auth_cooldowns.pop(account_id, None)
+    return False
+
+
+def _clear_usage_refresh_auth_cooldown(account_id: str) -> None:
+    _usage_refresh_auth_cooldowns.pop(account_id, None)
+
+
+def _prune_usage_refresh_auth_cooldowns() -> None:
+    now = time.monotonic()
+    stale = [account_id for account_id, expires_at in _usage_refresh_auth_cooldowns.items() if expires_at <= now]
+    for account_id in stale:
+        _usage_refresh_auth_cooldowns.pop(account_id, None)
+
+
+def _clear_usage_refresh_state() -> None:
+    _usage_refresh_auth_cooldowns.clear()
+    _last_successful_refresh.clear()
+    _USAGE_REFRESH_SINGLEFLIGHT.clear()

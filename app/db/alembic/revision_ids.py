@@ -25,6 +25,7 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
     "013_add_api_key_enforcement_fields": (
         "20260218_000100_add_import_without_overwrite_and_drop_accounts_email_unique"
     ),
+    "20260410_020000_restore_import_without_overwrite_default_false": "20260409_020000_fix_http_bridge_last_seen_index",
 }
 
 NEW_TO_OLD_REVISION_MAP: dict[str, str] = {new: old for old, new in OLD_TO_NEW_REVISION_MAP.items()}

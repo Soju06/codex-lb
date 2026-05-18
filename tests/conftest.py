@@ -44,14 +44,23 @@ def _reset_test_database(sync_conn) -> None:
 
 @pytest_asyncio.fixture
 async def _reset_db_state():
+    from app.db.session import close_db
+
+    await close_db()
     async with engine.begin() as conn:
         await conn.run_sync(_reset_test_database)
     return True
 
 
 @pytest_asyncio.fixture
-async def app_instance(_reset_db_state):
+async def app_instance(_reset_db_state, monkeypatch):
     del _reset_db_state
+    import app.main as main_module
+
+    async def _noop_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     app = create_app()
     return app
 

@@ -7,6 +7,8 @@ from typing import Awaitable, TypeVar
 
 import aiohttp
 
+from app.core.config.settings import Settings
+
 T = TypeVar("T")
 
 
@@ -120,7 +122,7 @@ _circuit_breaker: CircuitBreaker | None = None
 _account_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
-def get_circuit_breaker(settings: object | None = None) -> CircuitBreaker | None:
+def get_circuit_breaker(settings: Settings | None = None) -> CircuitBreaker | None:
     global _circuit_breaker
 
     if settings is None:
@@ -138,7 +140,7 @@ def get_circuit_breaker(settings: object | None = None) -> CircuitBreaker | None
 
 def get_circuit_breaker_for_account(
     account_id: str,
-    settings: object,
+    settings: Settings,
 ) -> CircuitBreaker | None:
     enabled = getattr(settings, "circuit_breaker_enabled", False)
     if not enabled:

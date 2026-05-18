@@ -1,0 +1,3 @@
+- [x] Add regression coverage for single anonymous HTTP bridge `previous_response_not_found`.
+- [x] Rewrite that error path to retryable fail-closed output.
+- [x] Run focused tests for HTTP bridge previous-response handling.

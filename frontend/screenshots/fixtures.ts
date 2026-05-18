@@ -391,6 +391,12 @@ const totalSecondaryRemaining = secondaryRemaining.reduce((a, b) => a + b, 0);
 
 export const overview = createDashboardOverview({
   accounts,
+  timeframe: {
+    key: "7d",
+    windowMinutes: 10_080,
+    bucketSeconds: 21_600,
+    bucketCount: 28,
+  },
   summary: {
     primaryWindow: {
       remainingPercent: 100,
@@ -406,12 +412,13 @@ export const overview = createDashboardOverview({
       resetAt: offsetIso(3 * 24 * 60),
       windowMinutes: 10_080,
     },
-    cost: { currency: "USD", totalUsd7d: 486.72 },
+    cost: { currency: "USD", totalUsd: 486.72 },
     metrics: {
-      requests7d: 22_480,
-      tokensSecondaryWindow: 1_918_000_000,
-      cachedTokensSecondaryWindow: 1_831_000_000,
-      errorRate7d: 0.008,
+      requests: 22_480,
+      tokens: 1_918_000_000,
+      cachedInputTokens: 1_831_000_000,
+      errorRate: 0.008,
+      errorCount: 180,
       topError: "upstream_error",
     },
   },

@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Generic, TypeVar
 
 import anyio
 
+_CacheValueT = TypeVar("_CacheValueT")
+
 
 @dataclass(slots=True)
-class CachedApiKey:
-    data: Any
+class CachedApiKey(Generic[_CacheValueT]):
+    data: _CacheValueT
     expires_at: float
 
 
-class ApiKeyCache:
+class ApiKeyCache(Generic[_CacheValueT]):
     def __init__(self, ttl_seconds: int = 5, max_entries: int = 10_000) -> None:
-        self._cache: dict[str, CachedApiKey] = {}
+        self._cache: dict[str, CachedApiKey[_CacheValueT]] = {}
         self._lock = anyio.Lock()
         self._ttl = ttl_seconds
         self._max_entries = max_entries
@@ -25,13 +27,13 @@ class ApiKeyCache:
     def version(self) -> int:
         return self._version
 
-    async def get(self, key_hash: str) -> Any | None:
+    async def get(self, key_hash: str) -> _CacheValueT | None:
         entry = self._cache.get(key_hash)
         if entry and time.monotonic() < entry.expires_at:
             return entry.data
         return None
 
-    async def set(self, key_hash: str, data: Any, *, if_version: int | None = None) -> None:
+    async def set(self, key_hash: str, data: _CacheValueT, *, if_version: int | None = None) -> None:
         async with self._lock:
             if if_version is not None and if_version != self._version:
                 return
@@ -50,8 +52,8 @@ class ApiKeyCache:
         self._version += 1
 
 
-_api_key_cache = ApiKeyCache(ttl_seconds=2)
+_api_key_cache: ApiKeyCache[object] = ApiKeyCache(ttl_seconds=2)
 
 
-def get_api_key_cache() -> ApiKeyCache:
+def get_api_key_cache() -> ApiKeyCache[object]:
     return _api_key_cache

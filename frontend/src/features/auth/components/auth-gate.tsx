@@ -3,6 +3,7 @@ import type { PropsWithChildren } from "react";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { SpinnerBlock } from "@/components/ui/spinner";
+import { BootstrapSetupScreen } from "@/features/auth/components/bootstrap-setup-screen";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { TotpDialog } from "@/features/auth/components/totp-dialog";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -13,7 +14,9 @@ export function AuthGate({ children }: PropsWithChildren) {
   const loading = useAuthStore((state) => state.loading);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const authenticated = useAuthStore((state) => state.authenticated);
+  const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
   const totpRequiredOnLogin = useAuthStore((state) => state.totpRequiredOnLogin);
+  const authMode = useAuthStore((state) => state.authMode);
 
   useEffect(() => {
     void refreshSessionStable();
@@ -26,6 +29,10 @@ export function AuthGate({ children }: PropsWithChildren) {
         <SpinnerBlock />
       </div>
     );
+  }
+
+  if (bootstrapRequired && !passwordRequired) {
+    return <BootstrapSetupScreen />;
   }
 
   if (passwordRequired && !authenticated) {
@@ -52,6 +59,20 @@ export function AuthGate({ children }: PropsWithChildren) {
             </div>
           </div>
           <LoginForm />
+        </div>
+      </div>
+    );
+  }
+
+  if (authMode === "trusted_header" && !authenticated) {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center p-4">
+        <div className="w-full max-w-lg rounded-2xl border bg-card p-6 shadow-sm">
+          <h1 className="text-lg font-semibold tracking-tight">Reverse proxy authentication required</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This dashboard expects a trusted auth header from your reverse proxy. Open it through Authelia
+            or configure a fallback dashboard password first.
+          </p>
         </div>
       </div>
     );

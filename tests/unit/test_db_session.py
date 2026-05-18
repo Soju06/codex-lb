@@ -6,8 +6,10 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from sqlalchemy.pool import NullPool
 
 import app.db.session as session_module
 from app.db.sqlite_utils import IntegrityCheck, SqliteIntegrityCheckMode
@@ -398,7 +400,10 @@ async def test_init_background_db_uses_smaller_pool_for_postgres() -> None:
     assert session_module._background_session_factory is not None
 
     pool = session_module._background_engine.pool
-    assert pool.size() == 3  # type: ignore[attr-defined]
+    if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
+        assert isinstance(pool, NullPool)
+    else:
+        assert cast(Any, pool).size() == 3
 
     if session_module._background_engine is not None:
         await session_module._background_engine.dispose()

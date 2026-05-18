@@ -12,6 +12,7 @@ from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog,
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
+_UNSET = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,12 +142,17 @@ class AccountsRepository:
         status: AccountStatus,
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
+        blocked_at: int | None | object = _UNSET,
     ) -> bool:
+        values: dict[str, object | None] = {
+            "status": status,
+            "deactivation_reason": deactivation_reason,
+            "reset_at": reset_at,
+        }
+        if blocked_at is not _UNSET:
+            values["blocked_at"] = blocked_at
         result = await self._session.execute(
-            update(Account)
-            .where(Account.id == account_id)
-            .values(status=status, deactivation_reason=deactivation_reason, reset_at=reset_at)
-            .returning(Account.id)
+            update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
@@ -157,16 +163,25 @@ class AccountsRepository:
         status: AccountStatus,
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
+        blocked_at: int | None | object = _UNSET,
         *,
         expected_status: AccountStatus,
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
+        expected_blocked_at: int | None | object = _UNSET,
     ) -> bool:
+        values: dict[str, object | None] = {
+            "status": status,
+            "deactivation_reason": deactivation_reason,
+            "reset_at": reset_at,
+        }
+        if blocked_at is not _UNSET:
+            values["blocked_at"] = blocked_at
         stmt = (
             update(Account)
             .where(Account.id == account_id)
             .where(Account.status == expected_status)
-            .values(status=status, deactivation_reason=deactivation_reason, reset_at=reset_at)
+            .values(**values)
             .returning(Account.id)
         )
         if expected_deactivation_reason is None:
@@ -177,6 +192,11 @@ class AccountsRepository:
             stmt = stmt.where(Account.reset_at.is_(None))
         else:
             stmt = stmt.where(Account.reset_at == expected_reset_at)
+        if expected_blocked_at is not _UNSET:
+            if expected_blocked_at is None:
+                stmt = stmt.where(Account.blocked_at.is_(None))
+            else:
+                stmt = stmt.where(Account.blocked_at == expected_blocked_at)
         result = await self._session.execute(stmt)
         await self._session.commit()
         return result.scalar_one_or_none() is not None
@@ -282,6 +302,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.last_refresh = source.last_refresh
     target.status = source.status
     target.deactivation_reason = source.deactivation_reason
+    target.reset_at = source.reset_at
+    target.blocked_at = source.blocked_at
 
 
 def _advisory_lock_key(scope: str, value: str) -> int:

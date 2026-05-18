@@ -1,0 +1,185 @@
+{{- if .Release.IsUpgrade }}
+{{- $cleanupName := printf "%s-legacy-cleanup" (include "codex-lb.fullname" . | trunc 42 | trimSuffix "-") -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $cleanupName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $cleanupName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $cleanupName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ $cleanupName }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $cleanupName }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $cleanupName }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "codex-lb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: legacy-cleanup
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $cleanupName }}
+      enableServiceLinks: false
+      {{- $pullSecrets := concat (.Values.global.imagePullSecrets | default list) (.Values.image.pullSecrets | default list) }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $pullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: cleanup
+          image: {{ include "codex-lb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              import json
+              import os
+              import ssl
+              import sys
+              import time
+              from urllib import error, request
+
+              namespace = os.environ["POD_NAMESPACE"]
+              statefulset = os.environ["STATEFULSET_NAME"]
+              deployment = os.environ["LEGACY_DEPLOYMENT_NAME"]
+              service_name = os.environ["PUBLIC_SERVICE_NAME"]
+              service_app_name = os.environ["PUBLIC_SERVICE_APP_NAME"]
+              service_instance = os.environ["PUBLIC_SERVICE_INSTANCE"]
+              token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r", encoding="utf-8").read().strip()
+              ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              api = "https://kubernetes.default.svc"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/json",
+              }
+              ctx = ssl.create_default_context(cafile=ca_file)
+
+              def get_json(url: str) -> dict:
+                  req = request.Request(url, headers=headers)
+                  with request.urlopen(req, context=ctx, timeout=10) as resp:
+                      return json.load(resp)
+
+              sts_url = f"{api}/apis/apps/v1/namespaces/{namespace}/statefulsets/{statefulset}"
+              dep_url = f"{api}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment}"
+              svc_url = f"{api}/api/v1/namespaces/{namespace}/services/{service_name}"
+              deadline = time.time() + 600
+              while time.time() < deadline:
+                  try:
+                      payload = get_json(sts_url)
+                  except error.HTTPError as exc:
+                      if exc.code == 404:
+                          time.sleep(5)
+                          continue
+                      raise
+                  spec = payload.get("spec") or {}
+                  status = payload.get("status") or {}
+                  desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))
+                  ready = int(status.get("readyReplicas") or 0)
+                  if ready >= desired:
+                      break
+                  time.sleep(5)
+              else:
+                  raise SystemExit("StatefulSet did not reach desired ready replicas before legacy Deployment cleanup")
+
+              patch_headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/json",
+                  "Content-Type": "application/merge-patch+json",
+              }
+              service_patch = json.dumps(
+                  {
+                      "spec": {
+                          "selector": {
+                              "app.kubernetes.io/name": service_app_name,
+                              "app.kubernetes.io/instance": service_instance,
+                              "codex-lb.soju.dev/traffic": "workload",
+                          }
+                      }
+                  }
+              ).encode("utf-8")
+              req = request.Request(svc_url, headers=patch_headers, data=service_patch, method="PATCH")
+              with request.urlopen(req, context=ctx, timeout=10):
+                  pass
+
+              req = request.Request(dep_url, headers=headers, method="DELETE")
+              try:
+                  with request.urlopen(req, context=ctx, timeout=10):
+                      pass
+              except error.HTTPError as exc:
+                  if exc.code != 404:
+                      raise
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: STATEFULSET_NAME
+              value: {{ include "codex-lb.workloadName" . | quote }}
+            - name: STATEFULSET_MIN_REPLICAS
+              value: {{ ternary (.Values.autoscaling.minReplicas | toString) (.Values.replicaCount | toString) .Values.autoscaling.enabled | quote }}
+            - name: LEGACY_DEPLOYMENT_NAME
+              value: {{ include "codex-lb.fullname" . | quote }}
+            - name: PUBLIC_SERVICE_NAME
+              value: {{ include "codex-lb.fullname" . | quote }}
+            - name: PUBLIC_SERVICE_APP_NAME
+              value: {{ include "codex-lb.name" . | quote }}
+            - name: PUBLIC_SERVICE_INSTANCE
+              value: {{ .Release.Name | quote }}
+{{- end }}

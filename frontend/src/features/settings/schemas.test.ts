@@ -13,6 +13,7 @@ describe("DashboardSettingsSchema", () => {
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -26,6 +27,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("round_robin");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.requestVisibilityMode).toBe("temporary");
@@ -42,6 +44,7 @@ describe("SettingsUpdateRequestSchema", () => {
       preferEarlierResetAccounts: true,
       routingStrategy: "usage_weighted",
       openaiCacheAffinityMaxAgeSeconds: 120,
+      dashboardSessionTtlSeconds: 7200,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
@@ -50,6 +53,7 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
+    expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("usage_weighted");
@@ -57,6 +61,16 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.apiKeyAuthEnabled).toBe(false);
     expect(parsed.requestVisibilityMode).toBe("temporary");
     expect(parsed.requestVisibilityDurationMinutes).toBe(30);
+  });
+
+  it("accepts long session lifetimes above 30 days", () => {
+    const parsed = SettingsUpdateRequestSchema.parse({
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      dashboardSessionTtlSeconds: 31536000,
+    });
+
+    expect(parsed.dashboardSessionTtlSeconds).toBe(31536000);
   });
 
   it("accepts payload without optional fields", () => {
@@ -72,6 +86,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
     expect(parsed.requestVisibilityMode).toBeUndefined();
     expect(parsed.requestVisibilityDurationMinutes).toBeUndefined();
+    expect(parsed.dashboardSessionTtlSeconds).toBeUndefined();
   });
 
   it("rejects invalid types", () => {

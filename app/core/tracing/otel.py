@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from importlib import import_module
 
+from fastapi import FastAPI
+
 logger = logging.getLogger(__name__)
 
 _otel_initialized = False
 
 
-def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: object | None = None) -> bool:
+def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: FastAPI | None = None) -> bool:
     global _otel_initialized
 
     if _otel_initialized:

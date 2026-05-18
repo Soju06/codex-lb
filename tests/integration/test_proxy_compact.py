@@ -102,6 +102,44 @@ async def test_proxy_compact_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, monkeypatch):
+    email = "compact-tools@example.com"
+    raw_account_id = "acc_compact_tools"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "tools": [{"type": "image_generation"}],
+        "tool_choice": {"type": "image_generation"},
+        "parallel_tool_calls": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert seen_payloads[0]["model"] == "gpt-5.1"
+    assert seen_payloads[0]["instructions"] == "hi"
+    assert seen_payloads[0]["input"] == []
+    assert "tools" not in seen_payloads[0]
+    assert "tool_choice" not in seen_payloads[0]
+    assert "parallel_tool_calls" not in seen_payloads[0]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(async_client):
     email = "compact-gated@example.com"
     raw_account_id = "acc_compact_gated"

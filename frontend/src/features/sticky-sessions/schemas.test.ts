@@ -39,7 +39,15 @@ describe("StickySessionsListResponseSchema", () => {
 describe("StickySessionsListParamsSchema", () => {
   it("defaults pagination parameters", () => {
     const parsed = StickySessionsListParamsSchema.parse({});
-    expect(parsed).toEqual({ staleOnly: false, offset: 0, limit: 10 });
+    expect(parsed).toEqual({
+      staleOnly: false,
+      accountQuery: "",
+      keyQuery: "",
+      sortBy: "updated_at",
+      sortDir: "desc",
+      offset: 0,
+      limit: 10,
+    });
   });
 });
 

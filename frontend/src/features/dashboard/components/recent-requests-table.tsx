@@ -34,9 +34,11 @@ import { RequestVisibilityDrawer } from "@/features/dashboard/components/request
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
+  formatDateTimeInline,
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
+  formatSlug,
   formatTimeLong,
 } from "@/utils/formatters";
 
@@ -59,6 +61,13 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
 
 const FAST_BADGE_CLASS =
   "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:border-amber-400/30 dark:text-amber-300";
+
+const PLAN_CLASS_MAP: Record<string, string> = {
+  free: "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/15 dark:text-zinc-300",
+  plus: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
+  team: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
+  pro: "bg-violet-500/15 text-violet-700 border-violet-500/20 hover:bg-violet-500/20 dark:text-violet-300",
+};
 
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
@@ -123,11 +132,12 @@ export function RecentRequestsTable({
     <div className="space-y-3">
       <div className="rounded-xl border bg-card">
         <div className="relative overflow-x-auto">
-          <Table className="min-w-[1160px] table-fixed">
+          <Table className="min-w-[1240px] table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
+              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
               <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
@@ -137,19 +147,21 @@ export function RecentRequestsTable({
               <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
             </TableRow>
           </TableHeader>
-            <TableBody>
-              {requests.map((request) => {
-                const time = formatTimeLong(request.requestedAt);
-                const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
-                const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
-                const errorPreview = request.errorMessage || request.errorCode || "-";
-                const hasError = !!(request.errorCode || request.errorMessage);
-                const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
-                const showRequestedTier =
-                  !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
-                const isFast = visibleServiceTier === "priority";
-                const showRequestedPriorityBolt = request.requestedServiceTier === "priority";
-                const showRequestedTierText = showRequestedTier && request.requestedServiceTier !== "priority";
+          <TableBody>
+            {requests.map((request) => {
+              const time = formatTimeLong(request.requestedAt);
+              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
+              const errorPreview = request.errorMessage || request.errorCode || "-";
+              const hasError = !!(request.errorCode || request.errorMessage);
+              const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
+              const showRequestedTier =
+                !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
+              const isFast = visibleServiceTier === "priority";
+              const showRequestedPriorityBolt = request.requestedServiceTier === "priority";
+              const showRequestedTierText = showRequestedTier && request.requestedServiceTier !== "priority";
+              const planType = request.planType?.trim().toLowerCase() || null;
+              const planLabel = planType ? formatSlug(planType) : "--";
 
                 return (
                   <TableRow
@@ -168,6 +180,18 @@ export function RecentRequestsTable({
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
+                    )}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {planType ? (
+                      <Badge
+                        variant="outline"
+                        className={PLAN_CLASS_MAP[planType] ?? PLAN_CLASS_MAP.free}
+                      >
+                        {planLabel}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
                     )}
                   </TableCell>
                   <TableCell className="truncate align-top text-xs text-muted-foreground">
@@ -311,9 +335,10 @@ export function RecentRequestsTable({
               />
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Status" value={viewingErrorRequest ? (REQUEST_STATUS_LABELS[viewingErrorRequest.status] ?? viewingErrorRequest.status) : "—"} />
-                <RequestDetailField label="Model" value={viewingErrorRequest ? formatModelLabel(viewingErrorRequest.model, viewingErrorRequest.reasoningEffort) : "—"} mono />
+                <RequestDetailField label="Model" value={viewingErrorRequest ? formatModelLabel(viewingErrorRequest.model, viewingErrorRequest.reasoningEffort, viewingErrorRequest.actualServiceTier ?? viewingErrorRequest.serviceTier) : "—"} mono />
+                <RequestDetailField label="Plan" value={viewingErrorRequest?.planType ? formatSlug(viewingErrorRequest.planType) : "—"} />
                 <RequestDetailField label="Transport" value={viewingErrorRequest?.transport ? (TRANSPORT_LABELS[viewingErrorRequest.transport] ?? viewingErrorRequest.transport) : "—"} />
-                <RequestDetailField label="Time" value={viewingErrorRequest ? `${formatTimeLong(viewingErrorRequest.requestedAt).time} ${formatTimeLong(viewingErrorRequest.requestedAt).date}` : "—"} />
+                <RequestDetailField label="Time" value={viewingErrorRequest ? formatDateTimeInline(viewingErrorRequest.requestedAt) : "—"} />
                 <RequestDetailField label="Error Code" value={viewingErrorRequest?.errorCode ?? "—"} mono />
               </div>
             </div>

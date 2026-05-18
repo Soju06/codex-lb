@@ -14,7 +14,7 @@ from app.core.types import JsonValue
 logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 15.0
-_FILTERED_FIELDS = {"base_instructions", "model_messages"}
+_FILTERED_FIELDS = {"model_messages"}
 
 
 class ModelFetchError(Exception):
@@ -74,6 +74,7 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
         slug=_str(data, "slug"),
         display_name=_str(data, "display_name"),
         description=_str(data, "description"),
+        base_instructions=_str(data, "base_instructions"),
         context_window=_int(data, "context_window"),
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,

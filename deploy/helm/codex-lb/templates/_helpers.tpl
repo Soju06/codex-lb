@@ -22,6 +22,20 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+Headless service name for per-pod bridge DNS.
+*/}}
+{{- define "codex-lb.bridgeHeadlessServiceName" -}}
+{{- printf "%s-bridge" (include "codex-lb.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Stable workload resource name. Separate from fullname to allow controller-kind migration without same-name conflicts.
+*/}}
+{{- define "codex-lb.workloadName" -}}
+{{- printf "%s-workload" (include "codex-lb.fullname" .) | trunc 52 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "codex-lb.chart" -}}
@@ -49,6 +63,22 @@ Selector labels — IMMUTABLE after first deploy (name + instance ONLY, never ve
 {{- define "codex-lb.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "codex-lb.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+StatefulSet workload selector labels. These are distinct from the legacy Deployment traffic lane.
+*/}}
+{{- define "codex-lb.workloadSelectorLabels" -}}
+{{- include "codex-lb.selectorLabels" . }}
+codex-lb.soju.dev/traffic: workload
+{{- end }}
+
+{{/*
+Legacy Deployment traffic selector labels used during controller migration cutover.
+*/}}
+{{- define "codex-lb.legacySelectorLabels" -}}
+{{- include "codex-lb.selectorLabels" . }}
+codex-lb.soju.dev/traffic: legacy
 {{- end }}
 
 {{/*
@@ -105,7 +135,17 @@ This is used in secret.yaml to populate the database-url secret key.
 {{/*
 Migration hook phases — default to pre-install when DB credentials are already available without ExternalSecrets materialization.
 */}}
-{{- define "codex-lb.migrationHookPhases" -}}{{- if .Values.externalSecrets.enabled -}}post-install,pre-upgrade{{- else if .Values.postgresql.enabled -}}pre-upgrade{{- else -}}pre-install,pre-upgrade{{- end -}}{{- end }}
+{{- define "codex-lb.migrationHookPhases" -}}
+{{- if .Values.externalSecrets.enabled -}}
+post-install,pre-upgrade
+{{- else if .Values.postgresql.enabled -}}
+pre-upgrade
+{{- else if or .Values.auth.existingSecret .Values.externalDatabase.existingSecret -}}
+pre-install,pre-upgrade
+{{- else -}}
+post-install,pre-upgrade
+{{- end -}}
+{{- end }}
 
 {{/*
 Migration job service account — pre-install hooks cannot rely on chart-created ServiceAccounts.

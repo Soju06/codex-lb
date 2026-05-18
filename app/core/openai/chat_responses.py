@@ -722,7 +722,7 @@ def _as_mapping(value: JsonValue) -> Mapping[str, JsonValue] | None:
     return None
 
 
-def _first_str(*values: object) -> str | None:
+def _first_str(*values: JsonValue) -> str | None:
     for value in values:
         if isinstance(value, str) and value:
             return value

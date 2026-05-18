@@ -38,8 +38,8 @@ spec:
             description: "p99 request latency is above 10 seconds"
         - alert: CodexLBPodDown
           expr: |
-            kube_deployment_status_replicas_available{deployment="{{ include "codex-lb.fullname" . }}"}
-            < kube_deployment_spec_replicas{deployment="{{ include "codex-lb.fullname" . }}"}
+            kube_statefulset_status_replicas_ready{statefulset="{{ include "codex-lb.workloadName" . }}"}
+            < kube_statefulset_replicas{statefulset="{{ include "codex-lb.workloadName" . }}"}
           for: 5m
           labels:
             severity: critical

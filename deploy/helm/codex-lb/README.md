@@ -198,7 +198,7 @@ This chart intentionally keeps migration behavior explicit by install mode.
 This means:
 
 - bundled PostgreSQL installs bootstrap themselves without requiring a separate install-time migration writer
-- external DB installs with direct credentials can migrate before Deployment creation
+- external DB installs with direct credentials can migrate before StatefulSet creation
 - external secrets installs fail closed instead of serving on a stale schema
 
 ## Secret Model
@@ -216,7 +216,7 @@ Use `auth.existingSecret` when one secret contains both:
 
 Use `externalDatabase.existingSecret` for the database URL and let the chart manage or reference a separate app secret for `encryption-key`.
 
-When `externalDatabase.existingSecret` is set and `auth.existingSecret` is not, the chart-managed app secret contains only the encryption key; the Deployment reads `CODEX_LB_DATABASE_URL` from the external DB secret.
+When `externalDatabase.existingSecret` is set and `auth.existingSecret` is not, the chart-managed app secret contains only the encryption key; the StatefulSet reads `CODEX_LB_DATABASE_URL` from the external DB secret.
 
 ## Network Policy
 
@@ -245,7 +245,7 @@ total_connections = (databasePoolSize + databaseMaxOverflow) × replicas
 
 Keep this within your PostgreSQL `max_connections` budget or place PgBouncer in front of the database.
 
-## Production Deployment
+## Production Workload
 
 Multi-replica production deployments require careful coordination of database connectivity, session routing, and graceful shutdown. This section covers the key patterns and tuning parameters.
 
@@ -278,9 +278,32 @@ The session bridge is an in-memory cache of upstream WebSocket connections, shar
 When using PostgreSQL, ring membership is **automatic and database-backed**:
 
 - Each pod registers itself in the database on startup
+- Each pod auto-advertises its owner-handoff endpoint via headless-service DNS
 - The `sessionBridgeInstanceRing` field is **optional** and only needed for manual pod list override
 - Pods discover each other via database queries; no manual configuration required
 - Ring membership is cleaned up automatically when pods terminate
+
+The chart configures each pod with:
+
+- StatefulSet name: `<release>-codex-lb-workload`
+- `serviceName: <release>-codex-lb-bridge` on the StatefulSet
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID=$(POD_NAME)`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL=http://$(POD_NAME).<headless-service>.$(POD_NAMESPACE).svc.<clusterDomain>:2455`
+
+`clusterDomain` defaults to `cluster.local`. If your cluster uses another suffix, set:
+
+```yaml
+clusterDomain: corp.internal
+```
+
+In most clusters no extra values are required for `/responses` owner handoff. If pods must be reached through a different internal address, override:
+
+```yaml
+config:
+  sessionBridgeAdvertiseBaseUrl: "http://codex-lb-internal.default.svc.cluster.local:2455"
+```
+
+When `networkPolicy.enabled=true`, the chart also allows port `2455` traffic between codex-lb pods so owner handoff can work without extra rules.
 
 **Manual Ring Override (Advanced)**
 
@@ -436,7 +459,7 @@ The chart targets the Kubernetes Restricted Pod Security Standard.
 Rollout controls for externally managed config:
 
 - `rollout.reloader.enabled=true` adds Stakater Reloader annotations
-- `rollout.manualToken` forces a Deployment rollout when external Secret contents change outside Helm
+- `rollout.manualToken` forces a StatefulSet rollout when external Secret contents change outside Helm
 
 ## Ingress and Gateway API
 
@@ -473,10 +496,11 @@ gatewayApi:
 helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb <your values...>
 ```
 
-- External DB installs can migrate before Deployment creation.
+- External DB installs can migrate before StatefulSet creation.
 - External secrets installs keep the dedicated migration Job and fail closed behind the schema gate.
 - Bundled installs stay easy to bootstrap and keep the migration hook for upgrades.
-- Deployment checksums force rollouts when chart-managed ConfigMaps or Secrets change.
+- StatefulSet pod-template checksums force rollouts when chart-managed ConfigMaps or Secrets change.
+- The workload resource name is intentionally different from the legacy Deployment name to avoid Helm kind-migration conflicts during upgrade.
 
 ## Validation
 

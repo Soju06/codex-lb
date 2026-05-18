@@ -13,6 +13,8 @@ from app.core.auth import (
     generate_unique_account_id,
     parse_auth_json,
 )
+from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -179,13 +181,13 @@ class AccountsService:
         )
 
     async def reactivate_account(self, account_id: str) -> bool:
-        result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None)
+        result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, None, blocked_at=None)
         if result:
             get_account_selection_cache().invalidate()
         return result
 
     async def pause_account(self, account_id: str) -> bool:
-        result = await self._repo.update_status(account_id, AccountStatus.PAUSED, None)
+        result = await self._repo.update_status(account_id, AccountStatus.PAUSED, None, None, blocked_at=None)
         if result:
             get_account_selection_cache().invalidate()
         return result
@@ -194,4 +196,8 @@ class AccountsService:
         result = await self._repo.delete(account_id)
         if result:
             get_account_selection_cache().invalidate()
+            get_api_key_cache().clear()
+            poller = get_cache_invalidation_poller()
+            if poller is not None:
+                await poller.bump(NAMESPACE_API_KEY)
         return result

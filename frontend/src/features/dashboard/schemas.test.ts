@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   AccountSummarySchema,
   AccountAdditionalQuotaSchema,
+  DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DepletionSchema,
+  parseOverviewTimeframe,
+  RequestLogFilterOptionsSchema,
   RequestLogVisibilityResponseSchema,
   RequestLogsResponseSchema,
   UsageWindowSchema,
@@ -23,6 +26,12 @@ describe("DashboardOverviewSchema", () => {
   it("parses overview payload without request_logs", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -35,13 +44,14 @@ describe("DashboardOverviewSchema", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: {
-          requests7d: 500,
-          tokensSecondaryWindow: 2000,
-          cachedTokensSecondaryWindow: 300,
-          errorRate7d: 0.02,
+          requests: 500,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
           topError: null,
         },
       },
@@ -62,6 +72,12 @@ describe("DashboardOverviewSchema", () => {
   it("drops legacy request_logs field from parse result", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -74,7 +90,7 @@ describe("DashboardOverviewSchema", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 0,
+          totalUsd: 0,
         },
         metrics: null,
       },
@@ -121,7 +137,9 @@ describe("RequestLogsResponseSchema", () => {
           id: 1,
           requestedAt: ISO,
           accountId: "acc-1",
+          planType: "plus",
           apiKeyName: "Key A",
+          apiKeyId: "key-1",
           requestId: "req-1",
           model: "gpt-5.1",
           transport: "websocket",
@@ -141,7 +159,28 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.id).toBe(1);
+    expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
+    expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+
+  it("parses request-log filter options including API keys", () => {
+    const parsed = RequestLogFilterOptionsSchema.parse({
+      accountIds: ["acc-1"],
+      apiKeys: [{ id: "key-1", name: "Key A", keyPrefix: "sk-key-a" }],
+      modelOptions: [{ model: "gpt-5.1", reasoningEffort: null }],
+      statuses: ["ok"],
+    });
+
+    expect(parsed.apiKeys[0]?.id).toBe("key-1");
+    expect(parsed.apiKeys[0]?.keyPrefix).toBe("sk-key-a");
+  });
+});
+
+describe("overview timeframe parsing", () => {
+  it("defaults invalid values to 7d", () => {
+    expect(parseOverviewTimeframe("invalid")).toBe(DEFAULT_OVERVIEW_TIMEFRAME);
+    expect(parseOverviewTimeframe(null)).toBe(DEFAULT_OVERVIEW_TIMEFRAME);
   });
 });
 
@@ -321,6 +360,12 @@ describe("DashboardOverviewSchema with additional quotas", () => {
   it("parses with additionalQuotas array", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -333,7 +378,7 @@ describe("DashboardOverviewSchema with additional quotas", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: null,
       },
@@ -380,6 +425,12 @@ describe("DashboardOverviewSchema with additional quotas", () => {
   it("defaults additionalQuotas to empty array for backward compatibility", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
       accounts: [],
       summary: {
         primaryWindow: {
@@ -392,7 +443,7 @@ describe("DashboardOverviewSchema with additional quotas", () => {
         secondaryWindow: null,
         cost: {
           currency: "USD",
-          totalUsd7d: 12.5,
+          totalUsd: 12.5,
         },
         metrics: null,
       },

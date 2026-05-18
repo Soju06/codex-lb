@@ -1,0 +1,5 @@
+- [x] 1. Add OpenSpec deltas for configurable dashboard password session lifetime in admin auth and settings UI.
+- [x] 2. Add a persisted `dashboard_session_ttl_seconds` field to dashboard settings, including migration, backend settings contracts, and validation.
+- [x] 3. Replace the hard-coded 12-hour dashboard auth session lifetime with the persisted setting for both encrypted session payload expiry and cookie `Max-Age`.
+- [x] 4. Add a dashboard Settings control for the session lifetime and wire it through the frontend schemas, payload builder, and tests.
+- [x] 5. Run targeted backend/frontend tests and `openspec validate --specs`.

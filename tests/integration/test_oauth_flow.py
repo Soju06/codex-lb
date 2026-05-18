@@ -414,3 +414,115 @@ async def test_manual_callback_returns_error_message_for_invalid_state(async_cli
         "status": "error",
         "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
     }
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_is_idempotent_for_same_attempt(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    email = "manual-idem@example.com"
+    raw_account_id = "acc_manual_idem"
+
+    exchange_calls = 0
+
+    async def fake_exchange_authorization_code(**_):
+        nonlocal exchange_calls
+        exchange_calls += 1
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="manual-idem-access-token",
+            refresh_token="manual-idem-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert start.status_code == 200
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state_token = oauth_module._OAUTH_STORE.state.state_token
+
+    callback_url = f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"
+
+    first = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={"callbackUrl": callback_url},
+    )
+    assert first.status_code == 200
+    assert first.json() == {"status": "success", "errorMessage": None}
+    assert exchange_calls == 1
+
+    # Re-submitting the same callback URL for the same attempt must be a
+    # no-op success (idempotent), not a re-exchange of the consumed code.
+    second = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={"callbackUrl": callback_url},
+    )
+    assert second.status_code == 200
+    assert second.json() == {"status": "success", "errorMessage": None}
+    assert exchange_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_after_success_rejects_stale_callback(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    email = "manual-stale@example.com"
+    raw_account_id = "acc_manual_stale"
+
+    async def fake_exchange_authorization_code(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="manual-stale-access-token",
+            refresh_token="manual-stale-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert start.status_code == 200
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state_token = oauth_module._OAUTH_STORE.state.state_token
+
+    first = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": (f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}"),
+        },
+    )
+    assert first.status_code == 200
+    assert first.json() == {"status": "success", "errorMessage": None}
+
+    # A stale callback URL from a previous/different attempt arrives after
+    # success. Idempotent return must NOT mask state-mismatch validation: the
+    # request must still be rejected as an invalid callback.
+    stale = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": "http://localhost:1455/auth/callback?code=stale-code&state=stale-state",
+        },
+    )
+    assert stale.status_code == 200
+    assert stale.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }

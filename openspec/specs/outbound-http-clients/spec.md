@@ -1,14 +1,17 @@
-# Outbound HTTP Clients
+# outbound-http-clients Specification
 
 ## Purpose
 
-Define how codex-lb performs outbound HTTP requests for upstream APIs and service metadata.
+See context docs for background.
 
 ## Requirements
+### Requirement: OAuth authorize requests use a configurable originator persona
+Browser OAuth authorize requests MUST include an `originator` query parameter. The service MUST default that parameter to `codex_chatgpt_desktop` and MUST let operators override it through configuration when they need a different first-party Codex persona.
 
-### Requirement: Outbound aiohttp clients honor environment proxy settings
-Shared outbound `aiohttp` clients MUST honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables so operator-configured proxy routing applies consistently to upstream OAuth, proxy, and metadata calls.
+#### Scenario: default OAuth authorize originator uses the Desktop persona
+- **WHEN** the operator does not configure an override
+- **THEN** the browser OAuth authorize URL includes `originator=codex_chatgpt_desktop`
 
-#### Scenario: Service runs behind an operator-configured proxy
-- **WHEN** codex-lb initializes the shared HTTP client or creates the Codex version GitHub client
-- **THEN** each outbound `aiohttp.ClientSession` is created with environment proxy support enabled
+#### Scenario: configured OAuth authorize originator falls back to the CLI persona
+- **WHEN** the operator configures the OAuth authorize originator as `codex_cli_rs`
+- **THEN** the browser OAuth authorize URL includes `originator=codex_cli_rs`

@@ -12,7 +12,7 @@ import {
 import { useChartColors } from "@/hooks/use-chart-colors";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import type { ApiKeyTrendPoint } from "@/features/apis/schemas";
-import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
+import { formatChartDateTime, formatCompactNumber, formatCurrency } from "@/utils/formatters";
 
 type MergedPoint = {
   t: string;
@@ -76,13 +76,7 @@ type ChartTooltipProps = {
 
 function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
   if (!active || !payload?.length) return null;
-  const d = new Date(label as string);
-  const heading = d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const heading = formatChartDateTime(label as string);
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md">
       <p className="mb-1 text-[11px] text-muted-foreground">{heading}</p>

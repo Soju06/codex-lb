@@ -19,6 +19,7 @@ def reset_request_id(token: Token[str | None]) -> None:
 
 
 def ensure_request_id(value: str | None = None) -> str:
+    """Return the active request ID, storing an explicit or generated value when needed."""
     if value:
         _REQUEST_ID.set(value)
         return value

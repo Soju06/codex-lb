@@ -99,7 +99,19 @@ async def test_import_falls_back_to_email_based_account_id(async_client):
 
 
 @pytest.mark.asyncio
-async def test_import_overwrites_by_default_for_same_account_identity(async_client):
+async def test_import_overwrites_for_same_account_identity_when_overwrite_enabled(async_client):
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": False,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert settings.status_code == 200
+    assert settings.json()["importWithoutOverwrite"] is False
+
     email = "same-default@example.com"
     raw_account_id = "acc_same_default"
 

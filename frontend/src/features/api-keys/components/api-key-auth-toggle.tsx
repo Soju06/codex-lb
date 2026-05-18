@@ -11,9 +11,7 @@ export function ApiKeyAuthToggle({ enabled, disabled = false, onChange }: ApiKey
     <div className="flex items-center justify-between rounded-lg border p-3">
       <div className="space-y-1">
         <p className="text-sm font-medium">API Key Auth</p>
-        <p className="text-xs text-muted-foreground">
-          Require API keys for incoming `/v1/*` requests.
-        </p>
+        <p className="text-xs text-muted-foreground">Require API keys for protected proxy requests.</p>
       </div>
       <Switch checked={enabled} disabled={disabled} onCheckedChange={onChange} />
     </div>

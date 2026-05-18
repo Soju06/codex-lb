@@ -205,7 +205,8 @@
         "code",
         "bug",
         "question",
-        "maintenance"
+        "maintenance",
+        "test"
       ]
     },
     {
@@ -245,7 +246,8 @@
       "profile": "https://github.com/Daltonganger",
       "contributions": [
         "code",
-        "test"
+        "test",
+        "bug"
       ]
     },
     {
@@ -255,6 +257,160 @@
       "profile": "https://github.com/L1st3r",
       "contributions": [
         "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "mhughdo",
+      "name": "Hugh Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15611134?v=4",
+      "profile": "https://github.com/mhughdo",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "salwinh",
+      "name": "Hubert Salwin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6965142?v=4",
+      "profile": "https://github.com/salwinh",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "Daeroni",
+      "name": "Teemu Koskinen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1648961?v=4",
+      "profile": "https://github.com/Daeroni",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "Felix201209",
+      "name": "Yu Peng Zheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151984457?v=4",
+      "profile": "http://felixypz.me",
+      "contributions": [
+        "doc",
+        "code"
+      ]
+    },
+    {
+      "login": "embogomolov",
+      "name": "embogomolov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/185256086?v=4",
+      "profile": "https://github.com/embogomolov",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "SHAREN",
+      "name": "Renat Sharipov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6128858?v=4",
+      "profile": "https://github.com/SHAREN",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "aruis",
+      "name": "Liu Rui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1785495?v=4",
+      "profile": "https://ximatai.net",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "OverHash",
+      "name": "OverHash",
+      "avatar_url": "https://avatars.githubusercontent.com/u/46231745?v=4",
+      "profile": "https://github.com/OverHash",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "Kazet111",
+      "name": "Kazet",
+      "avatar_url": "https://avatars.githubusercontent.com/u/21245898?v=4",
+      "profile": "https://github.com/Kazet111",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "balakumardev",
+      "name": "balakumardev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/45328806?v=4",
+      "profile": "https://github.com/balakumardev",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "ihazgithub",
+      "name": "ihazgithub",
+      "avatar_url": "https://avatars.githubusercontent.com/u/129220128?v=4",
+      "profile": "https://github.com/ihazgithub",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "stemirkhan",
+      "name": "Temirkhan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/99467693?v=4",
+      "profile": "https://github.com/stemirkhan",
+      "contributions": [
+        "code",
+        "test",
+        "doc",
+        "bug"
+      ]
+    },
+    {
+      "login": "tobwen",
+      "name": "tobwen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1864057?v=4",
+      "profile": "https://github.com/tobwen",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "rio-jeong",
+      "name": "Rio",
+      "avatar_url": "https://avatars.githubusercontent.com/u/193858009?v=4",
+      "profile": "https://github.com/rio-jeong",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
+    },
+    {
+      "login": "mikabytes",
+      "name": "Mika",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1054229?v=4",
+      "profile": "https://mikabytes.com",
+      "contributions": [
+        "code",
+        "doc",
         "test"
       ]
     }

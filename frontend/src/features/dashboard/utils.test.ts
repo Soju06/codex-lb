@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
+import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import {
   applySecondaryConstraint,
+  buildDashboardView,
   buildDepletionView,
   buildRemainingItems,
+  sumRemaining,
+  type RemainingItem,
 } from "@/features/dashboard/utils";
-import type { RemainingItem } from "@/features/dashboard/utils";
-import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
+import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
@@ -159,6 +162,16 @@ describe("applySecondaryConstraint", () => {
     expect(result[0].remainingPercent).toBe(90);
   });
 
+  it("does not clamp primary when secondary data is missing", () => {
+    const primary = [remainingItem({ accountId: "acc-1", value: 200, remainingPercent: 90 })];
+    const secondary = [remainingItem({ accountId: "acc-1", value: 0, remainingPercent: null })];
+
+    const result = applySecondaryConstraint(primary, secondary);
+
+    expect(result[0].value).toBe(200);
+    expect(result[0].remainingPercent).toBe(90);
+  });
+
   it("handles multiple accounts independently", () => {
     const primary = [
       remainingItem({ accountId: "acc-1", value: 200, remainingPercent: 90 }),
@@ -246,5 +259,185 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+});
+
+describe("sumRemaining", () => {
+  it("returns 0 for empty array", () => {
+    expect(sumRemaining([])).toBe(0);
+  });
+
+  it("sums positive values", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: 120 }),
+      remainingItem({ accountId: "b", value: 80 }),
+    ];
+    expect(sumRemaining(items)).toBe(200);
+  });
+
+  it("clamps negative values to 0 before summing", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: 100 }),
+      remainingItem({ accountId: "b", value: -30 }),
+    ];
+    expect(sumRemaining(items)).toBe(100);
+  });
+
+  it("returns 0 when all values are negative", () => {
+    const items = [
+      remainingItem({ accountId: "a", value: -10 }),
+      remainingItem({ accountId: "b", value: -20 }),
+    ];
+    expect(sumRemaining(items)).toBe(0);
+  });
+});
+
+describe("buildDashboardView", () => {
+  it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-1",
+          email: "one@example.com",
+          usage: {
+            primaryRemainingPercent: 90,
+            secondaryRemainingPercent: 1,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+        account({
+          accountId: "acc-2",
+          email: "two@example.com",
+          usage: {
+            primaryRemainingPercent: 60,
+            secondaryRemainingPercent: 70,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: 10080,
+        }),
+      ],
+      summary: {
+        primaryWindow: {
+          remainingPercent: 75,
+          capacityCredits: 450,
+          remainingCredits: 337.5,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: {
+          remainingPercent: 35.5,
+          capacityCredits: 15120,
+          remainingCredits: 5370,
+          resetAt: null,
+          windowMinutes: 10080,
+        },
+        cost: {
+          currency: "USD",
+          totalUsd: 1.82,
+        },
+        metrics: {
+          requests: 228,
+          tokens: 45000,
+          cachedInputTokens: 8200,
+          errorRate: 0.028,
+          errorCount: 6,
+          topError: "rate_limit_exceeded",
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    expect(view.primaryUsageItems).toHaveLength(2);
+    expect(view.primaryUsageItems[0]?.value).toBeCloseTo(75.6);
+    expect(view.primaryUsageItems[1]?.value).toBeCloseTo(135);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(450);
+    expect(overview.summary.secondaryWindow?.capacityCredits).toBe(15120);
+    expect(view.primaryUsageItems.reduce((total, item) => total + item.value, 0)).toBeCloseTo(210.6);
+  });
+
+  it("keeps primary totals intact for accounts without secondary usage data", () => {
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-1",
+          email: "one@example.com",
+          usage: {
+            primaryRemainingPercent: 90,
+            secondaryRemainingPercent: null,
+          },
+          resetAtPrimary: null,
+          resetAtSecondary: null,
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: null,
+        }),
+      ],
+      windows: {
+        primary: {
+          windowKey: "primary",
+          windowMinutes: 300,
+          accounts: [
+            {
+              accountId: "acc-1",
+              remainingPercentAvg: 90,
+              capacityCredits: 225,
+              remainingCredits: 202.5,
+            },
+          ],
+        },
+        secondary: {
+          windowKey: "secondary",
+          windowMinutes: 10080,
+          accounts: [
+            {
+              accountId: "acc-1",
+              remainingPercentAvg: null,
+              capacityCredits: 7560,
+              remainingCredits: 0,
+            },
+          ],
+        },
+      },
+      summary: {
+        primaryWindow: {
+          remainingPercent: 90,
+          capacityCredits: 225,
+          remainingCredits: 202.5,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: {
+          remainingPercent: 0,
+          capacityCredits: 7560,
+          remainingCredits: 0,
+          resetAt: null,
+          windowMinutes: 10080,
+        },
+        cost: {
+          currency: "USD",
+          totalUsd: 1.82,
+        },
+        metrics: {
+          requests: 228,
+          tokens: 45000,
+          cachedInputTokens: 8200,
+          errorRate: 0.028,
+          errorCount: 6,
+          topError: "rate_limit_exceeded",
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    expect(view.primaryUsageItems).toHaveLength(1);
+    expect(view.primaryUsageItems[0]?.value).toBeCloseTo(202.5);
+    expect(view.primaryUsageItems[0]?.remainingPercent).toBe(90);
+    expect(overview.summary.primaryWindow.capacityCredits).toBe(225);
   });
 });

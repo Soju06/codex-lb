@@ -22,6 +22,7 @@ def test_should_refresh_within_interval():
 
 def test_classify_refresh_error_permanent():
     assert classify_refresh_error("refresh_token_expired") is True
+    assert classify_refresh_error("account_deactivated") is True
 
 
 def test_classify_refresh_error_temporary():

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import cast
 
-from fastapi import Depends, Request, WebSocket
+from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
@@ -198,8 +198,8 @@ def get_proxy_context(request: Request) -> ProxyContext:
     return ProxyContext(service=service)
 
 
-def get_proxy_service_for_app(app: object) -> ProxyService:
-    state = getattr(app, "state", None)
+def get_proxy_service_for_app(app: FastAPI) -> ProxyService:
+    state = app.state
     service = getattr(state, "proxy_service", None)
     if not isinstance(service, ProxyService):
         service = ProxyService(repo_factory=_proxy_repo_context)

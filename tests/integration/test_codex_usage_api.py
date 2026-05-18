@@ -7,9 +7,11 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -35,6 +37,19 @@ def _make_account(
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+async def _create_api_key(*, name: str, limits: list[LimitRuleInput] | None = None) -> tuple[str, str]:
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name=name,
+                allowed_models=None,
+                limits=limits or [],
+            )
+        )
+    return created.id, created.key
 
 
 @pytest.fixture(autouse=True)
@@ -308,3 +323,154 @@ async def test_codex_usage_additional_limit_supports_secondary_only(async_client
     assert additional_limit["rate_limit"]["primary_window"] is None
     assert additional_limit["rate_limit"]["secondary_window"]["used_percent"] == 65
     assert additional_limit["rate_limit"]["secondary_window"]["reset_at"] == 1735862400
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
+    key_id, plain_key = await _create_api_key(
+        name="codex-usage-api-key",
+        limits=[
+            LimitRuleInput(limit_type="credits", limit_window="5h", max_value=60),
+            LimitRuleInput(limit_type="credits", limit_window="7d", max_value=1000),
+        ],
+    )
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.FIVE_HOURS,
+                    max_value=60,
+                    current_value=12,
+                    model_filter=None,
+                    reset_at=now + timedelta(hours=5),
+                ),
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.SEVEN_DAYS,
+                    max_value=1000,
+                    current_value=250,
+                    model_filter=None,
+                    reset_at=now + timedelta(days=7),
+                ),
+            ],
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plan_type"] == "api_key"
+    assert payload["rate_limit"]["allowed"] is True
+    assert payload["rate_limit"]["limit_reached"] is False
+    assert payload["rate_limit"]["primary_window"]["used_percent"] == 20
+    assert payload["rate_limit"]["secondary_window"]["used_percent"] == 25
+    assert payload["credits"] == {
+        "has_credits": True,
+        "unlimited": False,
+        "balance": "750",
+        "approx_local_messages": None,
+        "approx_cloud_messages": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_client, db_setup):
+    now = utcnow()
+    suffix = str(int(now.timestamp() * 1_000_000))
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                _make_account(f"acc-agg-a-{suffix}", f"agg-a-{suffix}@test.com"),
+                _make_account(f"acc-agg-b-{suffix}", f"agg-b-{suffix}@test.com"),
+                UsageHistory(
+                    account_id=f"acc-agg-a-{suffix}",
+                    recorded_at=now,
+                    window="primary",
+                    used_percent=80.0,
+                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=f"acc-agg-b-{suffix}",
+                    recorded_at=now,
+                    window="primary",
+                    used_percent=90.0,
+                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=f"acc-agg-a-{suffix}",
+                    recorded_at=now,
+                    window="secondary",
+                    used_percent=70.0,
+                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    window_minutes=10080,
+                ),
+                UsageHistory(
+                    account_id=f"acc-agg-b-{suffix}",
+                    recorded_at=now,
+                    window="secondary",
+                    used_percent=60.0,
+                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    window_minutes=10080,
+                ),
+            ]
+        )
+        await session.commit()
+
+    key_id, plain_key = await _create_api_key(
+        name="codex-usage-agg-test",
+        limits=[
+            LimitRuleInput(limit_type="credits", limit_window="5h", max_value=100),
+            LimitRuleInput(limit_type="credits", limit_window="7d", max_value=500),
+        ],
+    )
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.FIVE_HOURS,
+                    max_value=100,
+                    current_value=5,
+                    model_filter=None,
+                    reset_at=now + timedelta(hours=5),
+                ),
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.SEVEN_DAYS,
+                    max_value=500,
+                    current_value=50,
+                    model_filter=None,
+                    reset_at=now + timedelta(days=7),
+                ),
+            ],
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["primary_window"]["used_percent"] == 5
+    assert payload["rate_limit"]["secondary_window"]["used_percent"] == 10
+    assert payload["credits"]["balance"] == "450"

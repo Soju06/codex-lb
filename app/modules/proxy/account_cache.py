@@ -9,7 +9,8 @@ import anyio
 if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import SelectionInputs
 
-_CacheKey = tuple[str | None, str | None]
+_AssignedAccountsKey = tuple[str, ...] | None
+_CacheKey = tuple[str | None, str | None, _AssignedAccountsKey]
 
 
 @dataclass(slots=True)
@@ -35,7 +36,7 @@ class AccountSelectionCache:
     def generation(self) -> int:
         return self._generation
 
-    async def get(self, key: _CacheKey = (None, None)) -> SelectionInputs | None:
+    async def get(self, key: _CacheKey = (None, None, None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
             return None
         entry = self._cache.get(key)
@@ -45,7 +46,13 @@ class AccountSelectionCache:
             return None
         return entry.data
 
-    async def set(self, data: SelectionInputs, key: _CacheKey = (None, None), *, generation: int | None = None) -> None:
+    async def set(
+        self,
+        data: SelectionInputs,
+        key: _CacheKey = (None, None, None),
+        *,
+        generation: int | None = None,
+    ) -> None:
         async with self._lock:
             if generation is not None and generation != self._generation:
                 return

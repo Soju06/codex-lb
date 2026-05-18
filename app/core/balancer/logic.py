@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import FailureClass, UpstreamError
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.utils.retry import backoff_seconds, parse_retry_after
 from app.db.models import AccountStatus
@@ -14,6 +14,7 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_expired": "Refresh token expired - re-login required",
     "refresh_token_reused": "Refresh token was reused - re-login required",
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
+    "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
 }
@@ -32,6 +33,17 @@ CAPACITY_PLAN_ALIASES = {
     "unknown": "free",
 }
 
+HEALTH_TIER_HEALTHY = 0
+HEALTH_TIER_DRAINING = 1
+HEALTH_TIER_PROBING = 2
+
+DRAIN_PRIMARY_THRESHOLD_PCT = 85.0
+DRAIN_SECONDARY_THRESHOLD_PCT = 90.0
+DRAIN_ERROR_WINDOW_SECONDS = 60.0
+DRAIN_ERROR_COUNT_THRESHOLD = 2
+PROBE_QUIET_SECONDS = 60.0
+PROBE_SUCCESS_STREAK_REQUIRED = 3
+
 
 @dataclass
 class AccountState:
@@ -39,6 +51,7 @@ class AccountState:
     status: AccountStatus
     used_percent: float | None = None
     reset_at: float | None = None
+    blocked_at: float | None = None
     cooldown_until: float | None = None
     secondary_used_percent: float | None = None
     secondary_reset_at: int | None = None
@@ -48,6 +61,7 @@ class AccountState:
     deactivation_reason: str | None = None
     plan_type: str | None = None
     capacity_credits: float | None = None
+    health_tier: int = 0
 
 
 @dataclass
@@ -92,6 +106,33 @@ def select_account(
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
 ) -> SelectionResult:
+    """Select an eligible account by applying availability checks and routing strategy.
+
+    This function filters out accounts that cannot currently serve traffic
+    (for example paused, deactivated, still rate-limited, or in active
+    cooldown), attempts controlled recovery from transient error backoff,
+    and then chooses a candidate using the configured balancing strategy.
+
+    Args:
+        states: Candidate account states to evaluate for the current request.
+        now: Unix timestamp in seconds used as the evaluation clock. If
+            ``None``, the current system time is used.
+        prefer_earlier_reset: Whether to bias selection toward accounts whose
+            secondary quota window resets sooner.
+        routing_strategy: Balancing strategy used to pick from the effective
+            pool (``"capacity_weighted"``, ``"round_robin"``, or
+            ``"usage_weighted"``).
+        allow_backoff_fallback: Whether to allow a fallback attempt with the
+            backoff account nearest to recovery when no fully available
+            account exists.
+        deterministic_probe: Whether capacity-weighted routing should use a
+            deterministic probe order instead of random weighted choice.
+
+    Returns:
+        A ``SelectionResult`` containing the selected ``AccountState`` and no
+        error message when routing can proceed, or ``None`` plus a
+        human-readable error message when no account is eligible.
+    """
     current = now or time.time()
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
@@ -138,13 +179,17 @@ def select_account(
         available.append(state)
 
     if not available:
-        # If any account is in error backoff, try the one closest to
-        # backoff expiry — it may have recovered.  Hard-blocked accounts
-        # (paused/deactivated/rate-limited/quota-exceeded) can't serve
-        # traffic regardless, so they shouldn't prevent trying recoverable
-        # accounts.  This prevents #140: all accounts locked out during
-        # a widespread upstream outage.
-        if len(in_error_backoff) > 1 and allow_backoff_fallback:
+        hard_blocked_exists = any(
+            state.status
+            in (
+                AccountStatus.PAUSED,
+                AccountStatus.DEACTIVATED,
+                AccountStatus.RATE_LIMITED,
+                AccountStatus.QUOTA_EXCEEDED,
+            )
+            for state in all_states
+        )
+        if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))
@@ -183,16 +228,23 @@ def select_account(
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
 
+    healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
+    probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
+    draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
+    effective_pool = healthy or probing or draining or available
+
     if routing_strategy == "round_robin":
-        selected = min(available, key=_round_robin_sort_key)
+        selected = min(effective_pool, key=_round_robin_sort_key)
     elif routing_strategy == "capacity_weighted":
-        candidate_pool = _prefer_earlier_reset_candidates(available, current) if prefer_earlier_reset else available
+        candidate_pool = (
+            _prefer_earlier_reset_candidates(effective_pool, current) if prefer_earlier_reset else effective_pool
+        )
         if deterministic_probe:
             selected = min(candidate_pool, key=_capacity_probe_sort_key)
         else:
             selected = _select_capacity_weighted(candidate_pool)
     else:
-        selected = min(available, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
+        selected = min(effective_pool, key=_reset_first_sort_key if prefer_earlier_reset else _usage_sort_key)
     return SelectionResult(selected, None)
 
 
@@ -231,6 +283,7 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
     state.status = AccountStatus.RATE_LIMITED
     state.error_count += 1
     state.last_error_at = time.time()
+    state.blocked_at = time.time()
 
     reset_at = _extract_reset_at(error)
     if reset_at is not None:
@@ -249,6 +302,7 @@ QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:
     state.status = AccountStatus.QUOTA_EXCEEDED
     state.used_percent = 100.0
+    state.blocked_at = time.time()
     state.cooldown_until = time.time() + QUOTA_EXCEEDED_COOLDOWN_SECONDS
 
     reset_at = _extract_reset_at(error)
@@ -264,6 +318,25 @@ def handle_permanent_failure(state: AccountState, error_code: str) -> None:
         error_code,
         f"Authentication failed: {error_code}",
     )
+    state.blocked_at = None
+
+
+FailoverAction = Literal["failover_next", "surface"]
+
+
+def failover_decision(
+    *,
+    failure_class: FailureClass,
+    downstream_visible: bool,
+    candidates_remaining: int,
+) -> FailoverAction:
+    if downstream_visible:
+        return "surface"
+    if candidates_remaining <= 0:
+        return "surface"
+    if failure_class in ("rate_limit", "quota", "retryable_transient"):
+        return "failover_next"
+    return "surface"
 
 
 def _extract_reset_at(error: UpstreamError) -> int | None:
@@ -274,3 +347,63 @@ def _extract_reset_at(error: UpstreamError) -> int | None:
     if reset_in is not None:
         return int(time.time() + float(reset_in))
     return None
+
+
+def evaluate_health_tier(
+    state: AccountState,
+    *,
+    now: float | None = None,
+    drain_entered_at: float | None = None,
+    probe_success_streak: int = 0,
+    drain_primary_threshold_pct: float = DRAIN_PRIMARY_THRESHOLD_PCT,
+    drain_secondary_threshold_pct: float = DRAIN_SECONDARY_THRESHOLD_PCT,
+    drain_error_window_seconds: float = DRAIN_ERROR_WINDOW_SECONDS,
+    drain_error_count_threshold: int = DRAIN_ERROR_COUNT_THRESHOLD,
+    probe_quiet_seconds: float = PROBE_QUIET_SECONDS,
+    probe_success_streak_required: int = PROBE_SUCCESS_STREAK_REQUIRED,
+) -> int:
+    current = now or time.time()
+
+    if state.status in (
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+        AccountStatus.PAUSED,
+        AccountStatus.DEACTIVATED,
+    ):
+        return state.health_tier
+
+    should_drain = False
+
+    if state.used_percent is not None and state.used_percent >= drain_primary_threshold_pct:
+        should_drain = True
+
+    if state.secondary_used_percent is not None and state.secondary_used_percent >= drain_secondary_threshold_pct:
+        should_drain = True
+
+    if (
+        state.error_count >= drain_error_count_threshold
+        and state.last_error_at is not None
+        and current - state.last_error_at < drain_error_window_seconds
+    ):
+        should_drain = True
+
+    current_tier = state.health_tier
+
+    if current_tier == HEALTH_TIER_HEALTHY:
+        return HEALTH_TIER_DRAINING if should_drain else HEALTH_TIER_HEALTHY
+
+    if current_tier == HEALTH_TIER_DRAINING:
+        if should_drain:
+            return HEALTH_TIER_DRAINING
+        if drain_entered_at is not None and current - drain_entered_at >= probe_quiet_seconds:
+            return HEALTH_TIER_PROBING
+        return HEALTH_TIER_DRAINING
+
+    if current_tier == HEALTH_TIER_PROBING:
+        if should_drain:
+            return HEALTH_TIER_DRAINING
+        if probe_success_streak >= probe_success_streak_required:
+            return HEALTH_TIER_HEALTHY
+        return HEALTH_TIER_PROBING
+
+    return HEALTH_TIER_HEALTHY

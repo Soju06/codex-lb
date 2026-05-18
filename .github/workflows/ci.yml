@@ -127,8 +127,26 @@ jobs:
         run: uv run ty check
 
   test:
-    name: Tests (pytest)
+    name: Tests (pytest, ${{ matrix.slice.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        slice:
+          - name: unit
+            paths: "tests/unit tests/test_request_logs_options_api.py"
+          - name: integration-core
+            paths: "tests/integration --ignore=tests/integration/test_http_responses_bridge.py --ignore=tests/integration/test_proxy_websocket_responses.py"
+            extra_args: ""
+          - name: integration-bridge
+            paths: "tests/integration/test_http_responses_bridge.py tests/integration/test_proxy_websocket_responses.py"
+            extra_args: "-vv"
+          - name: e2e
+            paths: "tests/e2e"
+            extra_args: ""
+    env:
+      PYTHONFAULTHANDLER: "1"
 
     steps:
       - name: Checkout repository
@@ -155,11 +173,12 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest -q -ra ${{ matrix.slice.extra_args }} -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --timeout=180 --timeout-method=thread --durations=20 ${{ matrix.slice.paths }}
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -176,6 +195,7 @@ jobs:
           --health-retries 5
     env:
       CODEX_LB_TEST_DATABASE_URL: postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
+      PYTHONFAULTHANDLER: "1"
 
     steps:
       - name: Checkout repository
@@ -202,7 +222,7 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --timeout=180 --timeout-method=thread --durations=20
 
   migration-check:
     name: Migration check (alembic)

@@ -14,11 +14,23 @@ const DEFAULT_FILTER_STATE: FilterState = {
   search: "",
   timeframe: "all",
   accountIds: [],
+  apiKeyIds: [],
   modelOptions: [],
   statuses: [],
   limit: 25,
   offset: 0,
 };
+
+const REQUEST_LOG_PARAM_KEYS = [
+  "search",
+  "timeframe",
+  "accountId",
+  "apiKeyId",
+  "modelOption",
+  "status",
+  "limit",
+  "offset",
+] as const;
 
 function parseNumber(value: string | null, fallback: number): number {
   if (value === null) {
@@ -33,6 +45,7 @@ function parseFilterState(params: URLSearchParams): FilterState {
     search: params.get("search") ?? "",
     timeframe: params.get("timeframe") ?? "all",
     accountIds: params.getAll("accountId"),
+    apiKeyIds: params.getAll("apiKeyId"),
     modelOptions: params.getAll("modelOption"),
     statuses: params.getAll("status"),
     limit: parseNumber(params.get("limit"), DEFAULT_FILTER_STATE.limit),
@@ -45,8 +58,11 @@ function parseFilterState(params: URLSearchParams): FilterState {
   return DEFAULT_FILTER_STATE;
 }
 
-function writeFilterState(state: FilterState): URLSearchParams {
-  const params = new URLSearchParams();
+function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearchParams {
+  const params = new URLSearchParams(base);
+  for (const key of REQUEST_LOG_PARAM_KEYS) {
+    params.delete(key);
+  }
   if (state.search) {
     params.set("search", state.search);
   }
@@ -55,6 +71,9 @@ function writeFilterState(state: FilterState): URLSearchParams {
   }
   for (const value of state.accountIds) {
     params.append("accountId", value);
+  }
+  for (const value of state.apiKeyIds) {
+    params.append("apiKeyId", value);
   }
   for (const value of state.modelOptions) {
     params.append("modelOption", value);
@@ -91,6 +110,7 @@ export function useRequestLogs() {
       limit: filters.limit,
       offset: filters.offset,
       accountIds: filters.accountIds,
+      apiKeyIds: filters.apiKeyIds,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
       since,
@@ -101,9 +121,10 @@ export function useRequestLogs() {
     () => ({
       since,
       accountIds: filters.accountIds,
+      apiKeyIds: filters.apiKeyIds,
       modelOptions: filters.modelOptions,
     }),
-    [filters.accountIds, filters.modelOptions, since],
+    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, since],
   );
 
   const logsQuery = useQuery({
@@ -128,7 +149,7 @@ export function useRequestLogs() {
       ...filters,
       ...patch,
     };
-    setSearchParams(writeFilterState(nextState));
+    setSearchParams(writeFilterState(nextState, searchParams));
   };
 
   return {

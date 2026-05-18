@@ -76,7 +76,8 @@ class DatabaseRateLimiter:
         attempted_at_column = RateLimitAttempt.__table__.c.attempted_at
 
         raw_result = await session.execute(
-            insert(RateLimitAttempt).from_select(
+            insert(RateLimitAttempt)
+            .from_select(
                 [key_column.name, type_column.name, attempted_at_column.name],
                 select(
                     literal(key, type_=key_column.type),
@@ -94,8 +95,9 @@ class DatabaseRateLimiter:
                     < self.max_attempts
                 ),
             )
+            .returning(attempted_at_column)
         )
-        inserted = raw_result.rowcount > 0  # type: ignore[union-attr]
+        inserted = raw_result.scalar_one_or_none() is not None
         await session.commit()
 
         if not inserted:

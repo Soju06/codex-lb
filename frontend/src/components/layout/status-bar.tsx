@@ -3,6 +3,7 @@ import { Activity, ArrowRightLeft, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
+import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -24,8 +25,8 @@ function getRoutingLabel(strategy: "usage_weighted" | "round_robin" | "capacity_
 
 export function StatusBar() {
   const { data: lastSyncAt = null } = useQuery({
-    queryKey: ["dashboard", "overview"],
-    queryFn: getDashboardOverview,
+    queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
+    queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
     select: (data) => data.lastSyncAt,

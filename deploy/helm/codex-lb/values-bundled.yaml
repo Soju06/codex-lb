@@ -15,6 +15,7 @@ networkPolicy:
 
 config:
   databaseMigrateOnStartup: true
+  sessionBridgeCodexPrewarmEnabled: false
   logFormat: text
 
 migration:

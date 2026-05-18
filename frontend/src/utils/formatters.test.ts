@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RESET_ERROR_LABEL } from "@/utils/constants";
+import { useTimeFormatStore } from "@/hooks/use-time-format";
 import {
+  formatChartDateTime,
+  formatDateTimeInline,
   formatAccessTokenLabel,
   formatCachedTokensMeta,
   formatCompactNumber,
@@ -32,6 +35,7 @@ describe("formatters", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    useTimeFormatStore.setState({ timeFormat: "12h" });
   });
 
   afterEach(() => {
@@ -95,6 +99,20 @@ describe("formatters", () => {
     const formatted = formatTimeLong("2026-01-01T00:00:00.000Z");
     expect(formatted.time).not.toBe("--");
     expect(formatted.date).not.toBe("--");
+  });
+
+  it("respects the configured 12h or 24h time format", () => {
+    const iso = "2026-01-01T00:00:00.000Z";
+
+    const twelveHour = formatTimeLong(iso).time;
+    expect(twelveHour).toMatch(/AM|PM/);
+
+    useTimeFormatStore.getState().setTimeFormat("24h");
+
+    const twentyFourHour = formatTimeLong(iso).time;
+    expect(twentyFourHour).not.toMatch(/AM|PM/);
+    expect(formatDateTimeInline(iso)).toContain(twentyFourHour);
+    expect(formatChartDateTime(iso)).not.toMatch(/AM|PM/);
   });
 
   it("formats relative and countdown values", () => {

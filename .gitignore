@@ -13,6 +13,7 @@ __pycache__/
 # Env/config
 .env
 .env.*
+.envrc
 !.env.example
 .python-version
 

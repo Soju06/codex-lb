@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.utils.time import utcnow
-from app.db.models import ApiKey, ApiKeyLimit, LimitType
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -33,24 +33,29 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
     def __init__(self) -> None:
         self.rows: dict[str, ApiKey] = {}
         self._limits: dict[str, list[ApiKeyLimit]] = {}
+        self._account_assignments: dict[str, list[ApiKeyAccountAssignment]] = {}
+        self._accounts: dict[str, Account] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
 
     async def create(self, row: ApiKey) -> ApiKey:
         self.rows[row.id] = row
         row.limits = []
+        row.account_assignments = []
         return row
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
         row = self.rows.get(key_id)
         if row is not None:
             row.limits = self._limits.get(key_id, [])
+            row.account_assignments = self._account_assignments.get(key_id, [])
         return row
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         for row in self.rows.values():
             if row.key_hash == key_hash:
                 row.limits = self._limits.get(row.id, [])
+                row.account_assignments = self._account_assignments.get(row.id, [])
                 return row
         return None
 
@@ -58,7 +63,11 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         result = sorted(self.rows.values(), key=lambda row: row.created_at, reverse=True)
         for row in result:
             row.limits = self._limits.get(row.id, [])
+            row.account_assignments = self._account_assignments.get(row.id, [])
         return result
+
+    async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]:
+        return [self._accounts[account_id] for account_id in account_ids if account_id in self._accounts]
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
@@ -72,11 +81,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        commit: bool = True,
     ) -> ApiKey | None:
+        del commit
         row = self.rows.get(key_id)
         if row is None:
             return None
@@ -86,6 +98,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
+            "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "expires_at": expires_at,
             "is_active": is_active,
             "key_hash": key_hash,
@@ -129,7 +142,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.limits = self._limits[key_id]
         return self._limits[key_id]
 
-    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]:
+    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit], *, commit: bool = True) -> list[ApiKeyLimit]:
+        del commit
         existing = self._limits.get(key_id, [])
         existing_by_key = {(limit.limit_type, limit.limit_window, limit.model_filter): limit for limit in existing}
 
@@ -153,6 +167,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         if row is not None:
             row.limits = updated
         return updated
+
+    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+        del commit
+        assignments = [ApiKeyAccountAssignment(api_key_id=key_id, account_id=account_id) for account_id in account_ids]
+        self._account_assignments[key_id] = assignments
+        row = self.rows.get(key_id)
+        if row is not None:
+            row.account_assignments = assignments
 
     async def increment_limit_usage(
         self,
@@ -488,6 +510,53 @@ async def test_update_key_normalizes_service_tier_alias() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_key_tracks_assignment_scope_after_clear() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assignment-scope",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    scoped = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=["acc-a"],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert scoped.account_assignment_scope_enabled is True
+    assert scoped.assigned_account_ids == ["acc-a"]
+
+    cleared = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=[],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert cleared.account_assignment_scope_enabled is False
+    assert cleared.assigned_account_ids == []
+
+
+@pytest.mark.asyncio
 async def test_create_key_with_limits() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -575,6 +644,36 @@ async def test_validate_key_lazy_resets_expired_limit() -> None:
     updated_limits = await repo.get_limits_by_key(created.id)
     assert updated_limits[0].current_value == 0
     assert updated_limits[0].reset_at > utcnow()
+
+
+@pytest.mark.asyncio
+async def test_validate_key_does_not_refetch_when_limits_do_not_need_reset() -> None:
+    class _CountingRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_by_hash_calls = 0
+
+        async def get_by_hash(self, key_hash: str) -> ApiKey | None:
+            self.get_by_hash_calls += 1
+            return await super().get_by_hash(key_hash)
+
+    repo = _CountingRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="single-fetch",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=10),
+            ],
+        )
+    )
+
+    validated = await service.validate_key(created.key)
+
+    assert validated.id == created.id
+    assert repo.get_by_hash_calls == 1
 
 
 @pytest.mark.asyncio

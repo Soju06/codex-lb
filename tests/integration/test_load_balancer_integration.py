@@ -6,6 +6,7 @@ from datetime import timedelta, timezone
 
 import pytest
 
+from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -427,3 +428,82 @@ async def test_load_balancer_filters_accounts_by_persisted_additional_usage(db_s
 
     assert selection.account is not None
     assert selection.account.id == eligible_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_selects_best_draining_account_when_all_are_draining(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_reset = now_epoch + 3600
+    secondary_reset = now_epoch + 7200
+
+    account_a = Account(
+        id="acc_all_draining_a",
+        email="all_draining_a@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-drain-a"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-drain-a"),
+        id_token_encrypted=encryptor.encrypt("id-drain-a"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    account_b = Account(
+        id="acc_all_draining_b",
+        email="all_draining_b@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-drain-b"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-drain-b"),
+        id_token_encrypted=encryptor.encrypt("id-drain-b"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(account_a)
+        await accounts_repo.upsert(account_b)
+
+        await usage_repo.add_entry(
+            account_id=account_a.id,
+            used_percent=94.0,
+            window="primary",
+            reset_at=primary_reset,
+            window_minutes=300,
+            recorded_at=now,
+        )
+        await usage_repo.add_entry(
+            account_id=account_a.id,
+            used_percent=96.0,
+            window="secondary",
+            reset_at=secondary_reset,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+        await usage_repo.add_entry(
+            account_id=account_b.id,
+            used_percent=88.0,
+            window="primary",
+            reset_at=primary_reset,
+            window_minutes=300,
+            recorded_at=now,
+        )
+        await usage_repo.add_entry(
+            account_id=account_b.id,
+            used_percent=93.0,
+            window="secondary",
+            reset_at=secondary_reset,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selection.account is not None
+    assert selection.account.id == account_b.id
+    assert balancer._runtime[account_a.id].health_tier == HEALTH_TIER_DRAINING
+    assert balancer._runtime[account_b.id].health_tier == HEALTH_TIER_DRAINING

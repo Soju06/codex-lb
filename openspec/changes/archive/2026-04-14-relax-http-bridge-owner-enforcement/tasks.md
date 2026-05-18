@@ -1,0 +1,4 @@
+- [x] Add bridge owner enforcement logic that distinguishes hard continuity keys from soft prompt-cache locality keys.
+- [x] Add runtime/dashboard persistence for `http_responses_session_bridge_gateway_safe_mode`.
+- [x] Add prompt-cache locality miss and soft local rebind observability.
+- [x] Add regression coverage for gateway-safe prompt-cache fallback, strict prompt-cache mismatch, settings API, and migration upgrade.

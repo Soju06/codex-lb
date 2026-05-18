@@ -4,14 +4,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import Insert, func
+from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, StickySession, StickySessionKind
+from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,31 +75,35 @@ class StickySessionsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
-    async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> int:
+    async def delete_entries(
+        self,
+        entries: Sequence[tuple[str, StickySessionKind]],
+    ) -> list[tuple[str, StickySessionKind]]:
         targets = {(key, kind) for key, kind in entries if key}
         if not targets:
-            return 0
+            return []
         statement = delete(StickySession).where(
             or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in targets))
         )
-        result = await self._session.execute(statement.returning(StickySession.key))
-        deleted = len(result.scalars().all())
+        result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
         await self._session.commit()
-        return deleted
+        return [(key, kind) for key, kind in result.all()]
 
-    async def list_entries(
+    async def list_entry_identifiers(
         self,
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> Sequence[StickySessionListEntryRecord]:
+        account_query: str | None = None,
+        key_query: str | None = None,
+    ) -> list[tuple[str, StickySessionKind]]:
         statement = (
             self._apply_filters(
-                select(StickySession, Account.email),
+                select(StickySession.key, StickySession.kind),
                 kind=kind,
                 updated_before=updated_before,
+                account_query=account_query,
+                key_query=key_query,
             )
             .join(Account, Account.id == StickySession.account_id)
             .order_by(
@@ -106,6 +111,33 @@ class StickySessionsRepository:
                 StickySession.created_at.desc(),
                 StickySession.key.asc(),
             )
+        )
+        result = await self._session.execute(statement)
+        return [(key, kind) for key, kind in result.all()]
+
+    async def list_entries(
+        self,
+        *,
+        kind: StickySessionKind | None = None,
+        updated_before: datetime | None = None,
+        account_query: str | None = None,
+        key_query: str | None = None,
+        sort_by: StickySessionSortBy = "updated_at",
+        sort_dir: StickySessionSortDir = "desc",
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> Sequence[StickySessionListEntryRecord]:
+        order_by = self._build_order_by(sort_by=sort_by, sort_dir=sort_dir)
+        statement = (
+            self._apply_filters(
+                select(StickySession, Account.email),
+                kind=kind,
+                updated_before=updated_before,
+                account_query=account_query,
+                key_query=key_query,
+            )
+            .join(Account, Account.id == StickySession.account_id)
+            .order_by(*order_by)
         )
         if offset > 0:
             statement = statement.offset(offset)
@@ -122,11 +154,15 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        account_query: str | None = None,
+        key_query: str | None = None,
     ) -> int:
         statement = self._apply_filters(
-            select(func.count()).select_from(StickySession),
+            select(func.count()).select_from(StickySession).join(Account, Account.id == StickySession.account_id),
             kind=kind,
             updated_before=updated_before,
+            account_query=account_query,
+            key_query=key_query,
         )
         result = await self._session.execute(statement)
         return int(result.scalar_one())
@@ -166,9 +202,53 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None,
         updated_before: datetime | None,
+        account_query: str | None,
+        key_query: str | None,
     ):
         if kind is not None:
             statement = statement.where(StickySession.kind == kind)
         if updated_before is not None:
             statement = statement.where(StickySession.updated_at < to_utc_naive(updated_before))
+        if account_query:
+            statement = statement.where(func.lower(Account.email).contains(account_query.lower()))
+        if key_query:
+            statement = statement.where(func.lower(StickySession.key).contains(key_query.lower()))
         return statement
+
+    @staticmethod
+    def _build_order_by(
+        *,
+        sort_by: StickySessionSortBy,
+        sort_dir: StickySessionSortDir,
+    ):
+        sort_column_map = {
+            "updated_at": StickySession.updated_at,
+            "created_at": StickySession.created_at,
+            "account": Account.email,
+            "key": StickySession.key,
+        }
+        primary = sort_column_map[sort_by]
+        primary_order = primary.asc() if sort_dir == "asc" else primary.desc()
+        if sort_by == "updated_at":
+            return (
+                primary_order,
+                StickySession.created_at.desc(),
+                StickySession.key.asc(),
+            )
+        if sort_by == "created_at":
+            return (
+                primary_order,
+                StickySession.updated_at.desc(),
+                StickySession.key.asc(),
+            )
+        if sort_by == "account":
+            return (
+                primary_order,
+                StickySession.updated_at.desc(),
+                StickySession.key.asc(),
+            )
+        return (
+            primary_order,
+            StickySession.updated_at.desc(),
+            StickySession.created_at.desc(),
+        )

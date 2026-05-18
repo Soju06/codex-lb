@@ -10,13 +10,15 @@ import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { ApisPage } from "@/features/apis/components/apis-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
+import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 function AppLayout() {
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
+  const timeFormat = useTimeFormatStore((state) => state.timeFormat);
 
   return (
-    <div className="flex min-h-screen flex-col bg-background pb-10">
+    <div className="flex min-h-screen flex-col bg-background pb-10" data-time-format={timeFormat}>
       <AppHeader
         onLogout={() => {
           void logout();

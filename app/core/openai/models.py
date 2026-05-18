@@ -12,6 +12,19 @@ from pydantic import (
     field_validator,
 )
 
+from app.core.types import JsonValue
+
+type ModelLikeInput = JsonValue | BaseModel
+
+
+def _normalize_model_value[T: BaseModel](model_type: type[T], value: ModelLikeInput | None) -> T | None:
+    if value is None:
+        return None
+    try:
+        return model_type.model_validate(value)
+    except ValidationError:
+        return None
+
 
 class OpenAIError(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -58,23 +71,13 @@ class OpenAIResponse(BaseModel):
 
     @field_validator("error", mode="before")
     @classmethod
-    def _normalize_error(cls, value: object) -> OpenAIError | None:
-        if value is None:
-            return None
-        try:
-            return OpenAIError.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_error(cls, value: ModelLikeInput | None) -> OpenAIError | None:
+        return _normalize_model_value(OpenAIError, value)
 
     @field_validator("usage", mode="before")
     @classmethod
-    def _normalize_usage(cls, value: object) -> ResponseUsage | None:
-        if value is None:
-            return None
-        try:
-            return ResponseUsage.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_usage(cls, value: ModelLikeInput | None) -> ResponseUsage | None:
+        return _normalize_model_value(ResponseUsage, value)
 
 
 class OpenAIEvent(BaseModel):
@@ -86,13 +89,8 @@ class OpenAIEvent(BaseModel):
 
     @field_validator("error", mode="before")
     @classmethod
-    def _normalize_error(cls, value: object) -> OpenAIError | None:
-        if value is None:
-            return None
-        try:
-            return OpenAIError.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_error(cls, value: ModelLikeInput | None) -> OpenAIError | None:
+        return _normalize_model_value(OpenAIError, value)
 
 
 class OpenAIResponsePayload(BaseModel):
@@ -105,23 +103,13 @@ class OpenAIResponsePayload(BaseModel):
 
     @field_validator("error", mode="before")
     @classmethod
-    def _normalize_error(cls, value: object) -> OpenAIError | None:
-        if value is None:
-            return None
-        try:
-            return OpenAIError.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_error(cls, value: ModelLikeInput | None) -> OpenAIError | None:
+        return _normalize_model_value(OpenAIError, value)
 
     @field_validator("usage", mode="before")
     @classmethod
-    def _normalize_usage(cls, value: object) -> ResponseUsage | None:
-        if value is None:
-            return None
-        try:
-            return ResponseUsage.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_usage(cls, value: ModelLikeInput | None) -> ResponseUsage | None:
+        return _normalize_model_value(ResponseUsage, value)
 
 
 class CompactResponsePayload(BaseModel):
@@ -145,23 +133,13 @@ class CompactResponsePayload(BaseModel):
 
     @field_validator("error", mode="before")
     @classmethod
-    def _normalize_error(cls, value: object) -> OpenAIError | None:
-        if value is None:
-            return None
-        try:
-            return OpenAIError.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_error(cls, value: ModelLikeInput | None) -> OpenAIError | None:
+        return _normalize_model_value(OpenAIError, value)
 
     @field_validator("usage", mode="before")
     @classmethod
-    def _normalize_usage(cls, value: object) -> ResponseUsage | None:
-        if value is None:
-            return None
-        try:
-            return ResponseUsage.model_validate(value)
-        except ValidationError:
-            return None
+    def _normalize_usage(cls, value: ModelLikeInput | None) -> ResponseUsage | None:
+        return _normalize_model_value(ResponseUsage, value)
 
 
 OpenAIResponseResult: TypeAlias = OpenAIResponsePayload | OpenAIErrorEnvelope

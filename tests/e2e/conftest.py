@@ -66,7 +66,13 @@ async def _maybe_await(result: object) -> None:
 
 
 @pytest_asyncio.fixture
-async def e2e_client(db_setup):
+async def e2e_client(db_setup, monkeypatch):
+    import app.main as main_module
+
+    async def _noop_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     app = create_app()
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)

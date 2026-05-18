@@ -8,7 +8,7 @@ import {
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import type { AuthSession } from "@/features/auth/schemas";
+import { createDashboardAuthSession } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
   getAuthSession: vi.fn(),
@@ -18,21 +18,7 @@ vi.mock("@/features/auth/api", () => ({
   verifyTotp: vi.fn(),
 }));
 
-const sessionBase: AuthSession = {
-  authenticated: true,
-  passwordRequired: true,
-  totpRequiredOnLogin: false,
-  totpConfigured: true,
-  bootstrapRequired: false,
-  bootstrapTokenConfigured: false,
-  authMode: "standard",
-  passwordManagementEnabled: true,
-  passwordSessionActive: false,
-  role: "admin",
-  permissions: ["read", "write"],
-  guestAccessEnabled: false,
-  guestPasswordRequired: false,
-};
+const sessionBase = createDashboardAuthSession();
 
 function resetAuthStore(): void {
   useAuthStore.setState({

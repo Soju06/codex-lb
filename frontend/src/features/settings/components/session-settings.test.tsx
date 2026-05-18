@@ -3,21 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
-const baseSettings = {
-  stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
-  preferEarlierResetAccounts: false,
-  routingStrategy: "usage_weighted" as const,
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
-  totpConfigured: true,
-  apiKeyAuthEnabled: true,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-};
+const baseSettings = createDashboardSettings();
 
 describe("SessionSettings", () => {
   it("shows the current dashboard session lifetime in hours", () => {

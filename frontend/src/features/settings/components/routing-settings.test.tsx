@@ -3,22 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
-import type { DashboardSettings } from "@/features/settings/schemas";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
-const BASE_SETTINGS: DashboardSettings = {
+const BASE_SETTINGS = createDashboardSettings({
   stickyThreadsEnabled: false,
-  upstreamStreamTransport: "default",
   preferEarlierResetAccounts: true,
-  routingStrategy: "usage_weighted",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
   totpConfigured: false,
-  apiKeyAuthEnabled: true,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-};
+});
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {

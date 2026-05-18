@@ -6,15 +6,15 @@ import { LoginForm } from "@/features/auth/components/login-form";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 
 describe("LoginForm", () => {
-	  beforeEach(() => {
-	    useAuthStore.setState({
-	      loading: false,
-	      error: null,
-	      passwordRequired: true,
-	      guestAccessEnabled: false,
-	      guestPasswordRequired: false,
-	    });
-	  });
+  beforeEach(() => {
+    useAuthStore.setState({
+      loading: false,
+      error: null,
+      passwordRequired: true,
+      guestAccessEnabled: false,
+      guestPasswordRequired: false,
+    });
+  });
 
   it("renders and submits password", async () => {
     const user = userEvent.setup();

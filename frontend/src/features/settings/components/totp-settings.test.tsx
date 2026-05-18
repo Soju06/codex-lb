@@ -10,6 +10,7 @@ import {
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TotpSettings } from "@/features/settings/components/totp-settings";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
   startTotpSetup: vi.fn(),
@@ -17,20 +18,7 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
-const baseSettings = {
-  stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
-  preferEarlierResetAccounts: false,
-  routingStrategy: "usage_weighted" as const,
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
-  totpConfigured: false,
-  apiKeyAuthEnabled: true,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-};
+const baseSettings = createDashboardSettings({ totpConfigured: false });
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

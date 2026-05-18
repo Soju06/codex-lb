@@ -6166,7 +6166,7 @@ async def test_websocket_full_resend_conflicts_with_visible_pending() -> None:
         api_key_reservation=None,
         started_at=0.0,
         previous_response_id=None,
-        input_item_count=4,
+        input_item_count=proxy_service._WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     )
 
     assert (
@@ -6174,8 +6174,50 @@ async def test_websocket_full_resend_conflicts_with_visible_pending() -> None:
             full_resend,
             pending,
             pending_lock=pending_lock,
+            codex_session_affinity=True,
         )
         is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_full_resend_allows_fresh_multi_item_request() -> None:
+    pending_lock = anyio.Lock()
+    pending = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_started",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=0.0,
+                response_id="resp_started",
+                awaiting_response_created=False,
+                downstream_visible=True,
+                input_item_count=1,
+            )
+        ]
+    )
+    fresh_request = proxy_service._WebSocketRequestState(
+        request_id="ws_fresh_multi_item",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id=None,
+        input_item_count=2,
+    )
+
+    assert (
+        await proxy_service._websocket_full_resend_conflicts_with_visible_pending(
+            fresh_request,
+            pending,
+            pending_lock=pending_lock,
+            codex_session_affinity=True,
+        )
+        is False
     )
 
 
@@ -6206,7 +6248,7 @@ async def test_websocket_full_resend_allows_explicit_previous_response_id() -> N
         api_key_reservation=None,
         started_at=0.0,
         previous_response_id="resp_started",
-        input_item_count=4,
+        input_item_count=proxy_service._WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     )
 
     assert (
@@ -6214,6 +6256,7 @@ async def test_websocket_full_resend_allows_explicit_previous_response_id() -> N
             anchored_followup,
             pending,
             pending_lock=pending_lock,
+            codex_session_affinity=True,
         )
         is False
     )

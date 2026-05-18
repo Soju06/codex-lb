@@ -3232,6 +3232,7 @@ class ProxyService:
                     request_state,
                     pending_requests,
                     pending_lock=pending_lock,
+                    codex_session_affinity=codex_session_affinity,
                 ):
                     logger.warning(
                         "Rejecting websocket full resend while prior response is visible request_id=%s input_items=%s",
@@ -10418,10 +10419,13 @@ async def _websocket_full_resend_conflicts_with_visible_pending(
     pending_requests: deque[_WebSocketRequestState],
     *,
     pending_lock: anyio.Lock,
+    codex_session_affinity: bool,
 ) -> bool:
-    if request_state.previous_response_id is not None:
-        return False
-    if request_state.input_item_count <= 1:
+    if (
+        not codex_session_affinity
+        or request_state.previous_response_id is not None
+        or request_state.input_item_count < _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS
+    ):
         return False
     async with pending_lock:
         return any(

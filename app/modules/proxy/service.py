@@ -398,6 +398,7 @@ class ProxyService:
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
+        self._request_log_tasks: set[asyncio.Task[None]] = set()
 
     def _websocket_continuity_state_for_request(
         self,
@@ -9156,37 +9157,117 @@ class ProxyService:
         actual_service_tier: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(
+            self._persist_request_log(
+                account_id=account_id,
+                api_key_id=api_key.id if api_key else None,
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                status=status,
+                latency_first_token_ms=latency_first_token_ms,
+                error_code=error_code,
+                error_message=error_message,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
+                reasoning_effort=reasoning_effort,
+                transport=transport,
+                service_tier=service_tier,
+                requested_service_tier=requested_service_tier,
+                actual_service_tier=actual_service_tier,
+                session_id=session_id,
+            ),
+            name=f"proxy-request-log-{request_id}",
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_request_log_task(task, account_id=account_id, request_id=request_id)
+
+    def _track_request_log_task(
+        self,
+        task: asyncio.Task[None],
+        *,
+        account_id: str | None,
+        request_id: str,
+    ) -> None:
+        self._request_log_tasks.add(task)
+
+        def _request_log_done(done_task: asyncio.Task[None]) -> None:
+            self._request_log_tasks.discard(done_task)
             try:
-                async with self._repo_factory() as repos:
-                    await repos.request_logs.add_log(
-                        account_id=account_id,
-                        api_key_id=api_key.id if api_key else None,
-                        session_id=_normalize_session_id(session_id),
-                        request_id=request_id,
-                        model=model or "",
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cached_input_tokens=cached_input_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        reasoning_effort=reasoning_effort,
-                        transport=transport,
-                        service_tier=service_tier,
-                        requested_service_tier=requested_service_tier,
-                        actual_service_tier=actual_service_tier,
-                        latency_ms=latency_ms,
-                        latency_first_token_ms=latency_first_token_ms,
-                        status=status,
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
-            except Exception:
+                done_task.result()
+            except asyncio.CancelledError:
                 logger.warning(
-                    "Failed to persist request log account_id=%s request_id=%s",
+                    "Request log persistence task cancelled account_id=%s request_id=%s",
                     account_id,
                     request_id,
-                    exc_info=True,
                 )
+            except Exception as exc:
+                logger.warning(
+                    "Request log persistence task failed account_id=%s request_id=%s",
+                    account_id,
+                    request_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_request_log_done)
+
+    async def _persist_request_log(
+        self,
+        *,
+        account_id: str | None,
+        api_key_id: str | None,
+        request_id: str,
+        model: str | None,
+        latency_ms: int,
+        status: str,
+        latency_first_token_ms: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        transport: str | None = None,
+        service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        try:
+            async with self._repo_factory() as repos:
+                await repos.request_logs.add_log(
+                    account_id=account_id,
+                    api_key_id=api_key_id,
+                    session_id=_normalize_session_id(session_id),
+                    request_id=request_id,
+                    model=model or "",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    reasoning_effort=reasoning_effort,
+                    transport=transport,
+                    service_tier=service_tier,
+                    requested_service_tier=requested_service_tier,
+                    actual_service_tier=actual_service_tier,
+                    latency_ms=latency_ms,
+                    latency_first_token_ms=latency_first_token_ms,
+                    status=status,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to persist request log account_id=%s request_id=%s",
+                account_id,
+                request_id,
+                exc_info=True,
+            )
 
     async def _write_stream_preflight_error(
         self,

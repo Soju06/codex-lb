@@ -1106,6 +1106,44 @@ def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepo
     return factory
 
 
+@pytest.mark.asyncio
+async def test_write_request_log_continues_after_caller_cancellation() -> None:
+    request_logs = _RequestLogsRecorder()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_add_log(**kwargs: object) -> None:
+        started.set()
+        await release.wait()
+        request_logs.calls.append(dict(kwargs))
+
+    request_logs.add_log = blocking_add_log  # type: ignore[method-assign]
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    task = asyncio.create_task(
+        service._write_request_log(
+            account_id="acc_request_log_cancel",
+            api_key=None,
+            request_id="resp_request_log_cancel",
+            model="gpt-5.4",
+            latency_ms=1,
+            status="error",
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(task, timeout=1)
+    release.set()
+
+    for _ in range(20):
+        if request_logs.calls:
+            break
+        await asyncio.sleep(0.01)
+
+    assert request_logs.calls[0]["request_id"] == "resp_request_log_cancel"
+
+
 def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespace:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,

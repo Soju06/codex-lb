@@ -34,7 +34,7 @@ _DETAIL_BUCKET_SECONDS = 3600
 
 
 class ApiKeysRepositoryProtocol(Protocol):
-    async def create(self, row: ApiKey) -> ApiKey: ...
+    async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey: ...
 
     async def get_by_id(self, key_id: str) -> ApiKey | None: ...
 
@@ -204,6 +204,7 @@ class ApiKeyCreateData:
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
     expires_at: datetime | None = None
+    assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
@@ -278,6 +279,7 @@ class ApiKeysService:
         expires_at = _normalize_expires_at(payload.expires_at)
         plain_key = _generate_plain_key()
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
+        assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
@@ -291,20 +293,30 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
+            account_assignment_scope_enabled=bool(assigned_account_ids),
             expires_at=expires_at,
             is_active=True,
             created_at=now,
             last_used_at=None,
         )
-        created = await self._repository.create(row)
+        try:
+            created = await self._repository.create(row, commit=False)
 
-        if payload.limits:
-            limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
-            await self._repository.replace_limits(created.id, limit_rows)
-            # Refresh to get updated limits
-            created = await self._repository.get_by_id(created.id)
-            if created is None:
-                raise ValueError("Failed to create API key")
+            if assigned_account_ids:
+                await self._repository.replace_account_assignments(created.id, assigned_account_ids, commit=False)
+
+            if payload.limits:
+                limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
+                await self._repository.upsert_limits(created.id, limit_rows, commit=False)
+
+            await self._repository.commit()
+        except Exception:
+            await self._repository.rollback()
+            raise
+
+        created = await self._repository.get_by_id(created.id)
+        if created is None:
+            raise ValueError("Failed to create API key")
 
         return _to_created_data(_to_api_key_data(created), plain_key)
 
@@ -327,15 +339,7 @@ class ApiKeysService:
         else:
             allowed_models = None
         if payload.assigned_account_ids_set:
-            assigned_account_ids = _normalize_assigned_account_ids(payload.assigned_account_ids)
-            existing_accounts = await self._repository.list_accounts_by_ids(assigned_account_ids)
-            existing_account_ids = {account.id for account in existing_accounts}
-            missing_account_ids = [
-                account_id for account_id in assigned_account_ids if account_id not in existing_account_ids
-            ]
-            if missing_account_ids:
-                missing = ", ".join(missing_account_ids)
-                raise ValueError(f"Unknown account ids: {missing}")
+            assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
             account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
         else:
             assigned_account_ids = None
@@ -435,6 +439,18 @@ class ApiKeysService:
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
         return _to_api_key_data(row)
+
+    async def _resolve_assigned_account_ids(self, account_ids: list[str] | None) -> list[str]:
+        normalized_account_ids = _normalize_assigned_account_ids(account_ids)
+        existing_accounts = await self._repository.list_accounts_by_ids(normalized_account_ids)
+        existing_account_ids = {account.id for account in existing_accounts}
+        missing_account_ids = [
+            account_id for account_id in normalized_account_ids if account_id not in existing_account_ids
+        ]
+        if missing_account_ids:
+            missing = ", ".join(missing_account_ids)
+            raise ValueError(f"Unknown account ids: {missing}")
+        return normalized_account_ids
 
     async def delete_key(self, key_id: str) -> None:
         row = await self._repository.get_by_id(key_id)

@@ -91,6 +91,11 @@ async def case_tool_call_streaming(client: openai.AsyncOpenAI, model: str) -> Ca
                 "type": "object",
                 "properties": {"city": {"type": "string"}},
                 "required": ["city"],
+                # OpenAI Structured Outputs requires `additionalProperties: false`
+                # on every object schema when `strict: true`. Without it, real
+                # OpenAI returns 400 invalid_function_parameters; the Codex
+                # backend closes the websocket with close_code=1000.
+                "additionalProperties": False,
             },
             "strict": True,
         }

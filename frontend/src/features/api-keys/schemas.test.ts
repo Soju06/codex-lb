@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ApiKeyCreateRequestSchema,
   ApiKeyCreateResponseSchema,
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
@@ -71,6 +72,17 @@ describe("ApiKeyCreateResponseSchema", () => {
     });
 
     expect(parsed.key).toBe("sk-test-plaintext");
+  });
+});
+
+describe("ApiKeyCreateRequestSchema", () => {
+  it("accepts optional assigned accounts", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Scoped Key",
+      assignedAccountIds: ["acc_primary"],
+    });
+
+    expect(parsed.assignedAccountIds).toEqual(["acc_primary"]);
   });
 });
 

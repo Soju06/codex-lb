@@ -23,6 +23,7 @@ class _FakeSettings:
     database_background_pool_size: int | None = None
     database_background_max_overflow: int | None = None
     database_pool_timeout_seconds: float = 30.0
+    database_pool_recycle_seconds: int = 1800
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = False
     database_sqlite_pre_migrate_backup_max_files: int = 5
@@ -117,6 +118,72 @@ def test_background_pool_settings_can_override_main_pool(monkeypatch) -> None:
     assert session_module._database_max_overflow(background=True) == 1
     assert session_module._database_pool_size(background=False) == 15
     assert session_module._database_max_overflow(background=False) == 10
+
+
+def test_postgres_engine_kwargs_enable_pre_ping_and_recycle(monkeypatch) -> None:
+    """Regression for #672: PostgreSQL engines MUST validate pooled connections
+    on checkout (``pool_pre_ping``) and recycle them within the configured
+    window (``pool_recycle``). Without these the pool serves stale connections
+    after the server idles them out, causing
+    ``asyncpg.InterfaceError: connection is closed`` on the first real query.
+    """
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "")
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="postgresql+asyncpg://u:p@h/db",
+            database_pool_size=15,
+            database_max_overflow=10,
+            database_pool_timeout_seconds=30.0,
+            database_pool_recycle_seconds=1800,
+        ),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["pool_pre_ping"] is True
+    assert kwargs["pool_recycle"] == 1800
+    assert kwargs["pool_size"] == 15
+    assert kwargs["max_overflow"] == 10
+    assert kwargs["pool_timeout"] == 30.0
+
+    background_kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=True)
+    assert background_kwargs["pool_pre_ping"] is True
+    assert background_kwargs["pool_recycle"] == 1800
+
+
+def test_postgres_engine_kwargs_honor_custom_recycle(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="postgresql+asyncpg://u:p@h/db",
+            database_pool_recycle_seconds=600,
+        ),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["pool_recycle"] == 600
+
+
+def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> None:
+    """The CODEX_LB_TEST_DATABASE_URL escape hatch keeps NullPool semantics —
+    pool_pre_ping/recycle are irrelevant when each session opens a fresh
+    connection.
+    """
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "1")
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url="postgresql+asyncpg://u:p@h/db"),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["poolclass"] is NullPool
+    assert "pool_pre_ping" not in kwargs
+    assert "pool_recycle" not in kwargs
 
 
 @pytest.mark.asyncio

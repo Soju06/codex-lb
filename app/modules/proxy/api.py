@@ -6,9 +6,23 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from typing import Final, cast
 
-from fastapi import APIRouter, Body, Depends, File, Form, Path, Request, Response, Security, UploadFile, WebSocket
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Request,
+    Response,
+    Security,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -73,6 +87,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    enforce_strict_function_tools_format,
     enforce_strict_text_format,
     openai_client_payload_error,
     openai_validation_error,
@@ -125,6 +140,11 @@ ws_router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
 )
+wham_router = APIRouter(
+    prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
 v1_router = APIRouter(
     prefix="/v1",
     tags=["proxy"],
@@ -165,6 +185,18 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_V1_FULL_CONTEXT_WINDOW_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 1_000_000,
+    "gpt-5.5": 400_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5.3-codex": 400_000,
+}
+_V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 128_000,
+    "gpt-5.5": 128_000,
+    "gpt-5.4-mini": 128_000,
+    "gpt-5.3-codex": 128_000,
+}
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -186,6 +218,165 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+
+
+async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
+    if request.method.upper() == "GET":
+        return {key: value for key, value in request.query_params.multi_items()}
+    try:
+        raw = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="thread goal payload must be valid JSON") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="thread goal payload must be a JSON object")
+    return cast(dict[str, JsonValue], raw)
+
+
+async def _thread_goal_proxy(
+    request: Request,
+    operation: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    payload = await _thread_goal_payload_from_request(request)
+    try:
+        response = await context.service.thread_goal_request(
+            operation,
+            payload,
+            request.headers,
+            method=request.method,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return JSONResponse(response)
+
+
+_CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-type",
+        "etag",
+        "last-modified",
+        "location",
+        "openai-processing-ms",
+        "request-id",
+        "x-request-id",
+    }
+)
+
+
+def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
+
+
+async def _codex_control_proxy(
+    request: Request,
+    path: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    try:
+        response = await context.service.codex_control_request(
+            path,
+            method=request.method,
+            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            query_params=list(request.query_params.multi_items()),
+            headers=request.headers,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return Response(
+        content=response.body,
+        status_code=response.status_code,
+        headers=_codex_control_downstream_headers(response.headers),
+    )
+
+
+@router.api_route("/thread/goal/get", methods=["GET", "POST"])
+async def thread_goal_get(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "get", context, api_key)
+
+
+@router.post("/thread/goal/set")
+async def thread_goal_set(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "set", context, api_key)
+
+
+@router.post("/thread/goal/clear")
+async def thread_goal_clear(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "clear", context, api_key)
+
+
+@router.post("/analytics-events/events")
+async def codex_analytics_events(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "analytics-events/events", context, api_key)
+
+
+@router.post("/memories/trace_summarize")
+async def codex_memories_trace_summarize(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "memories/trace_summarize", context, api_key)
+
+
+@router.post("/realtime/calls")
+async def codex_realtime_calls(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "realtime/calls", context, api_key)
+
+
+@router.post("/safety/arc")
+async def codex_safety_arc(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "safety/arc", context, api_key)
+
+
+@router.get("/agent-identities/jwks")
+async def codex_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "agent-identities/jwks", context, api_key)
+
+
+@wham_router.get("/agent-identities/jwks")
+async def wham_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
 
 
 @router.post(
@@ -266,6 +457,7 @@ async def v1_responses(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload.tools)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -1435,6 +1627,40 @@ def _effective_context_window(model: UpstreamModel) -> int:
     return overrides.get(model.slug, model.context_window)
 
 
+def _raw_positive_int(raw: Mapping[str, JsonValue], key: str) -> int | None:
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _v1_full_context_window(model: UpstreamModel) -> int:
+    overrides = get_settings().model_context_window_overrides
+    explicit_override = overrides.get(model.slug)
+    if explicit_override is not None:
+        return explicit_override
+
+    known_context_window = _V1_FULL_CONTEXT_WINDOW_OVERRIDES.get(model.slug)
+    if known_context_window is not None:
+        return known_context_window
+
+    upstream_context_window = model.context_window
+    raw_max_context_window = _raw_positive_int(model.raw, "max_context_window")
+    if raw_max_context_window is not None and raw_max_context_window > upstream_context_window:
+        return raw_max_context_window
+
+    return upstream_context_window
+
+
+def _v1_input_context_window(model: UpstreamModel) -> int | None:
+    input_context_window = model.context_window
+    return input_context_window if input_context_window != _v1_full_context_window(model) else None
+
+
+def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
+    return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
+
+
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
@@ -1444,7 +1670,9 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=_effective_context_window(model),
+        context_window=_v1_full_context_window(model),
+        input_context_window=_v1_input_context_window(model),
+        max_output_tokens=_v1_max_output_tokens(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
             ReasoningLevelSchema(effort=rl.effort, description=rl.description)
@@ -1486,6 +1714,19 @@ async def v1_chat_completions(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
+        # Validate strict function tool schemas against the *original* request
+        # ``tools`` list before ``to_responses_request()`` runs. The chat
+        # normalizer (``_normalize_chat_tools``) silently drops invalid
+        # entries (non-dict tools, function tools with missing/empty
+        # ``name``), so validating the normalized output would surface
+        # ``tools[i].function.parameters`` with an ``i`` that no longer maps
+        # to the client's inbound payload. Using ``payload.tools`` keeps the
+        # error envelope's ``param`` aligned with what the client sent.
+        enforce_strict_function_tools_format(
+            payload.tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
     except ClientPayloadError as exc:
@@ -1634,16 +1875,24 @@ async def _stream_responses(
     stream, startup_error = await _probe_stream_startup_error(
         stream,
         convert_event_errors=bridge_active,
-        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
-        if prefer_http_bridge
-        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+        timeout_seconds=(
+            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+        ),
     )
     if startup_error is not None:
-        if reservation is not None and owns_reservation:
+        if owns_reservation:
             await _release_reservation(reservation)
-        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
+        return _stream_startup_error_response(
+            request,
+            startup_error,
+            headers=rate_limit_headers,
+        )
     stream = _normalize_public_responses_stream(
-        _stream_proxy_errors_as_response_failed(stream),
+        _stream_response_error_events(
+            stream,
+            owns_reservation=owns_reservation,
+            reservation=reservation,
+        ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
     return StreamingResponse(
@@ -1939,10 +2188,25 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
+        yield line
+
+
+async def _stream_response_error_events(
+    stream: AsyncIterator[str],
+    *,
+    owns_reservation: bool,
+    reservation: ApiKeyUsageReservationData | None,
+) -> AsyncIterator[str]:
     try:
         async for line in stream:
             yield line
     except ProxyResponseError as exc:
+        if owns_reservation:
+            try:
+                await _release_reservation(reservation)
+            except Exception:
+                logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
@@ -2791,11 +3055,12 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     if error_value.code == "previous_response_not_found":
         return True
     message = error_value.message or ""
+    normalized_message = " ".join(message.lower().split())
     return (
         error_value.code == "invalid_request_error"
         and error_value.param == "previous_response_id"
-        and "previous response" in message.lower()
-        and "not found" in message.lower()
+        and "previous response" in normalized_message
+        and "not found" in normalized_message
     )
 
 

@@ -47,6 +47,8 @@ class DurableBridgeSessionSnapshot:
     service_tier: str | None
     latest_turn_state: str | None
     latest_response_id: str | None
+    latest_input_item_count: int | None
+    latest_input_full_fingerprint: str | None
     closed_at: datetime | None
 
 
@@ -228,16 +230,22 @@ class DurableBridgeRepository:
             if account_changed:
                 existing.latest_turn_state = latest_turn_state
                 existing.latest_response_id = latest_response_id
+                existing.latest_input_item_count = None
+                existing.latest_input_full_fingerprint = None
             elif owner_changed:
                 if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
                     existing.latest_turn_state = latest_turn_state
                 if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
                     existing.latest_response_id = latest_response_id
+                    existing.latest_input_item_count = None
+                    existing.latest_input_full_fingerprint = None
             else:
                 if latest_turn_state is not None:
                     existing.latest_turn_state = latest_turn_state
                 if latest_response_id is not None:
                     existing.latest_response_id = latest_response_id
+                    existing.latest_input_item_count = None
+                    existing.latest_input_full_fingerprint = None
             existing.last_seen_at = now
             existing.closed_at = None
             await self._session.commit()
@@ -254,6 +262,8 @@ class DurableBridgeRepository:
         lease_ttl_seconds: float,
         latest_turn_state: str | None = None,
         latest_response_id: str | None = None,
+        latest_input_item_count: int | None = None,
+        latest_input_full_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -268,6 +278,12 @@ class DurableBridgeRepository:
             row.latest_turn_state = latest_turn_state
         if latest_response_id is not None:
             row.latest_response_id = latest_response_id
+            if latest_input_item_count is None or latest_input_full_fingerprint is None:
+                row.latest_input_item_count = None
+                row.latest_input_full_fingerprint = None
+        if latest_input_item_count is not None and latest_input_full_fingerprint is not None:
+            row.latest_input_item_count = latest_input_item_count
+            row.latest_input_full_fingerprint = latest_input_full_fingerprint
         if state is not None:
             row.state = state
         await self._session.commit()
@@ -413,6 +429,8 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         service_tier=row.service_tier,
         latest_turn_state=row.latest_turn_state,
         latest_response_id=row.latest_response_id,
+        latest_input_item_count=row.latest_input_item_count,
+        latest_input_full_fingerprint=row.latest_input_full_fingerprint,
         closed_at=row.closed_at,
     )
 

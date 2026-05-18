@@ -272,6 +272,37 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_masks_previous_response_not_found(async_client, monkeypatch):
+    email = "compact-prev-missing@example.com"
+    raw_account_id = "acc_compact_prev_missing"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        error_payload = openai_error(
+            "invalid_request_error",
+            "Previous response with id 'resp_compact_missing' not found.",
+            error_type="invalid_request_error",
+        )
+        error_payload["error"]["param"] = "previous_response_id"
+        raise ProxyResponseError(400, error_payload)
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["error"]["code"] == "stream_incomplete"
+    assert body["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "resp_compact_missing" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(async_client, monkeypatch):
     email = "compact-weekly@example.com"
     raw_account_id = "acc_compact_weekly"

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Equal idle and request-budget stream deadlines preserve idle classification
-When the configured upstream stream idle timeout is equal to the proxy request budget, and an already-started streaming Responses body reaches that shared deadline, the system MUST classify the timeout as `stream_idle_timeout` even if scheduler jitter observes the deadline after it has elapsed. When the request budget is strictly shorter than the stream idle timeout, or when the generic total timeout fires before an upstream response has started, the system MUST continue to classify the timeout as `upstream_request_timeout`.
+When the configured upstream stream idle timeout is equal to the proxy request budget, and an already-started streaming Responses body has been idle for the full shared window, the system MUST classify the timeout as `stream_idle_timeout` even if scheduler jitter observes the deadline after it has elapsed. When the request budget is strictly shorter than the stream idle timeout, when the generic total timeout fires before an upstream response has started, or when the remaining request budget for the next read is shorter than a fresh idle window, the system MUST continue to classify the timeout as `upstream_request_timeout`.
 
 #### Scenario: Direct HTTP stream body deadline tie is classified as idle
 - **GIVEN** `stream_idle_timeout_seconds` equals `proxy_request_budget_seconds`
@@ -24,8 +24,15 @@ When the configured upstream stream idle timeout is equal to the proxy request b
 
 #### Scenario: Owner-forward receive deadline tie is classified as idle
 - **GIVEN** an HTTP bridge owner-forward stream has equal idle and request-budget deadlines
+- **AND** the remaining request budget for the next read is at least a full idle window
 - **WHEN** receiving the next upstream chunk times out at that shared deadline
 - **THEN** the owner-forward timeout uses `error_code = "stream_idle_timeout"`
+
+#### Scenario: Owner-forward shorter remaining budget is request-timeout classified
+- **GIVEN** an HTTP bridge owner-forward stream has equal configured idle and request-budget deadlines
+- **AND** the remaining request budget for the next read is shorter than a fresh idle window
+- **WHEN** receiving the next upstream chunk times out at the request-budget deadline
+- **THEN** the owner-forward timeout uses `error_code = "upstream_request_timeout"`
 
 ### Requirement: Multiplexed websocket timeout ties preserve younger pending requests
 When an upstream websocket or HTTP bridge session has multiple pending Responses turns and the oldest pending turn reaches an equal idle/request-budget deadline, the system MUST NOT fail all pending turns solely because the equal deadline is classified as `stream_idle_timeout`. It MUST fail only pending turns whose own request budget has elapsed, and it MUST keep younger pending turns queued until their own terminal event or timeout.

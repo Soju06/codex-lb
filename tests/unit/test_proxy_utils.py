@@ -2058,7 +2058,7 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_af
         proxy_request_budget_seconds = 600.0
         upstream_stream_transport = "http"
 
-    monotonic_values = iter([100.0, 100.0, 100.0, 700.01])
+    monotonic_values = iter([100.0, 100.0, 100.0, 100.0, 700.01])
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module.time, "monotonic", lambda: next(monotonic_values, 700.01))
@@ -6572,7 +6572,7 @@ def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jit
     assert timeout.fail_all_pending is False
 
 
-def test_websocket_receive_timeout_keeps_idle_classification_when_equal_budget_is_sooner(monkeypatch):
+def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 400.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
@@ -6583,8 +6583,8 @@ def test_websocket_receive_timeout_keeps_idle_classification_when_equal_budget_i
 
     assert timeout is not None
     assert timeout.timeout_seconds == 300.0
-    assert timeout.error_code == "stream_idle_timeout"
-    assert timeout.error_message == "Upstream stream idle timeout"
+    assert timeout.error_code == "upstream_request_timeout"
+    assert timeout.error_message == "Proxy request budget exhausted"
     assert timeout.fail_all_pending is False
 
 

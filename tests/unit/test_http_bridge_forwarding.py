@@ -237,7 +237,7 @@ def test_owner_forward_receive_timeout_prefers_idle_after_scheduler_jitter(
     assert timeout.error_code == "stream_idle_timeout"
 
 
-def test_owner_forward_receive_timeout_keeps_idle_when_equal_budget_is_sooner(
+def test_owner_forward_receive_timeout_uses_budget_when_equal_budget_is_sooner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 400.0)
@@ -249,7 +249,7 @@ def test_owner_forward_receive_timeout_keeps_idle_when_equal_budget_is_sooner(
     )
 
     assert timeout.timeout_seconds == pytest.approx(300.0)
-    assert timeout.error_code == "stream_idle_timeout"
+    assert timeout.error_code == "upstream_request_timeout"
 
 
 @pytest.mark.asyncio

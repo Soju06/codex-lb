@@ -1910,6 +1910,7 @@ async def stream_responses(
 
     seen_terminal = False
     status_code: int | None = None
+    response_started_at: float | None = None
     error_code: str | None = None
     error_message: str | None = None
     client_session = session or get_http_client().session
@@ -1957,7 +1958,7 @@ async def stream_responses(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
-        nonlocal status_code, error_code, error_message, seen_terminal
+        nonlocal status_code, response_started_at, error_code, error_message, seen_terminal
 
         async with _service_circuit_breaker_context(
             client_session.post(
@@ -1970,6 +1971,7 @@ async def stream_responses(
             account_id=account_id,
         ) as resp:
             status_code = resp.status
+            response_started_at = time.monotonic()
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
@@ -2194,11 +2196,14 @@ async def stream_responses(
                 response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
             )
             return
-        elapsed_seconds = max(0.0, time.monotonic() - started_at)
+        now = time.monotonic()
+        body_elapsed_seconds = (
+            max(0.0, now - response_started_at) if response_started_at is not None else None
+        )
         if (
-            status_code is not None
+            body_elapsed_seconds is not None
             and effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
-            and elapsed_seconds >= effective_idle_timeout
+            and body_elapsed_seconds >= effective_idle_timeout
         ):
             error_code = "stream_idle_timeout"
             error_message = "Upstream stream idle timeout"

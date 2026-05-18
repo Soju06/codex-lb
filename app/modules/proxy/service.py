@@ -11472,7 +11472,7 @@ def _websocket_receive_timeout_for_pending_requests(
             error_code="stream_idle_timeout",
             error_message="Upstream stream idle timeout",
         )
-    if remaining_budget > 0 and idle_timeout_matches_request_budget:
+    if idle_timeout_matches_request_budget and remaining_budget >= idle_timeout_seconds:
         return _WebSocketReceiveTimeout(
             timeout_seconds=remaining_budget,
             error_code="stream_idle_timeout",

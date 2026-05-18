@@ -234,6 +234,8 @@ async def get_dashboard_auth_session(
     if current_settings.guest_access_enabled:
         if current_settings.guest_password_hash is None:
             return _public_guest_response(decorated)
+        if decorated.authenticated and decorated.role == DashboardRole.GUEST:
+            return decorated
         return _guest_login_required_response(decorated)
     bootstrap_token_configured = await has_active_bootstrap_token()
     return decorated.model_copy(

@@ -56,7 +56,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
 
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "2455")))
+    parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
 
@@ -75,12 +75,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
-    os.environ["PORT"] = str(args.port)
+    port = _parse_server_port(args.port)
+    os.environ["PORT"] = str(port)
 
     _load_uvicorn().run(
         "app.main:app",
         host=args.host,
-        port=args.port,
+        port=port,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
         log_config=_build_log_config(),
@@ -97,6 +98,13 @@ def _build_log_config() -> "LogConfig":
     from app.core.runtime_logging import build_log_config
 
     return build_log_config()
+
+
+def _parse_server_port(raw_port: str) -> int:
+    try:
+        return int(raw_port)
+    except ValueError as exc:
+        raise SystemExit(f"--port/PORT must be an integer, got {raw_port!r}.") from exc
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:

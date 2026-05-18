@@ -83,6 +83,28 @@ def test_codex_sessions_retag_dry_run_skips_confirmation(capsys, tmp_path):
     assert json.loads(session_file.read_text(encoding="utf-8"))["model_provider"] == "openai"
 
 
+def test_codex_sessions_retag_reports_file_access_errors(monkeypatch, tmp_path):
+    def fail_retag(**_kwargs):
+        raise PermissionError("cannot read session.jsonl")
+
+    monkeypatch.setattr(cli, "retag_codex_sessions", fail_retag)
+
+    with pytest.raises(SystemExit, match="Unable to read or write Codex session files: cannot read session.jsonl"):
+        cli.main(
+            [
+                "codex-sessions",
+                "retag",
+                "--from",
+                "openai",
+                "--to",
+                "codex-lb",
+                "--codex-home",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+
+
 def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
     session_file = tmp_path / "sessions" / "session.jsonl"
     session_file.parent.mkdir(parents=True)

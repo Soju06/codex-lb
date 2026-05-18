@@ -93,6 +93,44 @@ def test_retag_updates_jsonl_and_sqlite_with_backup(tmp_path: Path) -> None:
     assert ProviderCount("codex-lb", 5) in result.provider_counts_after
 
 
+def test_retag_surfaces_unreadable_jsonl_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_file = codex_home / "sessions" / "2026" / "session.jsonl"
+    _write_jsonl(session_file, [{"model_provider": "openai", "id": "a"}])
+
+    original_open = Path.open
+
+    def deny_session_read(
+        self: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ):
+        if self == session_file and "r" in mode:
+            raise PermissionError(f"cannot read {self}")
+        return original_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(Path, "open", deny_session_read)
+
+    with pytest.raises(PermissionError, match="cannot read"):
+        retag_codex_sessions(
+            codex_home=codex_home,
+            source_provider="openai",
+            target_provider="codex-lb",
+        )
+
+    assert not (codex_home / "backups").exists()
+
+
 def test_retag_supports_jsonl_only_storage(tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "session.jsonl"

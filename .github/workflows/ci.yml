@@ -352,6 +352,7 @@ jobs:
     name: Docker build
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
       security-events: write
 
@@ -387,7 +388,11 @@ jobs:
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
-          category: .github/workflows/release.yml:docker-image
+          # PR uploads use the existing release category so GitHub can compare
+          # against the current main-branch baseline while this workflow change
+          # is still under review. Push uploads use a CI-specific category so
+          # they do not overwrite release-workflow analyses on tagged commits.
+          category: ${{ github.event_name == 'pull_request' && '.github/workflows/release.yml:docker-image' || '.github/workflows/ci.yml:docker' }}
 
       - name: Enforce Trivy high-severity gate
         uses: aquasecurity/trivy-action@v0.36.0

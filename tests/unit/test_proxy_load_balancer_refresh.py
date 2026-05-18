@@ -910,7 +910,10 @@ async def test_additional_quota_selection_does_not_persist_canonical_account_sta
         )
     )
 
-    selection = await balancer.select_account(additional_limit_name="codex_spark")
+    selection = await balancer.select_account(
+        additional_limit_name="codex_spark",
+        exclude_account_ids={"unrelated-account"},
+    )
 
     assert selection.account is not None
     assert selection.account.id == account.id

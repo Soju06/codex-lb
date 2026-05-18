@@ -157,6 +157,7 @@ class LoadBalancer:
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                     ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
                     routing_policy_override=selection_inputs.routing_policy_override,
                 )
             return selection_inputs

@@ -144,3 +144,59 @@ async def test_cancelled_http_bridge_request_quarantines_late_anonymous_events(
     assert cancelled_request not in session.pending_requests
     assert retry_request in session.pending_requests
     assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_bridge_request_does_not_swallow_active_anonymous_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draining cancelled request should quarantine data deltas, not active terminal errors."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    cancelled_request = _make_request_state(
+        "req-cancelled-precreated",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+
+    detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
+    assert detached is True
+
+    retry_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    retry_request = _make_request_state(
+        "req-active-retry",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=retry_queue,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(retry_request)
+        session.queued_request_count += 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 502,
+                "error": {
+                    "code": "upstream_error",
+                    "type": "server_error",
+                    "message": "pre-created request failed",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    retry_event = await asyncio.wait_for(retry_queue.get(), timeout=0.1)
+    assert retry_event is not None
+    assert "pre-created request failed" in retry_event
+    assert await asyncio.wait_for(retry_queue.get(), timeout=0.1) is None
+    assert cancelled_request in session.pending_requests
+    assert retry_request not in session.pending_requests
+    assert session.queued_request_count == 0

@@ -6394,6 +6394,7 @@ class ProxyService:
             created_request_state = None
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
+            anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
             if event_type == "response.created":
                 matched_request_state = _assign_websocket_response_id(session.pending_requests, response_id)
                 created_request_state = matched_request_state
@@ -6412,6 +6413,7 @@ class ProxyService:
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                    prefer_draining_requests=anonymous_event_prefers_draining,
                 )
                 release_create_gate = False
             else:
@@ -6450,6 +6452,7 @@ class ProxyService:
                         "response.incomplete",
                         "error",
                     },
+                    prefer_draining_requests=anonymous_event_prefers_draining,
                 )
                 if terminal_request_state is not None and _http_bridge_request_counts_against_queue(
                     terminal_request_state
@@ -10837,6 +10840,7 @@ def _match_websocket_request_state_for_anonymous_event(
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
+    prefer_draining_requests: bool = True,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -10846,8 +10850,11 @@ def _match_websocket_request_state_for_anonymous_event(
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
 
+    visible_requests = [
+        request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)
+    ]
     draining_requests = _draining_websocket_request_states(pending_requests)
-    if draining_requests:
+    if prefer_draining_requests and draining_requests:
         unresolved_draining_requests = [
             request_state for request_state in draining_requests if request_state.response_id is None
         ]
@@ -10855,12 +10862,23 @@ def _match_websocket_request_state_for_anonymous_event(
             return unresolved_draining_requests[0]
         return draining_requests[0]
 
-    if len(pending_requests) == 1:
-        return pending_requests[0]
+    if len(visible_requests) == 1:
+        return visible_requests[0]
 
-    unresolved_requests = [request_state for request_state in pending_requests if request_state.response_id is None]
-    if len(unresolved_requests) == 1:
-        return unresolved_requests[0]
+    unresolved_visible_requests = [
+        request_state for request_state in visible_requests if request_state.response_id is None
+    ]
+    if len(unresolved_visible_requests) == 1:
+        return unresolved_visible_requests[0]
+
+    if not visible_requests and draining_requests:
+        unresolved_draining_requests = [
+            request_state for request_state in draining_requests if request_state.response_id is None
+        ]
+        if len(unresolved_draining_requests) == 1:
+            return unresolved_draining_requests[0]
+        return draining_requests[0]
+
     return None
 
 
@@ -11428,6 +11446,7 @@ def _pop_terminal_websocket_request_state(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     allow_precreated_terminal_fallback: bool = False,
+    prefer_draining_requests: bool = True,
 ) -> _WebSocketRequestState | None:
     if response_id is not None:
         request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
@@ -11459,6 +11478,7 @@ def _pop_terminal_websocket_request_state(
             previous_response_id_hint=previous_response_id_hint,
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
+            prefer_draining_requests=prefer_draining_requests,
         )
         if request_state is not None and request_state in pending_requests:
             pending_requests.remove(request_state)

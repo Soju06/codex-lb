@@ -133,6 +133,8 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
         raise SystemExit(message) from exc
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    except OSError as exc:
+        raise SystemExit(f"Unable to read or write Codex session files: {exc}") from exc
 
     _print_retag_summary(result)
 

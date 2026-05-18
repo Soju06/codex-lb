@@ -251,17 +251,14 @@ def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) ->
 
 
 def _read_jsonl_records(path: Path) -> Iterable[JsonObject]:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    yield record
-    except OSError:
-        return
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield record
 
 
 def _sqlite_count_provider_rows(db_path: Path, provider: str) -> int:

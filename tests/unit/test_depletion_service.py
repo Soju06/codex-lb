@@ -394,6 +394,106 @@ def test_aged_out_row_invalidates_memoized_state(monkeypatch: pytest.MonkeyPatch
     assert truncated_result.rate_per_second != pytest.approx(full_result.rate_per_second)
 
 
+def test_inplace_value_correction_invalidates_memoized_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review on #588: when a row's `used_percent` is corrected in place
+    (same timestamps, same row count) the cache must rebuild — otherwise we
+    keep returning depletion metrics derived from the stale value."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    history = [
+        _entry(10.0, BASE_TIME),
+        _entry(20.0, BASE_TIME + timedelta(minutes=1)),
+        _entry(30.0, BASE_TIME + timedelta(minutes=2)),
+    ]
+    now = BASE_TIME + timedelta(minutes=3)
+
+    rebuild_calls = 0
+    real_rebuild = depletion_service._rebuild_ewma_state
+
+    def _counting_rebuild(history_arg):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return real_rebuild(history_arg)
+
+    monkeypatch.setattr(depletion_service, "_rebuild_ewma_state", _counting_rebuild)
+
+    first = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert first is not None
+    assert rebuild_calls == 1
+
+    # Same window endpoints and row count, but the middle row's used_percent is
+    # corrected upward (e.g. backfill of a previously underreported sample) so
+    # the corrected series remains monotonically non-decreasing. Window-
+    # endpoint-only signatures would treat this as unchanged and reuse the
+    # stale EWMA state.
+    corrected_history = [
+        history[0],
+        _entry(25.0, BASE_TIME + timedelta(minutes=1)),
+        history[2],
+    ]
+    second = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", corrected_history, now=now
+    )
+    assert second is not None
+    assert rebuild_calls == 2
+    # Rate must reflect the correction, not the stale cached state.
+    assert second.rate_per_second != pytest.approx(first.rate_per_second)
+
+
+def test_inplace_reset_at_correction_invalidates_memoized_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review on #588: corrections to value-bearing non-`used_percent`
+    fields (here `reset_at`) must also invalidate the cache."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    reset_epoch = int((BASE_TIME + timedelta(minutes=30)).timestamp())
+    history = [
+        _entry(10.0, BASE_TIME, reset_at=reset_epoch, window_minutes=60),
+        _entry(20.0, BASE_TIME + timedelta(minutes=1), reset_at=reset_epoch, window_minutes=60),
+        _entry(30.0, BASE_TIME + timedelta(minutes=2), reset_at=reset_epoch, window_minutes=60),
+    ]
+    now = BASE_TIME + timedelta(minutes=3)
+
+    rebuild_calls = 0
+    real_rebuild = depletion_service._rebuild_ewma_state
+
+    def _counting_rebuild(history_arg):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return real_rebuild(history_arg)
+
+    monkeypatch.setattr(depletion_service, "_rebuild_ewma_state", _counting_rebuild)
+
+    first = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
+    assert first is not None
+    assert rebuild_calls == 1
+
+    # Upstream extended the window — reset_at moved later on every row
+    # (per-row consistency keeps ewma_update from treating it as a mid-stream
+    # window change and dropping the rate).
+    extended_reset = int((BASE_TIME + timedelta(minutes=90)).timestamp())
+    corrected_history = [
+        _entry(e.used_percent, e.recorded_at, reset_at=extended_reset, window_minutes=60)
+        for e in history
+    ]
+    second = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", corrected_history, now=now
+    )
+    assert second is not None
+    assert rebuild_calls == 2
+    # Extending reset_at lengthens seconds_until_reset which lowers the
+    # sustainable_rate denominator in compute_burn_rate, so burn_rate must
+    # rise; the cached pre-correction state would have produced the old,
+    # lower burn_rate.
+    assert second.burn_rate != pytest.approx(first.burn_rate)
+    assert second.burn_rate > first.burn_rate
+
+
 def test_post_reset_window_returns_none() -> None:
     """R30-F1: When reset_at is in the past, depletion should be None (window expired)."""
     reset_ewma_state()

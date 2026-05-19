@@ -16,10 +16,16 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 
 # Per-account cache key: (account_id, limit_name, window).
 _StateKey = tuple[str, str, str]
-# Signature of the history slice that produced a cached EWMAState. Includes the
-# window endpoints and length so any change in the in-window history (new row,
-# aged-out row, or replaced row) invalidates the cache and forces a rebuild.
-_HistorySignature = tuple[datetime, datetime, int]
+# Per-row content fingerprint: timestamp + value-bearing fields. Captured
+# row-by-row so an in-place correction to `used_percent` / `reset_at` /
+# `window_minutes` on an existing row invalidates the cache even when the
+# window endpoints and row count are unchanged.
+_RowSignature = tuple[datetime, float, float | None, int | None]
+# Signature of the history slice that produced a cached EWMAState. A tuple of
+# per-row fingerprints so any change in the in-window history (new row, aged-
+# out row, replaced row, or in-place value correction) invalidates the cache
+# and forces a rebuild.
+_HistorySignature = tuple[_RowSignature, ...]
 
 # In-memory EWMA state: keyed by (account_id, limit_name, window)
 # Persists across requests; resets on process restart.
@@ -79,10 +85,14 @@ def compute_depletion_for_account(
         _ewma_states[key] = ewma_update(
             None, entry.used_percent, naive_utc_to_epoch(entry.recorded_at), reset_at=entry.reset_at
         )
-        _history_signatures[key] = (entry.recorded_at, entry.recorded_at, 1)
+        _history_signatures[key] = (
+            (entry.recorded_at, entry.used_percent, entry.reset_at, entry.window_minutes),
+        )
         return None
 
-    signature: _HistorySignature = (history[0].recorded_at, history[-1].recorded_at, len(history))
+    signature: _HistorySignature = tuple(
+        (e.recorded_at, e.used_percent, e.reset_at, e.window_minutes) for e in history
+    )
     cached_state = _ewma_states.get(key)
     cached_signature = _history_signatures.get(key)
 

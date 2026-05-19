@@ -8,8 +8,8 @@ Issue #537 reports that `GET /api/dashboard/overview` is slow once `usage_histor
 Dashboard polls are issued much more frequently than new usage rows land, yet each poll currently re-walks the full per-account history through `ewma_update`.
 
 ## What Changes
-- Memoize per-account EWMA state alongside a signature of the in-window history `(earliest_recorded_at, latest_recorded_at, len(history))` so dashboard polls reuse the cached state whenever the input is unchanged.
-- Invalidate the memoized state automatically when a new sample is appended, an older sample ages out of the window, or `reset_ewma_state()` is called.
+- Memoize per-account EWMA state alongside a full per-row content signature of the in-window history (`recorded_at`, `used_percent`, `reset_at`, `window_minutes`) so dashboard polls reuse the cached state whenever the input is unchanged.
+- Invalidate the memoized state automatically when a new sample is appended, an older sample ages out of the window, an existing row is corrected in place, or `reset_ewma_state()` is called.
 - Continue recomputing the time-dependent fields (`risk`, `safe_usage_percent`, `projected_exhaustion_at`, `seconds_until_exhaustion`) on every call so polls remain live.
 
 ## Impact

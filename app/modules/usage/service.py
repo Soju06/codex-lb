@@ -12,6 +12,7 @@ from app.modules.usage.builders import (
     build_usage_summary_response,
     build_usage_window_response,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.schemas import (
     UsageHistoryResponse,
@@ -88,13 +89,4 @@ class UsageService:
 
     async def _latest_usage_rows(self, window: str) -> list[UsageWindowRow]:
         latest = await self._usage_repo.latest_by_account(window=window)
-        return [
-            UsageWindowRow(
-                account_id=entry.account_id,
-                used_percent=entry.used_percent,
-                reset_at=entry.reset_at,
-                window_minutes=entry.window_minutes,
-                recorded_at=entry.recorded_at,
-            )
-            for entry in latest.values()
-        ]
+        return [usage_history_to_window_row(entry) for entry in latest.values()]

@@ -38,6 +38,7 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
@@ -1033,8 +1034,8 @@ def _state_from_account(
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
-    primary_row = _usage_entry_to_window_row(primary_entry) if primary_entry is not None else None
-    secondary_row = _usage_entry_to_window_row(secondary_entry) if secondary_entry is not None else None
+    primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
+    secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
     # Weekly-only accounts may not emit a dedicated secondary row; treat the
     # weekly primary row as quota-window input for balancer decisions. When
     # both rows exist, prefer the newer weekly snapshot.
@@ -1200,16 +1201,6 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     if not isinstance(model_plans, dict):
         return False
     return model.strip().lower() in model_plans
-
-
-def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 def _clone_account(account: Account) -> Account:

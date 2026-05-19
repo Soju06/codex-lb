@@ -112,6 +112,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
@@ -705,8 +706,8 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     primary_latest = await usage_repository.latest_by_account(window="primary")
     secondary_latest = await usage_repository.latest_by_account(window="secondary")
 
-    primary_rows = [_usage_entry_to_window_row(entry) for entry in primary_latest.values()]
-    secondary_rows = [_usage_entry_to_window_row(entry) for entry in secondary_latest.values()]
+    primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
+    secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
 
     account_ids = {row.account_id for row in primary_rows} | {row.account_id for row in secondary_rows}
@@ -756,16 +757,6 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
         )
     )
     return list(result.scalars().all())
-
-
-def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 @transcribe_router.post("/transcribe")

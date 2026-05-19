@@ -56,21 +56,21 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function ManualCallbackInput({
-  onSubmit,
-  disabled = false,
-}: {
+type ManualCallbackInputProps = {
   onSubmit: (callbackUrl: string) => Promise<void>;
   disabled?: boolean;
-}) {
+};
+
+function ManualCallbackInput(props: ManualCallbackInputProps) {
+  return <ManualCallbackInputBody key={props.disabled ? "disabled" : "enabled"} {...props} />;
+}
+
+function ManualCallbackInputBody({
+  onSubmit,
+  disabled = false,
+}: ManualCallbackInputProps) {
   const [callbackUrl, setCallbackUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (disabled) {
-      setCallbackUrl("");
-    }
-  }, [disabled]);
 
   const handleSubmit = useCallback(async () => {
     if (!callbackUrl.trim()) return;

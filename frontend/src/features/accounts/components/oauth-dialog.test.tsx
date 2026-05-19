@@ -244,8 +244,9 @@ describe("OauthDialog", () => {
       />,
     );
 
-    expect(callbackInput).toHaveValue("");
-    expect(callbackInput).toBeDisabled();
+    const disabledCallbackInput = screen.getByRole("textbox");
+    expect(disabledCallbackInput).toHaveValue("");
+    expect(disabledCallbackInput).toBeDisabled();
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
   });
 });

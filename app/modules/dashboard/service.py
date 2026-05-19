@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
@@ -20,6 +21,7 @@ from app.modules.dashboard.schemas import (
     DashboardUsageWindows,
     DepletionResponse,
 )
+from app.modules.dashboard.weekly_pace import build_weekly_credit_pace
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -214,6 +216,14 @@ class DashboardService:
                     secondary_history[account_id] = rows
 
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
+        settings = get_settings()
+        weekly_credit_pace = build_weekly_credit_pace(
+            accounts=accounts,
+            account_summaries=account_summaries,
+            secondary_history=secondary_history,
+            now=now,
+            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+        )
 
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
@@ -225,6 +235,7 @@ class DashboardService:
             trends=trends,
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
+            weekly_credit_pace=weekly_credit_pace,
         )
 
 

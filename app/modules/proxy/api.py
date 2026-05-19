@@ -6,9 +6,23 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from typing import Final, cast
 
-from fastapi import APIRouter, Body, Depends, File, Form, Path, Request, Response, Security, UploadFile, WebSocket
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Request,
+    Response,
+    Security,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -61,6 +75,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
     ApiKeySelfLimitData,
     ApiKeysService,
     ApiKeyUsageReservationData,
@@ -69,10 +84,12 @@ from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    enforce_strict_function_tools_format,
     enforce_strict_text_format,
     openai_client_payload_error,
     openai_validation_error,
@@ -115,6 +132,10 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     }
 )
 _PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})
+_PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
+    {"response.completed", "response.incomplete", "response.failed", "error"}
+)
+_PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -124,6 +145,11 @@ router = APIRouter(
 ws_router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
+)
+wham_router = APIRouter(
+    prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
 )
 v1_router = APIRouter(
     prefix="/v1",
@@ -165,6 +191,18 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_V1_FULL_CONTEXT_WINDOW_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 1_000_000,
+    "gpt-5.5": 400_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5.3-codex": 400_000,
+}
+_V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-5.4": 128_000,
+    "gpt-5.5": 128_000,
+    "gpt-5.4-mini": 128_000,
+    "gpt-5.3-codex": 128_000,
+}
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -186,6 +224,165 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+
+
+async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
+    if request.method.upper() == "GET":
+        return {key: value for key, value in request.query_params.multi_items()}
+    try:
+        raw = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="thread goal payload must be valid JSON") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="thread goal payload must be a JSON object")
+    return cast(dict[str, JsonValue], raw)
+
+
+async def _thread_goal_proxy(
+    request: Request,
+    operation: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    payload = await _thread_goal_payload_from_request(request)
+    try:
+        response = await context.service.thread_goal_request(
+            operation,
+            payload,
+            request.headers,
+            method=request.method,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return JSONResponse(response)
+
+
+_CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-type",
+        "etag",
+        "last-modified",
+        "location",
+        "openai-processing-ms",
+        "request-id",
+        "x-request-id",
+    }
+)
+
+
+def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
+
+
+async def _codex_control_proxy(
+    request: Request,
+    path: str,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    try:
+        response = await context.service.codex_control_request(
+            path,
+            method=request.method,
+            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            query_params=list(request.query_params.multi_items()),
+            headers=request.headers,
+            codex_session_affinity=True,
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    return Response(
+        content=response.body,
+        status_code=response.status_code,
+        headers=_codex_control_downstream_headers(response.headers),
+    )
+
+
+@router.api_route("/thread/goal/get", methods=["GET", "POST"])
+async def thread_goal_get(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "get", context, api_key)
+
+
+@router.post("/thread/goal/set")
+async def thread_goal_set(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "set", context, api_key)
+
+
+@router.post("/thread/goal/clear")
+async def thread_goal_clear(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _thread_goal_proxy(request, "clear", context, api_key)
+
+
+@router.post("/analytics-events/events")
+async def codex_analytics_events(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "analytics-events/events", context, api_key)
+
+
+@router.post("/memories/trace_summarize")
+async def codex_memories_trace_summarize(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "memories/trace_summarize", context, api_key)
+
+
+@router.post("/realtime/calls")
+async def codex_realtime_calls(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "realtime/calls", context, api_key)
+
+
+@router.post("/safety/arc")
+async def codex_safety_arc(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "safety/arc", context, api_key)
+
+
+@router.get("/agent-identities/jwks")
+async def codex_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "agent-identities/jwks", context, api_key)
+
+
+@wham_router.get("/agent-identities/jwks")
+async def wham_agent_identities_jwks(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
 
 
 @router.post(
@@ -214,6 +411,11 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        # The Codex CLI consumes codex.* vendor events and the upstream's
+        # native event ordering (it does not use the OpenAI Python SDK parser);
+        # forward the stream verbatim instead of enforcing the OpenAI SDK
+        # contract that /v1/responses applies.
+        enforce_openai_sdk_contract=False,
     )
 
 
@@ -261,6 +463,7 @@ async def v1_responses(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload.tools)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -335,6 +538,17 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
+        # output, synthesize ``response.created``) MUST be applied by the
+        # origin instance — the one that actually responds to the client — so
+        # they can honour the original route's ``enforce_openai_sdk_contract``
+        # decision. This handler runs on the owner instance after the origin
+        # forwarded the request via the internal bridge; if we re-applied them
+        # here, a forwarded ``/backend-api/codex/responses`` request would
+        # lose ``codex.*`` events (and gain a synthetic ``response.created``)
+        # before the origin ever sees the stream. Forward verbatim and let
+        # the origin run its own normalization.
+        enforce_openai_sdk_contract=False,
     )
 
 
@@ -1419,6 +1633,40 @@ def _effective_context_window(model: UpstreamModel) -> int:
     return overrides.get(model.slug, model.context_window)
 
 
+def _raw_positive_int(raw: Mapping[str, JsonValue], key: str) -> int | None:
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _v1_full_context_window(model: UpstreamModel) -> int:
+    overrides = get_settings().model_context_window_overrides
+    explicit_override = overrides.get(model.slug)
+    if explicit_override is not None:
+        return explicit_override
+
+    known_context_window = _V1_FULL_CONTEXT_WINDOW_OVERRIDES.get(model.slug)
+    if known_context_window is not None:
+        return known_context_window
+
+    upstream_context_window = model.context_window
+    raw_max_context_window = _raw_positive_int(model.raw, "max_context_window")
+    if raw_max_context_window is not None and raw_max_context_window > upstream_context_window:
+        return raw_max_context_window
+
+    return upstream_context_window
+
+
+def _v1_input_context_window(model: UpstreamModel) -> int | None:
+    input_context_window = model.context_window
+    return input_context_window if input_context_window != _v1_full_context_window(model) else None
+
+
+def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
+    return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
+
+
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
@@ -1428,7 +1676,9 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=_effective_context_window(model),
+        context_window=_v1_full_context_window(model),
+        input_context_window=_v1_input_context_window(model),
+        max_output_tokens=_v1_max_output_tokens(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
             ReasoningLevelSchema(effort=rl.effort, description=rl.description)
@@ -1470,6 +1720,19 @@ async def v1_chat_completions(
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
+        # Validate strict function tool schemas against the *original* request
+        # ``tools`` list before ``to_responses_request()`` runs. The chat
+        # normalizer (``_normalize_chat_tools``) silently drops invalid
+        # entries (non-dict tools, function tools with missing/empty
+        # ``name``), so validating the normalized output would surface
+        # ``tools[i].function.parameters`` with an ``i`` that no longer maps
+        # to the client's inbound payload. Using ``payload.tools`` keeps the
+        # error envelope's ``param`` aligned with what the client sent.
+        enforce_strict_function_tools_format(
+            payload.tools,
+            param_template="tools[{index}].function.parameters",
+            nested=True,
+        )
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
     except ClientPayloadError as exc:
@@ -1478,13 +1741,14 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
+    apply_api_key_enforcement(responses_payload, api_key)
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=effective_model,
+        request_model=responses_payload.model,
         request_service_tier=responses_payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(responses_payload),
     )
     responses_payload.stream = True
-    apply_api_key_enforcement(responses_payload, api_key)
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -1558,6 +1822,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -1569,6 +1834,7 @@ async def _stream_responses(
             api_key,
             request_model=payload.model,
             request_service_tier=payload.service_tier,
+            request_usage_budget=estimate_api_key_request_usage(payload),
         )
     )
 
@@ -1617,15 +1883,26 @@ async def _stream_responses(
     stream, startup_error = await _probe_stream_startup_error(
         stream,
         convert_event_errors=bridge_active,
-        timeout_seconds=_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
-        if prefer_http_bridge
-        else _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+        timeout_seconds=(
+            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+        ),
     )
     if startup_error is not None:
-        if reservation is not None and owns_reservation:
+        if owns_reservation:
             await _release_reservation(reservation)
-        return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
-    stream = _normalize_public_responses_stream(_stream_proxy_errors_as_response_failed(stream))
+        return _stream_startup_error_response(
+            request,
+            startup_error,
+            headers=rate_limit_headers,
+        )
+    stream = _normalize_public_responses_stream(
+        _stream_response_error_events(
+            stream,
+            owns_reservation=owns_reservation,
+            reservation=reservation,
+        ),
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,
@@ -1657,6 +1934,7 @@ async def _collect_responses(
         api_key,
         request_model=payload.model,
         request_service_tier=payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
@@ -1698,16 +1976,17 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code = _status_for_error(error_payload.error)
+            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -1718,7 +1997,7 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
-    status_code = _status_for_error(response_payload.error)
+    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
@@ -1778,6 +2057,7 @@ async def _compact_responses(
         api_key,
         request_model=payload.model,
         request_service_tier=_compact_request_service_tier(payload),
+        request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
@@ -1806,9 +2086,10 @@ async def _compact_responses(
         )
     except ProxyResponseError as exc:
         error = _parse_error_envelope(exc.payload)
+        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
         return _logged_error_json_response(
             request,
-            exc.status_code,
+            status_code,
             error.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
@@ -1879,13 +2160,17 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield line
 
 
+async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
+    return await anext(stream)
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
-    first_task = asyncio.create_task(anext(stream))
+    first_task = asyncio.create_task(_read_first_stream_item(stream))
     try:
         first = await asyncio.wait_for(
             asyncio.shield(first_task),
@@ -1917,10 +2202,25 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
+        yield line
+
+
+async def _stream_response_error_events(
+    stream: AsyncIterator[str],
+    *,
+    owns_reservation: bool,
+    reservation: ApiKeyUsageReservationData | None,
+) -> AsyncIterator[str]:
     try:
         async for line in stream:
             yield line
     except ProxyResponseError as exc:
+        if owns_reservation:
+            try:
+                await _release_reservation(reservation)
+            except Exception:
+                logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
@@ -2092,6 +2392,7 @@ async def _enforce_request_limits(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget | None = None,
 ) -> ApiKeyUsageReservationData | None:
     if api_key is None:
         return None
@@ -2103,6 +2404,7 @@ async def _enforce_request_limits(
                 api_key.id,
                 request_model=request_model,
                 request_service_tier=request_service_tier,
+                request_usage_budget=request_usage_budget,
             )
         except ApiKeyRateLimitExceededError as exc:
             message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
@@ -2276,53 +2578,419 @@ def _merge_collected_output_items(
     return merged
 
 
-async def _normalize_public_responses_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _normalize_public_responses_stream(
+    stream: AsyncIterator[str],
+    *,
+    enforce_openai_sdk_contract: bool = True,
+) -> AsyncIterator[str]:
+    """Normalize the upstream SSE event stream for the public /v1 surface.
+
+    Args:
+        stream: the upstream SSE event blocks (post-error-conversion).
+        enforce_openai_sdk_contract: when True (the default, used for /v1),
+            apply OpenAI Responses SSE contract enforcement: drop Codex
+            vendor events (codex.*), backfill terminal output from streamed
+            item events, and synthesize a leading response.created event
+            when the upstream stream's first standard event is not
+            response.created. When False (used for /backend-api/codex/*,
+            which feeds the Codex CLI), all events including codex.* are
+            forwarded verbatim and no synthesis happens — the Codex CLI
+            relies on the upstream's native event shape.
+    """
     terminal_seen = False
+    done_seen = False
     contract_violation_kind: str | None = None
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
+    # Collect output items from streamed ``response.output_item.added`` /
+    # ``response.output_item.done`` events so the terminal
+    # ``response.completed`` / ``response.incomplete`` payload can be
+    # backfilled when the upstream Codex backend leaves ``response.output``
+    # empty. This mirrors the existing non-streaming behavior in
+    # ``_collect_responses_payload`` so OpenAI SDK consumers calling
+    # ``stream.get_final_response().output`` see the same items the
+    # non-streaming endpoint returns.
+    output_items: dict[int, dict[str, JsonValue]] = {}
+    # Track whether the first standard ``response.*`` event the public stream
+    # emits is ``response.created``. The OpenAI Responses SSE contract requires
+    # ``response.created`` to be the first event. The upstream Codex backend
+    # sometimes drops straight to a terminal event (e.g. ``response.failed``
+    # when upstream rejects the request mid-stream) without emitting
+    # ``response.created`` first, which makes the OpenAI SDK's
+    # ``_create_initial_response`` raise ``RuntimeError``. When that happens
+    # we synthesize a ``response.created`` snapshot from the terminal event's
+    # ``response`` envelope so the SDK parser can complete the stream.
+    created_emitted = False
+    # Anonymous pre-created events cannot be made SDK-safe until a response
+    # envelope arrives: the public OpenAI SDK requires response.created first.
+    # Buffer them temporarily. Once an envelope arrives, replay only lightweight
+    # visible content events (text/content-part deltas) after the created event;
+    # drop unowned output_item lifecycle events so cancelled-request orphans are
+    # not attached to the later response.
+    pre_created_buffer: list[dict[str, JsonValue]] = []
+
+    def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
+        return [
+            *[
+                format_sse_event(synthetic_payload)
+                for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
+            ],
+            format_sse_event(payload),
+        ]
+
+    def buffered_pre_created_payloads_to_replay(response_id: str | None) -> list[str]:
+        try:
+            if _pre_created_buffer_has_indexed_lifecycle(pre_created_buffer):
+                return []
+            return _format_legacy_pre_created_payloads(
+                pre_created_buffer,
+                response_id=response_id,
+                seen_text_delta_keys=seen_text_delta_keys,
+            )
+        finally:
+            pre_created_buffer.clear()
+
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
+            done_seen = True
             if terminal_seen:
                 yield event_block
+            continue
+        if _looks_like_sse_comment_block(event_block):
+            yield event_block
             continue
         payload = _parse_sse_payload(event_block)
         if payload is None:
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
-        normalized_payload, violation_kind = _normalize_public_stream_payload(payload)
+        raw_event_type = payload.get("type")
+        if (
+            enforce_openai_sdk_contract
+            and isinstance(raw_event_type, str)
+            and raw_event_type
+            in (
+                "response.completed",
+                "response.incomplete",
+            )
+        ):
+            response_obj = payload.get("response")
+            if is_json_mapping(response_obj):
+                existing_output = response_obj.get("output")
+                needs_backfill = not (isinstance(existing_output, list) and existing_output)
+                if needs_backfill and output_items:
+                    merged_response = _merge_collected_output_items(response_obj, output_items)
+                    payload = dict(payload)
+                    payload["response"] = merged_response
+        normalized_payload, violation_kind = _normalize_public_stream_payload(
+            payload,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
         if violation_kind is not None:
             contract_violation_kind = contract_violation_kind or violation_kind
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+
+        if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
+            if event_type == "response.created":
+                created_emitted = True
+                yield format_sse_event(normalized_payload)
+                response_id = _response_id_from_event_payload(normalized_payload)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
+                continue
+
+            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
+            if synthetic_created is not None:
+                yield format_sse_event(synthetic_created)
+                created_emitted = True
+                response_id = _response_id_from_event_payload(synthetic_created)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
+            elif _should_buffer_public_pre_created_event(event_type):
+                if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
+                    error_kind = contract_violation_kind or "upstream_stream_truncated"
+                    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                        yield formatted_payload
+                    return
+                pre_created_buffer.append(normalized_payload)
+                continue
+            elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                if event_type == "error":
+                    for formatted_payload in _public_response_failed_event_blocks_from_error(
+                        normalized_payload,
+                        include_created=True,
+                    ):
+                        yield formatted_payload
+                    return
+                error_kind = contract_violation_kind or "upstream_stream_truncated"
+                for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                    yield formatted_payload
+                return
+
+        _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        for synthetic_payload in _synthetic_text_delta_events(normalized_payload, seen_text_delta_keys):
-            yield format_sse_event(synthetic_payload)
-        if isinstance(event_type, str) and event_type in {
-            "response.completed",
-            "response.incomplete",
-            "response.failed",
-            "error",
-        }:
+        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+            yield formatted_payload
+        if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
             terminal_seen = True
-        yield format_sse_event(normalized_payload)
     if terminal_seen:
+        if not done_seen and not enforce_openai_sdk_contract:
+            yield "data: [DONE]\n\n"
         return
     error_kind = contract_violation_kind or "upstream_stream_truncated"
-    yield format_sse_event(
+    include_created = enforce_openai_sdk_contract and not created_emitted
+    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
+        yield formatted_payload
+
+
+def _should_buffer_public_pre_created_event(event_type: str) -> bool:
+    return (
+        event_type.startswith("response.")
+        and event_type != "response.created"
+        and event_type not in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
+    )
+
+
+def _public_response_failed_event_blocks(error_kind: str, *, include_created: bool) -> list[str]:
+    failed_payload = cast(
+        dict[str, JsonValue],
         response_failed_event(
             error_kind,
             _public_contract_error_message(error_kind),
-        )
+            response_id=f"resp_{error_kind}",
+        ),
     )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
+
+
+def _public_response_failed_event_blocks_from_error(
+    payload: dict[str, JsonValue],
+    *,
+    include_created: bool,
+) -> list[str]:
+    envelope = _parse_event_error_envelope(payload)
+    error = envelope.error
+    if error is None:
+        error = _default_error_envelope().error
+    assert error is not None
+    failed_payload = cast(
+        dict[str, JsonValue],
+        response_failed_event(
+            error.code or "upstream_error",
+            error.message or "Upstream error",
+            error.type or "server_error",
+            response_id=f"resp_{error.code or 'upstream_error'}",
+            error_param=error.param,
+        ),
+    )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
+
+
+_REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.refusal.delta",
+        "response.refusal.done",
+    }
+)
+
+
+_INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.content_part.added",
+    }
+)
+
+
+def _pre_created_buffer_has_indexed_lifecycle(payloads: list[dict[str, JsonValue]]) -> bool:
+    for payload in payloads:
+        event_type = payload.get("type")
+        if isinstance(event_type, str) and event_type in _INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES:
+            return True
+        if isinstance(payload.get("output_index"), int) or isinstance(payload.get("item_id"), str):
+            return True
+    return False
+
+
+def _format_legacy_pre_created_payloads(
+    payloads: list[dict[str, JsonValue]],
+    *,
+    response_id: str | None,
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> list[str]:
+    formatted: list[str] = []
+    if not payloads:
+        return formatted
+
+    item_id = _synthetic_pre_created_item_id(response_id)
+    output_index = 0
+    content_index = 0
+    text_item_opened = False
+    text_parts: list[str] = []
+    final_text: str | None = None
+
+    def open_text_item(sequence_number: int) -> None:
+        nonlocal text_item_opened
+        if text_item_opened:
+            return
+        output_item_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_added))
+        content_part_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.content_part.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "content_index": content_index,
+                "item_id": item_id,
+                "part": {"type": "output_text", "text": ""},
+            },
+        )
+        formatted.append(format_sse_event(content_part_added))
+        text_item_opened = True
+
+    sequence_number = 0
+    for payload in payloads:
+        event_type = payload.get("type")
+        if not isinstance(event_type, str) or event_type not in _REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES:
+            continue
+        sequence_number = _payload_sequence_number(payload, sequence_number + 1)
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                continue
+            open_text_item(sequence_number)
+            text_parts.append(delta)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            seen_text_delta_keys.add((item_id, output_index))
+            continue
+        if event_type in {"response.output_text.done", "response.refusal.done"}:
+            text = payload.get("text")
+            if not isinstance(text, str):
+                text = "".join(text_parts)
+            open_text_item(sequence_number)
+            final_text = text
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            continue
+        part = payload.get("part")
+        if is_json_mapping(part) and part.get("type") in _PUBLIC_RESPONSE_TEXT_PART_TYPES:
+            text = part.get("text")
+            if isinstance(text, str):
+                final_text = text
+            open_text_item(sequence_number)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            formatted.append(format_sse_event(normalized))
+        else:
+            # Preserve legacy unindexed non-text content_part.done events for
+            # raw SSE clients. They are not used to assemble SDK output.
+            formatted.append(format_sse_event(payload))
+
+    if text_item_opened:
+        seen_text_delta_keys.add((None, output_index))
+        text = final_text if final_text is not None else "".join(text_parts)
+        output_item_done = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence_number + 1,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_done))
+    return formatted
+
+
+def _payload_sequence_number(payload: Mapping[str, JsonValue], fallback: int) -> int:
+    sequence_number = payload.get("sequence_number")
+    return sequence_number if isinstance(sequence_number, int) else fallback
+
+
+def _response_id_from_event_payload(payload: Mapping[str, JsonValue]) -> str | None:
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return None
+    response_id = response.get("id")
+    return response_id if isinstance(response_id, str) and response_id else None
+
+
+def _synthetic_pre_created_item_id(response_id: str | None) -> str:
+    if response_id:
+        return f"msg_{response_id}_precreated"
+    return "msg_precreated"
 
 
 def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
+    *,
+    enforce_openai_sdk_contract: bool = True,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    # Drop Codex-internal vendor events on the public /v1 surface only. The
+    # upstream Codex backend emits non-standard events (notably
+    # ``codex.rate_limits``, which is throttled per rate-limit window and so
+    # leaks intermittently before ``response.created``). The OpenAI Responses
+    # SSE contract does not define any ``codex.*`` event type, and the OpenAI
+    # SDK's stream parser raises ``RuntimeError`` if any other event arrives
+    # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
+    # consume these events and pass ``enforce_openai_sdk_contract=False`` so
+    # they continue to forward unchanged.
+    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
+        return None, None
     if event_type == "error":
         parsed_error = _parse_event_error_envelope(payload)
         if _is_previous_response_not_found_public_error(parsed_error.error):
@@ -2381,6 +3049,40 @@ def _normalize_public_stream_payload(
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
+
+
+def _synthetic_response_created_envelope(
+    payload: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    """Synthesize a ``response.created`` SSE payload from a non-created event.
+
+    Used by ``_normalize_public_responses_stream`` when the upstream's first
+    standard event is not ``response.created`` (for example, the Codex backend
+    sometimes jumps straight to ``response.failed`` when upstream rejects the
+    request mid-stream). The OpenAI Responses SSE contract requires
+    ``response.created`` to be the first event the stream emits — the OpenAI
+    Python SDK's ``ResponseStreamState._create_initial_response`` raises
+    ``RuntimeError`` otherwise.
+
+    Returns ``None`` when no ``response`` envelope is available on the source
+    event (in that case the caller forwards the event verbatim; the SDK
+    consumer will still see a parser error, but the stream contract is at
+    least not silently violated by our synthesis logic).
+    """
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return None
+    created_envelope: dict[str, JsonValue] = dict(response)
+    created_envelope["status"] = "in_progress"
+    created_envelope["output"] = []
+    synthetic: dict[str, JsonValue] = {
+        "type": "response.created",
+        "response": created_envelope,
+    }
+    sequence_number = payload.get("sequence_number")
+    if isinstance(sequence_number, int):
+        synthetic["sequence_number"] = sequence_number
+    return synthetic
 
 
 def _synthetic_text_delta_events(
@@ -2564,6 +3266,12 @@ def _looks_like_sse_data_block(event_block: str) -> bool:
     return "data:" in event_block
 
 
+def _looks_like_sse_comment_block(event_block: str) -> bool:
+    return bool(event_block.strip()) and all(
+        not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
+    )
+
+
 def _public_contract_error_message(kind: str) -> str:
     if kind == "invalid_json":
         return "Responses stream produced an invalid JSON payload"
@@ -2644,11 +3352,12 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     if error_value.code == "previous_response_not_found":
         return True
     message = error_value.message or ""
+    normalized_message = " ".join(message.lower().split())
     return (
         error_value.code == "invalid_request_error"
         and error_value.param == "previous_response_id"
-        and "previous response" in message.lower()
-        and "not found" in message.lower()
+        and "previous response" in normalized_message
+        and "not found" in normalized_message
     )
 
 

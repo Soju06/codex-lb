@@ -126,9 +126,7 @@ def test_unresolvable_hostname_falls_back_to_hostname(monkeypatch: pytest.Monkey
     "hostname",
     ["localhost", "127.0.0.1", "::1", "[::1]"],
 )
-def test_loopback_host_returns_placeholder(
-    monkeypatch: pytest.MonkeyPatch, hostname: str
-) -> None:
+def test_loopback_host_returns_placeholder(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
     request = _fake_request(hostname)
     assert _resolve_runtime_connect_address(request) == "<codex-lb-ip-or-dns>"

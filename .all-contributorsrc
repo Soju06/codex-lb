@@ -510,6 +510,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "linusmixson",
+      "name": "Linus Mixson",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7087013?v=4",
+      "profile": "https://github.com/linusmixson",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

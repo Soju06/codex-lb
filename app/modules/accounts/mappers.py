@@ -145,10 +145,7 @@ def _effective_status_from_usage(
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
     )
-    if (
-        account.status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
-        and status == AccountStatus.ACTIVE
-    ):
+    if account.status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) and status == AccountStatus.ACTIVE:
         return account.status
     return status
 

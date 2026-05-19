@@ -55,7 +55,6 @@ def _estimate_request_input_tokens(payload: object) -> int | None:
     return min(len(serialized.encode("utf-8")), API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET)
 
 
-
 def _payload_field(payload: object, field: str) -> object:
     if isinstance(payload, Mapping):
         mapping = cast(Mapping[str, object], payload)

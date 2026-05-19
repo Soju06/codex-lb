@@ -3327,10 +3327,24 @@ class ProxyService:
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                             except ProxyResponseError as exc:
+                                (
+                                    status_code,
+                                    error_payload,
+                                    _error_code,
+                                    _error_message,
+                                ) = _sanitize_websocket_previous_response_error(
+                                    previous_response_id=_previous_response_id_from_payload(payload),
+                                    session_id=_owner_lookup_session_id_from_headers(headers),
+                                    status_code=exc.status_code,
+                                    payload=exc.payload,
+                                    error_code="upstream_error",
+                                    error_message="Upstream error",
+                                    surface="websocket_connect",
+                                )
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(exc.status_code, exc.payload)
+                                            _wrapped_websocket_error_event(status_code, error_payload)
                                         )
                                     )
                                 continue
@@ -11756,9 +11770,29 @@ def _sanitize_websocket_connect_failure(
     error_code: str,
     error_message: str,
 ) -> tuple[int, OpenAIErrorEnvelope, str, str]:
-    if request_state.previous_response_id is None:
-        return status_code, payload, error_code, error_message
+    return _sanitize_websocket_previous_response_error(
+        previous_response_id=request_state.previous_response_id,
+        session_id=request_state.session_id,
+        status_code=status_code,
+        payload=payload,
+        error_code=error_code,
+        error_message=error_message,
+        surface="websocket_connect",
+    )
 
+
+def _sanitize_websocket_previous_response_error(
+    *,
+    previous_response_id: str | None,
+    session_id: str | None,
+    status_code: int,
+    payload: OpenAIErrorEnvelope,
+    error_code: str,
+    error_message: str,
+    surface: str,
+) -> tuple[int, OpenAIErrorEnvelope, str, str]:
+    if previous_response_id is None:
+        return status_code, payload, error_code, error_message
     parsed_error = _parse_openai_error(payload)
     normalized_code = _normalize_error_code(
         parsed_error.code if parsed_error else error_code,
@@ -11783,10 +11817,10 @@ def _sanitize_websocket_connect_failure(
 
     rewritten_message = "Upstream websocket closed before response.completed"
     _record_continuity_fail_closed(
-        surface="websocket_connect",
+        surface=surface,
         reason=reason,
-        previous_response_id=request_state.previous_response_id,
-        session_id=request_state.session_id,
+        previous_response_id=previous_response_id,
+        session_id=session_id,
         upstream_error_code=normalized_code,
     )
     return (
@@ -11799,6 +11833,15 @@ def _sanitize_websocket_connect_failure(
         "stream_incomplete",
         rewritten_message,
     )
+
+
+def _previous_response_id_from_payload(payload: Mapping[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    previous_response_id = payload.get("previous_response_id")
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        return previous_response_id.strip()
+    return None
 
 
 def _rewrite_previous_response_stream_error(

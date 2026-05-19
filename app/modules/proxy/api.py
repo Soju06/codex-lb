@@ -2154,13 +2154,17 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield line
 
 
+async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
+    return await anext(stream)
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
-    first_task = asyncio.create_task(anext(stream))
+    first_task = asyncio.create_task(_read_first_stream_item(stream))
     try:
         first = await asyncio.wait_for(
             asyncio.shield(first_task),

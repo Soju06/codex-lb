@@ -184,7 +184,7 @@ def _make_session(upstream: _CancelThenRetryUpstreamWebSocket) -> proxy_service.
 @pytest.mark.asyncio
 async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstream() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    service._finalize_websocket_request_state = AsyncMock()  # type: ignore[method-assign]
+    service._finalize_websocket_request_state = cast(Any, AsyncMock())
     upstream = _CancelThenRetryUpstreamWebSocket()
     session = _make_session(upstream)
     session.upstream_reader = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))

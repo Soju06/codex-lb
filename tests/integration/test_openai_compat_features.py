@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import cast
 
 import pytest
 
 import app.modules.proxy.service as proxy_module
+from app.core.openai.requests import ResponsesRequest
 
 pytestmark = pytest.mark.integration
 
@@ -103,7 +105,7 @@ async def test_v1_responses_forwards_input_file_id(async_client, monkeypatch):
     }
     resp = await async_client.post("/v1/responses", json=payload)
     assert resp.status_code == 200
-    forwarded_input = seen["payload"].input  # type: ignore[attr-defined]
+    forwarded_input = cast(ResponsesRequest, seen["payload"]).input
     assert forwarded_input == payload["input"]
 
 

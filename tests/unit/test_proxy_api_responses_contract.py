@@ -455,9 +455,10 @@ async def test_normalize_public_responses_stream_backfills_terminal_output_from_
     output = response_obj["output"]
     assert isinstance(output, list)
     assert len(output) == 1
-    assert output[0]["id"] == "msg_1"
-    assert output[0]["type"] == "message"
-    assert output[0]["content"] == [{"type": "output_text", "text": "backfilled"}]
+    output_item = cast(dict[str, Any], output[0])
+    assert output_item["id"] == "msg_1"
+    assert output_item["type"] == "message"
+    assert output_item["content"] == [{"type": "output_text", "text": "backfilled"}]
 
 
 @pytest.mark.asyncio
@@ -494,7 +495,8 @@ async def test_normalize_public_responses_stream_preserves_existing_terminal_out
     output = response_obj["output"]
     assert isinstance(output, list)
     assert len(output) == 1
-    assert output[0]["id"] == "msg_terminal"
+    output_item = cast(dict[str, Any], output[0])
+    assert output_item["id"] == "msg_terminal"
 
 
 @pytest.mark.asyncio
@@ -838,7 +840,8 @@ async def test_normalize_public_responses_stream_codex_route_does_not_backfill_o
     payloads = [proxy_api_module._parse_sse_payload(b) for b in blocks]
     completed = next(p for p in payloads if p and p.get("type") == "response.completed")
     # Output stays empty — Codex CLI handles its own assembly.
-    assert completed["response"]["output"] == []
+    response_obj = cast(dict[str, Any], completed["response"])
+    assert response_obj["output"] == []
 
 
 # ----------------------------------------------------------------------------

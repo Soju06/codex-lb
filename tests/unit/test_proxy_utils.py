@@ -7,7 +7,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, Self, cast
+from typing import Any, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -1218,7 +1218,7 @@ async def test_write_request_log_continues_after_caller_cancellation() -> None:
         await release.wait()
         request_logs.calls.append(dict(kwargs))
 
-    request_logs.add_log = blocking_add_log  # type: ignore[method-assign]
+    request_logs.add_log = cast(Any, blocking_add_log)
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
     task = asyncio.create_task(
@@ -5278,7 +5278,7 @@ async def test_stream_responses_trims_overlapping_parallel_http_tool_call_replay
         ]
     }
 
-    def _parallel_payload(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    def _parallel_payload(arguments: object) -> dict[str, JsonValue]:
         return {
             "type": "response.output_item.done",
             "response_id": "resp_http_parallel_overlap",

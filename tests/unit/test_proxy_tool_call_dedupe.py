@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import cast
+from collections.abc import Mapping
+from typing import Any, cast
 
 import pytest
 
@@ -11,6 +12,12 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy import tool_call_dedupe
 
 pytestmark = pytest.mark.unit
+
+
+def _loads_item_arguments(item: Mapping[str, JsonValue]) -> Any:
+    arguments = item["arguments"]
+    assert isinstance(arguments, str)
+    return json.loads(arguments)
 
 
 def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_call_ids_with_same_arguments():
@@ -280,7 +287,7 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_side_effect_tool_u
     assert isinstance(rewritten_payload, dict)
     item = rewritten_payload["item"]
     assert isinstance(item, dict)
-    rewritten_arguments = json.loads(item["arguments"])
+    rewritten_arguments = _loads_item_arguments(item)
     assert len(rewritten_arguments["tool_uses"]) == 2
     commands = [tool_use["parameters"]["cmd"] for tool_use in rewritten_arguments["tool_uses"]]
     assert commands == [
@@ -338,7 +345,7 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_write_stdin_owner(
     assert isinstance(rewritten_payload, dict)
     item = rewritten_payload["item"]
     assert isinstance(item, dict)
-    rewritten_arguments = json.loads(item["arguments"])
+    rewritten_arguments = _loads_item_arguments(item)
     chars = [tool_use["parameters"]["chars"] for tool_use in rewritten_arguments["tool_uses"]]
     assert chars == ["", "y"]
 
@@ -380,7 +387,7 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_wait_agent_targets
     assert isinstance(rewritten_payload, dict)
     item = rewritten_payload["item"]
     assert isinstance(item, dict)
-    rewritten_arguments = json.loads(item["arguments"])
+    rewritten_arguments = _loads_item_arguments(item)
     assert len(rewritten_arguments["tool_uses"]) == 1
     assert rewritten_arguments["tool_uses"][0]["parameters"]["targets"] == ["agent_b", "agent_a"]
 
@@ -1498,7 +1505,7 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_goal_side_effects(
     assert isinstance(rewritten_payload, dict)
     item = rewritten_payload["item"]
     assert isinstance(item, dict)
-    rewritten_arguments = json.loads(item["arguments"])
+    rewritten_arguments = _loads_item_arguments(item)
     assert [tool_use["recipient_name"] for tool_use in rewritten_arguments["tool_uses"]] == [
         "functions.update_plan",
         "functions.request_user_input",

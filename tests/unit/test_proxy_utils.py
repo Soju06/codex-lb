@@ -14035,4 +14035,3 @@ async def test_pop_replayable_precreated_request_suppresses_replay_after_respons
 
     assert replayed is None
     assert pending_requests == deque([request_state])
-

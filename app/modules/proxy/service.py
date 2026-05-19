@@ -10901,7 +10901,6 @@ def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | 
     return call_id if isinstance(call_id, str) and call_id else None
 
 
-
 def _openai_error_envelope_from_response_failed_payload(
     payload: dict[str, JsonValue] | None,
 ) -> OpenAIErrorEnvelope:

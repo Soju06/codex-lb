@@ -241,7 +241,10 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
     def fake_validate_model_access(_api_key, _model):
         return None
 
-    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+    async def fake_enforce_request_limits(
+        _api_key, *, request_model=None, request_service_tier=None, request_usage_budget=None
+    ):
+        del request_model, request_service_tier, request_usage_budget
         return None
 
     async def fake_release_reservation(_reservation):

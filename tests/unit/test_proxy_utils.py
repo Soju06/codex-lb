@@ -6138,11 +6138,14 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         api_key=stale_api_key,
     )
 
-    reserve_usage.assert_awaited_once_with(
-        refreshed_api_key,
-        request_model="gpt-5.2",
-        request_service_tier="priority",
-    )
+    reserve_usage.assert_awaited_once()
+    assert reserve_usage.await_args is not None
+    reserve_args, reserve_kwargs = reserve_usage.await_args
+    assert reserve_args == (refreshed_api_key,)
+    assert reserve_kwargs["request_model"] == "gpt-5.2"
+    assert reserve_kwargs["request_service_tier"] == "priority"
+    assert reserve_kwargs["request_usage_budget"].input_tokens is not None
+    assert reserve_kwargs["request_usage_budget"].output_tokens is None
     assert prepared.request_state.model == "gpt-5.2"
     assert prepared.request_state.service_tier == "priority"
     assert prepared.request_state.reasoning_effort == "high"

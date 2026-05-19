@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -20,6 +21,7 @@ from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
     ApiKeysRepositoryProtocol,
     ApiKeysService,
     ApiKeyUpdateData,
@@ -909,6 +911,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         priority_created.id,
         request_model="gpt-5.4",
         request_service_tier="priority",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
     assert priority_reservation.key_id == priority_created.id
 
@@ -930,12 +933,110 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         standard_created.id,
         request_model="gpt-5.4",
         request_service_tier=None,
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
     assert standard_reservation.key_id == standard_created.id
 
     standard_limits = await repo.get_limits_by_key(standard_created.id)
     standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
     assert standard_cost_limit.current_value == 143_360
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_default_budget_allows_eight_priority_lanes_under_five_dollars() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="priority-lanes",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=5_000_000)],
+        )
+    )
+
+    reservations = await asyncio.gather(
+        *(
+            service.enforce_limits_for_request(
+                created.id,
+                request_model="gpt-5.5",
+                request_service_tier="priority",
+            )
+            for _ in range(8)
+        )
+    )
+
+    assert len(reservations) == 8
+    assert {reservation.key_id for reservation in reservations} == {created.id}
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert 0 < cost_limit.current_value < 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_request_budget_bounds_token_and_cost_reservations() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="bounded-request",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="input_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="output_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=1_000_000),
+            ],
+        )
+    )
+
+    await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.5",
+        request_service_tier="priority",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=123, output_tokens=456),
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    by_type = {limit.limit_type: limit.current_value for limit in limits}
+    assert by_type[LimitType.INPUT_TOKENS] == 123
+    assert by_type[LimitType.OUTPUT_TOKENS] == 456
+    assert by_type[LimitType.TOTAL_TOKENS] == 579
+    assert 0 < by_type[LimitType.COST_USD] < 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_finalize_usage_reservation_accounts_for_zero_reserved_limit_item() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="zero-output-reserve",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="output_tokens", limit_window="weekly", max_value=1_000)],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.5",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=0, output_tokens=0),
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    output_limit = next(limit for limit in limits if limit.limit_type == LimitType.OUTPUT_TOKENS)
+    assert output_limit.current_value == 0
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.5",
+        input_tokens=0,
+        output_tokens=100,
+    )
+
+    assert output_limit.current_value == 100
 
 
 @pytest.mark.asyncio

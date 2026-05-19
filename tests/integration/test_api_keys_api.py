@@ -2168,7 +2168,7 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
                 allowed_models=None,
                 expires_at=None,
                 limits=[
-                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=30_000),
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=50_000),
                 ],
             )
         )

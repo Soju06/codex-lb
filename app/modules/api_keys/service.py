@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from math import ceil
 from typing import Protocol
 
 from sqlalchemy.exc import OperationalError
@@ -37,6 +38,11 @@ _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.1
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600
+API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET = 8_192
+API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS = 2_048
+_API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_MICRODOLLARS = 2_000_000
+_API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_BASE_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET * 2
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -183,6 +189,12 @@ class ApiKeyRateLimitExceededError(ValueError):
     def __init__(self, *, message: str, reset_at: datetime) -> None:
         super().__init__(message)
         self.reset_at = reset_at
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyRequestUsageBudget:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,6 +531,7 @@ class ApiKeysService:
         *,
         request_model: str | None,
         request_service_tier: str | None = None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> ApiKeyUsageReservationData:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -526,6 +539,7 @@ class ApiKeysService:
                     key_id,
                     request_model=request_model,
                     request_service_tier=request_service_tier,
+                    request_usage_budget=request_usage_budget,
                 )
             except OperationalError as exc:
                 await self._repository.rollback()
@@ -541,6 +555,7 @@ class ApiKeysService:
         *,
         request_model: str | None,
         request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
     ) -> ApiKeyUsageReservationData:
         now = utcnow()
         async with sqlite_writer_section():
@@ -553,6 +568,7 @@ class ApiKeysService:
                 raise ApiKeyInvalidError("API key has expired")
 
             reservation_items: list[UsageReservationItemData] = []
+            normalized_usage_budget = _normalize_request_usage_budget(request_usage_budget)
             try:
                 for limit in refreshed.limits:
                     if not _limit_applies_for_request(limit, request_model=request_model):
@@ -563,16 +579,16 @@ class ApiKeysService:
                         limit,
                         request_model=request_model,
                         request_service_tier=request_service_tier,
+                        request_usage_budget=normalized_usage_budget,
                     )
-                    if reserve_delta <= 0:
-                        continue
-                    result = await self._repository.try_reserve_usage(
-                        limit.id,
-                        delta=reserve_delta,
-                        expected_reset_at=limit.reset_at,
-                    )
-                    if not result.success:
-                        raise _rate_limit_exceeded_error(limit)
+                    if reserve_delta > 0:
+                        result = await self._repository.try_reserve_usage(
+                            limit.id,
+                            delta=reserve_delta,
+                            expected_reset_at=limit.reset_at,
+                        )
+                        if not result.success:
+                            raise _rate_limit_exceeded_error(limit)
                     reservation_items.append(
                         UsageReservationItemData(
                             limit_id=limit.id,
@@ -1118,6 +1134,7 @@ def _reserve_delta_for_limit(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget,
 ) -> int:
     remaining = limit.max_value - limit.current_value
     if remaining <= 0:
@@ -1126,8 +1143,33 @@ def _reserve_delta_for_limit(
         limit.limit_type,
         request_model=request_model,
         request_service_tier=request_service_tier,
+        request_usage_budget=request_usage_budget,
     )
     return min(remaining, budget)
+
+
+def _normalize_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> ApiKeyRequestUsageBudget:
+    if budget is None:
+        return ApiKeyRequestUsageBudget(
+            input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+            output_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+        )
+    return ApiKeyRequestUsageBudget(
+        input_tokens=_normalize_reservation_token_budget(
+            budget.input_tokens,
+            default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+        ),
+        output_tokens=_normalize_reservation_token_budget(
+            budget.output_tokens,
+            default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+        ),
+    )
+
+
+def _normalize_reservation_token_budget(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, min(int(value), API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 def _reserve_budget_for_limit_type(
@@ -1135,31 +1177,60 @@ def _reserve_budget_for_limit_type(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget,
 ) -> int:
+    input_tokens = request_usage_budget.input_tokens or 0
+    output_tokens = request_usage_budget.output_tokens or 0
     if limit_type == LimitType.TOTAL_TOKENS:
-        return 8_192
+        return input_tokens + output_tokens
     if limit_type == LimitType.INPUT_TOKENS:
-        return 8_192
+        return input_tokens
     if limit_type == LimitType.OUTPUT_TOKENS:
-        return 8_192
+        return output_tokens
     if limit_type == LimitType.COST_USD:
-        return _reserve_cost_budget_microdollars(request_model, request_service_tier)
+        return _reserve_cost_budget_microdollars(
+            request_model,
+            request_service_tier,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
     if limit_type == LimitType.CREDITS:
         return 0
     return 1
 
 
-def _reserve_cost_budget_microdollars(model: str | None, service_tier: str | None) -> int:
+def _reserve_cost_budget_microdollars(
+    model: str | None,
+    service_tier: str | None,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> int:
     if not model:
-        return 2_000_000
+        return _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
     cost_microdollars = _calculate_cost_microdollars(
         model,
-        8_192,
-        8_192,
+        input_tokens,
+        output_tokens,
         0,
         service_tier,
     )
-    return cost_microdollars if cost_microdollars > 0 else 2_000_000
+    return (
+        cost_microdollars
+        if cost_microdollars > 0
+        else _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
+    )
+
+
+def _unknown_model_reserve_cost_budget_microdollars(*, input_tokens: int, output_tokens: int) -> int:
+    token_budget = max(0, input_tokens) + max(0, output_tokens)
+    if token_budget <= 0:
+        return 0
+    return ceil(
+        _API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_MICRODOLLARS
+        * token_budget
+        / _API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_BASE_TOKENS
+    )
 
 
 def _compute_increment_for_limit_type(

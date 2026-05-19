@@ -119,9 +119,11 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
     DurableBridgeSessionCoordinator,
@@ -939,6 +941,7 @@ class ProxyService:
                             request_service_tier=_normalize_service_tier_value(
                                 dict(effective_payload.to_payload()).get("service_tier"),
                             ),
+                            request_usage_budget=estimate_api_key_request_usage(effective_payload),
                         )
                         retry_reservation_reacquired = True
 
@@ -1285,6 +1288,7 @@ class ProxyService:
                         request_service_tier=_normalize_service_tier_value(
                             dict(retry_payload.to_payload()).get("service_tier"),
                         ),
+                        request_usage_budget=estimate_api_key_request_usage(retry_payload),
                     )
                     retry_reservation_reacquired = True
 
@@ -3606,6 +3610,7 @@ class ProxyService:
             request_service_tier=_normalize_service_tier_value(
                 dict(responses_payload.to_payload()).get("service_tier")
             ),
+            request_usage_budget=estimate_api_key_request_usage(responses_payload),
         )
         try:
             session_id = _owner_lookup_session_id_from_headers(headers)
@@ -8153,6 +8158,7 @@ class ProxyService:
         *,
         request_model: str | None,
         request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> ApiKeyUsageReservationData | None:
         if api_key is None:
             return None
@@ -8165,6 +8171,7 @@ class ProxyService:
                         api_key.id,
                         request_model=request_model,
                         request_service_tier=request_service_tier,
+                        request_usage_budget=request_usage_budget,
                     )
                 except ApiKeyRateLimitExceededError as exc:
                     message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."

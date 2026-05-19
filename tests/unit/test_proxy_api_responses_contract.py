@@ -75,6 +75,33 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_preserves_initial_error_details() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"error","error":{"type":"rate_limit_error",'
+                    '"code":"rate_limit_exceeded","message":"slow down","param":"model"}}\n\n'
+                )
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    response = payloads[1]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "rate_limit_error"
+    assert error["code"] == "rate_limit_exceeded"
+    assert error["message"] == "slow down"
+    assert error["param"] == "model"
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_normalizes_unknown_terminal_output_item() -> None:
     blocks = [
         block

@@ -2699,6 +2699,13 @@ async def _normalize_public_responses_stream(
                 pre_created_buffer.append(normalized_payload)
                 continue
             elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                if event_type == "error":
+                    for formatted_payload in _public_response_failed_event_blocks_from_error(
+                        normalized_payload,
+                        include_created=True,
+                    ):
+                        yield formatted_payload
+                    return
                 error_kind = contract_violation_kind or "upstream_stream_truncated"
                 for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
                     yield formatted_payload
@@ -2734,6 +2741,35 @@ def _public_response_failed_event_blocks(error_kind: str, *, include_created: bo
             error_kind,
             _public_contract_error_message(error_kind),
             response_id=f"resp_{error_kind}",
+        ),
+    )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
+
+
+def _public_response_failed_event_blocks_from_error(
+    payload: dict[str, JsonValue],
+    *,
+    include_created: bool,
+) -> list[str]:
+    envelope = _parse_event_error_envelope(payload)
+    error = envelope.error
+    if error is None:
+        error = _default_error_envelope().error
+    assert error is not None
+    failed_payload = cast(
+        dict[str, JsonValue],
+        response_failed_event(
+            error.code or "upstream_error",
+            error.message or "Upstream error",
+            error.type or "server_error",
+            response_id=f"resp_{error.code or 'upstream_error'}",
+            error_param=error.param,
         ),
     )
     blocks: list[str] = []

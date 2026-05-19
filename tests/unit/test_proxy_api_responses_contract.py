@@ -616,6 +616,39 @@ async def test_normalize_public_responses_stream_replays_legacy_precreated_text_
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_legacy_precreated_text_suppresses_terminal_duplicate() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.output_text.delta","delta":"hello world"}\n\n',
+                (
+                    'data: {"type":"response.completed","sequence_number":9,'
+                    '"response":{"id":"resp_legacy","object":"response","status":"completed",'
+                    '"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed",'
+                    '"content":[{"type":"output_text","text":"hello world"}]}]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    event_types = [payload["type"] for payload in payloads]
+    assert event_types == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [payload.get("delta") for payload in payloads if payload["type"] == "response.output_text.delta"] == [
+        "hello world"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_dropped_precreated_delta_does_not_suppress_terminal_delta() -> None:
     """Buffered orphan deltas are not marked seen until actually emitted.
 

@@ -141,6 +141,30 @@ async def test_retiring_http_bridge_session_is_not_live_for_anchor_decision() ->
     )
 
 
+@pytest.mark.asyncio
+async def test_retiring_http_bridge_session_stays_live_while_visible_request_finishes() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_retiring_visible", None)
+    visible_request = _make_request_state(
+        "req-visible",
+        response_id="resp-visible",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([visible_request]), queued_request_count=1, key=key)
+    session.upstream_control.retire_after_drain = True
+
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions[key] = session
+
+    assert proxy_service._http_bridge_session_retiring_with_visible_requests(session)
+    assert await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state="http_turn_retiring_visible",
+        api_key=None,
+    )
+
+
 def test_response_created_prefers_visible_request_when_drain_and_visible_overlap() -> None:
     draining_request = _make_request_state(
         "req-cancelled-before-created",

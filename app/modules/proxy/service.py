@@ -1483,7 +1483,7 @@ class ProxyService:
                     key=candidate_key,
                     incoming_turn_state=incoming_turn_state,
                     previous_response_id=None,
-                ):
+                ) and not _http_bridge_session_retiring_with_visible_requests(session):
                     continue
                 return True
         return False
@@ -4696,10 +4696,12 @@ class ProxyService:
                     existing = None
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
                     old_account_id = existing.account.id
+                    retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
                     self._http_bridge_sessions.pop(key, None)
                     self._unregister_http_bridge_turn_states_locked(existing)
-                    existing.closed = True
-                    sessions_to_close.append(existing)
+                    if not retiring_with_visible_requests:
+                        existing.closed = True
+                        sessions_to_close.append(existing)
                     existing = None
 
                 if shutdown_state.is_bridge_drain_active() and not _http_bridge_can_recover_during_drain(
@@ -5297,12 +5299,14 @@ class ProxyService:
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     old_account_id = session.account.id
+                    retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)
                     async with self._http_bridge_lock:
                         if self._http_bridge_sessions.get(key) is session:
                             self._http_bridge_sessions.pop(key, None)
                         self._unregister_http_bridge_turn_states_locked(session)
-                    session.closed = True
-                    await self._close_http_bridge_session(session)
+                    if not retiring_with_visible_requests:
+                        session.closed = True
+                        await self._close_http_bridge_session(session)
                 continue
 
             created_session: _HTTPBridgeSession | None = None
@@ -11535,6 +11539,16 @@ def _assign_websocket_response_id(
 
 def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestState) -> bool:
     return not request_state.draining_until_terminal
+
+
+def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> bool:
+    return session.queued_request_count > 0 or any(
+        _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
+    )
+
+
+def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:
+    return session.upstream_control.retire_after_drain and _http_bridge_session_has_visible_requests(session)
 
 
 def _draining_websocket_request_states(

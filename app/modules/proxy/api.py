@@ -2918,6 +2918,7 @@ def _format_legacy_pre_created_payloads(
             formatted.append(format_sse_event(payload))
 
     if text_item_opened:
+        seen_text_delta_keys.add((None, output_index))
         text = final_text if final_text is not None else "".join(text_parts)
         output_item_done = cast(
             dict[str, JsonValue],

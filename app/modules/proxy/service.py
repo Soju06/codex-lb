@@ -1422,6 +1422,13 @@ class ProxyService:
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
+                if not _http_bridge_session_reusable_for_request(
+                    session=session,
+                    key=candidate_key,
+                    incoming_turn_state=incoming_turn_state,
+                    previous_response_id=None,
+                ):
+                    continue
                 return True
         return False
 
@@ -10819,11 +10826,11 @@ def _assign_websocket_response_id(
     if existing is not None:
         return existing
     for request_state in pending_requests:
-        if request_state.response_id is None and request_state.draining_until_terminal:
+        if request_state.response_id is None and _http_bridge_request_counts_against_queue(request_state):
             request_state.response_id = response_id
             return request_state
     for request_state in pending_requests:
-        if request_state.response_id is None and _http_bridge_request_counts_against_queue(request_state):
+        if request_state.response_id is None and request_state.draining_until_terminal:
             request_state.response_id = response_id
             return request_state
     for request_state in pending_requests:

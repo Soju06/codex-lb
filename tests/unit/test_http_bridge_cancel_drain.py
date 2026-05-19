@@ -22,9 +22,11 @@ def _make_http_bridge_session(
     pending_requests: deque[proxy_service._WebSocketRequestState],
     *,
     queued_request_count: int,
+    key: proxy_service._HTTPBridgeSessionKey | None = None,
 ) -> proxy_service._HTTPBridgeSession:
+    session_key = key or proxy_service._HTTPBridgeSessionKey("session_header", "sid-cancel-drain", None)
     return proxy_service._HTTPBridgeSession(
-        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-cancel-drain", None),
+        key=session_key,
         headers={"x-codex-session-id": "sid-cancel-drain"},
         affinity=proxy_service._AffinityPolicy(
             key="sid-cancel-drain",
@@ -114,7 +116,32 @@ def test_retiring_http_bridge_session_is_not_reusable() -> None:
     )
 
 
-def test_response_created_prefers_draining_owner_in_illegal_overlap() -> None:
+@pytest.mark.asyncio
+async def test_retiring_http_bridge_session_is_not_live_for_anchor_decision() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_retiring", None)
+    session = _make_http_bridge_session(deque(), queued_request_count=0, key=key)
+    session.upstream_control.retire_after_drain = True
+
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions[key] = session
+
+    assert not await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state="http_turn_retiring",
+        api_key=None,
+    )
+
+    session.upstream_control.retire_after_drain = False
+
+    assert await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state="http_turn_retiring",
+        api_key=None,
+    )
+
+
+def test_response_created_prefers_visible_request_when_drain_and_visible_overlap() -> None:
     draining_request = _make_request_state(
         "req-cancelled-before-created",
         response_id=None,
@@ -129,12 +156,29 @@ def test_response_created_prefers_draining_owner_in_illegal_overlap() -> None:
 
     matched_request = proxy_service._assign_websocket_response_id(
         deque([draining_request, active_request]),
+        "resp-visible-created",
+    )
+
+    assert matched_request is active_request
+    assert draining_request.response_id is None
+    assert active_request.response_id == "resp-visible-created"
+
+
+def test_response_created_prefers_draining_owner_when_no_visible_request() -> None:
+    draining_request = _make_request_state(
+        "req-cancelled-before-created",
+        response_id=None,
+        awaiting_response_created=True,
+    )
+    draining_request.draining_until_terminal = True
+
+    matched_request = proxy_service._assign_websocket_response_id(
+        deque([draining_request]),
         "resp-late-cancelled",
     )
 
     assert matched_request is draining_request
     assert draining_request.response_id == "resp-late-cancelled"
-    assert active_request.response_id is None
 
 
 def test_anonymous_event_prefers_active_request_over_draining_owner_in_illegal_overlap() -> None:

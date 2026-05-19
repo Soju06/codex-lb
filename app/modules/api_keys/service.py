@@ -191,10 +191,21 @@ class ApiKeyRateLimitExceededError(ValueError):
         self.reset_at = reset_at
 
 
+def _ensure_optional_int_token_budget(field_name: str, value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an int or None")
+
+
 @dataclass(frozen=True, slots=True)
 class ApiKeyRequestUsageBudget:
     input_tokens: int | None = None
     output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        _ensure_optional_int_token_budget("input_tokens", self.input_tokens)
+        _ensure_optional_int_token_budget("output_tokens", self.output_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1169,7 +1180,7 @@ def _normalize_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> 
 def _normalize_reservation_token_budget(value: int | None, *, default: int) -> int:
     if value is None:
         return default
-    return max(0, min(int(value), API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
+    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 def _reserve_budget_for_limit_type(

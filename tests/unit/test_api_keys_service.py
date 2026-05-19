@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -940,6 +941,13 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     standard_limits = await repo.get_limits_by_key(standard_created.id)
     standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
     assert standard_cost_limit.current_value == 143_360
+
+
+def test_api_key_request_usage_budget_rejects_non_integer_tokens() -> None:
+    with pytest.raises(TypeError, match="input_tokens"):
+        ApiKeyRequestUsageBudget(input_tokens=cast(Any, "128"))
+    with pytest.raises(TypeError, match="output_tokens"):
+        ApiKeyRequestUsageBudget(output_tokens=cast(Any, True))
 
 
 @pytest.mark.asyncio

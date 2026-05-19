@@ -2714,7 +2714,8 @@ async def _normalize_public_responses_stream(
     if terminal_seen:
         return
     error_kind = contract_violation_kind or "upstream_stream_truncated"
-    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=not created_emitted):
+    include_created = enforce_openai_sdk_contract and not created_emitted
+    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
         yield formatted_payload
 
 

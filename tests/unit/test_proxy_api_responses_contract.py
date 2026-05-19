@@ -701,6 +701,23 @@ async def test_normalize_public_responses_stream_codex_route_preserves_codex_eve
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_truncated_stream_does_not_synthesize_created() -> None:
+    """`enforce_openai_sdk_contract=False` appends a terminal failure for
+    truncated upstream streams without injecting an SDK-only created envelope."""
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks('data: {"type":"response.output_text.delta","delta":"hello"}\n\n'),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(b) for b in blocks]
+    event_types = [p["type"] for p in payloads if p is not None]
+    assert event_types == ["response.output_text.delta", "response.failed"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_codex_route_does_not_backfill_output() -> None:
     """`enforce_openai_sdk_contract=False` MUST NOT backfill terminal
     `response.completed.output` from streamed item events. The Codex CLI

@@ -2693,23 +2693,15 @@ async def _normalize_public_responses_stream(
             elif _should_buffer_public_pre_created_event(event_type):
                 if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
                     error_kind = contract_violation_kind or "upstream_stream_truncated"
-                    yield format_sse_event(
-                        response_failed_event(
-                            error_kind,
-                            _public_contract_error_message(error_kind),
-                        )
-                    )
+                    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                        yield formatted_payload
                     return
                 pre_created_buffer.append(normalized_payload)
                 continue
             elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
                 error_kind = contract_violation_kind or "upstream_stream_truncated"
-                yield format_sse_event(
-                    response_failed_event(
-                        error_kind,
-                        _public_contract_error_message(error_kind),
-                    )
-                )
+                for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                    yield formatted_payload
                 return
 
         _collect_output_item_event(normalized_payload, output_items)
@@ -2722,12 +2714,8 @@ async def _normalize_public_responses_stream(
     if terminal_seen:
         return
     error_kind = contract_violation_kind or "upstream_stream_truncated"
-    yield format_sse_event(
-        response_failed_event(
-            error_kind,
-            _public_contract_error_message(error_kind),
-        )
-    )
+    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=not created_emitted):
+        yield formatted_payload
 
 
 def _should_buffer_public_pre_created_event(event_type: str) -> bool:
@@ -2736,6 +2724,24 @@ def _should_buffer_public_pre_created_event(event_type: str) -> bool:
         and event_type != "response.created"
         and event_type not in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
     )
+
+
+def _public_response_failed_event_blocks(error_kind: str, *, include_created: bool) -> list[str]:
+    failed_payload = cast(
+        dict[str, JsonValue],
+        response_failed_event(
+            error_kind,
+            _public_contract_error_message(error_kind),
+            response_id=f"resp_{error_kind}",
+        ),
+    )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
 
 
 _REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES = frozenset(

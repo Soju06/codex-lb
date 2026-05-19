@@ -60,8 +60,11 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
         async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks("data: {not-json}\n\n"))
     ]
 
-    assert len(blocks) == 1
-    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert len(blocks) == 2
+    created_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert created_payload is not None
+    assert created_payload["type"] == "response.created"
+    payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.failed"
     response = payload["response"]
@@ -593,6 +596,27 @@ async def test_normalize_public_responses_stream_dropped_precreated_delta_does_n
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_emits_created_before_precreated_buffer_overflow_failure() -> None:
+    event_count = proxy_api_module._PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT + 1
+    source_blocks = [
+        f'data: {{"type":"response.output_text.delta","delta":"orphan {index}"}}\n\n' for index in range(event_count)
+    ]
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(*source_blocks))
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    response = payloads[1]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "upstream_stream_truncated"
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_drops_precreated_output_when_no_envelope_arrives() -> None:
     blocks = [
         block
@@ -609,9 +633,9 @@ async def test_normalize_public_responses_stream_drops_precreated_output_when_no
 
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
     event_types = [payload["type"] for payload in payloads if payload is not None]
-    assert event_types == ["response.failed"]
-    assert payloads[0] is not None
-    response = payloads[0]["response"]
+    assert event_types == ["response.created", "response.failed"]
+    assert payloads[1] is not None
+    response = payloads[1]["response"]
     assert isinstance(response, dict)
     error = response["error"]
     assert isinstance(error, dict)

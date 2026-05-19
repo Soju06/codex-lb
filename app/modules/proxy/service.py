@@ -10864,13 +10864,14 @@ def _match_websocket_request_state_for_anonymous_event(
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)
     ]
     draining_requests = _draining_websocket_request_states(pending_requests)
-    if prefer_draining_requests and draining_requests and not visible_requests:
+    if prefer_draining_requests and draining_requests:
         unresolved_draining_requests = [
             request_state for request_state in draining_requests if request_state.response_id is None
         ]
         if len(unresolved_draining_requests) == 1:
             return unresolved_draining_requests[0]
-        return draining_requests[0]
+        if not visible_requests:
+            return draining_requests[0]
 
     if len(visible_requests) == 1:
         return visible_requests[0]

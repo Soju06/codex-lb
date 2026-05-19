@@ -105,10 +105,12 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
   const palette = buildDonutPalette(items.length, isDark);
-  const normalizedItems = items.map((item, index) => ({
-    ...item,
-    color: item.color ?? palette[index % palette.length],
-  }));
+  const normalizedItems = items
+    .map((item, index) => ({
+      ...item,
+      color: item.color ?? palette[index % palette.length],
+    }))
+    .sort((a, b) => b.value - a.value);
 
   const usedSum = normalizedItems.reduce((acc, item) => acc + Math.max(0, item.value), 0);
   const safeCapacity = Math.max(0, total);
@@ -184,8 +186,9 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                 animationDuration={600}
                 animationEasing="ease-out"
                 onMouseEnter={(data) => {
-                  if (typeof data?.id === "string") {
-                    setActiveLegendId(data.id);
+                  const datum = data.payload as DonutDatum | undefined;
+                  if (typeof datum?.id === "string") {
+                    setActiveLegendId(datum.id);
                   }
                 }}
                 onMouseLeave={() => setActiveLegendId(null)}

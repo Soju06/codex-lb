@@ -85,7 +85,7 @@ describe("dashboard flow integration", () => {
     const overviewAfterTimeframe = overviewCalls;
 
     await user.type(
-      screen.getByPlaceholderText("Search request id, account, model, error..."),
+      screen.getByPlaceholderText("Search request id, account, API key, model, error..."),
       "quota",
     );
 

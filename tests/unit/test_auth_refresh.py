@@ -25,5 +25,14 @@ def test_classify_refresh_error_permanent():
     assert classify_refresh_error("account_deactivated") is True
 
 
+def test_classify_refresh_error_token_expired_is_permanent():
+    # ``token_expired`` from the OAuth refresh endpoint means the refresh
+    # request itself failed because the refresh token (or the session it
+    # belonged to) is no longer usable. Treat it as a permanent failure so
+    # the load balancer deactivates the account instead of looping retries.
+    # Regression for #383.
+    assert classify_refresh_error("token_expired") is True
+
+
 def test_classify_refresh_error_temporary():
     assert classify_refresh_error("temporary_error") is False

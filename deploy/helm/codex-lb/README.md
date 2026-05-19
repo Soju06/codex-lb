@@ -389,18 +389,19 @@ helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
 Graceful shutdown coordinates three timeout parameters to drain in-flight requests and session bridge connections:
 
 ```
-preStopSleepSeconds (15s) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
+preStopSleepSeconds (15s minimum) → shutdownDrainTimeoutSeconds (30s) → terminationGracePeriodSeconds (60s)
 ```
 
 **Timeline:**
 
-1. **preStopSleepSeconds (15s)**: Pod receives SIGTERM
-   - Sleep briefly to allow load balancer to remove the pod from rotation
-   - Prevents new requests from arriving during shutdown
+1. **preStopSleepSeconds (15s minimum)**: Pod enters preStop
+   - Calls `/internal/drain/start` so readiness fails and new app requests are rejected
+   - Polls `/internal/drain/status` during the wait so in-flight state is visible while draining
+   - Gives Kubernetes/load balancers time to remove the pod from rotation before SIGTERM
    
 2. **shutdownDrainTimeoutSeconds (30s)**: Drain in-flight requests
    - HTTP server stops accepting new connections
-   - Existing requests are allowed to complete (up to 30 seconds)
+   - Any remaining requests are allowed to complete (up to 30 seconds)
    - Session bridge connections are gracefully closed
    
 3. **terminationGracePeriodSeconds (60s)**: Hard deadline
@@ -410,7 +411,7 @@ preStopSleepSeconds (15s) → shutdownDrainTimeoutSeconds (30s) → terminationG
 
 **Tuning:**
 
-- Increase `preStopSleepSeconds` if your load balancer takes longer to deregister
+- Increase `preStopSleepSeconds` if your load balancer takes longer to deregister or short requests need a larger pre-SIGTERM drain window
 - Increase `shutdownDrainTimeoutSeconds` if requests typically take >30s to complete
 - Increase `terminationGracePeriodSeconds` proportionally (must be larger than the sum)
 - Keep the buffer small; long shutdown times delay pod replacement

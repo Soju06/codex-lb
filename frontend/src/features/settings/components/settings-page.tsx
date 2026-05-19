@@ -10,6 +10,7 @@ import { AppearanceSettings } from "@/features/settings/components/appearance-se
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
+import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -76,6 +77,9 @@ export function SettingsPage() {
             />
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
+            {passwordManagementEnabled ? (
+              <SessionSettings settings={settings} busy={busy} onSave={handleSave} />
+            ) : null}
             {passwordManagementEnabled && passwordSessionActive ? (
               <Suspense fallback={null}>
                 <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />

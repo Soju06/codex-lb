@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -66,6 +66,7 @@ async def test_request_logs_options_returns_distinct_accounts_and_models(async_c
     assert response.status_code == 200
     payload = response.json()
     assert payload["accountIds"] == ["acc_opt_a", "acc_opt_b"]
+    assert payload["apiKeys"] == []
     assert payload["modelOptions"] == [
         {"model": "gpt-4o", "reasoningEffort": None},
         {"model": "gpt-5.1", "reasoningEffort": None},
@@ -109,6 +110,7 @@ async def test_request_logs_options_ignores_status_self_filter(async_client, db_
     assert response.status_code == 200
     payload = response.json()
     assert payload["accountIds"] == ["acc_opt_err", "acc_opt_ok"]
+    assert payload["apiKeys"] == []
     assert payload["modelOptions"] == [
         {"model": "gpt-4o", "reasoningEffort": None},
         {"model": "gpt-5.1", "reasoningEffort": None},
@@ -210,5 +212,68 @@ async def test_request_logs_options_respects_non_status_filters(async_client, db
     assert scoped.status_code == 200
     payload = scoped.json()
     assert payload["accountIds"] == ["acc_scope_a"]
+    assert payload["apiKeys"] == []
     assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
     assert payload["statuses"] == ["ok", "rate_limit"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_return_api_keys_and_ignore_api_key_self_filter(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_key_opt", "key-opt@example.com"))
+        session.add_all(
+            [
+                ApiKey(
+                    id="key_opt_a",
+                    name="Alpha Key",
+                    key_hash="hash_key_opt_a",
+                    key_prefix="sk-alpha",
+                ),
+                ApiKey(
+                    id="key_opt_b",
+                    name="Beta Key",
+                    key_hash="hash_key_opt_b",
+                    key_prefix="sk-beta",
+                ),
+            ]
+        )
+        await session.commit()
+
+        await logs_repo.add_log(
+            account_id="acc_key_opt",
+            request_id="req_key_opt_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=1),
+            api_key_id="key_opt_a",
+        )
+        await logs_repo.add_log(
+            account_id="acc_key_opt",
+            request_id="req_key_opt_2",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=100,
+            status="error",
+            error_code="rate_limit_exceeded",
+            requested_at=now,
+            api_key_id="key_opt_b",
+        )
+
+    response = await async_client.get("/api/request-logs/options?apiKeyId=key_opt_a")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accountIds"] == ["acc_key_opt"]
+    assert payload["modelOptions"] == [{"model": "gpt-5.1", "reasoningEffort": None}]
+    assert payload["statuses"] == ["ok"]
+    assert payload["apiKeys"] == [
+        {"id": "key_opt_a", "name": "Alpha Key", "keyPrefix": "sk-alpha"},
+        {"id": "key_opt_b", "name": "Beta Key", "keyPrefix": "sk-beta"},
+    ]

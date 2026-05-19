@@ -53,7 +53,7 @@ describe("useRequestLogs", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?overviewTimeframe=30d&search=rate&timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=rate_limit&limit=10&offset=20",
+      "/dashboard?overviewTimeframe=30d&search=rate&timeframe=24h&accountId=acc_primary&apiKeyId=key_1&modelOption=gpt-5.1:::high&status=rate_limit&limit=10&offset=20",
     );
 
     const { result } = renderHook(() => useRequestLogs(), { wrapper });
@@ -64,6 +64,7 @@ describe("useRequestLogs", () => {
       search: "rate",
       timeframe: "24h",
       accountIds: ["acc_primary"],
+      apiKeyIds: ["key_1"],
       modelOptions: ["gpt-5.1:::high"],
       statuses: ["rate_limit"],
       limit: 10,
@@ -129,6 +130,7 @@ describe("useRequestLogs", () => {
     const calls: Array<{
       statuses: string[];
       accountIds: string[];
+      apiKeyIds: string[];
       modelOptions: string[];
       since: string | null;
     }> = [];
@@ -138,11 +140,13 @@ describe("useRequestLogs", () => {
         calls.push({
           statuses: url.searchParams.getAll("status"),
           accountIds: url.searchParams.getAll("accountId"),
+          apiKeyIds: url.searchParams.getAll("apiKeyId"),
           modelOptions: url.searchParams.getAll("modelOption"),
           since: url.searchParams.get("since"),
         });
         return HttpResponse.json({
           accountIds: [],
+          apiKeys: [],
           modelOptions: [],
           statuses: ["ok", "rate_limit", "quota", "error"],
         });
@@ -152,17 +156,19 @@ describe("useRequestLogs", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?timeframe=24h&accountId=acc_primary&modelOption=gpt-5.1:::high&status=ok",
+      "/dashboard?timeframe=24h&accountId=acc_primary&apiKeyId=key_1&modelOption=gpt-5.1:::high&status=ok",
     );
 
     const { result } = renderHook(() => useRequestLogs(), { wrapper });
     await waitFor(() => expect(result.current.optionsQuery.isSuccess).toBe(true));
     await waitFor(() => expect(result.current.filters.accountIds).toEqual(["acc_primary"]));
+    await waitFor(() => expect(result.current.filters.apiKeyIds).toEqual(["key_1"]));
     await waitFor(() => expect(result.current.filters.modelOptions).toEqual(["gpt-5.1:::high"]));
 
     const matchingCall = calls.find(
       (call) =>
         call.accountIds.includes("acc_primary") &&
+        call.apiKeyIds.includes("key_1") &&
         call.modelOptions.includes("gpt-5.1:::high"),
     );
     expect(matchingCall).toBeDefined();
@@ -204,5 +210,37 @@ describe("useRequestLogs", () => {
 
     await waitFor(() => expect(result.current.filters.statuses).toEqual(["ok"]));
     await waitFor(() => expect(statusesPerCall[statusesPerCall.length - 1]).toEqual(["ok"]));
+  });
+
+  it("preserves api key filters in the URL and request-log queries", async () => {
+    const apiKeyCalls: string[][] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        const url = new URL(request.url);
+        apiKeyCalls.push(url.searchParams.getAll("apiKeyId"));
+        return HttpResponse.json({
+          requests: [],
+          total: 0,
+          hasMore: false,
+        });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?apiKeyId=key_1");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.filters.apiKeyIds).toEqual(["key_1"]));
+    await waitFor(() => expect(apiKeyCalls.some((ids) => ids.includes("key_1"))).toBe(true));
+
+    act(() => {
+      result.current.updateFilters({ apiKeyIds: ["key_1", "key_2"], offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.apiKeyIds).toEqual(["key_1", "key_2"]));
+    await waitFor(() =>
+      expect(apiKeyCalls[apiKeyCalls.length - 1]).toEqual(["key_1", "key_2"]),
+    );
   });
 });

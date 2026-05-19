@@ -11,6 +11,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
     ResponsesTextControls,
     ResponsesTextFormat,
+    normalize_reasoning_aliases,
     normalize_tool_type,
     validate_tool_types,
 )
@@ -133,6 +134,7 @@ class ChatCompletionsRequest(BaseModel):
         reasoning_effort = data.pop("reasoning_effort", None)
         if reasoning_effort is not None and "reasoning" not in data:
             data["reasoning"] = {"effort": reasoning_effort}
+        normalize_reasoning_aliases(data)
         if response_format is not None:
             _apply_response_format(data, response_format)
         if isinstance(stream_options, Mapping):
@@ -187,14 +189,21 @@ def _normalize_chat_tools(tools: list[JsonValue]) -> list[JsonValue]:
             name = function.get("name")
             if not isinstance(name, str) or not name:
                 continue
-            normalized.append(
-                {
-                    "type": tool_type or "function",
-                    "name": name,
-                    "description": function.get("description"),
-                    "parameters": function.get("parameters"),
-                }
-            )
+            # Preserve the function-level ``strict`` flag so the responses-side
+            # ``enforce_strict_function_tools_format`` pre-validator can run on
+            # chat-completions traffic too. Without this, ``strict: true``
+            # would be silently dropped here, masking schema violations the
+            # upstream Codex backend would otherwise reject.
+            normalized_tool: dict[str, JsonValue] = {
+                "type": tool_type or "function",
+                "name": name,
+                "description": function.get("description"),
+                "parameters": function.get("parameters"),
+            }
+            strict = function.get("strict")
+            if isinstance(strict, bool):
+                normalized_tool["strict"] = strict
+            normalized.append(normalized_tool)
             continue
         if isinstance(tool_type, str):
             normalized_type = normalize_tool_type(tool_type)

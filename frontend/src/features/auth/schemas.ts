@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+// Mirrors backend `_MAX_PASSWORD_BYTES` in `app/modules/dashboard_auth/api.py`.
+// bcrypt only hashes the first 72 bytes of input; the backend rejects
+// anything longer with HTTP 422 `password_too_long`. Validate the same
+// budget on the client so users see the failure inline instead of after a
+// round-trip. Multi-byte characters (e.g. emoji) consume their UTF-8 byte
+// count, not the visible character count.
+export const MAX_DASHBOARD_PASSWORD_BYTES = 72;
+
+const dashboardPasswordByteLength = (value: string): number => new TextEncoder().encode(value).length;
+
+const dashboardPasswordSchema = z
+  .string()
+  .min(8)
+  .refine((value) => dashboardPasswordByteLength(value) <= MAX_DASHBOARD_PASSWORD_BYTES, {
+    message: `Password must be at most ${MAX_DASHBOARD_PASSWORD_BYTES} bytes when encoded as UTF-8.`,
+  });
+
 export const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "disabled"]);
 
 export const AuthSessionSchema = z.object({
@@ -19,13 +36,13 @@ export const LoginRequestSchema = z.object({
 });
 
 export const PasswordSetupRequestSchema = z.object({
-  password: z.string().min(8),
+  password: dashboardPasswordSchema,
   bootstrapToken: z.string().optional(),
 });
 
 export const PasswordChangeRequestSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(8),
+  newPassword: dashboardPasswordSchema,
 });
 
 export const PasswordRemoveRequestSchema = z.object({

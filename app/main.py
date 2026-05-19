@@ -39,7 +39,9 @@ from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import SessionLocal, close_db, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
+from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.firewall import api as firewall_api
@@ -124,9 +126,11 @@ async def lifespan(app: FastAPI):
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
     usage_scheduler = build_usage_refresh_scheduler()
+    api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     await usage_scheduler.start()
+    await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
@@ -285,6 +289,7 @@ async def lifespan(app: FastAPI):
         await cache_poller.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
+        await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()
         try:
             await close_http_client()
@@ -346,15 +351,18 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
+    app.include_router(proxy_api.wham_router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
+    app.include_router(proxy_api.files_router)
     app.include_router(proxy_api.usage_router)
     app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
+    app.include_router(conversation_archive_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
@@ -433,7 +441,6 @@ async def _wait_for_bridge_advertise_endpoint(
     probe_base_url = bridge_endpoint_base_url or f"http://127.0.0.1:{local_port}"
     probe_base_url = probe_base_url.rstrip("/")
     probe_url = f"{probe_base_url}/health/live"
-    probe_scheme = urlparse(probe_url).scheme.lower()
     timeout = aiohttp.ClientTimeout(
         total=connect_timeout_seconds,
         sock_connect=connect_timeout_seconds,
@@ -447,7 +454,7 @@ async def _wait_for_bridge_advertise_endpoint(
         attempt += 1
         try:
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                async with session.get(probe_url, ssl=None if probe_scheme == "https" else None) as response:
+                async with session.get(probe_url) as response:
                     if response.status == 200:
                         return
         except Exception:

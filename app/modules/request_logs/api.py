@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
+    RequestLogApiKeyOption,
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
     RequestLogsResponse,
@@ -42,6 +43,7 @@ async def list_request_logs(
     offset: int = Query(0, ge=0),
     search: str | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
+    api_key_id: list[str] | None = Query(default=None, alias="apiKeyId"),
     status: list[str] | None = Query(default=None),
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
@@ -61,6 +63,7 @@ async def list_request_logs(
         since=since,
         until=until,
         account_ids=account_id,
+        api_key_ids=api_key_id,
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
@@ -77,6 +80,7 @@ async def list_request_logs(
 async def list_request_log_filter_options(
     status: list[str] | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
+    api_key_id: list[str] | None = Query(default=None, alias="apiKeyId"),
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
@@ -93,6 +97,7 @@ async def list_request_log_filter_options(
         since=since,
         until=until,
         account_ids=account_id,
+        api_key_ids=api_key_id,
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
@@ -102,6 +107,10 @@ async def list_request_log_filter_options(
         model_options=[
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
+        ],
+        api_keys=[
+            RequestLogApiKeyOption(id=option.id, name=option.name, key_prefix=option.key_prefix)
+            for option in options.api_keys
         ],
         statuses=options.statuses,
     )

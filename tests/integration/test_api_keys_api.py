@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import select, update
 
+import app.modules.api_keys.repository as api_keys_repository_module
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -15,9 +17,10 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import RequestLog
+from app.db.models import ApiKeyUsageReservation, LimitWindow, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 
 pytestmark = pytest.mark.integration
 
@@ -182,6 +185,29 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_persists_assigned_account_ids(async_client):
+    first_account_id = await _import_account(async_client, "acc-create-a", "create-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-create-b", "create-b@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "assigned-create-key",
+            "assignedAccountIds": [first_account_id, second_account_id],
+        },
+    )
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["accountAssignmentScopeEnabled"] is True
+    assert payload["assignedAccountIds"] == [first_account_id, second_account_id]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
+
+
+@pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
     monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
@@ -256,6 +282,16 @@ async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client)
     )
     assert update.status_code == 400
     assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_create_rejects_unknown_assigned_account_ids(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "invalid-create-assignment-key", "assignedAccountIds": ["missing-account"]},
+    )
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
 
 
 @pytest.mark.asyncio
@@ -2014,6 +2050,200 @@ async def test_update_key_reset_usage_requires_explicit_action(async_client):
         assert len(limits) == 1
         assert limits[0].current_value == 0
         assert limits[0].reset_at > original_reset_at
+
+
+@pytest.mark.asyncio
+async def test_reset_expired_limits_background_fallback_advances_windows(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "hourly-reset-fallback",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000},
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 2
+        daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
+        weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
+        daily_limit.current_value = 123
+        daily_limit.reset_at = now - timedelta(days=2)
+        weekly_limit.current_value = 456
+        weekly_limit.reset_at = now - timedelta(days=14)
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        reset_count = await repo.reset_expired_limits(now=now)
+        assert reset_count == 2
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
+        weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
+        assert daily_limit.current_value == 0
+        assert daily_limit.reset_at == now + timedelta(days=1)
+        assert weekly_limit.current_value == 0
+        assert weekly_limit.reset_at == now + timedelta(days=7)
+
+
+@pytest.mark.asyncio
+async def test_reset_expired_limits_background_fallback_processes_batches(async_client, monkeypatch):
+    monkeypatch.setattr(api_keys_repository_module, "_EXPIRED_LIMIT_RESET_BATCH_SIZE", 2)
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "batched-reset",
+            "allowedModels": [],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000},
+                {"limitType": "input_tokens", "limitWindow": "weekly", "maxValue": 1000},
+                {"limitType": "output_tokens", "limitWindow": "monthly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 3
+        for limit in limits:
+            limit.current_value = 42
+            if limit.limit_window == LimitWindow.DAILY:
+                limit.reset_at = now - timedelta(days=2)
+            elif limit.limit_window == LimitWindow.WEEKLY:
+                limit.reset_at = now - timedelta(days=14)
+            else:
+                limit.reset_at = now - timedelta(days=60)
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        reset_count = await repo.reset_expired_limits(now=now)
+        assert reset_count == 3
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        by_window = {limit.limit_window: limit for limit in limits}
+        assert by_window[LimitWindow.DAILY].current_value == 0
+        assert by_window[LimitWindow.DAILY].reset_at == now + timedelta(days=1)
+        assert by_window[LimitWindow.WEEKLY].current_value == 0
+        assert by_window[LimitWindow.WEEKLY].reset_at == now + timedelta(days=7)
+        assert by_window[LimitWindow.MONTHLY].current_value == 0
+        assert by_window[LimitWindow.MONTHLY].reset_at == now + timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_release_stale_usage_reservations_restores_reserved_usage(async_client, monkeypatch):
+    del async_client
+    now = utcnow()
+    writer_section_entries = 0
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal writer_section_entries
+        writer_section_entries += 1
+        yield
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="stale-reservation-cleanup",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=50_000),
+                ],
+            )
+        )
+        stale = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        stale_second = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        abandoned_before_first_heartbeat = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id.in_([stale.reservation_id, stale_second.reservation_id]))
+            .values(created_at=now - timedelta(hours=8), updated_at=now - timedelta(hours=7))
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == abandoned_before_first_heartbeat.reservation_id)
+            .values(created_at=now - timedelta(hours=7), updated_at=now - timedelta(hours=7))
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == fresh.reservation_id)
+            .values(created_at=now - timedelta(hours=7), updated_at=now)
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
+        assert released_count == 3
+        assert len(session.identity_map) == 0
+
+    assert writer_section_entries == 4
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        stale_reservation = await repo.get_usage_reservation(stale.reservation_id)
+        stale_second_reservation = await repo.get_usage_reservation(stale_second.reservation_id)
+        abandoned_reservation = await repo.get_usage_reservation(abandoned_before_first_heartbeat.reservation_id)
+        fresh_reservation = await repo.get_usage_reservation(fresh.reservation_id)
+        assert stale_reservation is not None
+        assert stale_reservation.status == "released"
+        assert stale_reservation.items[0].actual_delta == 0
+        assert stale_second_reservation is not None
+        assert stale_second_reservation.status == "released"
+        assert stale_second_reservation.items[0].actual_delta == 0
+        assert abandoned_reservation is not None
+        assert abandoned_reservation.status == "released"
+        assert abandoned_reservation.items[0].actual_delta == 0
+        assert fresh_reservation is not None
+        assert fresh_reservation.status == "reserved"
+
+        limits = await repo.get_limits_by_key(created.id)
+        assert len(limits) == 1
+        assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
+
+
+@pytest.mark.asyncio
+async def test_release_stale_usage_reservations_uses_sqlite_writer_section(async_client, monkeypatch):
+    del async_client
+    entered = False
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal entered
+        entered = True
+        yield
+
+    monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6))
+
+    assert released_count == 0
+    assert entered is True
 
 
 @pytest.mark.asyncio

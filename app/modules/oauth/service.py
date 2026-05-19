@@ -222,9 +222,7 @@ class OauthService:
                 return OauthCompleteResponse(status="success")
             if state.method != "device":
                 return OauthCompleteResponse(status="pending")
-            if flow is not None and flow.poll_task and not flow.poll_task.done():
-                return OauthCompleteResponse(status="pending")
-            if not state.device_auth_id or not state.user_code or not state.expires_at:
+            if not self._ensure_device_poll_task_locked(state):
                 if flow is not None:
                     self._store.set_flow_status_locked(
                         flow,
@@ -232,21 +230,9 @@ class OauthService:
                         error_message="Device code flow is not initialized.",
                     )
                 else:
-                    self._store.state.status = "error"
-                    self._store.state.error_message = "Device code flow is not initialized."
+                    state.status = "error"
+                    state.error_message = "Device code flow is not initialized."
                 return OauthCompleteResponse(status="error")
-
-            interval = state.interval_seconds if state.interval_seconds is not None else 0
-            interval = max(interval, 0)
-            poll_context = DevicePollContext(
-                device_auth_id=state.device_auth_id,
-                user_code=state.user_code,
-                interval_seconds=interval,
-                expires_at=state.expires_at,
-            )
-            if flow is not None:
-                flow.poll_task = asyncio.create_task(self._poll_device_tokens(flow.flow_id, poll_context))
-                self._store.set_latest_flow_locked(flow)
             return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self) -> OauthStartResponse:
@@ -350,17 +336,17 @@ class OauthService:
             raise
 
         async with self._store.lock:
-            self._store.remember_flow_locked(
-                OAuthState(
-                    flow_id=flow_id,
-                    status="pending",
-                    method="device",
-                    device_auth_id=device.device_auth_id,
-                    user_code=device.user_code,
-                    interval_seconds=device.interval_seconds,
-                    expires_at=time.time() + device.expires_in_seconds,
-                )
+            flow = OAuthState(
+                flow_id=flow_id,
+                status="pending",
+                method="device",
+                device_auth_id=device.device_auth_id,
+                user_code=device.user_code,
+                interval_seconds=device.interval_seconds,
+                expires_at=time.time() + device.expires_in_seconds,
             )
+            self._store.remember_flow_locked(flow)
+            self._ensure_device_poll_task_locked(flow)
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -429,6 +415,22 @@ class OauthService:
                 if flow is not None and flow.poll_task is current:
                     flow.poll_task = None
                     self._store.set_latest_flow_locked(flow)
+
+    def _ensure_device_poll_task_locked(self, state: OAuthState) -> bool:
+        if state.poll_task and not state.poll_task.done():
+            return True
+        if not state.device_auth_id or not state.user_code or not state.expires_at:
+            return False
+
+        interval = state.interval_seconds if state.interval_seconds is not None else 0
+        poll_context = DevicePollContext(
+            device_auth_id=state.device_auth_id,
+            user_code=state.user_code,
+            interval_seconds=max(interval, 0),
+            expires_at=state.expires_at,
+        )
+        state.poll_task = asyncio.create_task(self._poll_device_tokens(state.flow_id, poll_context))
+        return True
 
     async def _persist_tokens(self, tokens: OAuthTokens) -> None:
         claims = extract_id_token_claims(tokens.id_token)

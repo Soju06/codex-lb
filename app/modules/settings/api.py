@@ -81,6 +81,7 @@ async def get_settings(
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         routing_strategy=settings.routing_strategy,
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
@@ -114,6 +115,11 @@ async def update_settings(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
                     else current.openai_cache_affinity_max_age_seconds
+                ),
+                dashboard_session_ttl_seconds=(
+                    payload.dashboard_session_ttl_seconds
+                    if payload.dashboard_session_ttl_seconds is not None
+                    else current.dashboard_session_ttl_seconds
                 ),
                 http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                     payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
@@ -159,6 +165,7 @@ async def update_settings(
             "prefer_earlier_reset_accounts",
             "routing_strategy",
             "openai_cache_affinity_max_age_seconds",
+            "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
             "import_without_overwrite",
             "totp_required_on_login",
@@ -177,6 +184,7 @@ async def update_settings(
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
         routing_strategy=updated.routing_strategy,
         openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=updated.sticky_reallocation_budget_threshold_pct,

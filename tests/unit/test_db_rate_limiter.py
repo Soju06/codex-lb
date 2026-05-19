@@ -102,7 +102,10 @@ def test_migration_upgrade_downgrade_upgrade_is_reversible(tmp_path: Path) -> No
         engine.dispose()
 
 
-# RED (xfail) tests proving the bug: successful logins are counted toward lockout
+# Regression tests guarding the contract that successful logins must not
+# count toward lockout. The previous implementation incremented the
+# attempts counter on every check(), so eight successful logins would
+# trip the same lockout threshold as eight failures.
 
 
 @pytest.mark.asyncio
@@ -134,7 +137,8 @@ async def test_clear_for_key_resets_lockout(
         for _ in range(8):
             await limiter.check_and_record("ip:clear-test", session)
 
-        # clear_for_key doesn't exist yet — this will raise AttributeError (xfail)
+        # clear_for_key (defined in app/core/rate_limiter/db_rate_limiter.py)
+        # resets the lockout window for the given key.
         await limiter.clear_for_key("ip:clear-test", session)
 
         # After clearing, should be able to attempt again

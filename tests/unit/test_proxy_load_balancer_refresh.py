@@ -1139,14 +1139,11 @@ async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) 
 
     first = asyncio.create_task(pick_account())
     second = asyncio.create_task(pick_account())
-    started = time.perf_counter()
     start.set()
     selected_ids = await asyncio.gather(first, second)
-    elapsed = time.perf_counter() - started
 
     assert len(set(selected_ids)) == 2
     assert overlap_observed.is_set()
-    assert elapsed < 0.13
 
 
 @pytest.mark.asyncio

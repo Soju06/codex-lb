@@ -10,6 +10,7 @@ import {
   sumRemaining,
   weeklyCreditPaceStatus,
   type RemainingItem,
+  type WeeklyCreditPace,
 } from "@/features/dashboard/utils";
 import { createDashboardOverview, createDefaultRequestLogs } from "@/test/mocks/factories";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
@@ -444,7 +445,8 @@ describe("buildWeeklyCreditPace", () => {
 
     expect(pace).not.toBeNull();
     expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(800_000);
-    expect(pace?.overPlanCredits).toBeCloseTo(3_950_000);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(790_000);
+    expect(pace?.projectedShortfallCredits).toBeCloseTo(3_950_000);
     expect(pace?.deltaPercent).toBeCloseTo(79);
     expect(pace?.pauseForBreakEvenHours).toBeCloseTo(134.06);
     expect(pace?.paceMultiplier).toBeCloseTo(4.95);
@@ -469,9 +471,10 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.totalExpectedRemainingCredits).toBeCloseTo(100_000);
     expect(pace?.scheduledUsedPercent).toBeCloseTo(50);
     expect(pace?.actualUsedPercent).toBeCloseTo(50);
-    expect(pace?.overPlanCredits).toBeGreaterThan(0);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(0);
+    expect(pace?.projectedShortfallCredits).toBeGreaterThan(0);
     expect(pace?.pauseForBreakEvenHours).toBeCloseTo(90.72);
-    expect(pace?.paceMultiplier).toBeCloseTo(1);
+    expect(pace?.paceMultiplier).toBeCloseTo(2.78);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
     expect(pace?.proAccountsToCoverOverPlan).toBe(6);
     expect(pace?.status).toBe("danger");
@@ -516,7 +519,8 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(59_999.01);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(30_000.02);
+    expect(pace?.projectedShortfallCredits).toBeCloseTo(59_999.01);
     expect(pace?.projectedDepletionHours).toBeLessThan(40);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(1);
     expect(pace?.proAccountsToCoverOverPlan).toBe(2);
@@ -533,10 +537,11 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(900_000);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(100_000);
+    expect(pace?.projectedShortfallCredits).toBeCloseTo(900_000);
     expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
     expect(pace?.pauseForBreakEvenHours).toBeCloseTo(136.08);
-    expect(pace?.paceMultiplier).toBeCloseTo(2);
+    expect(pace?.paceMultiplier).toBeCloseTo(5.56);
     expect(pace?.throttleToPercent).toBeCloseTo(10);
     expect(pace?.reduceByPercent).toBeCloseTo(90);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(17.86);
@@ -555,7 +560,8 @@ describe("buildWeeklyCreditPace", () => {
     );
 
     expect(pace).not.toBeNull();
-    expect(pace?.overPlanCredits).toBeCloseTo(99_999.01);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(50_000.02);
+    expect(pace?.projectedShortfallCredits).toBeCloseTo(99_999.01);
     expect(pace?.pauseForBreakEvenHours).toBeCloseTo(84);
     expect(pace?.throttleToPercent).toBeCloseTo(0.002);
     expect(pace?.projectedDepletionHours).toBeCloseTo(0);
@@ -618,7 +624,8 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace).not.toBeNull();
     expect(pace?.accountCount).toBe(5);
     expect(pace?.totalActualRemainingCredits).toBeCloseTo(58_438.8);
-    expect(pace?.overPlanCredits).toBeCloseTo(20_510.96);
+    expect(pace?.scheduleGapCredits).toBeCloseTo(17_226.02);
+    expect(pace?.projectedShortfallCredits).toBeCloseTo(20_510.96);
     expect(pace?.pauseForBreakEvenHours).toBeGreaterThan(0);
     expect(pace?.paceMultiplier).toBeGreaterThan(1);
     expect(pace?.throttleToPercent).toBeGreaterThanOrEqual(0);
@@ -644,6 +651,78 @@ describe("buildWeeklyCreditPace", () => {
 });
 
 describe("buildDashboardView", () => {
+  it("prefers backend weekly credit pace when the overview provides it", () => {
+    const serverPace: WeeklyCreditPace = {
+      totalFullCredits: 50_400,
+      totalActualRemainingCredits: 38_304,
+      totalExpectedRemainingCredits: 41_904,
+      actualUsedPercent: 24,
+      scheduledUsedPercent: 16.86,
+      deltaPercent: 7.14,
+      scheduleGapCredits: 3_600,
+      overPlanCredits: 3_600,
+      projectedShortfallCredits: 0,
+      pauseForBreakEvenHours: null,
+      paceMultiplier: 0,
+      throttleToPercent: null,
+      reduceByPercent: null,
+      proAccountEquivalentToCoverOverPlan: null,
+      proAccountsToCoverOverPlan: null,
+      projectedDepletionHours: null,
+      projectedMinimumRemainingCredits: 38_304,
+      forecastBurnRateCreditsPerHour: 0,
+      scheduledBurnRateCreditsPerHour: 300,
+      status: "ahead",
+      accountCount: 1,
+      staleAccountCount: 0,
+      inactiveAccountCount: 0,
+      confidence: "high",
+    };
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "acc-server-pace",
+          email: "pace@example.com",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 50_400,
+          resetAtSecondary: "2026-01-14T12:00:00Z",
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+    });
+
+    const view = buildDashboardView({ ...overview, weeklyCreditPace: serverPace }, createDefaultRequestLogs(), false);
+
+    expect(view.weeklyCreditPace).toBe(serverPace);
+  });
+
+  it("keeps an explicit null backend weekly credit pace instead of falling back locally", () => {
+    const weeklyResetAt = new Date(Date.now() + 3.5 * 24 * 60 * 60 * 1000).toISOString();
+    const overview = createDashboardOverview({
+      weeklyCreditPace: null,
+      accounts: [
+        account({
+          accountId: "acc-null-server-pace",
+          email: "null-pace@example.com",
+          usage: {
+            primaryRemainingPercent: null,
+            secondaryRemainingPercent: 50,
+          },
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 25_200,
+          resetAtSecondary: weeklyResetAt,
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+    });
+
+    expect(buildWeeklyCreditPace(overview.accounts)).not.toBeNull();
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    expect(view.weeklyCreditPace).toBeNull();
+  });
+
   it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {
     const overview = createDashboardOverview({
       accounts: [

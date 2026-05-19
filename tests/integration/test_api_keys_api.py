@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import timedelta
 
@@ -16,9 +17,10 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import LimitWindow, RequestLog
+from app.db.models import ApiKeyUsageReservation, LimitWindow, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 
 pytestmark = pytest.mark.integration
 
@@ -2143,6 +2145,105 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
         assert by_window[LimitWindow.WEEKLY].reset_at == now + timedelta(days=7)
         assert by_window[LimitWindow.MONTHLY].current_value == 0
         assert by_window[LimitWindow.MONTHLY].reset_at == now + timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_release_stale_usage_reservations_restores_reserved_usage(async_client, monkeypatch):
+    del async_client
+    now = utcnow()
+    writer_section_entries = 0
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal writer_section_entries
+        writer_section_entries += 1
+        yield
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="stale-reservation-cleanup",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=30_000),
+                ],
+            )
+        )
+        stale = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        stale_second = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        abandoned_before_first_heartbeat = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id.in_([stale.reservation_id, stale_second.reservation_id]))
+            .values(created_at=now - timedelta(hours=8), updated_at=now - timedelta(hours=7))
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == abandoned_before_first_heartbeat.reservation_id)
+            .values(created_at=now - timedelta(hours=7), updated_at=now - timedelta(hours=7))
+        )
+        await session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == fresh.reservation_id)
+            .values(created_at=now - timedelta(hours=7), updated_at=now)
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(cutoff=now - timedelta(hours=6), batch_size=1)
+        assert released_count == 3
+        assert len(session.identity_map) == 0
+
+    assert writer_section_entries == 4
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        stale_reservation = await repo.get_usage_reservation(stale.reservation_id)
+        stale_second_reservation = await repo.get_usage_reservation(stale_second.reservation_id)
+        abandoned_reservation = await repo.get_usage_reservation(abandoned_before_first_heartbeat.reservation_id)
+        fresh_reservation = await repo.get_usage_reservation(fresh.reservation_id)
+        assert stale_reservation is not None
+        assert stale_reservation.status == "released"
+        assert stale_reservation.items[0].actual_delta == 0
+        assert stale_second_reservation is not None
+        assert stale_second_reservation.status == "released"
+        assert stale_second_reservation.items[0].actual_delta == 0
+        assert abandoned_reservation is not None
+        assert abandoned_reservation.status == "released"
+        assert abandoned_reservation.items[0].actual_delta == 0
+        assert fresh_reservation is not None
+        assert fresh_reservation.status == "reserved"
+
+        limits = await repo.get_limits_by_key(created.id)
+        assert len(limits) == 1
+        assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
+
+
+@pytest.mark.asyncio
+async def test_release_stale_usage_reservations_uses_sqlite_writer_section(async_client, monkeypatch):
+    del async_client
+    entered = False
+
+    @contextlib.asynccontextmanager
+    async def fake_sqlite_writer_section():
+        nonlocal entered
+        entered = True
+        yield
+
+    monkeypatch.setattr(api_keys_repository_module, "sqlite_writer_section", fake_sqlite_writer_section)
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        released_count = await repo.release_stale_usage_reservations(cutoff=utcnow() - timedelta(hours=6))
+
+    assert released_count == 0
+    assert entered is True
 
 
 @pytest.mark.asyncio

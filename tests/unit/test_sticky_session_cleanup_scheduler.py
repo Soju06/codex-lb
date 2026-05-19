@@ -32,6 +32,8 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo = AsyncMock()
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
     sticky_repo.purge_before = AsyncMock(return_value=0)
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_closed_before = AsyncMock(return_value=2)
 
     class FakeSession:
         async def __aenter__(self):
@@ -49,8 +51,91 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         patch.object(cleanup_scheduler, "get_background_session", FakeSession),
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
     ):
         await scheduler._cleanup_once()
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     sticky_repo.purge_before.assert_not_called()
+    bridge_repo.purge_closed_before.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypatch) -> None:
+    dashboard_settings = SimpleNamespace(openai_cache_affinity_max_age_seconds=600)
+
+    settings_repo = AsyncMock()
+    settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+
+    sticky_repo = AsyncMock()
+    sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(
+        interval_seconds=60,
+        enabled=True,
+    )
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
+        patch.object(
+            cleanup_scheduler,
+            "missing_durable_bridge_tables",
+            AsyncMock(return_value=("http_bridge_sessions",)),
+        ),
+    ):
+        await scheduler._cleanup_once()
+
+    sticky_repo.purge_prompt_cache_before.assert_called_once()
+    bridge_repo.purge_closed_before.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_reset(monkeypatch) -> None:
+    dashboard_settings = SimpleNamespace(openai_cache_affinity_max_age_seconds=600)
+
+    settings_repo = AsyncMock()
+    settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+
+    sticky_repo = AsyncMock()
+    sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_closed_before = AsyncMock(return_value=1)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(
+        interval_seconds=60,
+        enabled=True,
+    )
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
+        patch.object(cleanup_scheduler, "missing_durable_bridge_tables", AsyncMock(return_value=())),
+    ):
+        await scheduler._cleanup_once()
+
+    sticky_repo.purge_prompt_cache_before.assert_called_once()
+    bridge_repo.purge_closed_before.assert_called_once()

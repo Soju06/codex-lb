@@ -127,10 +127,17 @@ release-please from your commit titles.
 Run the full lint/test gate locally before pushing:
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check       # type checking
-uv run pytest
+uv run pre-commit run local-ci --hook-stage manual --all-files
+```
+
+The `local-ci` hook runs `make ci`, which is the local
+version of the GitHub Actions CI gate. You can also run a single CI job while
+iterating, for example:
+
+```bash
+make lint
+make test-unit
+make package
 ```
 
 ## Commit & PR conventions

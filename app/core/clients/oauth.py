@@ -12,7 +12,7 @@ import aiohttp
 from pydantic import ValidationError
 
 from app.core.auth.models import DeviceCodePayload, OAuthTokenPayload
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.utils.request_id import get_request_id
@@ -105,33 +105,33 @@ async def exchange_authorization_code(
     encoded = urlencode(payload, quote_via=quote)
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
-    client_session = session or get_http_client().session
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(
-        url,
-        data=encoded,
-        headers=headers,
-        timeout=timeout,
-    ) as resp:
-        data = await _safe_json(resp)
-        try:
-            payload = OAuthTokenPayload.model_validate(data)
-        except ValidationError as exc:
-            logger.warning(
-                "OAuth token response invalid request_id=%s",
-                get_request_id(),
-            )
-            raise OAuthError("invalid_response", "OAuth response invalid") from exc
-        if resp.status >= 400:
-            logger.warning(
-                "OAuth token request failed request_id=%s status=%s",
-                get_request_id(),
-                resp.status,
-            )
-            raise _oauth_error_from_payload(payload, resp.status)
+    async with lease_http_session(session) as client_session:
+        async with client_session.post(
+            url,
+            data=encoded,
+            headers=headers,
+            timeout=timeout,
+        ) as resp:
+            data = await _safe_json(resp)
+            try:
+                payload = OAuthTokenPayload.model_validate(data)
+            except ValidationError as exc:
+                logger.warning(
+                    "OAuth token response invalid request_id=%s",
+                    get_request_id(),
+                )
+                raise OAuthError("invalid_response", "OAuth response invalid") from exc
+            if resp.status >= 400:
+                logger.warning(
+                    "OAuth token request failed request_id=%s status=%s",
+                    get_request_id(),
+                    resp.status,
+                )
+                raise _oauth_error_from_payload(payload, resp.status)
 
     return _parse_tokens(payload)
 
@@ -151,41 +151,41 @@ async def request_device_code(
     }
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
-    client_session = session or get_http_client().session
     headers: dict[str, str] = {}
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-        data = await _safe_json(resp)
-        if resp.status >= 400:
-            if resp.status == 404:
-                raise OAuthError(
-                    "device_auth_unavailable",
-                    (
-                        "Device code login is not enabled for this Codex server. "
-                        "Use the browser login or verify the server URL."
-                    ),
+    async with lease_http_session(session) as client_session:
+        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            data = await _safe_json(resp)
+            if resp.status >= 400:
+                if resp.status == 404:
+                    raise OAuthError(
+                        "device_auth_unavailable",
+                        (
+                            "Device code login is not enabled for this Codex server. "
+                            "Use the browser login or verify the server URL."
+                        ),
+                        resp.status,
+                    )
+                logger.warning(
+                    "Device auth request failed request_id=%s status=%s",
+                    get_request_id(),
                     resp.status,
                 )
-            logger.warning(
-                "Device auth request failed request_id=%s status=%s",
-                get_request_id(),
-                resp.status,
-            )
-            raise OAuthError(
-                "device_auth_failed",
-                f"Device code request failed with status {resp.status}",
-                resp.status,
-            )
-        try:
-            payload_data = DeviceCodePayload.model_validate(data)
-        except ValidationError as exc:
-            logger.warning(
-                "Device auth response invalid request_id=%s",
-                get_request_id(),
-            )
-            raise OAuthError("invalid_response", "Device auth response invalid") from exc
+                raise OAuthError(
+                    "device_auth_failed",
+                    f"Device code request failed with status {resp.status}",
+                    resp.status,
+                )
+            try:
+                payload_data = DeviceCodePayload.model_validate(data)
+            except ValidationError as exc:
+                logger.warning(
+                    "Device auth response invalid request_id=%s",
+                    get_request_id(),
+                )
+                raise OAuthError("invalid_response", "Device auth response invalid") from exc
     verification_url = f"{auth_base}/codex/device"
     user_code = payload_data.user_code
     device_auth_id = payload_data.device_auth_id
@@ -219,34 +219,34 @@ async def exchange_device_token(
     payload = {"device_auth_id": device_auth_id, "user_code": user_code}
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
-    client_session = session or get_http_client().session
     headers: dict[str, str] = {}
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-        data = await _safe_json(resp)
-        try:
-            payload_data = OAuthTokenPayload.model_validate(data)
-        except ValidationError as exc:
-            logger.warning(
-                "Device token response invalid request_id=%s",
-                get_request_id(),
-            )
-            raise OAuthError("invalid_response", "Device auth response invalid") from exc
-        if resp.status in (403, 404):
-            return None
-        if resp.status >= 400:
+    async with lease_http_session(session) as client_session:
+        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            data = await _safe_json(resp)
+            try:
+                payload_data = OAuthTokenPayload.model_validate(data)
+            except ValidationError as exc:
+                logger.warning(
+                    "Device token response invalid request_id=%s",
+                    get_request_id(),
+                )
+                raise OAuthError("invalid_response", "Device auth response invalid") from exc
+            if resp.status in (403, 404):
+                return None
+            if resp.status >= 400:
+                if _is_pending_error(payload_data):
+                    return None
+                logger.warning(
+                    "Device token request failed request_id=%s status=%s",
+                    get_request_id(),
+                    resp.status,
+                )
+                raise _oauth_error_from_payload(payload_data, resp.status)
             if _is_pending_error(payload_data):
                 return None
-            logger.warning(
-                "Device token request failed request_id=%s status=%s",
-                get_request_id(),
-                resp.status,
-            )
-            raise _oauth_error_from_payload(payload_data, resp.status)
-        if _is_pending_error(payload_data):
-            return None
 
     if payload_data.authorization_code:
         if not payload_data.code_verifier:

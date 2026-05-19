@@ -541,6 +541,78 @@ async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client
 
 
 @pytest.mark.asyncio
+async def test_stream_http_500_after_text_is_surfaced_without_same_account_replay(async_client, monkeypatch):
+    """A transport/status exception after visible text must not restart the answer on retry."""
+    await _import_account(async_client, "acc_midtext_500", "midtext500@example.com")
+
+    call_count = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        yield _sse_event({"type": "response.output_text.delta", "delta": "partial answer"})
+        raise ProxyResponseError(
+            500,
+            openai_error("server_error", "late server error"),
+            failure_phase="body",
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    deltas = [e for e in events if e.get("type") == "response.output_text.delta"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    assert [e.get("delta") for e in deltas] == ["partial answer"]
+    assert len(failed) == 1
+    assert failed[0].get("response", {}).get("error", {}).get("code") == "server_error"
+    assert completed == []
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_http_429_after_text_is_surfaced_without_account_failover(async_client, monkeypatch):
+    """A quota/rate-limit exception after visible text cannot be hidden by replaying on another account."""
+    await _import_account(async_client, "acc_midtext_429_a", "midtext429a@example.com")
+    await _import_account(async_client, "acc_midtext_429_b", "midtext429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_midtext_429_a":
+            yield _sse_event({"type": "response.output_text.delta", "delta": "visible"})
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="body",
+            )
+        yield _success_sse_event("resp_should_not_replay")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    deltas = [e for e in events if e.get("type") == "response.output_text.delta"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    assert [e.get("delta") for e in deltas] == ["visible"]
+    assert len(failed) == 1
+    assert failed[0].get("response", {}).get("error", {}).get("code") == "usage_limit_reached"
+    assert completed == []
+    assert seen_account_ids == ["acc_midtext_429_a"]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_non_streaming_500_preserves_http_status(async_client, monkeypatch):
     """Non-streaming /v1/responses uses propagate_http_errors=True.
     After exhausting transient retries, the HTTP 500 status must be preserved

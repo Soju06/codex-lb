@@ -490,6 +490,36 @@
       "contributions": [
         "test"
       ]
+    },
+    {
+      "login": "AnobleSCM",
+      "name": "Andrew Noble",
+      "avatar_url": "https://avatars.githubusercontent.com/u/211227905?v=4",
+      "profile": "http://www.linkedin.com/in/andrewnoblescm",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "jgorostegui",
+      "name": "Josu Gorostegui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9865435?v=4",
+      "profile": "https://jgorostegui.github.io/",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "linusmixson",
+      "name": "Linus Mixson",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7087013?v=4",
+      "profile": "https://github.com/linusmixson",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

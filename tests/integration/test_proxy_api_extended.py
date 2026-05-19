@@ -845,15 +845,19 @@ async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_does_not_retry_stream_idle_timeout(async_client, monkeypatch):
-    await _import_account(async_client, "acc_idle_1", "idle-one@example.com")
-    await _import_account(async_client, "acc_idle_2", "idle-two@example.com")
+async def test_proxy_stream_fails_over_after_first_event_stream_idle_timeout(async_client, monkeypatch):
+    expected_account_id_1 = await _import_account(async_client, "acc_idle_1", "idle-one@example.com")
+    expected_account_id_2 = await _import_account(async_client, "acc_idle_2", "idle-two@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        event = {
-            "type": "response.failed",
-            "response": {"error": {"code": "stream_idle_timeout", "message": "idle"}},
-        }
+        if account_id == "acc_idle_1":
+            event = {
+                "type": "response.failed",
+                "response": {"error": {"code": "stream_idle_timeout", "message": "idle"}},
+            }
+            yield _sse_event(event)
+            return
+        event = {"type": "response.completed", "response": {"id": "resp_idle_ok", "usage": {}}}
         yield _sse_event(event)
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -868,14 +872,16 @@ async def test_proxy_stream_does_not_retry_stream_idle_timeout(async_client, mon
         lines = [line async for line in resp.aiter_lines() if line]
 
     event = _extract_first_event(lines)
-    assert event["type"] == "response.failed"
-    assert event["response"]["error"]["code"] == "stream_idle_timeout"
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_idle_ok"
 
     async with SessionLocal() as session:
         result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
         logs = list(result.scalars().all())
-        assert len(logs) == 1
-        assert logs[0].error_code == "stream_idle_timeout"
+        assert len(logs) == 2
+        by_account = {log.account_id: log for log in logs}
+        assert by_account[expected_account_id_1].error_code == "stream_idle_timeout"
+        assert by_account[expected_account_id_2].status == "success"
 
 
 @pytest.mark.asyncio

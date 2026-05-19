@@ -265,6 +265,12 @@ async def connect_responses_websocket(
             user_agent_header=user_agent,
             proxy=True if settings.upstream_websocket_trust_env else None,
             open_timeout=settings.upstream_connect_timeout_seconds,
+            # Long Codex turns can spend minutes in upstream reasoning without
+            # sending application frames. Keep transport pings enabled so
+            # intermediaries still see liveness, but disable the library's pong
+            # watchdog so codex-lb's own request/idle budgets decide when a
+            # healthy long turn has stalled.
+            ping_timeout=None,
             max_size=settings.max_sse_event_bytes,
         )
     except asyncio.TimeoutError as exc:

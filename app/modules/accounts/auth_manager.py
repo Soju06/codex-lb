@@ -100,11 +100,13 @@ class _RefreshSingleflight:
                     task.result()
                 except RefreshError as exc:
                     ttl = max(0.0, float(get_settings().proxy_refresh_failure_cooldown_seconds))
-                    if ttl > 0:
+                    if ttl > 0 and not exc.transport_error:
                         self._recent_failures[key] = (
                             time.monotonic() + ttl,
                             (exc.code, exc.message, exc.is_permanent),
                         )
+                    else:
+                        self._recent_failures.pop(key, None)
                 except BaseException:
                     self._recent_failures.pop(key, None)
                 else:

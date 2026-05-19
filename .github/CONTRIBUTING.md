@@ -211,13 +211,20 @@ Before a PR is squash-merged into `main`:
 
 1. **CI must be all-green** on the merge-target head. "UNSTABLE, looks
    fine" is not a green CI; rerun, fix, or wait. The Helm / migration /
-   PostgreSQL test jobs are part of the gate, not optional.
+   PostgreSQL test jobs are part of the gate, not optional. The
+   `CI Required` check is the branch-protection check to require: it
+   depends on every CI job and also runs for merge queue synthetic merge
+   groups, so a stale PR head cannot bypass a broken merge result.
 2. **`@codex review` must be clean — or its findings addressed — on the
    merge-target head.** Every PR triggers `@codex review` at least once
    against the head that's about to be merged. Local `codex review
    --base origin/main` runs are encouraged but don't substitute for the
    cloud review (the cloud `@codex review` reliably catches things the
    local run misses).
+   The `🤖 codex: ok` label is maintained by the trusted
+   `Codex review labels` workflow from current-head CI and current-head
+   Codex review evidence. Treat the label as an audit aid, not as a
+   substitute for branch protection or merge queue checks.
    - **P1 findings**: fix in the PR, or justify in-thread with a short
      write-up of why the finding doesn't apply. No silent skipping.
    - **P2 findings**: fix in the PR, or open a follow-up issue and link

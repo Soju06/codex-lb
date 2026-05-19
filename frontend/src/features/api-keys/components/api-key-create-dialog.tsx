@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
@@ -46,17 +47,37 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   });
 
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>([]);
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
   const [enforcedModel, setEnforcedModel] = useState("");
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
   const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
 
+  const resetForm = () => {
+    form.reset();
+    setSelectedModels([]);
+    setSelectedAccountIds([]);
+    setLimitRules([]);
+    setExpiresAt(null);
+    setEnforcedModel("");
+    setEnforcedReasoningEffort("none");
+    setEnforcedServiceTier("none");
+  };
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      resetForm();
+    }
+    onOpenChange(nextOpen);
+  };
+
   const handleSubmit = async (values: FormValues) => {
     const validLimits = limitRules.filter((r) => r.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
-      allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
+      ...(selectedModels.length > 0 ? { allowedModels: selectedModels } : {}),
+      ...(selectedAccountIds.length > 0 ? { assignedAccountIds: selectedAccountIds } : {}),
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
@@ -68,18 +89,12 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
     } catch {
       return;
     }
-    form.reset();
-    setSelectedModels([]);
-    setLimitRules([]);
-    setExpiresAt(null);
-    setEnforcedModel("");
-    setEnforcedReasoningEffort("none");
-    setEnforcedServiceTier("none");
+    resetForm();
     onOpenChange(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Create API key</DialogTitle>
@@ -110,6 +125,11 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
                 <div className="space-y-1">
                   <label className="text-sm font-medium">Allowed models</label>
                   <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Assigned accounts</label>
+                  <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
                 </div>
 
                 <div className="space-y-1">

@@ -259,6 +259,47 @@ async def test_ensure_fresh_reuses_recent_failure_without_reissuing_refresh(monk
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_does_not_reuse_recent_transport_failure(monkeypatch):
+    refresh_calls = 0
+
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise RefreshError("transport_error", "temporary dns failure", False, transport_error=True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+    )
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_transport_fail_cache",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError):
+        await manager.ensure_fresh(account, force=True)
+    await asyncio.sleep(0)
+    with pytest.raises(RefreshError):
+        await manager.ensure_fresh(account, force=True)
+
+    assert refresh_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(monkeypatch):
     refresh_calls = 0
 

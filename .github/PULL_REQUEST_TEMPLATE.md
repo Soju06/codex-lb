@@ -70,7 +70,6 @@ Required: unit tests for new logic, integration tests for new endpoints.
 - [ ] Title is in Conventional Commits format (`<type>(<scope>)?: <subject>`).
 - [ ] Linked the related issue / discussion above.
 - [ ] Added or updated tests covering the change.
-- [ ] Ran `uv run ruff check .` and `uv run ruff format .` (or pre-commit) locally.
-- [ ] Ran `uv run pytest` and all tests pass.
+- [ ] Ran `uv run pre-commit run local-ci --hook-stage manual --all-files` or the relevant `make <target>` subset locally.
 - [ ] If touching specs: `openspec validate --specs` passes and `/opsx:verify` is clean.
 - [ ] CHANGELOG is **not** edited by hand (release-please handles it).

@@ -26,6 +26,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.plan_types import account_plan_matches_allowed
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
@@ -672,14 +673,19 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                # Proactively rebind session affinity for prompt-cache and
-                # codex sessions once the pinned account is already above the
-                # configured budget threshold. That preserves continuity below
-                # the threshold while avoiding obvious short-window failures
-                # once the session is skating on the edge of exhaustion.
+                # Proactively rebind session affinity for any sticky kind
+                # once the pinned account is already above the configured
+                # budget threshold. That preserves continuity below the
+                # threshold while avoiding obvious short-window failures once
+                # the session is skating on the edge of exhaustion.
                 now = time.time()
                 budget_pressured = (
-                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
+                    sticky_kind
+                    in (
+                        StickySessionKind.PROMPT_CACHE,
+                        StickySessionKind.CODEX_SESSION,
+                        StickySessionKind.STICKY_THREAD,
+                    )
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
@@ -1169,7 +1175,7 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
-    return [a for a in accounts if a.plan_type in allowed_plans]
+    return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:

@@ -473,13 +473,13 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
 
 
 @pytest.mark.asyncio
-async def test_normalize_public_responses_stream_buffers_precreated_output_until_created() -> None:
-    """A: public /v1 must never emit output events before response.created.
+async def test_normalize_public_responses_stream_drops_precreated_output_when_envelope_arrives() -> None:
+    """A: public /v1 must never attach anonymous pre-created output to a later response.
 
     A downstream-cancelled HTTP bridge request can leave behind an anonymous
-    output event that has no response envelope. If that event reaches the /v1
-    normalizer before the next response.created, it must be held until a real or
-    synthetic response.created can be emitted first.
+    output event that has no response envelope. If a later retry response
+    envelope arrives, the orphan output still has no id proving ownership, so it
+    must be dropped rather than replayed into the retry.
     """
     blocks = [
         block
@@ -500,11 +500,17 @@ async def test_normalize_public_responses_stream_buffers_precreated_output_until
 
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
     event_types = [payload["type"] for payload in payloads if payload is not None]
-    assert event_types[:3] == ["response.created", "response.output_item.added", "response.completed"]
+    assert event_types[:2] == ["response.created", "response.completed"]
+    assert "response.output_item.added" not in event_types
     assert payloads[0] is not None
     created_response = payloads[0]["response"]
     assert isinstance(created_response, dict)
     assert created_response["id"] == "resp_retry"
+    completed = payloads[1]
+    assert completed is not None
+    completed_response = completed["response"]
+    assert isinstance(completed_response, dict)
+    assert completed_response["output"] == []
 
 
 @pytest.mark.asyncio

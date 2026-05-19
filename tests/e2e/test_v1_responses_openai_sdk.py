@@ -492,15 +492,15 @@ async def test_sdk_responses_stream_upstream_rejection_synthesizes_created(
 
 
 @pytest.mark.asyncio
-async def test_sdk_responses_stream_buffers_precreated_anonymous_output(
+async def test_sdk_responses_stream_drops_precreated_anonymous_output(
     sdk_client,
     monkeypatch,
 ) -> None:
     """Defense-in-depth for cancel/retry demux contamination.
 
-    If an anonymous output-item event reaches /v1 before any response.created,
-    the public stream must still be parseable by the stock OpenAI SDK: emit a
-    response.created envelope first, then replay the buffered output event.
+    If anonymous output-item events reach /v1 before any response.created, the
+    public stream must remain parseable by the stock OpenAI SDK without
+    attaching those unowned orphan events to the later response envelope.
     """
     resp_id = "resp_precreated_buffered"
     _patch_upstream_stream(
@@ -521,9 +521,9 @@ async def test_sdk_responses_stream_buffers_precreated_anonymous_output(
         final = await stream.get_final_response()
 
     assert events_seen[0] == "response.created"
-    assert "response.output_item.done" in events_seen
+    assert "response.output_item.done" not in events_seen
     assert final.id == resp_id
-    assert final.output[0].content[0].text == "buffered text"
+    assert final.output == []
 
 
 @pytest.mark.asyncio

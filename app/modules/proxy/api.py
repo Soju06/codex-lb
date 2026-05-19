@@ -2608,9 +2608,9 @@ async def _normalize_public_responses_stream(
     # ``response`` envelope so the SDK parser can complete the stream.
     created_emitted = False
     # Anonymous pre-created output/lifecycle events cannot be made SDK-safe
-    # until a response envelope arrives. Buffer them briefly, then replay them
-    # only after a real/synthetic response.created. If no envelope ever arrives,
-    # fail closed instead of leaking output before response.created.
+    # until a response envelope arrives. Buffer only to detect a truncated
+    # stream; if an envelope later arrives, drop the buffered anonymous events
+    # rather than attaching stale orphan output to the next response.
     pre_created_buffer: list[dict[str, JsonValue]] = []
 
     def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
@@ -2632,7 +2632,6 @@ async def _normalize_public_responses_stream(
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
-        _collect_output_item_event(payload, output_items)
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract
@@ -2667,9 +2666,6 @@ async def _normalize_public_responses_stream(
             if event_type == "response.created":
                 created_emitted = True
                 yield format_sse_event(normalized_payload)
-                for buffered_payload in pre_created_buffer:
-                    for buffered_block in formatted_payloads_with_synthetic_deltas(buffered_payload):
-                        yield buffered_block
                 pre_created_buffer.clear()
                 continue
 
@@ -2677,9 +2673,6 @@ async def _normalize_public_responses_stream(
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True
-                for buffered_payload in pre_created_buffer:
-                    for buffered_block in formatted_payloads_with_synthetic_deltas(buffered_payload):
-                        yield buffered_block
                 pre_created_buffer.clear()
             elif _should_buffer_public_pre_created_event(event_type):
                 if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
@@ -2703,6 +2696,7 @@ async def _normalize_public_responses_stream(
                 )
                 return
 
+        _collect_output_item_event(normalized_payload, output_items)
         for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
             yield formatted_payload
         if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:

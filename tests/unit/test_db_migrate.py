@@ -584,6 +584,31 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
+@pytest.mark.parametrize(
+    "live_revision",
+    [
+        "20260519_010000_merge_stack_schema_heads",
+        "20260519_020000_merge_live_aggregate_and_repair_heads",
+    ],
+)
+def test_run_upgrade_remaps_live_aggregate_revision_id(tmp_path: Path, live_revision: str) -> None:
+    db_path = tmp_path / "live-aggregate-remap.db"
+    url = _db_url(db_path)
+
+    initial = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert initial.current_revision is not None
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :live_aggregate"),
+            {"live_aggregate": live_revision},
+        )
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision == initial.current_revision
+
+
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
     class _FakeRevision:
         def __init__(self, revision: str, path: str) -> None:

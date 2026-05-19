@@ -5531,6 +5531,11 @@ class ProxyService:
         async with self._http_bridge_lock:
             if session.closed:
                 return
+            if (
+                session.upstream_control.retire_after_drain
+                and self._http_bridge_sessions.get(session.key) is not session
+            ):
+                return
             alias_key = _http_bridge_previous_response_alias_key(stripped_response_id, session.key.api_key_id)
             self._http_bridge_previous_response_index[alias_key] = session.key
             session.previous_response_ids.add(stripped_response_id)

@@ -165,6 +165,30 @@ async def test_retiring_http_bridge_session_stays_live_while_visible_request_fin
     )
 
 
+@pytest.mark.asyncio
+async def test_detached_retiring_session_does_not_alias_completed_response_to_replacement() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_replaced", None)
+    old_request = _make_request_state(
+        "req-old-visible",
+        response_id="resp-old-visible",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    old_session = _make_http_bridge_session(deque([old_request]), queued_request_count=1, key=key)
+    old_session.upstream_control.retire_after_drain = True
+    replacement_session = _make_http_bridge_session(deque(), queued_request_count=0, key=key)
+
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions[key] = replacement_session
+
+    await service._register_http_bridge_previous_response_id(old_session, "resp-old-completed")
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key("resp-old-completed", key.api_key_id)
+    assert alias_key not in service._http_bridge_previous_response_index
+    assert old_session.previous_response_ids == set()
+
+
 def test_response_created_prefers_visible_request_when_drain_and_visible_overlap() -> None:
     draining_request = _make_request_state(
         "req-cancelled-before-created",

@@ -8,6 +8,11 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
   useAccounts: vi.fn(),
+  useAccountRoutingPolicyMutation: vi.fn(() => ({
+    isPending: false,
+    error: null,
+    mutateAsync: vi.fn(),
+  })),
   useAccountTrends: vi.fn(() => ({ data: null })),
 }));
 
@@ -92,6 +97,7 @@ describe("AccountsPage", () => {
       resumeMutation: idleMutation(),
       deleteMutation: idleMutation(),
       updateMutation: idleMutation(),
+      exportMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
     render(

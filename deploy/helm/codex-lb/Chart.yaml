@@ -20,6 +20,6 @@ maintainers:
     email: qlskssk@gmail.com
 dependencies:
   - name: postgresql
-    version: 18.5.14
+    version: 18.6.7
     repository: oci://registry-1.docker.io/bitnamicharts
     condition: postgresql.enabled

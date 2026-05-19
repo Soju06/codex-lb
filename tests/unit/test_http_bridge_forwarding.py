@@ -319,5 +319,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
         )
     ]
 
-    assert events == []
+    assert len(events) == 1
+    assert '"type":"response.failed"' in events[0]
+    assert '"code":"stream_incomplete"' in events[0]
     assert captured["trust_env"] is False

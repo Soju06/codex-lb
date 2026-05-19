@@ -9902,8 +9902,6 @@ class ProxyService:
                     error_code = code
                     error_message = error.message if error else None
                     settlement.account_health_error = _should_penalize_stream_error(code)
-                    if allow_retry and code == "stream_idle_timeout":
-                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_retry and _should_retry_stream_error(code):
                         raise _RetryableStreamError(code, settlement.error)
                     if allow_transient_retry and code in _TRANSIENT_RETRY_CODES and code != "stream_idle_timeout":
@@ -10755,6 +10753,8 @@ def _consume_api_key_reservation_heartbeat_result(task: asyncio.Task[None]) -> N
 
 def _should_penalize_stream_error(code: str | None) -> bool:
     if code is None:
+        return False
+    if code == "stream_idle_timeout":
         return False
     return code in _ACCOUNT_RECOVERY_RETRY_CODES or code in _TRANSIENT_RETRY_CODES
 

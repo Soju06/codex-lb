@@ -25,6 +25,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
+    AccountExportResponse,
     AccountImportResponse,
     AccountRequestUsage,
     AccountSummary,
@@ -154,6 +155,7 @@ class AccountsService:
             account_id=account_id,
             primary=trend.primary if trend else [],
             secondary=trend.secondary if trend else [],
+            secondary_scheduled=trend.secondary_scheduled if trend else [],
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:
@@ -215,6 +217,32 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def export_account(self, account_id: str) -> AccountExportResponse | None:
+        account = await self._repo.get_by_id(account_id)
+        if not account:
+            return None
+        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        id_token = self._encryptor.decrypt(account.id_token_encrypted)
+        auth_json = {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account.chatgpt_account_id,
+            },
+            "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+        }
+        return AccountExportResponse(
+            account_id=account.id,
+            email=account.email,
+            plan_type=account.plan_type,
+            status=account.status.value,
+            auth_json=json.dumps(auth_json, indent=2),
+        )
 
     async def update_routing_policy(self, account_id: str, routing_policy: str) -> str | None:
         normalized = routing_policy.strip().lower()

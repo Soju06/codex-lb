@@ -4931,7 +4931,7 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(monkeypatch):
+async def test_stream_responses_first_idle_timeout_does_not_fail_over_to_next_account(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4975,12 +4975,13 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
-    record_error.assert_awaited_once_with(account_a)
-    record_success.assert_awaited_once_with(account_b)
-    assert [call["status"] for call in request_logs.calls] == ["error", "success"]
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "stream_idle_timeout"
+    assert event["response"]["error"]["message"] == "idle"
+    assert seen_excluded_account_ids == [set()]
+    record_error.assert_not_awaited()
+    record_success.assert_not_awaited()
+    assert [call["status"] for call in request_logs.calls] == ["error"]
     assert request_logs.calls[0]["error_code"] == "stream_idle_timeout"
 
 
@@ -5025,8 +5026,8 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "idle"
-    assert seen_excluded_account_ids == [set(), {account.id}]
-    record_error.assert_awaited_once_with(account)
+    assert seen_excluded_account_ids == [set()]
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert request_logs.calls[-1]["error_code"] == "stream_idle_timeout"
 

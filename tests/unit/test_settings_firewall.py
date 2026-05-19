@@ -29,20 +29,20 @@ def test_settings_parses_proxy_unauthenticated_client_cidrs_from_csv(monkeypatch
     assert settings.proxy_unauthenticated_client_cidrs == ["192.168.65.1/32", "172.17.0.0/16"]
 
 
-def test_settings_firewall_cache_ttl_defaults_to_two_seconds(monkeypatch):
-    monkeypatch.delenv("CODEX_LB_FIREWALL_CACHE_TTL_SECONDS", raising=False)
+def test_settings_firewall_ip_cache_ttl_defaults_to_thirty_seconds(monkeypatch):
+    monkeypatch.delenv("CODEX_LB_FIREWALL_IP_CACHE_TTL_SECONDS", raising=False)
     settings = Settings()
-    assert settings.firewall_cache_ttl_seconds == 2
+    assert settings.firewall_ip_cache_ttl_seconds == 30
 
 
-def test_settings_parses_firewall_cache_ttl_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_FIREWALL_CACHE_TTL_SECONDS", "60")
+def test_settings_parses_firewall_ip_cache_ttl_from_env(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_IP_CACHE_TTL_SECONDS", "60")
     settings = Settings()
-    assert settings.firewall_cache_ttl_seconds == 60
+    assert settings.firewall_ip_cache_ttl_seconds == 60
 
 
-def test_settings_rejects_non_positive_firewall_cache_ttl(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_FIREWALL_CACHE_TTL_SECONDS", "0")
+def test_settings_rejects_non_positive_firewall_ip_cache_ttl(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_IP_CACHE_TTL_SECONDS", "0")
     with pytest.raises(ValidationError):
         Settings()
 

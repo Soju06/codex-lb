@@ -43,10 +43,38 @@ def _make_auth_json(account_id: str, email: str) -> dict:
 
 
 def _extract_first_event(lines: list[str]) -> dict:
-    for line in lines:
-        if line.startswith("data: "):
-            return json.loads(line[6:])
+    """Return the first standard SSE event payload, ignoring the synthetic
+    ``response.created`` that ``_normalize_public_responses_stream`` may
+    prepend when the upstream stream's first standard event is not
+    ``response.created`` (see change
+    ``normalize-v1-responses-openai-sdk-stream``). Callers that want to
+    assert on the *original* first upstream event (e.g. ``response.failed``)
+    should keep using this helper unchanged; callers that want to assert on
+    the new synthetic created should use ``_extract_first_raw_event`` below.
+    """
+    for event in _iter_sse_events(lines):
+        if event.get("type") == "response.created":
+            response = event.get("response")
+            if isinstance(response, dict) and response.get("status") == "in_progress" and response.get("output") == []:
+                # Likely the synthesized created envelope — skip and return
+                # whatever the upstream actually started with.
+                continue
+        return event
     raise AssertionError("No SSE data event found")
+
+
+def _extract_first_raw_event(lines: list[str]) -> dict:
+    """Return the literal first SSE data event, including any synthesized
+    ``response.created`` the public-stream normalizer prepended."""
+    for event in _iter_sse_events(lines):
+        return event
+    raise AssertionError("No SSE data event found")
+
+
+def _iter_sse_events(lines: list[str]):
+    for line in lines:
+        if line.startswith("data: ") and not line.startswith("data: [DONE]"):
+            yield json.loads(line[6:])
 
 
 class _FakeUpstreamWebSocket:
@@ -443,12 +471,12 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_without_http_bridge_websocket_upstream_rejects_oversized_response_create_before_connect(
+async def test_v1_responses_without_http_bridge_forces_http_upstream_when_dashboard_requests_websocket(
     async_client,
     monkeypatch,
 ):
-    email = "stream-ws-oversized@example.com"
-    raw_account_id = "acc_stream_ws_oversized"
+    email = "stream-http-forced@example.com"
+    raw_account_id = "acc_stream_http_forced"
     auth_json = _make_auth_json(raw_account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
@@ -503,7 +531,26 @@ async def test_v1_responses_without_http_bridge_websocket_upstream_rejects_overs
 
     async def fail_open_upstream_websocket(**kwargs):
         del kwargs
-        raise AssertionError("oversized response.create must fail before upstream websocket connect")
+        raise AssertionError("HTTP /v1/responses must not open upstream websocket")
+
+    captured: dict[str, object] = {}
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        captured["payload"] = payload.to_payload()
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_http_forced","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
@@ -511,6 +558,7 @@ async def test_v1_responses_without_http_bridge_websocket_upstream_rejects_overs
     monkeypatch.setattr(proxy_client_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
     monkeypatch.setattr(proxy_client_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 128, raising=False)
     monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fail_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/v1/responses",
@@ -521,21 +569,21 @@ async def test_v1_responses_without_http_bridge_websocket_upstream_rejects_overs
         },
     )
 
-    assert response.status_code == 413
-    payload = response.json()
-    assert payload["error"]["code"] == "payload_too_large"
-    assert payload["error"]["type"] == "invalid_request_error"
-    assert payload["error"]["param"] == "input"
-    assert "response.create is too large for upstream websocket" in payload["error"]["message"]
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_http_forced"
+    assert captured["transport"] == "http"
+    assert cast(dict[str, object], captured["payload"])["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "x" * 256}]}
+    ]
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_without_http_bridge_websocket_upstream_slims_historical_inline_artifacts_and_succeeds(
+async def test_v1_responses_without_http_bridge_http_upstream_preserves_historical_inline_artifacts(
     async_client,
     monkeypatch,
 ):
-    email = "stream-ws-slim@example.com"
-    raw_account_id = "acc_stream_ws_slim"
+    email = "stream-http-inline@example.com"
+    raw_account_id = "acc_stream_http_inline"
     auth_json = _make_auth_json(raw_account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
@@ -588,48 +636,36 @@ async def test_v1_responses_without_http_bridge_websocket_upstream_slims_histori
         proxy_request_budget_seconds = 75.0
         log_upstream_request_summary = False
 
-    fake_upstream = _FakeUpstreamWebSocket(
-        [
-            SimpleNamespace(
-                type=proxy_client_module.aiohttp.WSMsgType.TEXT,
-                data=json.dumps(
-                    {
-                        "type": "response.created",
-                        "response": {"id": "resp_http_stream_slim", "object": "response", "status": "in_progress"},
-                    },
-                    separators=(",", ":"),
-                ),
-                extra=None,
-            ),
-            SimpleNamespace(
-                type=proxy_client_module.aiohttp.WSMsgType.TEXT,
-                data=json.dumps(
-                    {
-                        "type": "response.completed",
-                        "response": {
-                            "id": "resp_http_stream_slim",
-                            "object": "response",
-                            "status": "completed",
-                            "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
-                        },
-                    },
-                    separators=(",", ":"),
-                ),
-                extra=None,
-            ),
-        ]
-    )
+    captured: dict[str, object] = {}
 
-    async def fake_open_upstream_websocket(**kwargs):
+    async def fail_open_upstream_websocket(**kwargs):
         del kwargs
-        return fake_upstream, fake_upstream
+        raise AssertionError("HTTP /v1/responses must not open upstream websocket")
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        captured["payload"] = payload.to_payload()
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_http_stream_inline","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
+        )
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
     monkeypatch.setattr(proxy_client_module, "get_settings", lambda: _CoreProxySettings())
     monkeypatch.setattr(proxy_client_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
     monkeypatch.setattr(proxy_client_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 640, raising=False)
-    monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fail_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/v1/responses",
@@ -658,17 +694,18 @@ async def test_v1_responses_without_http_bridge_websocket_upstream_slims_histori
     )
 
     assert response.status_code == 200
-    assert response.json()["id"] == "resp_http_stream_slim"
-    assert fake_upstream.sent_json
-    request_input = fake_upstream.sent_json[0]["input"]
+    assert response.json()["id"] == "resp_http_stream_inline"
+    assert captured["transport"] == "http"
+    request_input = cast(dict[str, object], captured["payload"])["input"]
     assert isinstance(request_input, list)
     tool_input = cast(dict[str, object], request_input[1])
     assistant_input = cast(dict[str, object], request_input[2])
-    assert tool_input["output"] == proxy_module._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
-        bytes=len(("data:image/png;base64," + ("A" * 1200)).encode("utf-8"))
-    )
+    assert tool_input["output"] == "data:image/png;base64," + ("A" * 1200)
     assert assistant_input["content"] == [
-        {"type": "input_text", "text": proxy_module._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64," + ("B" * 1200),
+        }
     ]
 
 
@@ -850,6 +887,8 @@ async def test_v1_responses_stream_preserves_done_text_events(async_client, monk
     event_types: list[str] = []
     for line in lines:
         if not line.startswith("data: "):
+            continue
+        if line.startswith("data: [DONE]"):
             continue
         data = json.loads(line[6:])
         event_type = data.get("type")

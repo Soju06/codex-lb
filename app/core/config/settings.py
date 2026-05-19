@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     database_background_pool_size: int | None = Field(default=None, gt=0)
     database_background_max_overflow: int | None = Field(default=None, ge=0)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
+    database_pool_recycle_seconds: int = Field(default=1800, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
@@ -134,8 +135,8 @@ class Settings(BaseSettings):
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = False
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
-    compact_request_budget_seconds: float = Field(default=75.0, gt=0)
-    stream_idle_timeout_seconds: float = 300.0
+    compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    stream_idle_timeout_seconds: float = 600.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
@@ -181,6 +182,8 @@ class Settings(BaseSettings):
     log_proxy_service_tier_trace: bool = False
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
+    conversation_archive_enabled: bool = False
+    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -206,7 +209,7 @@ class Settings(BaseSettings):
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
-    firewall_cache_ttl_seconds: int = Field(default=2, gt=0)
+    firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     dashboard_auth_proxy_header: str = "Remote-User"
 

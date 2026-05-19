@@ -1,6 +1,6 @@
 ## 1. Implementation
 
-- [x] 1.1 Add `firewall_cache_ttl_seconds` setting with sensible default and `gt=0` validation
+- [x] 1.1 Add `firewall_ip_cache_ttl_seconds` setting with sensible default and `gt=0` validation
 - [x] 1.2 Use the setting when constructing the process-level `FirewallIPCache`
 
 ## 2. Verification

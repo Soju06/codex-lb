@@ -4126,7 +4126,7 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
 
 
 @pytest.mark.asyncio
-async def test_service_stream_responses_uses_dashboard_upstream_transport_override(monkeypatch):
+async def test_service_stream_responses_forces_http_upstream_for_http_stream(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     setattr(settings, "upstream_stream_transport", "websocket")
     request_logs = _RequestLogsRecorder()
@@ -4170,7 +4170,7 @@ async def test_service_stream_responses_uses_dashboard_upstream_transport_overri
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     assert chunks
-    assert captured["override"] == "websocket"
+    assert captured["override"] == "http"
 
 
 @pytest.mark.asyncio

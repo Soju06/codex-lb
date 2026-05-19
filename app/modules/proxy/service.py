@@ -3839,7 +3839,6 @@ class ProxyService:
             request_service_tier=_normalize_service_tier_value(
                 dict(responses_payload.to_payload()).get("service_tier")
             ),
-            request_usage_budget=estimate_api_key_request_usage(responses_payload),
         )
         try:
             session_id = _owner_lookup_session_id_from_headers(headers)
@@ -8146,6 +8145,8 @@ class ProxyService:
 
         if request_state is None:
             if is_previous_response_not_found_event:
+                if _message_mentions_any_response_id(error_message):
+                    return text
                 upstream_control.reconnect_requested = True
                 downstream_text = json.dumps(
                     cast(
@@ -10363,8 +10364,6 @@ class ProxyService:
                     error_code = code
                     error_message = error.message if error else None
                     settlement.account_health_error = _should_penalize_stream_error(code)
-                    if allow_retry and code == "stream_idle_timeout":
-                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_retry and _is_security_work_authorization_required_error(code, error_message):
                         error_code = _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
                         raise _RetryableStreamError(
@@ -11226,6 +11225,8 @@ def _consume_api_key_reservation_heartbeat_result(task: asyncio.Task[None]) -> N
 def _should_penalize_stream_error(code: str | None) -> bool:
     if code is None:
         return False
+    if code == "stream_idle_timeout":
+        return False
     return code in _ACCOUNT_RECOVERY_RETRY_CODES or code in _TRANSIENT_RETRY_CODES
 
 
@@ -11900,6 +11901,13 @@ def _message_mentions_previous_response_id(message: str | None, previous_respons
     )
 
 
+def _message_mentions_any_response_id(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized_message = " ".join(message.split())
+    return re.search(r"(?<![A-Za-z0-9_-])resp_[A-Za-z0-9_-]+(?![A-Za-z0-9_-])", normalized_message) is not None
+
+
 def _normalize_session_id(session_id: str | None) -> str | None:
     if not isinstance(session_id, str):
         return None
@@ -12151,6 +12159,16 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         message=error_message,
     )
     reason = "previous_response_not_found"
+    if should_rewrite and request_state.previous_response_id is None and request_state.transport != "http":
+        return event, payload, event_type, original_text
+    if (
+        should_rewrite
+        and request_state.previous_response_id is not None
+        and error_message is not None
+        and "resp_" in error_message
+        and request_state.previous_response_id not in error_message
+    ):
+        return event, payload, event_type, original_text
     if not should_rewrite:
         if request_state.previous_response_id is None:
             return event, payload, event_type, original_text
@@ -12163,7 +12181,12 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     if not should_rewrite:
         return event, payload, event_type, original_text
 
-    reconnect_requested = reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    reconnect_requested = (
+        reason in {"missing_tool_output", "previous_response_not_found"}
+        or request_state.preferred_account_id is not None
+    )
+    if reason == "previous_response_not_found" and request_state.transport == "http":
+        reconnect_requested = False
     return _rewrite_websocket_continuity_corruption_event(
         request_state=request_state,
         upstream_control=upstream_control,
@@ -12589,6 +12612,8 @@ def _matching_websocket_request_states_for_previous_response_error(
         ]
         if matching_requests:
             return matching_requests
+        if _message_mentions_any_response_id(error_message):
+            return []
     unresolved_followups = [request_state for request_state in followup_requests if request_state.response_id is None]
     if len(unresolved_followups) == 1:
         return unresolved_followups

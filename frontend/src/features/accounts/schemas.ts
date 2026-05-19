@@ -8,6 +8,7 @@ export const UsageTrendPointSchema = z.object({
 export const AccountUsageTrendSchema = z.object({
   primary: z.array(UsageTrendPointSchema),
   secondary: z.array(UsageTrendPointSchema),
+  secondaryScheduled: z.array(UsageTrendPointSchema).default([]),
 });
 
 export const AccountUsageSchema = z.object({
@@ -62,6 +63,8 @@ export const AccountSummarySchema = z.object({
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  capacityCreditsSecondary: z.number().nullable().optional(),
+  remainingCreditsSecondary: z.number().nullable().optional(),
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
@@ -71,6 +74,7 @@ export const AccountTrendsResponseSchema = z.object({
   accountId: z.string(),
   primary: z.array(UsageTrendPointSchema),
   secondary: z.array(UsageTrendPointSchema),
+  secondaryScheduled: z.array(UsageTrendPointSchema).default([]),
 });
 
 export const AccountsResponseSchema = z.object({

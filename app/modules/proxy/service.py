@@ -12324,14 +12324,11 @@ def _wrapped_websocket_error_event(
     payload: OpenAIErrorEnvelope,
 ) -> dict[str, JsonValue]:
     error_payload = cast(JsonValue, dict(payload["error"]))
-    event = cast(
-        dict[str, JsonValue],
-        {
-            "type": "error",
-            "status": status_code,
-            "error": error_payload,
-        },
-    )
+    event: dict[str, JsonValue] = {
+        "type": "error",
+        "status": status_code,
+        "error": error_payload,
+    }
     return event
 
 

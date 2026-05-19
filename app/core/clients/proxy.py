@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
+    Any,
     AsyncContextManager,
     AsyncIterator,
     Awaitable,
@@ -2675,7 +2676,7 @@ async def thread_goal_request(
         else None,
     )
     try:
-        request_kwargs: dict[str, object] = {
+        request_kwargs: dict[str, Any] = {
             "headers": upstream_headers,
             "timeout": timeout,
         }

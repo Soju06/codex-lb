@@ -308,7 +308,7 @@ def test_chat_completions_strict_schema_violation_surfaces_via_enforce_helper():
 
 
 def test_strict_function_tool_missing_additional_properties():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"city": {"type": "string"}},
         "required": ["city"],
@@ -322,7 +322,7 @@ def test_strict_function_tool_missing_additional_properties():
 
 
 def test_strict_function_tool_additional_properties_true_rejected():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"city": {"type": "string"}},
         "required": ["city"],
@@ -334,7 +334,7 @@ def test_strict_function_tool_additional_properties_true_rejected():
 
 
 def test_strict_function_tool_missing_required_rejected():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
         "required": ["city"],
@@ -346,7 +346,7 @@ def test_strict_function_tool_missing_required_rejected():
 
 
 def test_strict_function_tool_valid_schema_passes():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {"city": {"type": "string"}},
         "required": ["city"],
@@ -356,7 +356,7 @@ def test_strict_function_tool_valid_schema_passes():
 
 
 def test_strict_function_tool_nested_violation_surfaced():
-    schema = {
+    schema: JsonValue = {
         "type": "object",
         "properties": {
             "filter": {
@@ -504,7 +504,8 @@ def test_enforce_strict_function_tools_accepts_compliant_schema():
         }
     ]
     request = normalize_responses_request_payload(_responses_payload_with_tools(tools), openai_compat=False)
-    assert request.tools[0]["strict"] is True  # type: ignore[index]
+    tool = _json_object(request.tools[0])
+    assert tool["strict"] is True
 
 
 def test_enforce_strict_function_tools_param_template_for_chat():
@@ -564,7 +565,8 @@ def test_chat_function_tool_strict_true_preserved_in_coercion():
     }
     request = ChatCompletionsRequest.model_validate(payload)
     responses_request = request.to_responses_request()
-    assert responses_request.tools[0]["strict"] is True  # type: ignore[index]
+    tool = _json_object(responses_request.tools[0])
+    assert tool["strict"] is True
     # Compliant schema passes the strict pre-validator (chat path validates
     # the raw payload tools, before ``_normalize_chat_tools`` runs).
     enforce_strict_function_tools_format(
@@ -629,7 +631,8 @@ def test_chat_function_tool_strict_false_is_preserved_as_false():
     }
     request = ChatCompletionsRequest.model_validate(payload)
     responses_request = request.to_responses_request()
-    assert responses_request.tools[0].get("strict") is False  # type: ignore[union-attr]
+    tool = _json_object(responses_request.tools[0])
+    assert tool.get("strict") is False
 
 
 def test_chat_function_tool_without_strict_has_no_strict_key():

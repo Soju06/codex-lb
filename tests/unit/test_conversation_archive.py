@@ -26,9 +26,10 @@ def _reset_archive_disk_pressure() -> None:
 
 
 class _ArchiveSettings:
-    def __init__(self, *, enabled: bool, directory: Path) -> None:
+    def __init__(self, *, enabled: bool, directory: Path, queue_max_bytes: int = 8 * 1024 * 1024) -> None:
         self.conversation_archive_enabled = enabled
         self.conversation_archive_dir = directory
+        self.conversation_archive_queue_max_bytes = queue_max_bytes
 
 
 def _archive_records(directory: Path) -> list[dict[str, object]]:
@@ -147,9 +148,8 @@ def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path
     monkeypatch.setattr(
         conversation_archive,
         "get_settings",
-        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path, queue_max_bytes=64),
     )
-    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE_MAX_BYTES", 64)
     monkeypatch.setattr(
         conversation_archive,
         "_ensure_writer_thread",
@@ -169,6 +169,47 @@ def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path
     assert record["payload"] == {"text": "x" * 256}
     with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
         assert conversation_archive._WRITE_QUEUE_BYTES == 0
+
+
+def test_archive_queue_byte_limit_warning_is_rate_limited(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path, queue_max_bytes=64),
+    )
+    monkeypatch.setattr(
+        conversation_archive,
+        "_ensure_writer_thread",
+        lambda: (_ for _ in ()).throw(AssertionError("writer should not start for byte-budget fallback")),
+    )
+    monkeypatch.setattr(conversation_archive, "_archive_disk_pressure_active", lambda: False)
+    monotonic_values = iter([100.0, 101.0, 102.0, 161.0])
+    monkeypatch.setattr(conversation_archive.time, "monotonic", lambda: next(monotonic_values))
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 0
+    with conversation_archive._BACKPRESSURE_WARNING_LOCK:
+        conversation_archive._BACKPRESSURE_LAST_WARNING_AT = (
+            -conversation_archive._BACKPRESSURE_WARNING_INTERVAL_SECONDS
+        )
+        conversation_archive._BACKPRESSURE_SUPPRESSED_WARNINGS = 0
+
+    caplog.set_level("WARNING", logger="app.core.conversation_archive")
+    for idx in range(4):
+        conversation_archive.archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload={"text": f"{idx}-" + ("x" * 256)},
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Conversation archive writer queue byte budget is full" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert warnings[0].suppressed_warnings == 0
+    assert warnings[1].suppressed_warnings == 2
 
 
 def test_archive_queue_thread_start_failure_drops_record(monkeypatch, tmp_path):

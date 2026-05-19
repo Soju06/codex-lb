@@ -6695,7 +6695,7 @@ class ProxyService:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None:
+        if response_id is not None and matched_request_state is not None and event_type == "response.completed":
             await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,

@@ -2607,10 +2607,12 @@ async def _normalize_public_responses_stream(
     # we synthesize a ``response.created`` snapshot from the terminal event's
     # ``response`` envelope so the SDK parser can complete the stream.
     created_emitted = False
-    # Anonymous pre-created output/lifecycle events cannot be made SDK-safe
-    # until a response envelope arrives. Buffer only to detect a truncated
-    # stream; if an envelope later arrives, drop the buffered anonymous events
-    # rather than attaching stale orphan output to the next response.
+    # Anonymous pre-created events cannot be made SDK-safe until a response
+    # envelope arrives: the public OpenAI SDK requires response.created first.
+    # Buffer them temporarily. Once an envelope arrives, replay only lightweight
+    # visible content events (text/content-part deltas) after the created event;
+    # drop unowned output_item lifecycle events so cancelled-request orphans are
+    # not attached to the later response.
     pre_created_buffer: list[dict[str, JsonValue]] = []
 
     def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
@@ -2621,6 +2623,18 @@ async def _normalize_public_responses_stream(
             ],
             format_sse_event(payload),
         ]
+
+    def buffered_pre_created_payloads_to_replay(response_id: str | None) -> list[str]:
+        try:
+            if _pre_created_buffer_has_indexed_lifecycle(pre_created_buffer):
+                return []
+            return _format_legacy_pre_created_payloads(
+                pre_created_buffer,
+                response_id=response_id,
+                seen_text_delta_keys=seen_text_delta_keys,
+            )
+        finally:
+            pre_created_buffer.clear()
 
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
@@ -2666,14 +2680,18 @@ async def _normalize_public_responses_stream(
             if event_type == "response.created":
                 created_emitted = True
                 yield format_sse_event(normalized_payload)
-                pre_created_buffer.clear()
+                response_id = _response_id_from_event_payload(normalized_payload)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
                 continue
 
             synthetic_created = _synthetic_response_created_envelope(normalized_payload)
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True
-                pre_created_buffer.clear()
+                response_id = _response_id_from_event_payload(synthetic_created)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
             elif _should_buffer_public_pre_created_event(event_type):
                 if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
                     error_kind = contract_violation_kind or "upstream_stream_truncated"
@@ -2718,6 +2736,179 @@ def _should_buffer_public_pre_created_event(event_type: str) -> bool:
         and event_type != "response.created"
         and event_type not in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
     )
+
+
+_REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.refusal.delta",
+        "response.refusal.done",
+    }
+)
+
+
+_INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.content_part.added",
+    }
+)
+
+
+def _pre_created_buffer_has_indexed_lifecycle(payloads: list[dict[str, JsonValue]]) -> bool:
+    for payload in payloads:
+        event_type = payload.get("type")
+        if isinstance(event_type, str) and event_type in _INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES:
+            return True
+        if isinstance(payload.get("output_index"), int) or isinstance(payload.get("item_id"), str):
+            return True
+    return False
+
+
+def _format_legacy_pre_created_payloads(
+    payloads: list[dict[str, JsonValue]],
+    *,
+    response_id: str | None,
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> list[str]:
+    formatted: list[str] = []
+    if not payloads:
+        return formatted
+
+    item_id = _synthetic_pre_created_item_id(response_id)
+    output_index = 0
+    content_index = 0
+    text_item_opened = False
+    text_parts: list[str] = []
+    final_text: str | None = None
+
+    def open_text_item(sequence_number: int) -> None:
+        nonlocal text_item_opened
+        if text_item_opened:
+            return
+        output_item_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_added))
+        content_part_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.content_part.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "content_index": content_index,
+                "item_id": item_id,
+                "part": {"type": "output_text", "text": ""},
+            },
+        )
+        formatted.append(format_sse_event(content_part_added))
+        text_item_opened = True
+
+    sequence_number = 0
+    for payload in payloads:
+        event_type = payload.get("type")
+        if not isinstance(event_type, str) or event_type not in _REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES:
+            continue
+        sequence_number = _payload_sequence_number(payload, sequence_number + 1)
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                continue
+            open_text_item(sequence_number)
+            text_parts.append(delta)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            seen_text_delta_keys.add((item_id, output_index))
+            continue
+        if event_type in {"response.output_text.done", "response.refusal.done"}:
+            text = payload.get("text")
+            if not isinstance(text, str):
+                text = "".join(text_parts)
+            open_text_item(sequence_number)
+            final_text = text
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            continue
+        part = payload.get("part")
+        if is_json_mapping(part) and part.get("type") in _PUBLIC_RESPONSE_TEXT_PART_TYPES:
+            text = part.get("text")
+            if isinstance(text, str):
+                final_text = text
+            open_text_item(sequence_number)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            formatted.append(format_sse_event(normalized))
+        else:
+            # Preserve legacy unindexed non-text content_part.done events for
+            # raw SSE clients. They are not used to assemble SDK output.
+            formatted.append(format_sse_event(payload))
+
+    if text_item_opened:
+        text = final_text if final_text is not None else "".join(text_parts)
+        output_item_done = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence_number + 1,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_done))
+    return formatted
+
+
+def _payload_sequence_number(payload: Mapping[str, JsonValue], fallback: int) -> int:
+    sequence_number = payload.get("sequence_number")
+    return sequence_number if isinstance(sequence_number, int) else fallback
+
+
+def _response_id_from_event_payload(payload: Mapping[str, JsonValue]) -> str | None:
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return None
+    response_id = response.get("id")
+    return response_id if isinstance(response_id, str) and response_id else None
+
+
+def _synthetic_pre_created_item_id(response_id: str | None) -> str:
+    if response_id:
+        return f"msg_{response_id}_precreated"
+    return "msg_precreated"
 
 
 def _normalize_public_stream_payload(

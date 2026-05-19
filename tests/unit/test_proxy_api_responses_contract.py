@@ -514,6 +514,47 @@ async def test_normalize_public_responses_stream_drops_precreated_output_when_en
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_replays_legacy_precreated_text_after_created() -> None:
+    """Legacy unindexed text events can be preserved without violating SDK order.
+
+    These events have no output lifecycle of their own, so the normalizer emits
+    a synthetic message/content-part envelope after response.created before it
+    replays the visible text events.
+    """
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.output_text.delta","delta":"hello "}\n\n',
+                'data: {"type":"response.output_text.done","text":"hello world"}\n\n',
+                ('data: {"type":"response.content_part.done","part":{"type":"output_text","text":"hello world"}}\n\n'),
+                (
+                    'data: {"type":"response.completed","sequence_number":9,'
+                    '"response":{"id":"resp_legacy","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    replayed_delta = payloads[3]
+    assert replayed_delta["output_index"] == 0
+    assert replayed_delta["content_index"] == 0
+    assert replayed_delta["item_id"] == "msg_resp_legacy_precreated"
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_drops_precreated_output_when_no_envelope_arrives() -> None:
     blocks = [
         block

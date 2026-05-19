@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import AsyncMock
 
 import anyio
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
-from app.db.models import AccountStatus
+from app.db.models import AccountStatus, Base
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
 pytestmark = pytest.mark.unit
 
@@ -203,3 +205,65 @@ def test_anonymous_terminal_errors_can_target_visible_retry_when_drain_exists() 
     )
 
     assert matched_request is retry_request
+
+
+@pytest.mark.asyncio
+async def test_response_created_does_not_promote_in_progress_durable_anchor() -> None:
+    """Undo/edit safety: an in-progress response must not become the auto-continuation anchor.
+
+    If turn D has only reached response.created when the client interrupts/edits,
+    a later short E request on the same logical thread must not be auto-anchored
+    to D. Only a completed response is safe as the durable latest_response_id.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    coordinator = DurableBridgeSessionCoordinator(cast(Callable[[], AsyncSession], session_factory))
+
+    instance_id = proxy_service.get_settings().http_responses_session_bridge_instance_id
+    lookup = await coordinator.claim_live_session(
+        session_key_kind="turn_state_header",
+        session_key_value="thread-undo-edit",
+        api_key_id=None,
+        instance_id=instance_id,
+        lease_ttl_seconds=60.0,
+        account_id="acc-undo-edit",
+        model="gpt-5.5",
+        service_tier=None,
+        latest_turn_state="thread-undo-edit",
+        latest_response_id="resp_B_completed",
+        allow_takeover=True,
+    )
+
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service._durable_bridge = coordinator  # noqa: SLF001
+    request_state = _make_request_state(
+        "req-D-in-progress",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+    session.key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "thread-undo-edit", None)
+    session.headers = {"x-codex-turn-state": "thread-undo-edit"}
+    session.durable_session_id = lookup.session_id
+    session.durable_owner_epoch = lookup.owner_epoch
+
+    await service._process_http_bridge_upstream_text(  # noqa: SLF001
+        session,
+        '{"type":"response.created","response":{"id":"resp_D_in_progress","object":"response","status":"in_progress"}}',
+    )
+
+    refreshed = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="thread-undo-edit",
+        api_key_id=None,
+        turn_state="thread-undo-edit",
+        session_header=None,
+        previous_response_id=None,
+    )
+
+    assert refreshed is not None
+    assert refreshed.latest_response_id == "resp_B_completed"
+    await engine.dispose()

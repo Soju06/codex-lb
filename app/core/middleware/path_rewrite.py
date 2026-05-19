@@ -11,16 +11,20 @@ because the OpenAI-style endpoints are mounted at the top-level
 
 This middleware collapses the duplicated ``/v1`` segment in-place by
 mutating ``scope["path"]`` (and ``scope["raw_path"]``) before routing,
-so the canonical handler picks the request up unchanged. See
+so the canonical handler picks the request up unchanged. Implemented as
+a pure ASGI middleware so the rewrite covers both HTTP and WebSocket
+scopes -- ``app/modules/proxy/api.py`` exposes websocket endpoints under
+``/backend-api/codex`` (and ``/v1``), so a client that appends ``/v1``
+to its ``/backend-api/codex`` base URL needs the alias for handshakes
+just as much as it does for HTTP requests. See
 ``openspec/changes/strip-codex-v1-prefix/`` for the spec delta.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from typing import Any
 
-from fastapi import FastAPI, Request
-from starlette.responses import Response
+from fastapi import FastAPI
 
 # The middleware is intentionally scoped to the duplicated Codex prefix
 # only. The top-level ``/v1/`` namespace is the canonical OpenAI-style
@@ -52,27 +56,39 @@ def _canonicalize_raw_path(raw_path: bytes) -> bytes:
     return _CODEX_CANONICAL_PREFIX_BYTES + raw_path[len(_CODEX_V1_PREFIX_BYTES) :]
 
 
-def add_backend_api_codex_v1_alias_middleware(app: FastAPI) -> None:
-    """Register a path-rewrite middleware for the duplicated prefix.
+class BackendApiCodexV1AliasMiddleware:
+    """ASGI middleware that canonicalises the duplicated Codex prefix.
 
-    Implemented as a standard FastAPI HTTP middleware so it runs before
-    Starlette's router matches a route. Both ``scope["path"]`` and
-    ``scope["raw_path"]`` are kept in sync so downstream middleware that
-    re-derive the request URL from either field see the canonical form.
+    Runs before Starlette's router matches a route. Both ``scope["path"]``
+    and ``scope["raw_path"]`` are kept in sync so downstream middleware
+    that re-derive the request URL from either field see the canonical
+    form.
+
+    Handles both ``http`` and ``websocket`` scopes -- HTTP-only middleware
+    misses websocket handshakes, which is the bug Codex flagged on #610.
+    Lifespan and other scope types pass through untouched.
     """
 
-    @app.middleware("http")
-    async def alias_middleware(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        scope = request.scope
-        path = scope.get("path")
-        if isinstance(path, str) and path.startswith(_CODEX_V1_PREFIX):
-            rewritten = _canonicalize_backend_api_codex_path(path)
-            if rewritten != path:
-                scope["path"] = rewritten
-                raw_path = scope.get("raw_path")
-                if isinstance(raw_path, bytes):
-                    scope["raw_path"] = _canonicalize_raw_path(raw_path)
-        return await call_next(request)
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") in ("http", "websocket"):
+            path = scope.get("path")
+            if isinstance(path, str) and path.startswith(_CODEX_V1_PREFIX):
+                rewritten = _canonicalize_backend_api_codex_path(path)
+                if rewritten != path:
+                    # Copy the scope so we don't mutate the caller's dict;
+                    # ASGI servers may reuse scope instances across calls.
+                    scope = dict(scope)
+                    scope["path"] = rewritten
+                    raw_path = scope.get("raw_path")
+                    if isinstance(raw_path, bytes):
+                        scope["raw_path"] = _canonicalize_raw_path(raw_path)
+        await self.app(scope, receive, send)
+
+
+def add_backend_api_codex_v1_alias_middleware(app: FastAPI) -> None:
+    """Register the path-rewrite ASGI middleware for the duplicated prefix."""
+
+    app.add_middleware(BackendApiCodexV1AliasMiddleware)

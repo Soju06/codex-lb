@@ -1,0 +1,45 @@
+title: "Q: <one-line question>"
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for usage and how-to questions. For bug reports and
+        feature proposals, please file an [Issue](https://github.com/Soju06/codex-lb/issues/new/choose) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: codex-lb version
+      placeholder: "1.17.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - uvx
+        - pip
+        - Docker
+        - Docker Compose
+        - Helm chart
+        - From source
+        - Not yet deployed — pre-install question
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: |
+        Describe what you're trying to do and what's blocking you. Include any
+        commands you've already tried and the output you got.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Config snippets (redact secrets), logs, screenshots.

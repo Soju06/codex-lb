@@ -1,13 +1,65 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict
 
 type JsonPayload = Mapping[str, JsonValue] | ResponseFailedEvent
+
+SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
+
+
+async def inject_sse_keepalives(
+    source: AsyncIterator[str],
+    interval_seconds: float,
+) -> AsyncIterator[str]:
+    """Wrap an SSE event iterator and emit comment heartbeats on idle gaps.
+
+    Comment frames (lines starting with ``:``) are mandated by the SSE spec to
+    be ignored by parsers, so they are safe to inject between event blocks.
+    They keep the TCP path warm so half-open sockets surface as write errors
+    instead of hanging forever, and let aggressive intermediaries see traffic.
+
+    A non-positive ``interval_seconds`` disables injection entirely.
+    """
+    if interval_seconds <= 0:
+        async for chunk in source:
+            yield chunk
+        return
+
+    async def _next_chunk(it: AsyncIterator[str]) -> str:
+        return await it.__anext__()
+
+    iterator = source.__aiter__()
+    pending: asyncio.Task[str] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(_next_chunk(iterator))
+            try:
+                chunk = await asyncio.wait_for(
+                    asyncio.shield(pending),
+                    timeout=interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                yield SSE_KEEPALIVE_FRAME
+                continue
+            except StopAsyncIteration:
+                pending = None
+                break
+            pending = None
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except BaseException:
+                pass
 
 
 def format_sse_event(payload: JsonPayload) -> str:

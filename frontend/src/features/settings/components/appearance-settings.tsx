@@ -1,5 +1,6 @@
 import { Monitor, Moon, Palette, Sun } from "lucide-react";
 
+import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
 import { cn } from "@/lib/utils";
@@ -15,11 +16,19 @@ const TIME_FORMAT_OPTIONS: { value: TimeFormatPreference; label: string }[] = [
   { value: "24h", label: "24h" },
 ];
 
+const QUOTA_DISPLAY_OPTIONS: { value: AccountQuotaDisplayPreference; label: string; description: string }[] = [
+  { value: "5h", label: "5H", description: "Show only the 5h quota row when available." },
+  { value: "weekly", label: "W", description: "Show only the weekly quota row." },
+  { value: "both", label: "Both", description: "Show both quota rows." },
+];
+
 export function AppearanceSettings() {
   const preference = useThemeStore((s) => s.preference);
   const setTheme = useThemeStore((s) => s.setTheme);
   const timeFormat = useTimeFormatStore((s) => s.timeFormat);
   const setTimeFormat = useTimeFormatStore((s) => s.setTimeFormat);
+  const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
+  const setQuotaDisplay = useAccountQuotaDisplayStore((s) => s.setQuotaDisplay);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -78,6 +87,32 @@ export function AppearanceSettings() {
                   className={cn(
                     "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
                     timeFormat === value
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <span className="block">{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Account rows</p>
+              <p className="text-xs text-muted-foreground">Choose which quota rows appear in compact account views.</p>
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
+              {QUOTA_DISPLAY_OPTIONS.map(({ value, label, description }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={quotaDisplay === value}
+                  title={description}
+                  onClick={() => setQuotaDisplay(value)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
+                    quotaDisplay === value
                       ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
                       : "text-muted-foreground hover:text-foreground",
                   )}

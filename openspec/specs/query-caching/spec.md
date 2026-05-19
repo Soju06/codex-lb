@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define query caching and quota-key normalization contracts so selection and dashboard reads remain fast and consistent.
 
 ## Requirements
 

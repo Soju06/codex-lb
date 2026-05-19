@@ -88,12 +88,14 @@ def build_dashboard_overview_summary(
             currency=activity_cost.currency,
             totalUsd=activity_cost.total_usd,
         ),
-        metrics=DashboardUsageMetrics(
-            requests=activity_metrics.requests,
-            tokens=activity_metrics.tokens,
-            cached_input_tokens=activity_metrics.cached_input_tokens,
-            error_rate=activity_metrics.error_rate,
-            error_count=activity_metrics.error_count,
-            top_error=activity_metrics.top_error,
+        metrics=DashboardUsageMetrics.model_validate(
+            {
+                "requests": activity_metrics.requests,
+                "tokens": activity_metrics.tokens,
+                "cached_input_tokens": activity_metrics.cached_input_tokens,
+                "error_rate": activity_metrics.error_rate,
+                "error_count": activity_metrics.error_count,
+                "top_error": activity_metrics.top_error,
+            }
         ),
     )

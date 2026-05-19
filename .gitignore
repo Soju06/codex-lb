@@ -54,3 +54,5 @@ certs/
 .venv
 
 .omx/
+PROMPT.md
+SUMMARY.md

@@ -218,6 +218,21 @@ describe("UsageWindowSchema", () => {
 });
 
 describe("AccountSummarySchema light contract", () => {
+  it("keeps weekly credit budget fields for dashboard pace math", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      capacityCreditsSecondary: 2000,
+      remainingCreditsSecondary: 900,
+    });
+
+    expect(parsed.capacityCreditsSecondary).toBe(2000);
+    expect(parsed.remainingCreditsSecondary).toBe(900);
+  });
+
   it("does not expose removed legacy fields", () => {
     const parsed = AccountSummarySchema.parse({
       accountId: "acc-1",

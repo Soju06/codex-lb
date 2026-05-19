@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
@@ -158,6 +159,34 @@ async def test_create_file_transport_failure_yields_502() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_file_leases_shared_session_when_session_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
+    response_body = json.dumps({"file_id": "file_abc", "upload_url": "https://blob.example/sas"})
+    session = _FakeSession([_FakeResponse(status=200, body=response_body)])
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+        assert session_arg is None
+        events.append("enter")
+        try:
+            yield session
+        finally:
+            events.append(f"exit:{len(session.calls)}")
+
+    monkeypatch.setattr(files_module, "lease_http_session", _lease_session)
+
+    result = await create_file(
+        payload={"file_name": "page.pdf", "file_size": 1024, "use_case": OPENAI_FILE_USE_CASE},
+        headers={},
+        access_token="upstream-token",
+        account_id="acc_1",
+    )
+
+    assert result["file_id"] == "file_abc"
+    assert events == ["enter", "exit:1"]
+
+
+@pytest.mark.asyncio
 async def test_finalize_file_returns_immediately_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
     body = json.dumps(
         {
@@ -223,6 +252,45 @@ async def test_finalize_file_retries_then_succeeds(monkeypatch: pytest.MonkeyPat
     # Two ``retry`` responses -> two inter-poll sleeps before the final
     # success response. Both must be the 250 ms cadence.
     assert sleeps == [files_module._FILE_FINALIZE_POLL_DELAY_SECONDS] * 2
+
+
+@pytest.mark.asyncio
+async def test_finalize_file_holds_shared_session_lease_across_poll_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    retry_body = json.dumps({"status": "retry"})
+    success_body = json.dumps({"status": "success", "download_url": "https://download.example/f"})
+    session = _FakeSession(
+        [
+            _FakeResponse(status=200, body=retry_body),
+            _FakeResponse(status=200, body=success_body),
+        ]
+    )
+    events: list[str] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        return None
+
+    @asynccontextmanager
+    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+        assert session_arg is None
+        events.append("enter")
+        try:
+            yield session
+        finally:
+            events.append(f"exit:{len(session.calls)}")
+
+    monkeypatch.setattr(files_module.asyncio, "sleep", _record_sleep)
+    monkeypatch.setattr(files_module, "lease_http_session", _lease_session)
+
+    result = await finalize_file(
+        file_id="f",
+        headers={},
+        access_token="t",
+        account_id=None,
+    )
+
+    assert result["status"] == "success"
+    assert len(session.calls) == 2
+    assert events == ["enter", "exit:2"]
 
 
 @pytest.mark.asyncio

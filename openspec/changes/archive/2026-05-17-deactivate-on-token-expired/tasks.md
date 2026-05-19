@@ -1,0 +1,4 @@
+- [x] Add `token_expired` to `PERMANENT_FAILURE_CODES` in `app/core/balancer/logic.py` with a re-login-required message, so `classify_refresh_error("token_expired")` returns `True` and both the auth-manager refresh path and the usage-refresh deactivation path treat it as permanent.
+- [x] Add a unit regression in `tests/unit/test_auth_refresh.py` pinning `classify_refresh_error("token_expired") is True`.
+- [x] Add a unit regression in `tests/unit/test_auth_manager.py` driving `AuthManager.refresh_account` against a stubbed `refresh_access_token` raising `RefreshError("token_expired", ..., is_permanent=True)` and asserting the account transitions to `DEACTIVATED` with a re-login-required reason.
+- [x] Document the new behavior under the `usage-refresh-policy` capability spec.

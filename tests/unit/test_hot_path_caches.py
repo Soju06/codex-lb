@@ -226,13 +226,19 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
 
 
 # ---------------------------------------------------------------------------
-# Task 1 RED: API key cache invalidation (xfail — bug not yet fixed)
+# API key cache invalidation regression coverage
+#
+# Earlier revisions of `ApiKeysService` mutated the api_keys table without
+# evicting the in-memory `ApiKeyCache`, so deleted / regenerated /
+# deactivated keys kept authorising requests until the cache TTL elapsed.
+# `app/modules/api_keys/service.py:433-449,464-467` now invalidates the
+# cache on those write paths; the tests below pin that contract.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_deleted_key_rejected_immediately() -> None:
-    """BUG: ApiKeyCache is never invalidated when a key is deleted."""
+    """ApiKeyCache must be evicted when a key is deleted."""
     plain_key = "sk-clb-test-del-0001"
     key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
     now = datetime.now(UTC)
@@ -265,14 +271,15 @@ async def test_deleted_key_rejected_immediately() -> None:
     service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _DeleteOnlyRepo()))
     await service.delete_key("key-del-1")
 
-    # BUG: after deletion the cache should be empty, but it still holds stale data
+    # After deletion the cache must be empty so the next auth lookup falls
+    # through to the (now-missing) DB row instead of returning stale data.
     cached = await cache.get(key_hash)
-    assert cached is None  # xfail: cache still returns the deleted key's data
+    assert cached is None
 
 
 @pytest.mark.asyncio
 async def test_regenerated_key_old_token_rejected_immediately() -> None:
-    """BUG: Old key hash stays in cache after regeneration — old token remains valid."""
+    """Old key hash must be evicted from the cache when a key is regenerated."""
     plain_key = "sk-clb-test-regen-001"
     old_key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
     now = datetime.now(UTC)
@@ -336,14 +343,14 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
     service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _RegenRepo()))
     await service.regenerate_key("key-regen-1")
 
-    # BUG: old token should be evicted from cache but it still authorises requests
+    # The old token must no longer authorise requests after regeneration.
     cached = await cache.get(old_key_hash)
-    assert cached is None  # xfail: old hash still in cache
+    assert cached is None
 
 
 @pytest.mark.asyncio
 async def test_deactivated_key_rejected_immediately() -> None:
-    """BUG: Deactivated key (is_active=False) stays in cache — still grants access."""
+    """Deactivated key (is_active=False) must be evicted from the cache so the next request is rejected."""
     plain_key = "sk-clb-test-deact-01"
     key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
     now = datetime.now(UTC)
@@ -397,19 +404,27 @@ async def test_deactivated_key_rejected_immediately() -> None:
     service = ApiKeysService(cast(ApiKeysRepositoryProtocol, _UpdateOnlyRepo()))
     await service.update_key("key-deact-1", ApiKeyUpdateData(is_active=False, is_active_set=True))
 
-    # BUG: deactivated key should be evicted from cache but it still returns stale active data
+    # Deactivated key must be evicted; otherwise stale `is_active=True`
+    # data would keep authorising requests.
     cached = await cache.get(key_hash)
-    assert cached is None  # xfail: cache still returns the deactivated key's data
+    assert cached is None
 
 
 # ---------------------------------------------------------------------------
-# Task 3 RED: selection cache poisoning (xfail — bug not yet fixed)
+# Selection cache keying regression coverage
+#
+# `AccountSelectionCache` previously used a single slot, so a query for
+# (model=None) would mask a follow-up (model="gpt-4-no-filter") and a
+# query for (limit_name=None) would mask (limit_name="pro_tier"). The
+# cache is now keyed on the full (model, additional_limit_name) tuple
+# (`app/modules/proxy/account_cache.py:39-66`); the tests below pin
+# that contract.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_different_models_get_different_cache_entries() -> None:
-    """BUG: First model query caches its result; second model query gets wrong cached data."""
+    """First model query must not satisfy a second query for a different model."""
     from app.modules.proxy.account_cache import AccountSelectionCache
 
     cache = AccountSelectionCache(ttl_seconds=5)
@@ -450,10 +465,10 @@ async def test_different_models_get_different_cache_entries() -> None:
     await balancer._load_selection_inputs(model=None)
     assert accounts_repo.calls == 1
 
-    # Second call for a different model — should load from DB again (different cache key)
-    # BUG: it hits the single-slot cache and skips DB load
+    # Second call for a different model must load from DB again because the
+    # selection cache is keyed on (model, additional_limit_name).
     await balancer._load_selection_inputs(model="gpt-4-no-filter")
-    assert accounts_repo.calls == 2  # xfail: still 1 because cache poisoned this call
+    assert accounts_repo.calls == 2
 
 
 @pytest.mark.asyncio
@@ -503,7 +518,7 @@ async def test_same_model_reuses_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_different_limit_names_get_different_cache_entries() -> None:
-    """BUG: Queries with different additional_limit_name share the same cache slot."""
+    """Queries with different additional_limit_name must each get their own cache slot."""
     from app.modules.proxy.account_cache import AccountSelectionCache
 
     cache = AccountSelectionCache(ttl_seconds=5)
@@ -544,10 +559,10 @@ async def test_different_limit_names_get_different_cache_entries() -> None:
     await balancer._load_selection_inputs(model=None, additional_limit_name=None)
     assert accounts_repo.calls == 1
 
-    # Second call with different additional_limit_name — should re-load from DB
-    # BUG: same single slot used → DB never re-queried
+    # Second call with a different additional_limit_name must re-load from
+    # DB; the cache is keyed on (model, additional_limit_name).
     await balancer._load_selection_inputs(model=None, additional_limit_name="pro_tier")
-    assert accounts_repo.calls == 2  # xfail: still 1 because of cache poisoning
+    assert accounts_repo.calls == 2
 
 
 @pytest.mark.asyncio

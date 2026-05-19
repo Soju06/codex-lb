@@ -118,6 +118,7 @@ async def create_api_key(
                 enforced_reasoning_effort=payload.enforced_reasoning_effort,
                 enforced_service_tier=payload.enforced_service_tier,
                 expires_at=payload.expires_at,
+                assigned_account_ids=payload.assigned_account_ids,
                 limits=limit_inputs,
             )
         )

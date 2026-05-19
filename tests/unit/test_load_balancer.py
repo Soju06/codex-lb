@@ -246,6 +246,62 @@ def test_select_account_reports_cooldown_wait_time():
     assert "Try again in" in result.error_message
 
 
+def test_select_account_caps_quota_exceeded_retry_hint():
+    now = 1_700_000_000.0
+    far_future_reset = int(now + 89_872)
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=far_future_reset,
+        ),
+        AccountState(
+            "b",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 271_819),
+        ),
+    ]
+    result = select_account(states, now=now)
+    assert result.account is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+    # The underlying state values are intentionally not clamped — only the
+    # surfaced hint is.
+    assert states[0].reset_at == far_future_reset
+
+
+def test_select_account_preserves_short_quota_exceeded_retry_hint():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 60),
+        ),
+    ]
+    result = select_account(states, now=now)
+    assert result.account is None
+    assert result.error_message == "Rate limit exceeded. Try again in 60s"
+
+
+def test_select_account_caps_cooldown_retry_hint():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.ACTIVE,
+            used_percent=5.0,
+            cooldown_until=now + 86_400,
+        ),
+    ]
+    result = select_account(states, now=now)
+    assert result.account is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+    assert states[0].cooldown_until == now + 86_400
+
+
 def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)

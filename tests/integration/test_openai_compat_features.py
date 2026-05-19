@@ -507,6 +507,168 @@ async def test_v1_chat_completions_rejects_strict_schema_violation(async_client)
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_rejects_strict_function_tool_violation(async_client):
+    """Strict-mode violations on function tool parameters are rejected with 400.
+
+    Before this fix, ``_normalize_chat_tools`` dropped the ``strict`` flag
+    silently, so the request reached the upstream Codex backend with a
+    spec-violating schema and surfaced as a 502 ``upstream_rejected_input``.
+    Real OpenAI returns 400 ``invalid_function_parameters`` for the same
+    payload; codex-lb now does too.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        # No additionalProperties: false → strict-mode violation.
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].function.parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_strict_violation_param_uses_original_index(async_client):
+    """Regression: when ``_normalize_chat_tools`` drops earlier entries,
+    the strict-validator's ``param`` must still point at the *inbound*
+    index so clients can map the error back to their payload.
+
+    Index 0 is an invalid function tool (no ``name``) — the normalizer
+    will drop it. Index 1 is the real strict violation. The error
+    envelope must surface ``tools[1].function.parameters``, not
+    ``tools[0].function.parameters``.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            # Index 0: dropped by ``_normalize_chat_tools`` (missing name).
+            {
+                "type": "function",
+                "function": {
+                    "description": "no name → dropped",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            # Index 1: strict violation (missing additionalProperties).
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": True,
+                },
+            },
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[1].function.parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_strict_violation_when_type_omitted_in_chat_tool(async_client):
+    """Regression for the second codex review pass on PR #658.
+
+    ``_normalize_chat_tools`` coerces a tool with ``"function": {...}``
+    into a function tool even when the top-level ``"type"`` is omitted
+    (``"type": tool_type or "function"`` at chat_requests.py:198). The
+    strict pre-validator must mirror that detection rule — anchoring on
+    the presence of the ``function`` wrapper dict, not on a strict
+    ``type == "function"`` check — otherwise type-omitted strict
+    violations bypass the local 400 and surface as upstream 5xx.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                # No top-level ``"type"`` — the chat normalizer still
+                # treats this as a function tool.
+                "function": {
+                    "name": "get_weather",
+                    "description": "x",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        # No additionalProperties → strict violation.
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].function.parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_rejects_strict_function_tool_violation(async_client):
+    """Same as the chat-completions case, but on the native /v1/responses endpoint.
+
+    The param shape differs: native responses callers see
+    ``tools[<i>].parameters`` rather than ``tools[<i>].function.parameters``.
+    """
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "strict": True,
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_rejects_missing_json_schema(async_client):
     payload = {
         "model": "gpt-5.2",

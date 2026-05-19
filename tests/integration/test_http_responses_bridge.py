@@ -8655,7 +8655,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
+async def test_v1_responses_http_bridge_stream_cancel_retires_session(
     async_client,
     app_instance,
     monkeypatch,
@@ -8757,8 +8757,11 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
     async with service._http_bridge_lock:
         session = service._http_bridge_sessions[session_key]
     async with session.pending_lock:
-        assert list(session.pending_requests) == []
+        assert not session.pending_requests
         assert session.queued_request_count == 0
+    assert session.closed is True
+    assert session.upstream_control.retire_after_drain is True
+    assert fake_upstream.closed is True
 
 
 @pytest.mark.asyncio

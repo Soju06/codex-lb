@@ -1,0 +1,5 @@
+- [x] Mark model fetch timeouts/transport failures as `ModelFetchError(..., transport_error=True)` without changing HTTP-status error handling.
+- [x] Mark token-refresh `aiohttp`/timeout/OS transport failures as non-permanent `RefreshError(..., transport_error=True)`.
+- [x] Rotate the shared HTTP client once per model-refresh failover cycle after a transport failure and retry the failed token-refresh/model-fetch operation.
+- [x] Replace direct default shared-session/retry-client use with lease helpers for model fetch, token refresh, OAuth flows, proxy streaming/compact/transcription, usage fetch, and file create/finalize calls.
+- [x] Add regression coverage for lease drain/forced shutdown, model-fetch transport retry, token-refresh transport retry, and file create/finalize lease coverage.

@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Protocol, cast
 
+from app.core import startup as startup_module
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, missing_durable_bridge_tables
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
 
@@ -66,6 +68,7 @@ class StickySessionCleanupScheduler:
             try:
                 async with get_background_session() as session:
                     settings_repo = SettingsRepository(session)
+                    bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)
                     settings = await settings_repo.get_or_create()
 
@@ -73,6 +76,10 @@ class StickySessionCleanupScheduler:
                     deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                     if deleted_count > 0:
                         logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
+                    if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
+                        bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
+                        if bridge_deleted_count > 0:
+                            logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
             except Exception:
                 logger.exception("Sticky session cleanup loop failed")
 

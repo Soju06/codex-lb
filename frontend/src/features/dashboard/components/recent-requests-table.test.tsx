@@ -17,6 +17,12 @@ vi.mock("sonner", () => ({
   },
 }));
 
+vi.mock("@/features/conversation-archive/components/request-archive-panel", () => ({
+  RequestArchivePanel: ({ requestId }: { requestId: string }) => (
+    <div data-testid="request-archive-panel">Archive for {requestId}</div>
+  ),
+}));
+
 const PAGINATION_PROPS = {
   total: 1,
   limit: 25,
@@ -95,6 +101,7 @@ describe("RecentRequestsTable", () => {
     expect(dialog).toBeInTheDocument();
     expect(screen.getByText("Request Details")).toBeInTheDocument();
     expect(screen.getByText("req-1")).toBeInTheDocument();
+    expect(screen.getByTestId("request-archive-panel")).toHaveTextContent("Archive for req-1");
     expect(screen.getAllByText("rate_limit_exceeded")[0]).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
 

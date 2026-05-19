@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -23,6 +24,7 @@ class _FakeSettings:
     database_background_pool_size: int | None = None
     database_background_max_overflow: int | None = None
     database_pool_timeout_seconds: float = 30.0
+    database_pool_recycle_seconds: int = 1800
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = False
     database_sqlite_pre_migrate_backup_max_files: int = 5
@@ -85,6 +87,63 @@ def test_import_session_with_postgres_url_does_not_error() -> None:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+@pytest.mark.asyncio
+async def test_sqlite_writer_section_serializes_file_sqlite_writers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'store.db'}"),
+    )
+    monkeypatch.setattr(session_module, "_sqlite_writer_lock", None)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    order: list[str] = []
+
+    async def first_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            order.append("first-start")
+            first_entered.set()
+            await release_first.wait()
+            order.append("first-end")
+
+    async def second_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            order.append("second-start")
+            order.append("second-end")
+
+    first_task = asyncio.create_task(first_writer())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second_writer())
+    await asyncio.sleep(0)
+
+    assert order == ["first-start"]
+
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert order == ["first-start", "first-end", "second-start", "second-end"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_writer_section_does_not_serialize_memory_sqlite(monkeypatch) -> None:
+    monkeypatch.setattr(session_module, "_settings", _FakeSettings(database_url="sqlite+aiosqlite:///:memory:"))
+    monkeypatch.setattr(session_module, "_sqlite_writer_lock", None)
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_writer() -> None:
+        async with session_module.sqlite_writer_section():
+            first_entered.set()
+            await second_entered.wait()
+
+    async def second_writer() -> None:
+        await first_entered.wait()
+        async with session_module.sqlite_writer_section():
+            second_entered.set()
+
+    await asyncio.wait_for(asyncio.gather(first_writer(), second_writer()), timeout=1)
+
+
 def test_background_pool_defaults_to_main_pool_settings(monkeypatch) -> None:
     monkeypatch.setattr(
         session_module,
@@ -117,6 +176,72 @@ def test_background_pool_settings_can_override_main_pool(monkeypatch) -> None:
     assert session_module._database_max_overflow(background=True) == 1
     assert session_module._database_pool_size(background=False) == 15
     assert session_module._database_max_overflow(background=False) == 10
+
+
+def test_postgres_engine_kwargs_enable_pre_ping_and_recycle(monkeypatch) -> None:
+    """Regression for #672: PostgreSQL engines MUST validate pooled connections
+    on checkout (``pool_pre_ping``) and recycle them within the configured
+    window (``pool_recycle``). Without these the pool serves stale connections
+    after the server idles them out, causing
+    ``asyncpg.InterfaceError: connection is closed`` on the first real query.
+    """
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "")
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="postgresql+asyncpg://u:p@h/db",
+            database_pool_size=15,
+            database_max_overflow=10,
+            database_pool_timeout_seconds=30.0,
+            database_pool_recycle_seconds=1800,
+        ),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["pool_pre_ping"] is True
+    assert kwargs["pool_recycle"] == 1800
+    assert kwargs["pool_size"] == 15
+    assert kwargs["max_overflow"] == 10
+    assert kwargs["pool_timeout"] == 30.0
+
+    background_kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=True)
+    assert background_kwargs["pool_pre_ping"] is True
+    assert background_kwargs["pool_recycle"] == 1800
+
+
+def test_postgres_engine_kwargs_honor_custom_recycle(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="postgresql+asyncpg://u:p@h/db",
+            database_pool_recycle_seconds=600,
+        ),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["pool_recycle"] == 600
+
+
+def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> None:
+    """The CODEX_LB_TEST_DATABASE_URL escape hatch keeps NullPool semantics —
+    pool_pre_ping/recycle are irrelevant when each session opens a fresh
+    connection.
+    """
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "1")
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url="postgresql+asyncpg://u:p@h/db"),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+    assert kwargs["poolclass"] is NullPool
+    assert "pool_pre_ping" not in kwargs
+    assert "pool_recycle" not in kwargs
 
 
 @pytest.mark.asyncio

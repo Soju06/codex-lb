@@ -1,0 +1,150 @@
+name: 🐛 Bug Report
+description: Report a reproducible bug, crash, or unexpected behavior in codex-lb.
+title: "bug: <one-line summary of what's broken>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! 🙏
+
+        Before you continue:
+        - Search [open & closed issues](https://github.com/Soju06/codex-lb/issues?q=is%3Aissue) — your problem may already be known.
+        - For "how do I…?" questions, please use [Discussions](https://github.com/Soju06/codex-lb/discussions) instead.
+        - For security vulnerabilities, use a [private advisory](https://github.com/Soju06/codex-lb/security/advisories/new) — **do not** post them here.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      description: Confirm each item before submitting.
+      options:
+        - label: I searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: I am running a supported codex-lb version (see Releases).
+          required: true
+        - label: I can reproduce the problem with the steps below.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: codex-lb version
+      description: Output of `codex-lb --version` or the image tag you deployed.
+      placeholder: "1.17.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      multiple: false
+      options:
+        - uvx (codex-lb)
+        - pip install codex-lb
+        - Docker (ghcr.io/Soju06/codex-lb)
+        - Docker Compose
+        - Helm chart (oci://ghcr.io/soju06/charts/codex-lb)
+        - From source
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client used against codex-lb
+      multiple: true
+      description: Select every client that triggers the bug.
+      options:
+        - Codex CLI
+        - Codex app (desktop / web)
+        - ОpenCode
+        - Direct HTTP (curl / SDK)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: account_plan
+    attributes:
+      label: ChatGPT account plan(s) involved
+      multiple: true
+      description: Plan type of the upstream account(s) in the affected pool.
+      options:
+        - Free
+        - Plus
+        - Pro
+        - Team
+        - Business
+        - Enterprise
+        - Edu
+        - API-key only (no ChatGPT account)
+        - Mixed pool
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model(s) involved
+      description: Exact model string(s) from the request that fails.
+      placeholder: "gpt-5-codex, gpt-5.3-codex-spark"
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior. Include error messages verbatim.
+      placeholder: |
+        e.g. "Streaming response from /v1/responses returns empty body for ~10s
+        then closes with status 200 but no `response.output_text.delta` events."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal reproduction — config, request payload, command sequence.
+      placeholder: |
+        1. Start codex-lb with `docker compose up -d` (compose snippet below).
+        2. Configure Codex CLI to point at http://localhost:<port>.
+        3. Run `codex … <prompt>`.
+        4. Observe …
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste the **codex-lb server logs** spanning the failing request. Redact API
+        keys, tokens, and any account identifiers before pasting.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration / environment
+      description: |
+        Anonymized excerpt of your deployment config — env vars, compose file, helm
+        values, or `config.yaml`. Strip secrets.
+      render: yaml
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots of the dashboard, network captures, related issues, etc.

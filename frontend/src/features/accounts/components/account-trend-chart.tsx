@@ -3,6 +3,7 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -18,25 +19,29 @@ type MergedPoint = {
   t: string;
   primary: number;
   secondary: number;
+  secondaryScheduled?: number;
 };
 
 function mergePoints(
   primary: UsageTrendPoint[],
   secondary: UsageTrendPoint[],
+  secondaryScheduled: UsageTrendPoint[],
 ): MergedPoint[] {
   const secondaryMap = new Map(secondary.map((p) => [p.t, p.v]));
   const primaryMap = new Map(primary.map((p) => [p.t, p.v]));
-  
-  if (primary.length === 0 && secondary.length === 0) {
+  const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [p.t, p.v]));
+
+  if (primary.length === 0 && secondary.length === 0 && secondaryScheduled.length === 0) {
     return [];
   }
-  
-  const basePoints = primary.length > 0 ? primary : secondary;
-  
+
+  const basePoints = primary.length > 0 ? primary : secondary.length > 0 ? secondary : secondaryScheduled;
+
   return basePoints.map((p) => ({
     t: p.t,
     primary: primaryMap.get(p.t) ?? 0,
     secondary: secondaryMap.get(p.t) ?? 0,
+    secondaryScheduled: secondaryScheduledMap.get(p.t),
   }));
 }
 
@@ -48,6 +53,7 @@ function formatXTick(isoStr: string): string {
 const SERIES_META: Record<string, { label: string }> = {
   primary: { label: "Primary" },
   secondary: { label: "Secondary" },
+  secondaryScheduled: { label: "Weekly plan" },
 };
 
 type ChartTooltipPayloadEntry = {
@@ -90,14 +96,22 @@ const CHART_MARGIN = { top: 4, right: 8, bottom: 0, left: 0 } as const;
 export type AccountTrendChartProps = {
   primary: UsageTrendPoint[];
   secondary: UsageTrendPoint[];
+  secondaryScheduled?: UsageTrendPoint[];
 };
 
-export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps) {
+export function AccountTrendChart({
+  primary,
+  secondary,
+  secondaryScheduled = [],
+}: AccountTrendChartProps) {
   const chartColors = useChartColors();
   const reducedMotion = useReducedMotion();
   const c1 = chartColors[0];
   const c2 = chartColors[1];
-  const data = useMemo(() => mergePoints(primary, secondary), [primary, secondary]);
+  const data = useMemo(
+    () => mergePoints(primary, secondary, secondaryScheduled),
+    [primary, secondary, secondaryScheduled],
+  );
 
   if (data.length === 0) {
     return (
@@ -168,6 +182,21 @@ export function AccountTrendChart({ primary, secondary }: AccountTrendChartProps
             isAnimationActive={!reducedMotion}
             animationDuration={500}
             animationBegin={100}
+          />
+        )}
+        {secondaryScheduled.length > 0 && (
+          <Line
+            type="linear"
+            dataKey="secondaryScheduled"
+            stroke={c2}
+            strokeWidth={1.25}
+            strokeDasharray="5 5"
+            dot={false}
+            activeDot={{ r: 3, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
+            connectNulls={false}
+            isAnimationActive={!reducedMotion}
+            animationDuration={500}
+            animationBegin={150}
           />
         )}
       </AreaChart>

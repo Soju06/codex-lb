@@ -96,6 +96,7 @@ class HTTPBridgeOwnerClient:
                         response.status,
                         _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
                     )
+                yielded_event = False
                 try:
                     async for event_block in _iter_sse_event_blocks(
                         response,
@@ -103,6 +104,7 @@ class HTTPBridgeOwnerClient:
                         proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
+                        yielded_event = True
                         yield event_block
                 except _OwnerForwardStreamTimeoutError as exc:
                     raise OwnerForwardRelayFailure(
@@ -112,6 +114,14 @@ class HTTPBridgeOwnerClient:
                                 exc.error_message,
                                 response_id=get_request_id(),
                             )
+                        )
+                    )
+                if not yielded_event:
+                    yield format_sse_event(
+                        response_failed_event(
+                            "stream_incomplete",
+                            "Upstream websocket closed before response.completed",
+                            response_id=get_request_id(),
                         )
                     )
 
@@ -294,6 +304,19 @@ def _owner_forward_receive_timeout(
 ) -> _OwnerForwardReceiveTimeout:
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     remaining_budget = _remaining_budget_seconds(request_started_at + proxy_request_budget_seconds)
+    idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
+    if remaining_budget <= 0 and idle_timeout_matches_request_budget:
+        return _OwnerForwardReceiveTimeout(
+            timeout_seconds=0.0,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
+    if idle_timeout_matches_request_budget and remaining_budget >= idle_timeout_seconds:
+        return _OwnerForwardReceiveTimeout(
+            timeout_seconds=remaining_budget,
+            error_code="stream_idle_timeout",
+            error_message="Upstream stream idle timeout",
+        )
     if remaining_budget <= 0:
         return _OwnerForwardReceiveTimeout(
             timeout_seconds=0.0,

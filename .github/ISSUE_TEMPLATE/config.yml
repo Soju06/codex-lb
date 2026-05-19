@@ -1,0 +1,21 @@
+# Disable freeform "blank issue" — force structured Issue Forms below.
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 Questions, Usage Help, Show & Tell
+    url: https://github.com/Soju06/codex-lb/discussions
+    about: |
+      Not sure if it's a bug? Want to ask "how do I…?", share a setup,
+      or propose an idea before filing a feature request? Use Discussions.
+
+  - name: 🔒 Security Vulnerability (private)
+    url: https://github.com/Soju06/codex-lb/security/advisories/new
+    about: |
+      Please report security issues privately via GitHub Security
+      Advisories — do NOT open a public issue. See SECURITY.md.
+
+  - name: 📚 Documentation & FAQ
+    url: https://github.com/Soju06/codex-lb#readme
+    about: |
+      Common setup, deployment, account quota and dashboard topics are
+      documented in the README — check there first.

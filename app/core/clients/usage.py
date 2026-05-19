@@ -7,7 +7,7 @@ import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.usage.models import UsagePayload
@@ -59,37 +59,37 @@ async def fetch_usage(
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
     retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
     headers = _usage_headers(access_token, account_id)
-    retry_client = client or get_http_client().retry_client
     retry_options = _retry_options(retries + 1)
 
     try:
-        async with retry_client.request(
-            "GET",
-            url,
-            headers=headers,
-            timeout=timeout,
-            retry_options=retry_options,
-        ) as resp:
-            data = await _safe_json(resp)
-            if resp.status >= 400:
-                code = _extract_error_code(data)
-                message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
-                logger.warning(
-                    "Usage fetch failed request_id=%s status=%s code=%s message=%s",
-                    get_request_id(),
-                    resp.status,
-                    code,
-                    message,
-                )
-                raise UsageFetchError(resp.status, message, code=code)
-            try:
-                return UsagePayload.model_validate(data)
-            except ValidationError as exc:
-                logger.warning(
-                    "Usage fetch invalid payload request_id=%s",
-                    get_request_id(),
-                )
-                raise UsageFetchError(502, "Invalid usage payload") from exc
+        async with lease_retry_client(client) as retry_client:
+            async with retry_client.request(
+                "GET",
+                url,
+                headers=headers,
+                timeout=timeout,
+                retry_options=retry_options,
+            ) as resp:
+                data = await _safe_json(resp)
+                if resp.status >= 400:
+                    code = _extract_error_code(data)
+                    message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
+                    logger.warning(
+                        "Usage fetch failed request_id=%s status=%s code=%s message=%s",
+                        get_request_id(),
+                        resp.status,
+                        code,
+                        message,
+                    )
+                    raise UsageFetchError(resp.status, message, code=code)
+                try:
+                    return UsagePayload.model_validate(data)
+                except ValidationError as exc:
+                    logger.warning(
+                        "Usage fetch invalid payload request_id=%s",
+                        get_request_id(),
+                    )
+                    raise UsageFetchError(502, "Invalid usage payload") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         logger.warning(
             "Usage fetch error request_id=%s error=%s",

@@ -12,6 +12,7 @@ import { RequestFilters } from "@/features/dashboard/components/filters/request-
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
+import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
@@ -171,6 +172,21 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
+          {view.weeklyCreditPace ? (
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
+              <UsageDonuts
+                primaryItems={view.primaryUsageItems}
+                secondaryItems={view.secondaryUsageItems}
+                primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
+                secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
+                primaryCenterValue={view.primaryTotal}
+                secondaryCenterValue={view.secondaryTotal}
+                safeLinePrimary={view.safeLinePrimary}
+                safeLineSecondary={view.safeLineSecondary}
+              />
+              <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
+            </div>
+          ) : (
             <UsageDonuts
               primaryItems={view.primaryUsageItems}
               secondaryItems={view.secondaryUsageItems}
@@ -181,6 +197,7 @@ export function DashboardPage() {
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
             />
+          )}
 
           <section className="space-y-4">
             <div className="flex items-center gap-3">

@@ -58,3 +58,27 @@ Prompting cue (use when writing docs):
 - Verify before archive: `/opsx:verify <change>`
 - Sync delta specs → main specs: `/opsx:sync <change>`
 - Archive: `/opsx:archive <change>`
+
+## Contributing & Merge Gates
+
+When authoring or merging a PR (as a human contributor, a collaborator,
+or an AI assistant acting on behalf of either), the binding workflow is
+in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md). The sections
+an AI assistant most often needs are:
+
+- [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
+  `@codex review` clean (or findings addressed) + `mergeable=CLEAN` +
+  OpenSpec change folder for behavior changes + `Fixes #N` /
+  `Closes #N` for issue cover.
+- [Collaborator rules](.github/CONTRIBUTING.md#collaborator-rules) —
+  no self-merge by default; large PRs get split (≈1-concern per PR,
+  ~800 net lines / scoped capability ceiling).
+- [Bus factor escape hatch](.github/CONTRIBUTING.md#bus-factor-escape-hatch)
+  — self-merge allowed after **14 days** with all gates met and a
+  comment invoking the clause.
+
+An assistant preparing a merge MUST verify the gates against the
+actual GitHub state (status check rollup, codex review submissions,
+`mergeable` field) rather than asserting them from local history.
+Local `uv run pytest` / `uv run ruff` / `codex review --base origin/main`
+are encouraged but not substitutes for the cloud gates.

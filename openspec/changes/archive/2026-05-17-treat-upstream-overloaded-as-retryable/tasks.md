@@ -1,0 +1,3 @@
+- [x] Add `"overloaded_error"` to `_TRANSIENT_CODES` in `app/modules/proxy/helpers.py` so `classify_upstream_failure` returns `retryable_transient` for the upstream overload envelope even when no 5xx HTTP status accompanies it.
+- [x] Add a regression in `tests/unit/test_failover_foundation.py::TestClassifyUpstreamFailure` driving `error_code="overloaded_error"` with `http_status=None` and asserting `failure_class == "retryable_transient"`.
+- [x] Add a requirement under the `responses-api-compat` capability documenting that upstream overload envelopes are classified as retryable transient failures regardless of HTTP status, so account fail-over and bounded retry are exercised.

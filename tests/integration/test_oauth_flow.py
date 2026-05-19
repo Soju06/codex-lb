@@ -63,10 +63,6 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
     assert start.status_code == 200
     assert start.json()["method"] == "device"
 
-    complete = await async_client.post("/api/oauth/complete", json={})
-    assert complete.status_code == 200
-    assert complete.json()["status"] == "pending"
-
     await asyncio.sleep(0)
 
     payload = None

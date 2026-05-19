@@ -5,12 +5,12 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -293,6 +293,43 @@ async def test_delete_account_removes_from_list(async_client):
     assert accounts.status_code == 200
     data = accounts.json()["accounts"]
     assert all(account["accountId"] != actual_account_id for account in data)
+
+
+@pytest.mark.asyncio
+async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_delete_logs", "delete-logs@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_delete_logs",
+            request_id="req_delete_logs_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=25,
+            status="success",
+            error_code=None,
+            requested_at=utcnow(),
+        )
+
+    delete = await async_client.delete("/api/accounts/acc_delete_logs")
+    assert delete.status_code == 200
+
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(select(RequestLog).where(RequestLog.request_id == "req_delete_logs_1"))
+        ).scalar_one()
+        assert row.account_id is None
+        assert row.deleted_at is not None
+
+    request_logs = await async_client.get("/api/request-logs?limit=10")
+    assert request_logs.status_code == 200
+    assert request_logs.json()["total"] == 0
+
+    options = await async_client.get("/api/request-logs/options")
+    assert options.status_code == 200
+    assert options.json()["accountIds"] == []
 
 
 @pytest.mark.asyncio

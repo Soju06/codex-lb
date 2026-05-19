@@ -79,6 +79,33 @@ export const DepletionSchema = z.object({
   secondsUntilExhaustion: z.number().nullable().optional(),
 });
 
+export const WeeklyCreditPaceSchema = z.object({
+  totalFullCredits: z.number(),
+  totalActualRemainingCredits: z.number(),
+  totalExpectedRemainingCredits: z.number(),
+  actualUsedPercent: z.number(),
+  scheduledUsedPercent: z.number(),
+  deltaPercent: z.number(),
+  scheduleGapCredits: z.number(),
+  overPlanCredits: z.number(),
+  projectedShortfallCredits: z.number(),
+  pauseForBreakEvenHours: z.number().nullable(),
+  paceMultiplier: z.number().nullable(),
+  throttleToPercent: z.number().nullable(),
+  reduceByPercent: z.number().nullable(),
+  proAccountEquivalentToCoverOverPlan: z.number().nullable(),
+  proAccountsToCoverOverPlan: z.number().int().nullable(),
+  projectedDepletionHours: z.number().nullable(),
+  projectedMinimumRemainingCredits: z.number().nullable(),
+  forecastBurnRateCreditsPerHour: z.number().nullable(),
+  scheduledBurnRateCreditsPerHour: z.number(),
+  status: z.enum(["behind", "on_track", "ahead", "danger"]),
+  accountCount: z.number().int().nonnegative(),
+  staleAccountCount: z.number().int().nonnegative(),
+  inactiveAccountCount: z.number().int().nonnegative(),
+  confidence: z.enum(["high", "medium", "low"]),
+});
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
@@ -97,6 +124,7 @@ export const DashboardOverviewSchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
+  weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
 export const RequestLogSchema = z.object({
@@ -167,3 +195,4 @@ export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
+export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;

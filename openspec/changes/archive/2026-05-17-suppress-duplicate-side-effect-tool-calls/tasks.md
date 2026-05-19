@@ -1,0 +1,5 @@
+- [x] Add downstream side-effect tool-call dedupe for HTTP streams, websocket streams, and the HTTP responses bridge.
+- [x] Suppress same-response `exec_command`, `write_stdin`, and `apply_patch_call` replays even when `call_id` changes.
+- [x] Remove duplicate nested side-effect operations from `multi_tool_use.parallel` batches before forwarding.
+- [x] Preserve distinct read-only calls and repeated operations under later response ids.
+- [x] Add regression tests for same-response replay suppression, read-only pass-through, response-id scoping, and cache bounds.

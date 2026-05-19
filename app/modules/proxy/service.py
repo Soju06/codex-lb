@@ -6602,12 +6602,20 @@ class ProxyService:
                     allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                     allow_precreated_terminal_fallback=event_type
                     in {
+                        "response.completed",
                         "response.failed",
                         "response.incomplete",
                         "error",
                     },
                     prefer_draining_requests=anonymous_event_prefers_draining,
                 )
+                if (
+                    matched_request_state is None
+                    and terminal_request_state is not None
+                    and response_id is not None
+                    and terminal_request_state.response_id == response_id
+                ):
+                    matched_request_state = terminal_request_state
                 if terminal_request_state is not None and _http_bridge_request_counts_against_queue(
                     terminal_request_state
                 ):
@@ -12189,6 +12197,7 @@ def _pop_terminal_websocket_request_state(
     if response_id is not None and allow_precreated_terminal_fallback:
         request_state = _match_websocket_request_state_for_precreated_terminal_event(pending_requests)
         if request_state is not None and request_state in pending_requests:
+            request_state.response_id = response_id
             pending_requests.remove(request_state)
             return request_state
     if response_id is not None and prefer_previous_response_not_found:

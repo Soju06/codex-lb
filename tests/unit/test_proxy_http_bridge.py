@@ -31,6 +31,32 @@ def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled)
 
 
+def _make_bridge_session(
+    *,
+    key_value: str = "bridge-test",
+    pending_requests: deque[proxy_service._WebSocketRequestState] | None = None,
+    queued_request_count: int = 0,
+) -> proxy_service._HTTPBridgeSession:
+    return proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", key_value, None),
+        headers={"x-codex-session-id": key_value},
+        affinity=proxy_service._AffinityPolicy(
+            key=key_value,
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.2",
+        account=cast(Any, SimpleNamespace(id="acc-bridge", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=pending_requests or deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=queued_request_count,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+
 def _make_api_key(
     *,
     key_id: str,
@@ -54,6 +80,120 @@ def _make_api_key(
         ),
         assigned_account_ids=assigned_account_ids,
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolved_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    finalize = AsyncMock()
+    register_previous = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-precreated-completed",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-precreated-completed",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps({"type": "response.output_text.delta", "delta": "legacy text"}),
+    )
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps({"type": "response.output_text.done", "text": "legacy text"}),
+    )
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_precreated_completed",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    blocks: list[str | None] = []
+    while True:
+        block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+        blocks.append(block)
+        if block is None:
+            break
+
+    payloads: list[dict[str, Any]] = []
+    for block in blocks:
+        if block is None:
+            continue
+        payload = proxy_service.parse_sse_data_json(block)
+        assert isinstance(payload, dict)
+        payloads.append(payload)
+    assert [payload["type"] for payload in payloads] == [
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.completed",
+    ]
+    assert request_state.response_id == "resp_precreated_completed"
+    assert session.last_completed_response_id == "resp_precreated_completed"
+    assert session.queued_request_count == 0
+    assert not session.pending_requests
+    register_previous.assert_awaited_once()
+    finalize.assert_awaited_once()
+
+
+def test_pop_terminal_websocket_request_state_precreated_completed_does_not_guess_with_ambiguous_pending() -> None:
+    draining = proxy_service._WebSocketRequestState(
+        request_id="req-draining",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        draining_until_terminal=True,
+    )
+    visible = proxy_service._WebSocketRequestState(
+        request_id="req-visible",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+    )
+    pending = deque([draining, visible])
+
+    popped = proxy_service._pop_terminal_websocket_request_state(
+        pending,
+        response_id="resp_ambiguous_precreated_completed",
+        fallback_request_state=None,
+        allow_precreated_terminal_fallback=True,
+    )
+
+    assert popped is None
+    assert list(pending) == [draining, visible]
+    assert draining.response_id is None
+    assert visible.response_id is None
 
 
 def test_trim_http_bridge_previous_response_input_items_preserves_context_assistant_message() -> None:

@@ -418,6 +418,10 @@ For Helm, pass the same values through `extraEnv`.
 
 Backup this directory to preserve your data.
 
+## Troubleshooting
+
+- [Usage and quota — why does codex-lb still say `rate_limited` when Codex Desktop says reset?](docs/troubleshooting/usage-and-quota.md)
+
 ## Kubernetes
 
 ```bash

@@ -2673,8 +2673,6 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
-        if event_type == "response.output_text.delta":
-            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
             if event_type == "response.created":
@@ -2715,6 +2713,8 @@ async def _normalize_public_responses_stream(
                 return
 
         _collect_output_item_event(normalized_payload, output_items)
+        if event_type == "response.output_text.delta":
+            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
         for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
             yield formatted_payload
         if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:

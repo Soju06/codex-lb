@@ -555,6 +555,44 @@ async def test_normalize_public_responses_stream_replays_legacy_precreated_text_
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_dropped_precreated_delta_does_not_suppress_terminal_delta() -> None:
+    """Buffered orphan deltas are not marked seen until actually emitted.
+
+    Indexed pre-created deltas are dropped as unowned cancel/retry orphans. If a
+    later terminal response carries the real output, the normalizer must still
+    synthesize a replacement text delta for SDK streaming consumers.
+    """
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.output_text.delta","sequence_number":0,'
+                    '"output_index":0,"content_index":0,"item_id":"msg_1",'
+                    '"delta":"terminal text"}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_1",'
+                    '"object":"response","status":"completed",'
+                    '"output":[{"id":"msg_1","type":"message",'
+                    '"content":[{"type":"output_text","text":"terminal text"}]}]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == [
+        "response.created",
+        "response.output_text.delta",
+        "response.completed",
+    ]
+    assert payloads[1]["delta"] == "terminal text"
+    assert payloads[1]["item_id"] == "msg_1"
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_drops_precreated_output_when_no_envelope_arrives() -> None:
     blocks = [
         block

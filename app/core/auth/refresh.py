@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.utils.request_id import get_request_id
@@ -37,11 +38,12 @@ class TokenRefreshResult:
 
 
 class RefreshError(Exception):
-    def __init__(self, code: str, message: str, is_permanent: bool) -> None:
+    def __init__(self, code: str, message: str, is_permanent: bool, *, transport_error: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.is_permanent = is_permanent
+        self.transport_error = transport_error
 
 
 def should_refresh(last_refresh: datetime, now: datetime | None = None) -> bool:
@@ -72,28 +74,39 @@ async def refresh_access_token(
     }
     timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
 
-    client_session = session or get_http_client().session
     headers: dict[str, str] = {}
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-        data = await _safe_json(resp)
-        try:
-            payload_data = OAuthTokenPayload.model_validate(data)
-        except ValidationError as exc:
-            logger.warning(
-                "Token refresh response invalid request_id=%s",
-                get_request_id(),
-            )
-            raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
-        if resp.status >= 400:
-            logger.warning(
-                "Token refresh failed request_id=%s status=%s",
-                get_request_id(),
-                resp.status,
-            )
-            raise _refresh_error_from_payload(payload_data, resp.status)
+    try:
+        async with lease_http_session(session) as client_session:
+            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+                data = await _safe_json(resp)
+                try:
+                    payload_data = OAuthTokenPayload.model_validate(data)
+                except ValidationError as exc:
+                    logger.warning(
+                        "Token refresh response invalid request_id=%s",
+                        get_request_id(),
+                    )
+                    raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
+                if resp.status >= 400:
+                    logger.warning(
+                        "Token refresh failed request_id=%s status=%s",
+                        get_request_id(),
+                        resp.status,
+                    )
+                    raise _refresh_error_from_payload(payload_data, resp.status)
+    except RefreshError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        message = str(exc) or exc.__class__.__name__
+        raise RefreshError(
+            "transport_error",
+            f"Transport error during token refresh: {message}",
+            False,
+            transport_error=True,
+        ) from exc
 
     if not payload_data.access_token or not payload_data.refresh_token or not payload_data.id_token:
         raise RefreshError("invalid_response", "Refresh response missing tokens", False)

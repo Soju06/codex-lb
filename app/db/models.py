@@ -124,11 +124,16 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -234,6 +239,12 @@ class DashboardSettings(Base):
         Integer,
         default=1800,
         server_default=text("1800"),
+        nullable=False,
+    )
+    dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=43200,
+        server_default=text("43200"),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(
@@ -523,6 +534,8 @@ class HttpBridgeSessionRecord(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -622,8 +635,15 @@ Index(
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_deleted_at_requested_at_id",
+    RequestLog.deleted_at,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
 Index(
     "idx_logs_requested_at_model_tier",
     RequestLog.requested_at.desc(),
@@ -669,10 +689,29 @@ Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
+Index(
+    "idx_api_key_usage_reservations_status_updated_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.updated_at
+)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
+Index(
+    "idx_http_bridge_sessions_latest_turn_scope_state_seen",
+    HttpBridgeSessionRecord.latest_turn_state,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
+Index(
+    "idx_http_bridge_sessions_latest_response_scope_state_seen",
+    HttpBridgeSessionRecord.latest_response_id,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
 Index(
     "idx_http_bridge_session_aliases_session_id",
     HttpBridgeSessionAlias.session_id,

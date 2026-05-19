@@ -27,6 +27,7 @@ class SettingsRepository:
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=43200,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -58,6 +59,7 @@ class SettingsRepository:
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
+        dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
         http_responses_session_bridge_gateway_safe_mode: bool | None = None,
         sticky_reallocation_budget_threshold_pct: float | None = None,
@@ -80,6 +82,8 @@ class SettingsRepository:
             settings.relative_availability_top_k = relative_availability_top_k
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
+        if dashboard_session_ttl_seconds is not None:
+            settings.dashboard_session_ttl_seconds = dashboard_session_ttl_seconds
         if http_responses_session_bridge_prompt_cache_idle_ttl_seconds is not None:
             settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = (
                 http_responses_session_bridge_prompt_cache_idle_ttl_seconds

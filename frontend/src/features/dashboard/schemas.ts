@@ -79,6 +79,33 @@ export const DepletionSchema = z.object({
   secondsUntilExhaustion: z.number().nullable().optional(),
 });
 
+export const WeeklyCreditPaceSchema = z.object({
+  totalFullCredits: z.number(),
+  totalActualRemainingCredits: z.number(),
+  totalExpectedRemainingCredits: z.number(),
+  actualUsedPercent: z.number(),
+  scheduledUsedPercent: z.number(),
+  deltaPercent: z.number(),
+  scheduleGapCredits: z.number(),
+  overPlanCredits: z.number(),
+  projectedShortfallCredits: z.number(),
+  pauseForBreakEvenHours: z.number().nullable(),
+  paceMultiplier: z.number().nullable(),
+  throttleToPercent: z.number().nullable(),
+  reduceByPercent: z.number().nullable(),
+  proAccountEquivalentToCoverOverPlan: z.number().nullable(),
+  proAccountsToCoverOverPlan: z.number().int().nullable(),
+  projectedDepletionHours: z.number().nullable(),
+  projectedMinimumRemainingCredits: z.number().nullable(),
+  forecastBurnRateCreditsPerHour: z.number().nullable(),
+  scheduledBurnRateCreditsPerHour: z.number(),
+  status: z.enum(["behind", "on_track", "ahead", "danger"]),
+  accountCount: z.number().int().nonnegative(),
+  staleAccountCount: z.number().int().nonnegative(),
+  inactiveAccountCount: z.number().int().nonnegative(),
+  confidence: z.enum(["high", "medium", "low"]),
+});
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.string().datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
@@ -97,6 +124,7 @@ export const DashboardOverviewSchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
+  weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
 export const RequestLogSchema = z.object({
@@ -104,6 +132,7 @@ export const RequestLogSchema = z.object({
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
   apiKeyName: z.string().nullable(),
+  apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   model: z.string(),
   transport: z.string().nullable().optional().default(null),
@@ -131,9 +160,16 @@ export const RequestLogModelOptionSchema = z.object({
   reasoningEffort: z.string().nullable(),
 });
 
+export const RequestLogApiKeyOptionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  keyPrefix: z.string().nullable().optional().default(null),
+});
+
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
+  apiKeys: z.array(RequestLogApiKeyOptionSchema),
   statuses: z.array(z.string()),
 });
 
@@ -141,6 +177,7 @@ export const FilterStateSchema = z.object({
   search: z.string(),
   timeframe: z.enum(["all", "1h", "24h", "7d"]),
   accountIds: z.array(z.string()),
+  apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),
   limit: z.number().int().positive(),
@@ -158,3 +195,4 @@ export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
+export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;

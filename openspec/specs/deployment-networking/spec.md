@@ -2,7 +2,7 @@
 
 ## Purpose
 
-See context docs for background.
+Define network exposure and policy contracts so chart deployments default to explicit, least-privilege connectivity.
 
 ## Requirements
 

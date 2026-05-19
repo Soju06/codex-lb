@@ -587,4 +587,64 @@ async def test_request_logs_search_matches_api_key_name(async_client, db_setup):
     payload = response.json()["requests"]
     assert len(payload) == 1
     assert payload[0]["requestId"] == "req_key_search_1"
+    assert payload[0]["apiKeyId"] == "key_search_1"
     assert payload[0]["apiKeyName"] == "Window-Runner"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_filters_by_api_key_id(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_key_filter", "key-filter@example.com"))
+        session.add_all(
+            [
+                ApiKey(
+                    id="key_filter_a",
+                    name="Alpha Key",
+                    key_hash="hash_key_filter_a",
+                    key_prefix="sk-alpha",
+                ),
+                ApiKey(
+                    id="key_filter_b",
+                    name="Beta Key",
+                    key_hash="hash_key_filter_b",
+                    key_prefix="sk-beta",
+                ),
+            ]
+        )
+        await session.commit()
+
+        await logs_repo.add_log(
+            account_id="acc_key_filter",
+            request_id="req_key_filter_1",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=2,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=1),
+            api_key_id="key_filter_a",
+        )
+        await logs_repo.add_log(
+            account_id="acc_key_filter",
+            request_id="req_key_filter_2",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=2,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=now,
+            api_key_id="key_filter_b",
+        )
+
+    response = await async_client.get("/api/request-logs?apiKeyId=key_filter_b&limit=50")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 1
+    assert payload[0]["requestId"] == "req_key_filter_2"
+    assert payload[0]["apiKeyId"] == "key_filter_b"
+    assert payload[0]["apiKeyName"] == "Beta Key"

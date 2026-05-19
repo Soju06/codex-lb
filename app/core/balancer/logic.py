@@ -15,6 +15,12 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_expired": "Refresh token expired - re-login required",
     "refresh_token_reused": "Refresh token was reused - re-login required",
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
+    # ``token_expired`` from the OAuth refresh endpoint means the refresh
+    # request itself failed because the refresh token (or the session it
+    # belonged to) is no longer usable -- access-token-only expiry would have
+    # returned a fresh token pair instead. Treat it as a permanent failure so
+    # the account stops being routed to until it is re-authenticated.
+    "token_expired": "Authentication token expired - re-login required",
     "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
@@ -90,6 +96,13 @@ def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
     return secondary_used, primary_used, last_selected, state.account_id
 
 
+def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    last_selected = state.last_selected_at or 0.0
+    return primary_used, secondary_used, last_selected, state.account_id
+
+
 def _reset_bucket_days(state: AccountState, current: float) -> int:
     if state.secondary_reset_at is None:
         return UNKNOWN_RESET_BUCKET_DAYS
@@ -120,6 +133,7 @@ def select_account(
     deterministic_probe: bool = False,
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
+    primary_first_usage_weighted: bool = False,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -146,6 +160,8 @@ def select_account(
             availability weights.
         relative_availability_top_k: Maximum number of highest-weight
             relative-availability candidates retained before weighted draw.
+        primary_first_usage_weighted: Whether usage-weighted routing should
+            rank by primary-window pressure before secondary-window pressure.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -231,17 +247,22 @@ def select_account(
                 reset_candidates = [s.reset_at for s in quota_exceeded if s.reset_at]
                 if reset_candidates:
                     wait_seconds = max(0, min(reset_candidates) - int(current))
-                    return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
+                    return SelectionResult(None, _format_retry_hint(wait_seconds))
             cooldowns = [s.cooldown_until for s in all_states if s.cooldown_until and s.cooldown_until > current]
             if cooldowns:
                 wait_seconds = max(0.0, min(cooldowns) - current)
-                return SelectionResult(None, f"Rate limit exceeded. Try again in {wait_seconds:.0f}s")
+                return SelectionResult(None, _format_retry_hint(wait_seconds))
             return SelectionResult(None, "No available accounts")
 
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
         reset_bucket_days = _reset_bucket_days(state, current)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
+
+    def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
+        reset_bucket_days = _reset_bucket_days(state, current)
+        primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
+        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
 
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
@@ -274,10 +295,13 @@ def select_account(
             deterministic_probe=deterministic_probe,
         )
     else:
-        selected = min(
-            effective_pool,
-            key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key,
-        )
+        if primary_first_usage_weighted:
+            selected = min(effective_pool, key=_primary_usage_sort_key)
+        else:
+            selected = min(
+                effective_pool,
+                key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key,
+            )
     return SelectionResult(selected, None)
 
 
@@ -503,6 +527,22 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
 
 
 QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
+
+# Upper bound for the user-visible "Try again in {N}s" hint that
+# ``select_account`` surfaces when zero candidates are selectable. The clamp
+# protects clients from waiting the worst-case persisted ``reset_at`` after
+# OpenAI-side reset events that propagate lazily through ``/wham/usage`` (see
+# https://github.com/Soju06/codex-lb/issues/676). codex-lb's background usage
+# refresh runs every ``usage_refresh_interval_seconds`` (default 60s) and the
+# per-status cooldowns are 120s, so a 300s ceiling lets clients reattempt
+# inside the auto-recovery window. The underlying ``AccountState.reset_at``
+# and ``AccountState.cooldown_until`` fields are not clamped.
+SELECTOR_RETRY_HINT_MAX_SECONDS = 300
+
+
+def _format_retry_hint(wait_seconds: float) -> str:
+    capped = min(max(0.0, wait_seconds), float(SELECTOR_RETRY_HINT_MAX_SECONDS))
+    return f"Rate limit exceeded. Try again in {capped:.0f}s"
 
 
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:

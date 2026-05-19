@@ -9,11 +9,13 @@ import type { FilterState } from "@/features/dashboard/schemas";
 export type RequestFiltersProps = {
   filters: FilterState;
   accountOptions: MultiSelectOption[];
+  apiKeyOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   statusOptions: MultiSelectOption[];
   onSearchChange: (value: string) => void;
   onTimeframeChange: (value: FilterState["timeframe"]) => void;
   onAccountChange: (values: string[]) => void;
+  onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
   onReset: () => void;
@@ -22,11 +24,13 @@ export type RequestFiltersProps = {
 export function RequestFilters({
   filters,
   accountOptions,
+  apiKeyOptions,
   modelOptions,
   statusOptions,
   onSearchChange,
   onTimeframeChange,
   onAccountChange,
+  onApiKeyChange,
   onModelChange,
   onStatusChange,
   onReset,
@@ -40,7 +44,7 @@ export function RequestFilters({
             value={filters.search}
             onChange={(event) => onSearchChange(event.target.value)}
             className="h-8 pl-9"
-            placeholder="Search request id, account, model, error..."
+            placeholder="Search request id, account, API key, model, error..."
           />
         </div>
 
@@ -53,6 +57,12 @@ export function RequestFilters({
           values={filters.accountIds}
           options={accountOptions}
           onChange={onAccountChange}
+        />
+        <MultiSelectFilter
+          label="API Keys"
+          values={filters.apiKeyIds}
+          options={apiKeyOptions}
+          onChange={onApiKeyChange}
         />
         <MultiSelectFilter
           label="Models"

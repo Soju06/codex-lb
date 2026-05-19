@@ -1,0 +1,4 @@
+- [x] Add a `_validate_password_length` helper in `app/modules/dashboard_auth/api.py` that enforces the existing 8-character minimum and a new 72-UTF-8-byte maximum, raising `DashboardValidationError` with code `password_too_long` on the new failure case.
+- [x] Replace the inline `len(password) < 8` checks in `setup_password` and `change_password` with calls to the shared helper, so both endpoints validate identically before hashing.
+- [x] Add regression tests in `tests/integration/test_dashboard_password_auth.py` covering 73-byte ASCII rejection, exact 72-byte acceptance, emoji-only multi-byte rejection, and `/password/change` `new_password` rejection.
+- [x] Document the new behavior under the `admin-auth` capability spec.

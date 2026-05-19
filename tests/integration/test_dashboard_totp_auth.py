@@ -285,7 +285,9 @@ async def test_disable_totp_requires_existing_totp_configuration(async_client):
     )
     assert setup_password.status_code == 200
 
-    session_id = get_dashboard_session_store().create(password_verified=True, totp_verified=True)
+    session_id = get_dashboard_session_store().create(
+        password_verified=True, totp_verified=True, ttl_seconds=12 * 60 * 60
+    )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     disable = await async_client.post("/api/dashboard-auth/totp/disable", json={"code": "123456"})

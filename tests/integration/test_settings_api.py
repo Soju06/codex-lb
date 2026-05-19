@@ -17,6 +17,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
+    assert payload["dashboardSessionTtlSeconds"] == 43200
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
@@ -35,6 +36,7 @@ async def test_settings_api_get_and_update(async_client):
             "relativeAvailabilityPower": 1.5,
             "relativeAvailabilityTopK": 7,
             "openaiCacheAffinityMaxAgeSeconds": 180,
+            "dashboardSessionTtlSeconds": 31536000,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
             "httpResponsesSessionBridgeGatewaySafeMode": True,
             "stickyReallocationBudgetThresholdPct": 90.0,
@@ -52,6 +54,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["relativeAvailabilityPower"] == 1.5
     assert updated["relativeAvailabilityTopK"] == 7
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
+    assert updated["dashboardSessionTtlSeconds"] == 31536000
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert updated["stickyReallocationBudgetThresholdPct"] == 90.0
@@ -70,6 +73,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 1.5
     assert payload["relativeAvailabilityTopK"] == 7
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
+    assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert payload["stickyReallocationBudgetThresholdPct"] == 90.0

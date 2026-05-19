@@ -14,6 +14,7 @@ class DashboardSettingsData:
     relative_availability_power: float
     relative_availability_top_k: int
     openai_cache_affinity_max_age_seconds: int
+    dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -32,6 +33,7 @@ class DashboardSettingsUpdateData:
     relative_availability_power: float
     relative_availability_top_k: int
     openai_cache_affinity_max_age_seconds: int
+    dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -54,6 +56,7 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),
@@ -77,6 +80,7 @@ class SettingsService:
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),
@@ -94,6 +98,7 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),

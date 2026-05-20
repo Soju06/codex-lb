@@ -30,7 +30,12 @@ def _content_parts(content: JsonValue) -> list[JsonValue]:
     return [content]
 
 
-def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -> tuple[str, list[JsonValue]]:
+def coerce_messages(
+    existing_instructions: str,
+    messages: Sequence[JsonValue],
+    *,
+    preserve_instruction_roles: bool = False,
+) -> tuple[str, list[JsonValue]]:
     instruction_parts: list[str] = []
     input_messages: list[JsonValue] = []
     for message in messages:
@@ -45,6 +50,9 @@ def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -
             raise ClientPayloadError(f"Unsupported message role: {role}", param="messages")
         if role in ("system", "developer"):
             _ensure_text_only_content(message_dict.get("content"), role)
+            if preserve_instruction_roles:
+                input_messages.append(cast(JsonValue, _normalize_message_content(cast(OpenAIMessage, message_dict))))
+                continue
             content_text = _content_to_text(message_dict.get("content"))
             if content_text:
                 instruction_parts.append(content_text)

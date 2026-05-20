@@ -6697,21 +6697,24 @@ class ProxyService:
                 request_state
                 for request_state in session.pending_requests
                 if not request_state.draining_until_terminal
-                and request_state.response_id is None
-                and request_state.awaiting_response_created
-                and bool(request_state.request_text)
+                and _websocket_request_can_replay_before_visible_output(request_state)
             ]
             if len(retryable_requests) != 1:
                 return False
             request_state = retryable_requests[0]
-            if request_state.previous_response_id is not None:
+            if (
+                request_state.previous_response_id is not None
+                and not (
+                    request_state.proxy_injected_previous_response_id
+                    and request_state.fresh_upstream_request_is_retry_safe
+                    and request_state.fresh_upstream_request_text
+                )
+            ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
-                # is unsafe without upstream idempotency guarantees.
-                return False
-            if request_state.replay_count >= 1:
-                return False
-            if request_state.response_event_count > 0 or request_state.downstream_visible:
+                # is unsafe without upstream idempotency guarantees. Proxy-
+                # injected retry-safe anchors are equivalent to the client's own
+                # full resend once the anchor is stripped.
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
@@ -6725,9 +6728,9 @@ class ProxyService:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
-            request_text = request_state.request_text
-            assert isinstance(request_text, str)
-            request_state.replay_count += 1
+            request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+            if request_text is None:
+                return False
         _log_http_bridge_event(
             "retry_precreated",
             session.key,
@@ -10897,6 +10900,47 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
     request_state.response_event_count += 1
 
 
+def _websocket_request_can_replay_before_visible_output(request_state: "_WebSocketRequestState") -> bool:
+    if not request_state.request_text:
+        return False
+    if request_state.replay_count >= 1:
+        return False
+    if request_state.downstream_visible:
+        return False
+    precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
+    created_only_pending = (
+        request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count <= 1
+    )
+    if precreated_pending and request_state.response_event_count > 0:
+        return False
+    return precreated_pending or created_only_pending
+
+
+def _prepare_websocket_request_state_for_visible_output_replay(
+    request_state: "_WebSocketRequestState",
+) -> str | None:
+    if (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        request_state.request_text = request_state.fresh_upstream_request_text
+        request_state.previous_response_id = None
+        request_state.proxy_injected_previous_response_id = False
+        request_state.fresh_upstream_request_is_retry_safe = False
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    request_text = request_state.request_text
+    if not isinstance(request_text, str):
+        return None
+    request_state.replay_count += 1
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    return request_text
+
+
 @dataclass(frozen=True, slots=True)
 class _FilePinEntry:
     account_id: str
@@ -11610,37 +11654,11 @@ async def _pop_replayable_precreated_websocket_request_state(
         if len(pending_requests) != 1:
             return None
         request_state = pending_requests[0]
-        if not request_state.request_text:
-            return None
-        if request_state.replay_count >= 1:
-            return None
-        if request_state.downstream_visible:
-            return None
-        precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
-        created_only_pending = (
-            request_state.response_id is not None
-            and not request_state.awaiting_response_created
-            and request_state.response_event_count <= 1
-        )
-        if precreated_pending and request_state.response_event_count > 0:
-            return None
-        if not (precreated_pending or created_only_pending):
+        if not _websocket_request_can_replay_before_visible_output(request_state):
             return None
         pending_requests.popleft()
-    if (
-        request_state.proxy_injected_previous_response_id
-        and request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
-    ):
-        request_state.request_text = request_state.fresh_upstream_request_text
-        request_state.previous_response_id = None
-        request_state.proxy_injected_previous_response_id = False
-        request_state.fresh_upstream_request_is_retry_safe = False
-        _refresh_websocket_request_input_fingerprint_from_text(request_state)
-    request_state.replay_count += 1
-    request_state.awaiting_response_created = True
-    request_state.response_id = None
-    request_state.response_event_count = 0
+    if _prepare_websocket_request_state_for_visible_output_replay(request_state) is None:
+        return None
     return request_state
 
 

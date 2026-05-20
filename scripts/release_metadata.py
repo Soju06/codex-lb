@@ -24,7 +24,7 @@ def main() -> int:
         "channel": release.channel,
         "is_prerelease": release.is_prerelease,
         "pypi_version": release.pypi_version,
-        "make_latest": not release.is_prerelease,
+        "make_latest": "false" if release.is_prerelease else "legacy",
     }
     write_github_outputs(outputs)
     for key, value in outputs.items():

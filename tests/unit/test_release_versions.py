@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,24 @@ def test_read_pyproject_version_uses_project_table(tmp_path: Path) -> None:
     )
 
     assert read_pyproject_version(tmp_path) == "1.19.0"
+
+
+def test_release_metadata_make_latest_outputs() -> None:
+    stable = subprocess.run(
+        [sys.executable, "-m", "scripts.release_metadata", "--tag", "v1.19.0"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    beta = subprocess.run(
+        [sys.executable, "-m", "scripts.release_metadata", "--tag", "v1.19.0-beta.1"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "make_latest=legacy" in stable.stdout
+    assert "make_latest=false" in beta.stdout
 
 
 @pytest.mark.parametrize("bad", ["1.19", "v1.19.0", "1.19.0-beta", "1.19.0-beta.0", "1.19.0-dev.1"])

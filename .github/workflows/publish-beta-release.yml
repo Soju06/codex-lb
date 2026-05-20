@@ -45,9 +45,18 @@ jobs:
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          tag_ref="refs/tags/${TAG}"
           tag_exists=false
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --tags origin "${tag_ref}" >/dev/null 2>&1; then
             tag_exists=true
+            existing_target="$(git ls-remote origin "${tag_ref}^{}" | awk '{print $1}')"
+            if [ -z "${existing_target}" ]; then
+              existing_target="$(git ls-remote origin "${tag_ref}" | awk '{print $1}')"
+            fi
+            if [ "${existing_target}" != "${SHA}" ]; then
+              echo "::error::${TAG} already points to ${existing_target}, not merged commit ${SHA}. Refusing to publish."
+              exit 1
+            fi
           fi
 
           git config user.name "github-actions[bot]"

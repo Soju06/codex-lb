@@ -45,16 +45,18 @@ jobs:
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          tag_exists=false
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists; leaving existing release unchanged."
-            exit 0
+            tag_exists=true
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" "${SHA}" -m "Release ${TAG}"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin "${TAG}"
+          if [ "${tag_exists}" = "false" ]; then
+            git tag -a "${TAG}" "${SHA}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
 
           notes_file="${RUNNER_TEMP}/beta-release-notes.md"
           cat > "${notes_file}" <<EOF
@@ -70,8 +72,16 @@ jobs:
           Promote this train by merging the normal release-please PR for ${VERSION%-beta.*}.
           EOF
 
-          gh release create "${TAG}" \
-            --target "${SHA}" \
-            --title "Release ${TAG}" \
-            --notes-file "${notes_file}" \
-            --prerelease
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; ensuring it remains marked as a prerelease."
+            gh release edit "${TAG}" \
+              --title "Release ${TAG}" \
+              --notes-file "${notes_file}" \
+              --prerelease
+          else
+            gh release create "${TAG}" \
+              --target "${SHA}" \
+              --title "Release ${TAG}" \
+              --notes-file "${notes_file}" \
+              --prerelease
+          fi

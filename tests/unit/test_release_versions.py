@@ -11,6 +11,7 @@ from scripts.release_versions import (
     next_beta_number,
     parse_tag,
     parse_version,
+    read_pyproject_version,
     update_project_versions,
 )
 
@@ -50,6 +51,15 @@ def test_parse_stable_and_beta_versions() -> None:
     assert beta.serial == 2
     assert beta.pypi_version == "1.19.0b2"
     assert beta.is_prerelease
+
+
+def test_read_pyproject_version_uses_project_table(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.example]\nversion = "0.0.0"\n\n[project]\nname = "codex-lb"\nversion = "1.19.0"\n',
+        encoding="utf-8",
+    )
+
+    assert read_pyproject_version(tmp_path) == "1.19.0"
 
 
 @pytest.mark.parametrize("bad", ["1.19", "v1.19.0", "1.19.0-beta", "1.19.0-beta.0", "1.19.0-dev.1"])

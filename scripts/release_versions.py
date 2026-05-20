@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,12 +65,19 @@ def parse_tag(tag: str) -> ReleaseVersion:
     return parse_version(match.group("version"))
 
 
-def read_pyproject_version(root: Path) -> str:
-    text = (root / "pyproject.toml").read_text(encoding="utf-8")
-    match = re.search(r'^version = "([^"]+)"$', text, flags=re.MULTILINE)
-    if not match:
+def read_pyproject_version_text(text: str) -> str:
+    data = tomllib.loads(text)
+    project = data.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("could not find [project] table in pyproject.toml")
+    version = project.get("version")
+    if not isinstance(version, str) or not version:
         raise ValueError("could not find [project] version in pyproject.toml")
-    return match.group(1)
+    return version
+
+
+def read_pyproject_version(root: Path) -> str:
+    return read_pyproject_version_text((root / "pyproject.toml").read_text(encoding="utf-8"))
 
 
 def _replace_once(text: str, pattern: str, replacement: str, *, path: str) -> str:
@@ -196,10 +204,10 @@ def discover_release_please_base_version(root: Path) -> str:
         if proc.returncode != 0:
             last_error = proc.stderr.strip()
             continue
-        match = re.search(r'^version = "([^"]+)"$', proc.stdout, flags=re.MULTILINE)
-        if not match:
-            raise ValueError(f"{ref}:pyproject.toml does not contain a project version")
-        release = parse_version(match.group(1))
+        try:
+            release = parse_version(read_pyproject_version_text(proc.stdout))
+        except ValueError as exc:
+            raise ValueError(f"{ref}:pyproject.toml does not contain a valid project version") from exc
         if release.is_prerelease:
             raise ValueError(f"release-please branch version must be stable, got {release.version!r}")
         return release.version

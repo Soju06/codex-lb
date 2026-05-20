@@ -4,8 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import ResourceClosedError
 
+from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -25,7 +27,7 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
         monkeypatch.setattr(session, "refresh", _refresh_failure)
 
         log = await repo.add_log(
-            account_id="acc",
+            account_id=None,
             request_id="req",
             model="gpt-5.2",
             input_tokens=1000,
@@ -38,6 +40,29 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
 
         assert log.request_id == "req"
         assert log.cost_usd is not None
+
+
+@pytest.mark.asyncio
+async def test_add_log_persists_request_kind(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_kind",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            request_kind="warmup",
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.request_kind == "warmup"
 
 
 @pytest.mark.asyncio

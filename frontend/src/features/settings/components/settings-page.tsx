@@ -5,6 +5,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
+import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
@@ -99,6 +100,7 @@ export function SettingsPage() {
               }
             />
             <FirewallSection />
+            <QuotaPlannerSection />
             <StickySessionsSection />
           </div>
 

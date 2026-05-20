@@ -9,6 +9,7 @@ import pytest
 
 from app.core.balancer import (
     AccountState,
+    RoutingCost,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -36,6 +37,38 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_applies_planner_cold_start_penalty():
+    states = [
+        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0),
+        AccountState("active", AccountStatus.ACTIVE, used_percent=20.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="usage_weighted",
+        routing_costs={"cold": RoutingCost(total=40.0, reason="cold_start_outside_work")},
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "active"
+
+
+def test_select_account_prefers_expiring_active_window_bonus():
+    states = [
+        AccountState("expiring", AccountStatus.ACTIVE, used_percent=60.0),
+        AccountState("fresh", AccountStatus.ACTIVE, used_percent=10.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="usage_weighted",
+        routing_costs={"expiring": RoutingCost(total=-20.0, reason="expiring_active_window")},
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "expiring"
 
 
 def test_select_account_prefers_earlier_secondary_reset_bucket():

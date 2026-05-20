@@ -90,6 +90,26 @@ class SelectionResult:
     error_message: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class RoutingCost:
+    """Request-scoped planner cost applied after hard eligibility filters."""
+
+    total: float = 0.0
+    reason: str | None = None
+
+
+RoutingCostsByAccount = dict[str, RoutingCost]
+
+
+def _planner_cost(state: AccountState, routing_costs: RoutingCostsByAccount | None) -> float:
+    if not routing_costs:
+        return 0.0
+    cost = routing_costs.get(state.account_id)
+    if cost is None:
+        return 0.0
+    return float(cost.total)
+
+
 def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
     primary_used = state.used_percent if state.used_percent is not None else 0.0
     secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
@@ -135,6 +155,7 @@ def select_account(
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
     primary_first_usage_weighted: bool = False,
+    routing_costs: RoutingCostsByAccount | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -163,6 +184,8 @@ def select_account(
             relative-availability candidates retained before weighted draw.
         primary_first_usage_weighted: Whether usage-weighted routing should
             rank by primary-window pressure before secondary-window pressure.
+        routing_costs: Optional request-scoped planner costs. Lower cost wins
+            after hard eligibility, health tier, and reset-bucket filtering.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -257,19 +280,29 @@ def select_account(
                 return SelectionResult(None, _format_retry_hint(wait_seconds))
             return SelectionResult(None, "No available accounts")
 
-    def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
+    def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, float, str]:
         reset_bucket_days = _reset_bucket_days(state, current)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
-        return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
+        return (
+            reset_bucket_days,
+            _planner_cost(state, routing_costs),
+            secondary_used,
+            primary_used,
+            last_selected,
+            account_id,
+        )
 
-    def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current)
+    def _primary_usage_sort_key_with_cost(state: AccountState) -> tuple[float, float, float, float, str]:
         primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
-        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
+        return _planner_cost(state, routing_costs), primary_used, secondary_used, last_selected, account_id
 
-    def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
+    def _usage_sort_key_with_cost(state: AccountState) -> tuple[float, float, float, float, str]:
+        secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
+        return _planner_cost(state, routing_costs), secondary_used, primary_used, last_selected, account_id
+
+    def _round_robin_sort_key(state: AccountState) -> tuple[float, float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
-        return state.last_selected_at or 0.0, state.account_id
+        return _planner_cost(state, routing_costs), state.last_selected_at or 0.0, state.account_id
 
     healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
     probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
@@ -285,8 +318,8 @@ def select_account(
             if effective_prefer_earlier_reset
             else effective_pool
         )
-        if deterministic_probe:
-            selected = min(candidate_pool, key=_capacity_probe_sort_key)
+        if deterministic_probe or routing_costs:
+            selected = min(candidate_pool, key=lambda state: _capacity_probe_sort_key_with_cost(state, routing_costs))
         else:
             selected = _select_capacity_weighted(candidate_pool)
     elif routing_strategy == "relative_availability":
@@ -299,11 +332,11 @@ def select_account(
         )
     else:
         if primary_first_usage_weighted:
-            selected = min(effective_pool, key=_primary_usage_sort_key)
+            selected = min(effective_pool, key=_primary_usage_sort_key_with_cost)
         else:
             selected = min(
                 effective_pool,
-                key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key,
+                key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key_with_cost,
             )
     return SelectionResult(selected, None)
 
@@ -499,6 +532,21 @@ def _select_relative_availability(
             _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
             break
     return winner
+
+
+def _capacity_probe_sort_key_with_cost(
+    state: AccountState,
+    routing_costs: RoutingCostsByAccount | None,
+) -> tuple[float, float, float, float, float, str]:
+    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
+    return (
+        _planner_cost(state, routing_costs),
+        -_remaining_secondary_credits(state),
+        secondary_used,
+        primary_used,
+        last_selected,
+        account_id,
+    )
 
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:

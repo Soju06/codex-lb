@@ -30,6 +30,7 @@ from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
@@ -89,6 +90,12 @@ class RequestLogsContext:
     session: AsyncSession
     repository: RequestLogsRepository
     service: RequestLogsService
+
+
+@dataclass(slots=True)
+class QuotaPlannerContext:
+    session: AsyncSession
+    repository: QuotaPlannerRepository
 
 
 @dataclass(slots=True)
@@ -177,6 +184,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
+            quota_planner=QuotaPlannerRepository(session),
         )
 
 
@@ -229,6 +237,13 @@ def get_request_logs_context(
     repository = RequestLogsRepository(session)
     service = RequestLogsService(repository)
     return RequestLogsContext(session=session, repository=repository, service=service)
+
+
+def get_quota_planner_context(
+    session: AsyncSession = Depends(get_session),
+) -> QuotaPlannerContext:
+    repository = QuotaPlannerRepository(session)
+    return QuotaPlannerContext(session=session, repository=repository)
 
 
 def get_settings_context(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Collection
@@ -15,6 +16,7 @@ from app.core.balancer import (
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     AccountState,
+    RoutingCostsByAccount,
     RoutingStrategy,
     SelectionResult,
     evaluate_health_tier,
@@ -36,6 +38,7 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_definition,
@@ -91,6 +94,7 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
+    quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
     error_code: str | None = None
@@ -124,6 +128,7 @@ class LoadBalancer:
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
+        routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -139,6 +144,7 @@ class LoadBalancer:
                     accounts=[account for account in selection_inputs.accounts if account.id not in excluded_ids],
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
@@ -176,6 +182,15 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
                 )
+                effective_routing_costs = (
+                    routing_costs_by_account_id
+                    if routing_costs_by_account_id is not None
+                    else build_routing_costs(
+                        settings=selection_inputs.quota_planner_settings,
+                        states=states,
+                        now=datetime.now(timezone.utc),
+                    )
+                )
 
                 result = _select_account_preferring_budget_safe(
                     states,
@@ -184,6 +199,7 @@ class LoadBalancer:
                     relative_availability_power=relative_availability_power,
                     relative_availability_top_k=relative_availability_top_k,
                     budget_threshold_pct=budget_threshold_pct,
+                    routing_costs_by_account_id=effective_routing_costs,
                 )
 
                 selected_account_map = account_map
@@ -308,6 +324,15 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
                 )
+                effective_routing_costs = (
+                    routing_costs_by_account_id
+                    if routing_costs_by_account_id is not None
+                    else build_routing_costs(
+                        settings=selection_inputs.quota_planner_settings,
+                        states=states,
+                        now=datetime.now(timezone.utc),
+                    )
+                )
                 async with self._repo_factory() as repos:
                     result = await self._select_with_stickiness(
                         states=states,
@@ -322,6 +347,7 @@ class LoadBalancer:
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
+                        routing_costs_by_account_id=effective_routing_costs,
                     )
                     selected_account_map = account_map
                     selected_states = []
@@ -421,6 +447,15 @@ class LoadBalancer:
 
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
+            quota_planner_repo = getattr(repos, "quota_planner", None)
+            get_quota_planner_settings = getattr(quota_planner_repo, "get_settings", None)
+            if callable(get_quota_planner_settings):
+                settings_result = get_quota_planner_settings()
+                quota_planner_settings = (
+                    await settings_result if inspect.isawaitable(settings_result) else PlannerSettings()
+                )
+            else:
+                quota_planner_settings = PlannerSettings()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
@@ -435,6 +470,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
                     await self._selection_inputs_cache.set(
@@ -446,6 +482,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
                     await self._selection_inputs_cache.set(
@@ -456,6 +493,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
@@ -478,6 +516,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=error_message,
                         error_code=error_code,
@@ -491,6 +530,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
                 await self._selection_inputs_cache.set(
@@ -510,6 +550,7 @@ class LoadBalancer:
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
+                quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
             )
             await self._selection_inputs_cache.set(
@@ -662,6 +703,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
+        routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
@@ -671,6 +713,7 @@ class LoadBalancer:
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
+                routing_costs_by_account_id=routing_costs_by_account_id,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -722,6 +765,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
+                        routing_costs=routing_costs_by_account_id,
                     )
                     if pinned_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -742,6 +786,7 @@ class LoadBalancer:
                             relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
+                            routing_costs_by_account_id=routing_costs_by_account_id,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
@@ -760,6 +805,7 @@ class LoadBalancer:
                                 allow_backoff_fallback=False,
                                 relative_availability_power=relative_availability_power,
                                 relative_availability_top_k=relative_availability_top_k,
+                                routing_costs=routing_costs_by_account_id,
                             )
                             if pinned_result.account is not None:
                                 if sticky_max_age_seconds is not None:
@@ -786,6 +832,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
+                        routing_costs=routing_costs_by_account_id,
                     )
                     if grace_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -816,6 +863,7 @@ class LoadBalancer:
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
+            routing_costs_by_account_id=routing_costs_by_account_id,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1355,6 +1403,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         latest_secondary={
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
+        quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
             None
             if selection_inputs.runtime_accounts is None
@@ -1468,6 +1517,7 @@ def _select_account_preferring_budget_safe(
     budget_threshold_pct: float,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
+    routing_costs_by_account_id: RoutingCostsByAccount | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
@@ -1481,6 +1531,7 @@ def _select_account_preferring_budget_safe(
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
+            routing_costs=routing_costs_by_account_id,
         )
         if preferred.account is not None:
             return preferred
@@ -1494,6 +1545,7 @@ def _select_account_preferring_budget_safe(
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             primary_first_usage_weighted=True,
+            routing_costs=routing_costs_by_account_id,
         )
     return select_account(
         state_list,
@@ -1503,6 +1555,7 @@ def _select_account_preferring_budget_safe(
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,
+        routing_costs=routing_costs_by_account_id,
     )
 
 

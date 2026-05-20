@@ -150,6 +150,7 @@ class RequestLog(Base):
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -573,6 +574,96 @@ class RateLimitAttempt(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
 
 
+class QuotaPlannerSettings(Base):
+    __tablename__ = "quota_planner_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    mode: Mapped[str] = mapped_column(String, default="shadow", server_default=text("'shadow'"), nullable=False)
+    timezone: Mapped[str] = mapped_column(String, default="UTC", server_default=text("'UTC'"), nullable=False)
+    working_days_json: Mapped[str] = mapped_column(
+        Text,
+        default="[0,1,2,3,4]",
+        server_default=text("'[0,1,2,3,4]'"),
+        nullable=False,
+    )
+    working_hours_start: Mapped[str] = mapped_column(
+        String,
+        default="09:00",
+        server_default=text("'09:00'"),
+        nullable=False,
+    )
+    working_hours_end: Mapped[str] = mapped_column(
+        String,
+        default="18:00",
+        server_default=text("'18:00'"),
+        nullable=False,
+    )
+    prewarm_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    prewarm_lead_minutes: Mapped[int] = mapped_column(Integer, default=300, server_default=text("300"), nullable=False)
+    max_warmups_per_day: Mapped[int] = mapped_column(Integer, default=3, server_default=text("3"), nullable=False)
+    max_warmup_credits_per_day: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        server_default=text("0.0"),
+        nullable=False,
+    )
+    min_expected_gain: Mapped[float] = mapped_column(Float, default=1.0, server_default=text("1.0"), nullable=False)
+    forecast_quantile: Mapped[str] = mapped_column(String, default="p75", server_default=text("'p75'"), nullable=False)
+    allow_synthetic_traffic: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    warmup_model_preference: Mapped[str | None] = mapped_column(String, nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class QuotaPlannerDecision(Base):
+    __tablename__ = "quota_planner_decisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state_before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state_after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="planned", server_default=text("'planned'"), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+
+
+class QuotaWindowObservation(Base):
+    __tablename__ = "quota_window_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    primary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secondary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    confidence: Mapped[str] = mapped_column(String, default="unknown", server_default=text("'unknown'"), nullable=False)
+
+
 class CacheInvalidation(Base):
     __tablename__ = "cache_invalidation"
 
@@ -735,6 +826,7 @@ Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
+Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -797,6 +889,17 @@ Index(
     "idx_api_key_usage_reservations_status_updated_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.updated_at
 )
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
+Index("idx_quota_planner_decisions_status_created", QuotaPlannerDecision.status, QuotaPlannerDecision.created_at.desc())
+Index(
+    "idx_quota_planner_decisions_account_created",
+    QuotaPlannerDecision.account_id,
+    QuotaPlannerDecision.created_at.desc(),
+)
+Index(
+    "idx_quota_window_observations_account_time",
+    QuotaWindowObservation.account_id,
+    QuotaWindowObservation.observed_at.desc(),
+)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())

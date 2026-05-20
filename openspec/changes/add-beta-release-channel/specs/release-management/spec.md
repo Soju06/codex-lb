@@ -23,6 +23,7 @@ Beta releases SHALL be prepared by an automatically maintained pull request agai
 - **GIVEN** a fork has an open pull request whose head branch is named `release-please--branches--main`
 - **WHEN** the beta PR sync workflow looks for the release-please PR
 - **THEN** it ignores that pull request unless the head repository owner is the canonical repository owner
+- **AND** it requests enough open pull requests to avoid missing the canonical release-please PR during high-PR-volume periods
 
 #### Scenario: merged beta release already covers main
 

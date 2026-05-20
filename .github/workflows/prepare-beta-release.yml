@@ -53,6 +53,7 @@ jobs:
           release_pr="$(gh pr list \
             --base main \
             --state open \
+            --limit 200 \
             --json number,headRefName,headRepositoryOwner \
             --jq '[.[] | select(.headRefName == "release-please--branches--main" and .headRepositoryOwner.login == "'"${repo_owner}"'")][0].number // empty')"
           if [ -z "${release_pr}" ]; then

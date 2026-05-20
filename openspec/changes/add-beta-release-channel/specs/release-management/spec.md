@@ -27,12 +27,13 @@ Beta releases SHALL be prepared by an automatically maintained pull request agai
 
 ### Requirement: Merged beta release PRs publish GitHub prereleases
 
-When a pull request from a `release/beta-*` branch is merged into `main`, the release automation SHALL verify that all release-managed version files agree on a beta version, create the matching `vX.Y.Z-beta.N` tag at the merge commit, and publish a GitHub prerelease for that tag. Re-running the workflow after the tag already exists SHALL be safe and SHALL NOT create a second tag.
+When a pull request from a `release/beta-*` branch is merged into `main`, the release automation SHALL require `RELEASE_PLEASE_TOKEN` rather than falling back to `GITHUB_TOKEN`, verify that all release-managed version files agree on a beta version, create the matching `vX.Y.Z-beta.N` tag at the merge commit, and publish a GitHub prerelease for that tag. Re-running the workflow after the tag already exists SHALL be safe and SHALL NOT create a second tag.
 
 #### Scenario: beta PR merge publishes a prerelease tag
 
 - **GIVEN** a merged pull request from `release/beta-1.19.0-beta.1`
 - **AND** release-managed files all contain `1.19.0-beta.1`
+- **AND** `RELEASE_PLEASE_TOKEN` is configured
 - **WHEN** the beta publish workflow runs
 - **THEN** it creates tag `v1.19.0-beta.1` at the merge commit
 - **AND** it creates a GitHub prerelease for `v1.19.0-beta.1`

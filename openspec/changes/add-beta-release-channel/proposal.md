@@ -6,7 +6,7 @@ codex-lb currently has one stable release path managed by release-please. Mainta
 
 ## What Changes
 
-- Add a manual workflow that prepares a beta release PR by updating the same release-managed version files that release-please owns for stable releases.
+- Add an automatic workflow that keeps a beta release PR synced from the open release-please PR without requiring manual workflow dispatch.
 - Add a PR-merge workflow that publishes merged beta release PRs as GitHub prereleases.
 - Teach the release publishing workflow to accept prerelease tags and avoid stable aliases (`latest`, major, major.minor) for prerelease Docker images.
 - Keep `.github/release-please-manifest.json` owned by stable release-please; beta PRs do not advance the stable manifest.

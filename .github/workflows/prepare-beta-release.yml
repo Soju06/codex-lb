@@ -1,16 +1,11 @@
-name: Prepare Beta Release
+name: Sync Beta Release PR
 
 on:
-  workflow_dispatch:
-    inputs:
-      base_version:
-        description: "Stable version to beta-test (defaults to the open release-please PR version)"
-        required: false
-        default: ""
-      beta_number:
-        description: "Beta serial number (defaults to highest existing beta tag + 1)"
-        required: false
-        default: ""
+  push:
+    branches: ["main"]
+  workflow_run:
+    workflows: ["Release Please"]
+    types: [completed]
 
 concurrency:
   group: ${{ github.workflow }}-main
@@ -21,7 +16,10 @@ permissions:
   pull-requests: write
 
 jobs:
-  prepare-beta-release:
+  sync-beta-release-pr:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
 
     env:
@@ -35,31 +33,44 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Find open release-please PR
+        id: release_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_pr="$(gh pr list \
+            --base main \
+            --head release-please--branches--main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [ -z "${release_pr}" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No open release-please PR; beta PR sync is a no-op."
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "number=${release_pr}" >> "$GITHUB_OUTPUT"
+            echo "Found release-please PR #${release_pr}."
+          fi
+
       - name: Fetch release metadata
+        if: steps.release_pr.outputs.found == 'true'
         shell: bash
         run: |
           set -euo pipefail
           git fetch --tags --force
-          git fetch origin release-please--branches--main:refs/remotes/origin/release-please--branches--main || true
+          git fetch origin release-please--branches--main:refs/remotes/origin/release-please--branches--main
 
       - name: Prepare beta version bump
+        if: steps.release_pr.outputs.found == 'true'
         id: prepare
         shell: bash
-        env:
-          BASE_VERSION: ${{ inputs.base_version }}
-          BETA_NUMBER: ${{ inputs.beta_number }}
         run: |
           set -euo pipefail
-          args=()
-          if [ -n "${BASE_VERSION}" ]; then
-            args+=(--base-version "${BASE_VERSION}")
-          fi
-          if [ -n "${BETA_NUMBER}" ]; then
-            args+=(--beta-number "${BETA_NUMBER}")
-          fi
-          python -m scripts.prepare_beta_release "${args[@]}"
+          python -m scripts.prepare_beta_release
 
       - name: Detect changes
+        if: steps.release_pr.outputs.found == 'true' && steps.prepare.outputs.should_create != 'false'
         id: changes
         shell: bash
         run: |
@@ -97,6 +108,7 @@ jobs:
           VERSION: ${{ steps.prepare.outputs.version }}
           BASE_VERSION: ${{ steps.prepare.outputs.base_version }}
           PYPI_VERSION: ${{ steps.prepare.outputs.pypi_version }}
+          RELEASE_PR: ${{ steps.release_pr.outputs.number }}
         run: |
           set -euo pipefail
           body_file="${RUNNER_TEMP}/beta-release-pr.md"
@@ -105,6 +117,7 @@ jobs:
           - Prepares beta release ${TAG} for the ${BASE_VERSION} stable train.
           - Updates release-managed version files only; release-please remains the stable release owner.
           - Merging this PR will publish ${TAG} as a GitHub prerelease and trigger package/image/chart publishing.
+          - Synced automatically from release-please PR #${RELEASE_PR}; no manual beta workflow dispatch is required.
 
           ## Install after publish
           \`\`\`bash
@@ -117,7 +130,7 @@ jobs:
           Merge the normal release-please PR to promote this beta-tested train to ${BASE_VERSION}.
           EOF
 
-          existing_pr="$(gh pr list --base main --head "${BRANCH}" --json number --jq '.[0].number // empty')"
+          existing_pr="$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
           if [ -n "${existing_pr}" ]; then
             gh pr edit "${existing_pr}" --title "chore: release ${TAG}" --body-file "${body_file}"
             echo "Updated PR #${existing_pr}"

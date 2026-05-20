@@ -217,18 +217,31 @@ def discover_release_please_base_version(root: Path) -> str:
     )
 
 
-def next_beta_number(root: Path, base_version: str) -> int:
+def latest_beta_tag(root: Path, base_version: str) -> ReleaseVersion | None:
     parse_version(base_version)
     proc = run_git(root, "tag", "--list", f"v{base_version}-beta.*")
-    highest = 0
+    latest: ReleaseVersion | None = None
     for tag in proc.stdout.splitlines():
         try:
             parsed = parse_tag(tag.strip())
         except ValueError:
             continue
-        if parsed.base == base_version and parsed.channel == "beta" and parsed.serial is not None:
-            highest = max(highest, parsed.serial)
-    return highest + 1
+        if parsed.base != base_version or parsed.channel != "beta" or parsed.serial is None:
+            continue
+        if latest is None or parsed.serial > (latest.serial or 0):
+            latest = parsed
+    return latest
+
+
+def next_beta_number(root: Path, base_version: str) -> int:
+    latest = latest_beta_tag(root, base_version)
+    return (latest.serial + 1) if latest and latest.serial is not None else 1
+
+
+def tag_targets_head(root: Path, tag: str) -> bool:
+    tag_sha = run_git(root, "rev-parse", f"{tag}^{{commit}}").stdout.strip()
+    head_sha = run_git(root, "rev-parse", "HEAD").stdout.strip()
+    return tag_sha == head_sha
 
 
 def write_github_outputs(values: Mapping[str, str | int | bool]) -> None:

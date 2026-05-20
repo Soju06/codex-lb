@@ -7,9 +7,12 @@ import argparse
 from pathlib import Path
 
 from scripts.release_versions import (
+    assert_project_versions,
     discover_release_please_base_version,
+    latest_beta_tag,
     next_beta_number,
     parse_version,
+    tag_targets_head,
     update_project_versions,
     write_github_outputs,
 )
@@ -36,6 +39,24 @@ def main() -> int:
     base = parse_version(base_version)
     if base.is_prerelease:
         raise SystemExit(f"--base-version must be stable, got {base.version!r}")
+
+    latest_beta = latest_beta_tag(root, base.version)
+    if args.beta_number == 0 and latest_beta is not None and tag_targets_head(root, latest_beta.tag):
+        assert_project_versions(root, latest_beta.version)
+        outputs = {
+            "should_create": False,
+            "reason": f"{latest_beta.tag} already covers HEAD",
+            "base_version": base.version,
+            "beta_number": latest_beta.serial or 0,
+            "version": latest_beta.version,
+            "tag": latest_beta.tag,
+            "pypi_version": latest_beta.pypi_version,
+            "branch": f"release/beta-{latest_beta.version}",
+        }
+        write_github_outputs(outputs)
+        for key, value in outputs.items():
+            print(f"{key}={str(value).lower() if isinstance(value, bool) else value}")
+        return 0
 
     beta_number = args.beta_number or next_beta_number(root, base.version)
     if beta_number < 1:

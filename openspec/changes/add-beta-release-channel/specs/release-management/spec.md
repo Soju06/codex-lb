@@ -2,15 +2,28 @@
 
 ### Requirement: Beta releases are prepared through release PRs
 
-Beta releases SHALL be prepared by a pull request against `main` that updates the release-managed version files to `X.Y.Z-beta.N`. The beta preparation flow SHALL derive `X.Y.Z` from the open release-please PR branch when no explicit base version is provided. Beta release PRs SHALL NOT update `.github/release-please-manifest.json` because stable version ownership remains with release-please.
+Beta releases SHALL be prepared by an automatically maintained pull request against `main` that updates the release-managed version files to `X.Y.Z-beta.N`. The beta preparation flow SHALL run after release-please completes and after pushes to `main`, SHALL derive `X.Y.Z` from the open release-please PR branch, and SHALL do nothing when there is no open release-please PR. Beta release PRs SHALL NOT update `.github/release-please-manifest.json` because stable version ownership remains with release-please.
 
-#### Scenario: maintainer prepares the next beta from the release-please PR
+#### Scenario: automation syncs the next beta from the release-please PR
 
 - **GIVEN** release-please has opened or updated `release-please--branches--main` with `pyproject.toml` version `1.19.0`
-- **WHEN** the beta preparation workflow runs without an explicit base version
+- **WHEN** the beta PR sync workflow runs
 - **THEN** it creates or updates a pull request that sets release-managed files to `1.19.0-beta.N`
 - **AND** `N` is one higher than the highest existing `v1.19.0-beta.N` tag
 - **AND** `.github/release-please-manifest.json` remains unchanged
+
+#### Scenario: automation is idle without a release-please PR
+
+- **GIVEN** there is no open release-please PR targeting `main`
+- **WHEN** the beta PR sync workflow runs
+- **THEN** it exits without creating a beta release pull request
+
+#### Scenario: merged beta release already covers main
+
+- **GIVEN** tag `v1.19.0-beta.1` points to `HEAD`
+- **AND** release-managed files all contain `1.19.0-beta.1`
+- **WHEN** the beta PR sync workflow runs for base version `1.19.0`
+- **THEN** it exits without creating `1.19.0-beta.2`
 
 ### Requirement: Merged beta release PRs publish GitHub prereleases
 

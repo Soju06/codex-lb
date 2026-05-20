@@ -943,6 +943,15 @@ class ApiKeysService:
             total_cost_usd=data.total_cost_usd,
             total_requests=data.total_requests,
             cached_input_tokens=data.cached_input_tokens,
+            account_costs=[
+                ApiKeyAccountCostData(
+                    account_id=ac.account_id,
+                    email=ac.email,
+                    cost_usd=ac.cost_usd,
+                    is_deleted=ac.is_deleted,
+                )
+                for ac in data.account_costs
+            ],
         )
 
 
@@ -960,12 +969,21 @@ class ApiKeyTrendsData:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiKeyAccountCostData:
+    account_id: str | None
+    email: str | None
+    cost_usd: float
+    is_deleted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ApiKeyUsage7DayData:
     key_id: str
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     total_requests: int = 0
     cached_input_tokens: int = 0
+    account_costs: list[ApiKeyAccountCostData] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

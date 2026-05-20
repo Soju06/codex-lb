@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.db.models import LimitWindow
-from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 
 pytestmark = pytest.mark.unit
 
@@ -46,3 +46,159 @@ async def test_reset_expired_limits_counts_successful_updates_without_rowcount()
     assert "RETURNING api_key_limits.id" in executed_sql[1]
     assert "RETURNING api_key_limits.id" in executed_sql[2]
     session.commit.assert_awaited_once()
+
+
+class TestUsage7dByAccount:
+    @pytest.mark.asyncio
+    async def test_groups_known_accounts_sorted_by_cost_descending(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        rows = [
+            SimpleNamespace(account_id="acc_1", email="alice@example.com", is_deleted=False, cost_usd=1.5),
+            SimpleNamespace(account_id="acc_2", email="bob@example.com", is_deleted=False, cost_usd=3.2),
+        ]
+
+        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+
+        result = await repo.usage_7d_by_account("key_1", since, until)
+
+        assert len(result) == 2
+        assert result[0] == ApiKeyAccountCost(
+            account_id="acc_2",
+            email="bob@example.com",
+            cost_usd=3.2,
+            is_deleted=False,
+        )
+        assert result[1] == ApiKeyAccountCost(
+            account_id="acc_1",
+            email="alice@example.com",
+            cost_usd=1.5,
+            is_deleted=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_deleted_account_bucket_is_sorted_by_cost_without_folding_unknown_account_usage(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        rows = [
+            SimpleNamespace(account_id="acc_1", email="alice@example.com", is_deleted=False, cost_usd=1.0),
+            SimpleNamespace(account_id=None, email=None, is_deleted=False, cost_usd=0.5),
+            SimpleNamespace(account_id="acc_del", email=None, is_deleted=True, cost_usd=0.8),
+        ]
+
+        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+
+        result = await repo.usage_7d_by_account("key_1", since, until)
+
+        assert len(result) == 3
+        assert result[0].account_id == "acc_1"
+        assert result[0].cost_usd == 1.0
+        assert result[0].is_deleted is False
+        assert result[1] == ApiKeyAccountCost(
+            account_id=None,
+            email=None,
+            cost_usd=0.8,
+            is_deleted=True,
+        )
+        assert result[2] == ApiKeyAccountCost(
+            account_id=None,
+            email=None,
+            cost_usd=0.5,
+            is_deleted=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_zero_cost_rows_excluded(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        rows = [
+            SimpleNamespace(account_id="acc_1", email="alice@example.com", is_deleted=False, cost_usd=0.0),
+            SimpleNamespace(account_id="acc_2", email="bob@example.com", is_deleted=False, cost_usd=2.0),
+        ]
+
+        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+
+        result = await repo.usage_7d_by_account("key_1", since, until)
+
+        assert len(result) == 1
+        assert result[0].account_id == "acc_2"
+
+    @pytest.mark.asyncio
+    async def test_empty_result_when_no_logs(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        session.execute.return_value = SimpleNamespace(all=lambda: [])
+
+        result = await repo.usage_7d_by_account("key_1", since, until)
+
+        assert result == []
+
+
+class TestUsage7d:
+    @pytest.mark.asyncio
+    async def test_returns_totals_and_account_costs_from_single_execute(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        rows = [
+            SimpleNamespace(
+                total_requests=3,
+                total_input_tokens=200,
+                total_output_tokens=50,
+                cached_input_tokens=25,
+                total_cost_usd=1.8,
+                account_id="acc_1",
+                email="alice@example.com",
+                is_deleted=False,
+                cost_usd=1.0,
+            ),
+            SimpleNamespace(
+                total_requests=3,
+                total_input_tokens=200,
+                total_output_tokens=50,
+                cached_input_tokens=25,
+                total_cost_usd=1.8,
+                account_id="acc_del",
+                email=None,
+                is_deleted=True,
+                cost_usd=0.8,
+            ),
+        ]
+
+        session.execute.return_value = SimpleNamespace(all=lambda: rows)
+
+        result = await repo.usage_7d("key_1", since, until)
+
+        assert result.total_requests == 3
+        assert result.total_tokens == 250
+        assert result.cached_input_tokens == 25
+        assert result.total_cost_usd == 1.8
+        assert result.account_costs == [
+            ApiKeyAccountCost(
+                account_id="acc_1",
+                email="alice@example.com",
+                cost_usd=1.0,
+                is_deleted=False,
+            ),
+            ApiKeyAccountCost(
+                account_id=None,
+                email=None,
+                cost_usd=0.8,
+                is_deleted=True,
+            ),
+        ]
+        session.execute.assert_awaited_once()

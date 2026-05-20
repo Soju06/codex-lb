@@ -361,6 +361,14 @@ async def test_usage_7d_sums_only_recent_request_logs(async_client):
         "totalCostUsd": 0.53,
         "totalRequests": 3,
         "cachedInputTokens": 21,
+        "accountCosts": [
+            {
+                "accountId": None,
+                "email": None,
+                "costUsd": 0.53,
+                "isDeleted": False,
+            }
+        ],
     }
 
 
@@ -405,4 +413,63 @@ async def test_usage_7d_clamps_cached_input_tokens_to_total_input(async_client):
         "totalCostUsd": 0.15,
         "totalRequests": 2,
         "cachedInputTokens": 14,
+        "accountCosts": [
+            {
+                "accountId": None,
+                "email": None,
+                "costUsd": 0.15,
+                "isDeleted": False,
+            }
+        ],
     }
+
+
+@pytest.mark.asyncio
+async def test_usage_7d_keeps_unknown_account_usage_separate_from_deleted_account_usage(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    key_id = await _create_api_key(async_client, name="usage-key-account-breakdown")
+    now = datetime(2026, 5, 20, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-usage-unknown",
+            requested_at=now - timedelta(hours=3),
+            model="gpt-5.1",
+            status="ok",
+            account_id=None,
+            cost_usd=0.11,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-usage-deleted",
+            requested_at=now - timedelta(hours=2),
+            model="gpt-5.1",
+            status="ok",
+            account_id=None,
+            deleted_at=now - timedelta(hours=1),
+            cost_usd=0.29,
+        ),
+    )
+
+    response = await async_client.get(f"/api/api-keys/{key_id}/usage-7d")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["accountCosts"] == [
+        {
+            "accountId": None,
+            "email": None,
+            "costUsd": 0.29,
+            "isDeleted": True,
+        },
+        {
+            "accountId": None,
+            "email": None,
+            "costUsd": 0.11,
+            "isDeleted": False,
+        },
+    ]

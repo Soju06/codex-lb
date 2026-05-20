@@ -98,6 +98,20 @@ describe("ApiDetail", () => {
 		expect(screen.getByText(/\$2.47/)).toBeInTheDocument();
 	});
 
+	it("renders unknown and deleted account buckets distinctly in the cost donut", () => {
+		renderApiDetail({
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [
+					{ accountId: null, email: null, costUsd: 0.11, isDeleted: false },
+					{ accountId: null, email: null, costUsd: 0.29, isDeleted: true },
+				],
+			}),
+		});
+
+		expect(screen.getByText("Unknown Account")).toBeInTheDocument();
+		expect(screen.getByText("Deleted Account")).toBeInTheDocument();
+	});
+
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {
 		renderApiDetail({
 			apiKey: createApiKey({
@@ -220,7 +234,13 @@ describe("ApiDetail", () => {
 
 	it("disables all mutation actions while busy", async () => {
 		const user = userEvent.setup();
-		renderApiDetail({ busy: true });
+		renderApiDetail({
+			busy: true,
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.2 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1500 }],
+			}),
+		});
 
 		expect(screen.getByRole("button", { name: "Actions" })).toBeDisabled();
 		expect(screen.getByRole("button", { name: "Disable" })).toBeDisabled();

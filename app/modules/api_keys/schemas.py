@@ -93,9 +93,17 @@ class ApiKeyTrendsResponse(DashboardModel):
     tokens: list[ApiKeyTrendPoint] = Field(default_factory=list)
 
 
+class ApiKeyAccountCostResponse(DashboardModel):
+    account_id: str | None = None
+    email: str | None = None
+    cost_usd: float = 0
+    is_deleted: bool = False
+
+
 class ApiKeyUsage7DayResponse(DashboardModel):
     key_id: str
     total_tokens: int = 0
     total_cost_usd: float = 0
     total_requests: int = 0
     cached_input_tokens: int = 0
+    account_costs: list[ApiKeyAccountCostResponse] = Field(default_factory=list)

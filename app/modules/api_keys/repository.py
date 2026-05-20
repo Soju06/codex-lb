@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, delete, func, select, update
+from sqlalchemy import Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -72,6 +73,15 @@ class ApiKeyUsageTotals:
     total_tokens: int
     cached_input_tokens: int
     total_cost_usd: float
+    account_costs: list["ApiKeyAccountCost"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyAccountCost:
+    account_id: str | None
+    email: str | None
+    cost_usd: float
+    is_deleted: bool = False
 
 
 class _Unset(Enum):
@@ -86,6 +96,41 @@ _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE = 500
 class ApiKeysRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    @staticmethod
+    def _build_account_costs(rows: Sequence[object]) -> list[ApiKeyAccountCost]:
+        account_costs: list[ApiKeyAccountCost] = []
+        deleted_cost = 0.0
+
+        for row in rows:
+            cost = round(float(getattr(row, "cost_usd", 0.0) or 0.0), 6)
+            if cost <= 0:
+                continue
+            is_deleted = bool(getattr(row, "is_deleted", False))
+            if is_deleted:
+                deleted_cost += cost
+                continue
+            account_costs.append(
+                ApiKeyAccountCost(
+                    account_id=getattr(row, "account_id", None),
+                    email=getattr(row, "email", None),
+                    cost_usd=cost,
+                    is_deleted=False,
+                )
+            )
+
+        if deleted_cost > 0:
+            account_costs.append(
+                ApiKeyAccountCost(
+                    account_id=None,
+                    email=None,
+                    cost_usd=round(deleted_cost, 6),
+                    is_deleted=True,
+                )
+            )
+
+        account_costs.sort(key=lambda item: item.cost_usd, reverse=True)
+        return account_costs
 
     def _select_api_key(self):
         return (
@@ -709,6 +754,31 @@ class ApiKeysRepository:
 
         return released_count
 
+    async def usage_7d_by_account(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[ApiKeyAccountCost]:
+        deleted_expr = func.coalesce(RequestLog.deleted_at.is_not(None), False)
+        stmt = (
+            select(
+                RequestLog.account_id,
+                Account.email,
+                deleted_expr.label("is_deleted"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            )
+            .outerjoin(Account, Account.id == RequestLog.account_id)
+            .where(
+                RequestLog.api_key_id == key_id,
+                RequestLog.requested_at >= since,
+                RequestLog.requested_at < until,
+            )
+            .group_by(RequestLog.account_id, Account.email, deleted_expr)
+        )
+        result = await self._session.execute(stmt)
+        return self._build_account_costs(result.all())
+
     async def trends_by_key(
         self,
         key_id: str,
@@ -754,22 +824,62 @@ class ApiKeysRepository:
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
-        stmt = select(
-            func.count(RequestLog.id).label("total_requests"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
-            func.coalesce(
-                func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
-                0,
-            ).label("total_output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-        ).where(
-            RequestLog.api_key_id == key_id,
-            RequestLog.requested_at >= since,
-            RequestLog.requested_at < until,
+        filtered_logs = (
+            select(
+                RequestLog.id.label("id"),
+                RequestLog.account_id.label("account_id"),
+                RequestLog.deleted_at.label("deleted_at"),
+                RequestLog.input_tokens.label("input_tokens"),
+                RequestLog.output_tokens.label("output_tokens"),
+                RequestLog.reasoning_tokens.label("reasoning_tokens"),
+                RequestLog.cached_input_tokens.label("cached_input_tokens"),
+                RequestLog.cost_usd.label("cost_usd"),
+            )
+            .where(
+                RequestLog.api_key_id == key_id,
+                RequestLog.requested_at >= since,
+                RequestLog.requested_at < until,
+            )
+            .cte("filtered_logs")
         )
+        usage_totals = (
+            select(
+                func.count(filtered_logs.c.id).label("total_requests"),
+                func.coalesce(func.sum(filtered_logs.c.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(filtered_logs.c.output_tokens, filtered_logs.c.reasoning_tokens, 0)),
+                    0,
+                ).label("total_output_tokens"),
+                func.coalesce(func.sum(filtered_logs.c.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("total_cost_usd"),
+            ).cte("usage_totals")
+        )
+        deleted_expr = func.coalesce(filtered_logs.c.deleted_at.is_not(None), False)
+        usage_grouped = (
+            select(
+                filtered_logs.c.account_id.label("account_id"),
+                Account.email.label("email"),
+                deleted_expr.label("is_deleted"),
+                func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("cost_usd"),
+            )
+            .select_from(filtered_logs.outerjoin(Account, Account.id == filtered_logs.c.account_id))
+            .group_by(filtered_logs.c.account_id, Account.email, deleted_expr)
+            .cte("usage_grouped")
+        )
+        stmt = select(
+            usage_totals.c.total_requests,
+            usage_totals.c.total_input_tokens,
+            usage_totals.c.total_output_tokens,
+            usage_totals.c.cached_input_tokens,
+            usage_totals.c.total_cost_usd,
+            usage_grouped.c.account_id,
+            usage_grouped.c.email,
+            usage_grouped.c.is_deleted,
+            usage_grouped.c.cost_usd,
+        ).select_from(usage_totals.outerjoin(usage_grouped, true()))
         result = await self._session.execute(stmt)
-        row = result.one()
+        rows = result.all()
+        row = rows[0]
         input_sum = int(row.total_input_tokens or 0)
         output_sum = int(row.total_output_tokens or 0)
         cached_sum = int(row.cached_input_tokens or 0)
@@ -779,6 +889,7 @@ class ApiKeysRepository:
             total_tokens=input_sum + output_sum,
             cached_input_tokens=cached_sum,
             total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+            account_costs=self._build_account_costs(rows),
         )
 
 

@@ -7,6 +7,7 @@ from app.core.auth.dependencies import set_dashboard_error_format, validate_dash
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
+    ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyResponse,
@@ -262,4 +263,13 @@ async def get_api_key_usage_7d(
         total_cost_usd=result.total_cost_usd,
         total_requests=result.total_requests,
         cached_input_tokens=result.cached_input_tokens,
+        account_costs=[
+            ApiKeyAccountCostResponse(
+                account_id=ac.account_id,
+                email=ac.email,
+                cost_usd=ac.cost_usd,
+                is_deleted=ac.is_deleted,
+            )
+            for ac in result.account_costs
+        ],
     )

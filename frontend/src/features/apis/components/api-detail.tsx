@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import type { ApiKey } from "@/features/api-keys/schemas";
+import { AccountCostDonut } from "@/features/apis/components/account-cost-donut";
 import { ApiKeyInfo } from "@/features/apis/components/api-key-info";
 import { ApiTrendChart } from "@/features/apis/components/api-trend-chart";
 import type { ApiKeyUsage7DayResponse } from "@/features/apis/schemas";
@@ -87,6 +88,9 @@ export function ApiDetail({
 		return null;
 	}, [usage7Day, usage7DayError, usage7DayLoading]);
 
+	const hasDonutData = usage7Day && usage7Day.accountCosts.length > 0;
+	const hasTrends = trends && (trends.cost.length > 0 || trends.tokens.length > 0);
+
 	if (!apiKey) {
 		return (
 			<div className="flex flex-col items-center justify-center rounded-xl border border-dashed p-12">
@@ -102,9 +106,6 @@ export function ApiDetail({
 			</div>
 		);
 	}
-
-	const hasTrends =
-		trends && (trends.cost.length > 0 || trends.tokens.length > 0);
 
 	return (
 		<div
@@ -138,32 +139,43 @@ export function ApiDetail({
 				</DropdownMenu>
 			</div>
 
-			<div className="space-y-4 rounded-lg border bg-muted/30 p-4">
-				<div className="flex items-center justify-end gap-3">
-					<div className="flex items-center gap-3 text-[10px] text-muted-foreground">
-						<span className="flex items-center gap-1.5">
-							Tokens
-							<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-						</span>
-						<span className="flex items-center gap-1.5">
-							Cost
-							<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-						</span>
-					</div>
-					<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
-						<span className="text-[10px]">Accumulated</span>
-						<Switch
-							size="sm"
-							checked={showAccumulated}
-							onCheckedChange={setShowAccumulated}
+			{hasDonutData || hasTrends ? (
+				<div className={`grid gap-4 ${hasDonutData ? "lg:grid-cols-[25fr_75fr]" : ""}`}>
+					{hasDonutData && (
+						<AccountCostDonut
+							accountCosts={usage7Day.accountCosts}
+							totalCostUsd={usage7Day.totalCostUsd}
 						/>
+					)}
+					<div className="rounded-xl border bg-card p-4">
+						<div className="mb-2">
+							<h3 className="text-sm font-semibold">Usage Trend</h3>
+							<p className="text-xs text-muted-foreground">7-day token and cost activity</p>
+						</div>
+						<div className="flex items-center justify-end gap-1.5 rounded-md border px-2 py-1 w-fit ml-auto mb-3">
+							<span className="text-[10px]">Accumulated</span>
+							<Switch
+								size="sm"
+								checked={showAccumulated}
+								onCheckedChange={setShowAccumulated}
+							/>
+						</div>
+						<div className="flex items-center gap-3 text-[10px] text-muted-foreground mb-3">
+							<span className="flex items-center gap-1.5">
+								Tokens
+								<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+							</span>
+							<span className="flex items-center gap-1.5">
+								Cost
+								<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+							</span>
+						</div>
+						{hasTrends && chartData && (
+							<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
+						)}
 					</div>
 				</div>
-
-				{hasTrends && chartData && (
-					<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
-				)}
-			</div>
+			) : null}
 
 			{usage7DayError ? (
 				<AlertMessage variant="error">{usage7DayError}</AlertMessage>

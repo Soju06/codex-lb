@@ -4,7 +4,7 @@
 
 When the selected API key's 7-day usage payload contains one or more `accountCosts[]` items, the APIs tab detail panel SHALL render the account-cost donut section and usage-trend section inside a single shared card. On large screens, the split layout SHALL use a 25:75 width ratio with the donut on the left, the trend on the right, and a vertical separator between them.
 
-The donut section SHALL include a title and subtitle, SHALL show the 7-day total cost in the donut center, SHALL render a visible `Total $...` summary in the section header, and SHALL render the legend beside the donut on larger screens.
+The donut section SHALL include a title and subtitle, SHALL show the 7-day total cost in the donut center, SHALL not render a separate `Total $...` summary in the section header, and SHALL render the legend below the donut.
 
 #### Scenario: Donut renders inside the shared usage card
 - **WHEN** a selected API key has 7-day account-cost data and trend data

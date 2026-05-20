@@ -68,6 +68,23 @@ describe("AccountCostDonut", () => {
 		expect(screen.getByTestId("account-cost-legend-5")).toBeInTheDocument();
 	});
 
+	it("renders the legend below the donut and omits the header total summary", () => {
+		const usage = createApiKeyUsage7Day({
+			totalCostUsd: 0.75,
+			accountCosts: [
+				{ accountId: "acc-1", email: "a@example.com", costUsd: 0.45, isDeleted: false },
+				{ accountId: "acc-2", email: "b@example.com", costUsd: 0.3, isDeleted: false },
+			],
+		});
+
+		renderWithProviders(
+			<AccountCostDonut accountCosts={usage.accountCosts} totalCostUsd={usage.totalCostUsd} />,
+		);
+
+		expect(screen.queryByTestId("account-cost-total")).not.toBeInTheDocument();
+		expect(screen.getByTestId("account-cost-legend-list")).toHaveClass("w-full");
+	});
+
 	it("scrolls the hovered pie item into view in the legend list", async () => {
 		const scrollIntoView = vi.fn();
 		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {

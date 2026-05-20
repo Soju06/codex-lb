@@ -475,7 +475,7 @@ def _raw_with_max_context_window(max_context_window: int) -> dict[str, JsonValue
 
 
 @pytest.mark.asyncio
-async def test_v1_models_reports_full_context_and_preserves_codex_budget(async_client):
+async def test_v1_models_reports_backend_context_window(async_client):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(1_000_000)),
@@ -489,15 +489,9 @@ async def test_v1_models_reports_full_context_and_preserves_codex_budget(async_c
     assert resp_v1.status_code == 200
     metadata_by_id = {item["id"]: item["metadata"] for item in resp_v1.json()["data"]}
 
-    expected_context_windows = {
-        "gpt-5.4": 1_000_000,
-        "gpt-5.5": 400_000,
-        "gpt-5.4-mini": 400_000,
-        "gpt-5.3-codex": 400_000,
-    }
-    for slug, full_context_window in expected_context_windows.items():
+    for slug in ("gpt-5.4", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"):
         metadata = metadata_by_id[slug]
-        assert metadata["context_window"] == full_context_window
+        assert metadata["context_window"] == 272_000
         assert metadata["input_context_window"] == 272_000
         assert metadata["max_output_tokens"] == 128_000
 
@@ -511,7 +505,7 @@ async def test_v1_models_reports_full_context_and_preserves_codex_budget(async_c
 
 
 @pytest.mark.asyncio
-async def test_v1_models_uses_raw_max_context_window_for_unknown_models(async_client):
+async def test_v1_models_does_not_promote_raw_max_context_window(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-custom", raw=_raw_with_max_context_window(900_000))]
     await registry.update({"pro": models})
@@ -520,6 +514,6 @@ async def test_v1_models_uses_raw_max_context_window_for_unknown_models(async_cl
     assert resp.status_code == 200
     entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-custom")
 
-    assert entry["metadata"]["context_window"] == 900_000
+    assert entry["metadata"]["context_window"] == 272_000
     assert entry["metadata"]["input_context_window"] == 272_000
     assert entry["metadata"].get("max_output_tokens") is None

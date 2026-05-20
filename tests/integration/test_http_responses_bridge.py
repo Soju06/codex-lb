@@ -5566,7 +5566,16 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings_with_limits(monkeypatch, enabled=True, max_sessions=1)
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        max_sessions=1,
+        # This test verifies pool accounting for a queued request. Keep the
+        # synthetic request queued long enough on slow CI hosts so the
+        # response-create gate timeout does not drain it before the pool-full
+        # assertion runs.
+        admission_wait_timeout_seconds=30.0,
+    )
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_queued_capacity",

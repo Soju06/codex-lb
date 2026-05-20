@@ -298,6 +298,32 @@ def test_archive_writer_streams_gzip_without_precompressing_record(monkeypatch, 
     assert record["payload"] == {"text": "x" * 1024}
 
 
+def test_archive_writer_batches_queued_records(monkeypatch, tmp_path):
+    archive_queue: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue()
+    first = (tmp_path / "archive.jsonl.gz", {"payload": "one"}, 11)
+    second = (tmp_path / "archive.jsonl.gz", {"payload": "two"}, 13)
+    archive_queue.put(first)
+    archive_queue.put(second)
+    archive_queue.put(None)
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", archive_queue)
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 24
+
+    batches: list[list[tuple[Path, object, int]]] = []
+
+    def capture_batch(items):
+        batches.append(list(items))
+
+    monkeypatch.setattr(conversation_archive, "_append_records", capture_batch)
+
+    conversation_archive._writer_loop()
+
+    assert [[item[1]["payload"] for item in batch] for batch in batches] == [["one", "two"]]
+    assert archive_queue.unfinished_tasks == 0
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == 0
+
+
 def test_archive_queue_thread_start_failure_drops_record(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,

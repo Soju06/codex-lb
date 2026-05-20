@@ -291,11 +291,9 @@ jobs:
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
-          # PR uploads use the existing release category so GitHub can compare
-          # against the current main-branch baseline while this workflow change
-          # is still under review. Push uploads use a CI-specific category so
-          # they do not overwrite release-workflow analyses on tagged commits.
-          category: ${{ github.event_name == 'pull_request' && '.github/workflows/release.yml:docker-image' || '.github/workflows/ci.yml:docker' }}
+          # Keep PR and main uploads in the same CI category so Code Scanning
+          # can compare pull-request alerts against the default-branch baseline.
+          category: .github/workflows/ci.yml:docker
 
       - name: Enforce Trivy high-severity gate
         uses: aquasecurity/trivy-action@v0.36.0

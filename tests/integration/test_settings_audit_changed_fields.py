@@ -79,6 +79,7 @@ async def test_settings_audit_records_single_changed_field(
     assert response.status_code == 200
 
     audit_log = await _wait_for_settings_changed_audit_log()
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     assert audit_field_name in details["changed_fields"], (
         f"settings audit changed_fields missing {audit_field_name!r}; got {details['changed_fields']!r}"
@@ -97,6 +98,7 @@ async def test_settings_audit_changed_fields_excludes_unchanged(async_client) ->
     assert response.status_code == 200
 
     audit_log = await _wait_for_settings_changed_audit_log()
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     changed = details["changed_fields"]
     assert changed == ["sticky_threads_enabled"], (
@@ -110,6 +112,7 @@ async def test_settings_audit_changed_fields_empty_on_noop_put(async_client) -> 
     assert response.status_code == 200
 
     audit_log = await _wait_for_settings_changed_audit_log()
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     assert details["changed_fields"] == [], f"no-op PUT should produce an empty changed_fields list; got {details!r}"
 
@@ -128,6 +131,7 @@ async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
     assert response.status_code == 200
 
     audit_log = await _wait_for_settings_changed_audit_log()
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     changed = set(details["changed_fields"])
     assert changed == {

@@ -53,7 +53,10 @@ export type WeeklyCreditPace = {
   actualUsedPercent: number;
   scheduledUsedPercent: number;
   deltaPercent: number;
+  scheduleGapCredits: number;
+  /** Legacy alias for scheduleGapCredits while older components migrate. */
   overPlanCredits: number;
+  projectedShortfallCredits: number;
   pauseForBreakEvenHours: number | null;
   paceMultiplier: number | null;
   throttleToPercent: number | null;
@@ -62,8 +65,13 @@ export type WeeklyCreditPace = {
   proAccountsToCoverOverPlan: number | null;
   projectedDepletionHours: number | null;
   projectedMinimumRemainingCredits: number | null;
+  forecastBurnRateCreditsPerHour: number | null;
+  scheduledBurnRateCreditsPerHour: number;
   status: WeeklyCreditPaceStatus;
   accountCount: number;
+  staleAccountCount: number;
+  inactiveAccountCount: number;
+  confidence: "high" | "medium" | "low";
 };
 
 export type DashboardView = {
@@ -456,17 +464,25 @@ export function buildWeeklyCreditPace(
   const actualUsedPercent = (100 * (totalFullCredits - totalActualRemainingCredits)) / totalFullCredits;
   const scheduledUsedPercent = (100 * (totalFullCredits - totalExpectedRemainingCredits)) / totalFullCredits;
   const deltaPercent = actualUsedPercent - scheduledUsedPercent;
+  const scheduleGapCredits = Math.max(0, totalExpectedRemainingCredits - totalActualRemainingCredits);
+  const scheduledBurnRateCreditsPerHour = weeklyAccounts.reduce(
+    (sum, account) => sum + (account.fullCredits / account.windowMs) * 3_600_000,
+    0,
+  );
   const projection = buildWeeklyPoolProjection(weeklyAccounts, nowMs);
-  const overPlanCredits = projection?.projectedShortfallCredits ?? 0;
+  const projectedShortfallCredits = projection?.projectedShortfallCredits ?? 0;
   const pauseForBreakEvenHours =
-    projection && overPlanCredits > 0 && projection.burnRateCreditsPerMs > 0
-      ? overPlanCredits / projection.burnRateCreditsPerMs / 3_600_000
+    projection && projectedShortfallCredits > 0 && projection.burnRateCreditsPerMs > 0
+      ? projectedShortfallCredits / projection.burnRateCreditsPerMs / 3_600_000
       : null;
-  const paceMultiplier = overPlanCredits > 0 && scheduledUsedPercent > 0 ? actualUsedPercent / scheduledUsedPercent : null;
+  const paceMultiplier =
+    projection && projectedShortfallCredits > 0 && projection.burnRateCreditsPerMs > 0 && scheduledBurnRateCreditsPerHour > 0
+      ? (projection.burnRateCreditsPerMs * 3_600_000) / scheduledBurnRateCreditsPerHour
+      : null;
   const throttleToPercent =
-    projection && overPlanCredits > 0 && projection.firstReplenishmentWaitMs && projection.burnRateCreditsPerMs > 0
+    projection && projectedShortfallCredits > 0 && projection.firstReplenishmentWaitMs && projection.burnRateCreditsPerMs > 0
       ? clamp(
-          ((projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs - overPlanCredits) /
+          ((projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs - projectedShortfallCredits) /
             (projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs)) *
             100,
           0,
@@ -475,9 +491,9 @@ export function buildWeeklyCreditPace(
       : null;
   const reduceByPercent = throttleToPercent != null ? 100 - throttleToPercent : null;
   const proAccountEquivalentToCoverOverPlan =
-    overPlanCredits > 0 ? overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS : null;
+    projectedShortfallCredits > 0 ? projectedShortfallCredits / PRO_WEEKLY_CAPACITY_CREDITS : null;
   const proAccountsToCoverOverPlan =
-    overPlanCredits > 0 ? Math.ceil(overPlanCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null;
+    projectedShortfallCredits > 0 ? Math.ceil(projectedShortfallCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null;
 
   return {
     totalFullCredits,
@@ -486,7 +502,9 @@ export function buildWeeklyCreditPace(
     actualUsedPercent,
     scheduledUsedPercent,
     deltaPercent,
-    overPlanCredits,
+    scheduleGapCredits,
+    overPlanCredits: scheduleGapCredits,
+    projectedShortfallCredits,
     pauseForBreakEvenHours,
     paceMultiplier,
     throttleToPercent,
@@ -495,8 +513,13 @@ export function buildWeeklyCreditPace(
     proAccountsToCoverOverPlan,
     projectedDepletionHours: projection?.projectedDepletionHours ?? null,
     projectedMinimumRemainingCredits: projection?.projectedMinimumRemainingCredits ?? null,
-    status: weeklyCreditPaceStatus(deltaPercent, overPlanCredits),
+    forecastBurnRateCreditsPerHour: projection ? projection.burnRateCreditsPerMs * 3_600_000 : null,
+    scheduledBurnRateCreditsPerHour,
+    status: weeklyCreditPaceStatus(deltaPercent, projectedShortfallCredits),
     accountCount,
+    staleAccountCount: 0,
+    inactiveAccountCount: 0,
+    confidence: "low",
   };
 }
 
@@ -581,6 +604,9 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),
-    weeklyCreditPace: buildWeeklyCreditPace(overview.accounts),
+    weeklyCreditPace:
+      overview.weeklyCreditPace !== undefined
+        ? overview.weeklyCreditPace
+        : buildWeeklyCreditPace(overview.accounts),
   };
 }

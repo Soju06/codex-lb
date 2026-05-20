@@ -80,7 +80,7 @@ async def _collect_sse_events(
     async with async_client.stream("POST", path, json=json_body, headers=headers) as response:
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines]
+    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
 
 
 async def _collect_sse_events_with_headers(
@@ -94,7 +94,7 @@ async def _collect_sse_events_with_headers(
         assert response.status_code == 200
         response_headers = dict(response.headers)
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines], response_headers
+    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"], response_headers
 
 
 def _assert_created_text_delta_completed(events: list[dict]) -> None:
@@ -4408,7 +4408,7 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
-    events = [json.loads(line[6:]) for line in lines]
+    events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
     _assert_created_text_delta_completed(events)
     assert connect_count == 1
 
@@ -5566,7 +5566,16 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings_with_limits(monkeypatch, enabled=True, max_sessions=1)
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        max_sessions=1,
+        # This test verifies pool accounting for a queued request. Keep the
+        # synthetic request queued long enough on slow CI hosts so the
+        # response-create gate timeout does not drain it before the pool-full
+        # assertion runs.
+        admission_wait_timeout_seconds=30.0,
+    )
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_queued_capacity",
@@ -5948,6 +5957,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6121,6 +6131,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6207,6 +6218,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6312,6 +6324,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6764,7 +6777,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
-    events = [json.loads(line[6:]) for line in lines]
+    events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
     assert [event["type"] for event in events] == ["response.created", "response.failed"]
     assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
 
@@ -8655,7 +8668,7 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
+async def test_v1_responses_http_bridge_stream_cancel_retires_session(
     async_client,
     app_instance,
     monkeypatch,
@@ -8757,8 +8770,11 @@ async def test_v1_responses_http_bridge_stream_cancel_detaches_pending_request(
     async with service._http_bridge_lock:
         session = service._http_bridge_sessions[session_key]
     async with session.pending_lock:
-        assert list(session.pending_requests) == []
+        assert not session.pending_requests
         assert session.queued_request_count == 0
+    assert session.closed is True
+    assert session.upstream_control.retire_after_drain is True
+    assert fake_upstream.closed is True
 
 
 @pytest.mark.asyncio

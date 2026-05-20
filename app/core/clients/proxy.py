@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
+    Any,
     AsyncContextManager,
     AsyncIterator,
     Awaitable,
@@ -35,7 +36,7 @@ from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
-from app.core.clients.http import get_http_client
+from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -987,17 +988,19 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
     if event_type == "error":
         message = _extract_upstream_message(payload) or "Upstream websocket error"
         code = payload.get("code")
-        raw_error_type = payload.get("error_type")
-        error_type = raw_error_type if isinstance(raw_error_type, str) else None
+        error_type = payload.get("error_type") or payload.get("type")
+        normalized_code = _normalize_error_code(
+            code if isinstance(code, str) else None,
+            error_type if isinstance(error_type, str) else None,
+        )
+        if not isinstance(code, str) and normalized_code == "error":
+            normalized_code = "upstream_error"
         return cast(
             dict[str, JsonValue],
             response_failed_event(
-                _normalize_error_code(
-                    code if isinstance(code, str) else None,
-                    error_type,
-                ),
+                normalized_code,
                 message,
-                error_type=error_type or "server_error",
+                error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
                 response_id=get_request_id(),
             ),
         )
@@ -1894,6 +1897,30 @@ async def stream_responses(
     session: aiohttp.ClientSession | None = None,
     upstream_stream_transport_override: str | None = None,
 ) -> AsyncIterator[str]:
+    async with lease_http_session(session) as client_session:
+        async for event_block in _stream_responses_with_session(
+            payload=payload,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            base_url=base_url,
+            raise_for_status=raise_for_status,
+            session=client_session,
+            upstream_stream_transport_override=upstream_stream_transport_override,
+        ):
+            yield event_block
+
+
+async def _stream_responses_with_session(
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    session: aiohttp.ClientSession,
+    base_url: str | None = None,
+    raise_for_status: bool = False,
+    upstream_stream_transport_override: str | None = None,
+) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
@@ -1910,9 +1937,10 @@ async def stream_responses(
 
     seen_terminal = False
     status_code: int | None = None
+    last_stream_activity_at: float | None = None
     error_code: str | None = None
     error_message: str | None = None
-    client_session = session or get_http_client().session
+    client_session = session
     payload_dict = payload.to_payload()
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
@@ -1957,7 +1985,7 @@ async def stream_responses(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
-        nonlocal status_code, error_code, error_message, seen_terminal
+        nonlocal status_code, last_stream_activity_at, error_code, error_message, seen_terminal
 
         async with _service_circuit_breaker_context(
             client_session.post(
@@ -1970,6 +1998,7 @@ async def stream_responses(
             account_id=account_id,
         ) as resp:
             status_code = resp.status
+            last_stream_activity_at = time.monotonic()
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
@@ -2009,6 +2038,7 @@ async def stream_responses(
                 effective_idle_timeout,
                 settings.max_sse_event_bytes,
             ):
+                last_stream_activity_at = time.monotonic()
                 event_block = _normalize_sse_event_block(event_block)
                 event = parse_sse_event(event_block)
                 if event:
@@ -2194,6 +2224,23 @@ async def stream_responses(
                 response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
             )
             return
+        now = time.monotonic()
+        idle_elapsed_seconds = max(0.0, now - last_stream_activity_at) if last_stream_activity_at is not None else None
+        if (
+            idle_elapsed_seconds is not None
+            and effective_idle_timeout <= (request_total_timeout or effective_idle_timeout)
+            and idle_elapsed_seconds >= effective_idle_timeout
+        ):
+            error_code = "stream_idle_timeout"
+            error_message = "Upstream stream idle timeout"
+            yield format_sse_event(
+                response_failed_event(
+                    "stream_idle_timeout",
+                    "Upstream stream idle timeout",
+                    response_id=get_request_id(),
+                ),
+            )
+            return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
         yield format_sse_event(
@@ -2330,14 +2377,15 @@ async def compact_responses(
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
 ) -> CompactResponsePayload:
-    transport = _CompactCommandTransport(
-        payload=payload,
-        headers=headers,
-        access_token=access_token,
-        account_id=account_id,
-        session=session or get_http_client().session,
-    )
-    return await transport.execute()
+    async with lease_http_session(session) as client_session:
+        transport = _CompactCommandTransport(
+            payload=payload,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            session=client_session,
+        )
+        return await transport.execute()
 
 
 def _is_retryable_compact_status(status_code: int) -> bool:
@@ -2606,7 +2654,12 @@ async def thread_goal_request(
         sock_connect=connect_timeout,
         sock_read=total_timeout,
     )
-    client_session = session or get_http_client().session
+    if session is None:
+        lease = await acquire_http_client()
+        client_session = lease.client.session
+    else:
+        lease = None
+        client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -2623,7 +2676,7 @@ async def thread_goal_request(
         else None,
     )
     try:
-        request_kwargs: dict[str, object] = {
+        request_kwargs: dict[str, Any] = {
             "headers": upstream_headers,
             "timeout": timeout,
         }
@@ -2671,16 +2724,20 @@ async def thread_goal_request(
         error_message = message
         raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
     finally:
-        _maybe_log_upstream_request_complete(
-            kind=f"thread_goal_{operation}",
-            url=url,
-            headers=upstream_headers,
-            method=request_method,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        try:
+            _maybe_log_upstream_request_complete(
+                kind=f"thread_goal_{operation}",
+                url=url,
+                headers=upstream_headers,
+                method=request_method,
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        finally:
+            if lease is not None:
+                await lease.close()
 
 
 async def codex_control_request(
@@ -2722,7 +2779,12 @@ async def codex_control_request(
         sock_connect=connect_timeout,
         sock_read=total_timeout,
     )
-    client_session = session or get_http_client().session
+    if session is None:
+        lease = await acquire_http_client()
+        client_session = lease.client.session
+    else:
+        lease = None
+        client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None
@@ -2781,16 +2843,20 @@ async def codex_control_request(
         error_message = message
         raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
     finally:
-        _maybe_log_upstream_request_complete(
-            kind=f"codex_control_{normalized_path.replace('/', '_')}",
-            url=url,
-            headers=upstream_headers,
-            method=request_method,
-            started_at=started_at,
-            status_code=status_code,
-            error_code=error_code,
-            error_message=error_message,
-        )
+        try:
+            _maybe_log_upstream_request_complete(
+                kind=f"codex_control_{normalized_path.replace('/', '_')}",
+                url=url,
+                headers=upstream_headers,
+                method=request_method,
+                started_at=started_at,
+                status_code=status_code,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        finally:
+            if lease is not None:
+                await lease.close()
 
 
 async def transcribe_audio(
@@ -2804,6 +2870,32 @@ async def transcribe_audio(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+) -> dict[str, JsonValue]:
+    async with lease_http_session(session) as client_session:
+        return await _transcribe_audio_with_session(
+            audio_bytes,
+            filename=filename,
+            content_type=content_type,
+            prompt=prompt,
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            base_url=base_url,
+            session=client_session,
+        )
+
+
+async def _transcribe_audio_with_session(
+    audio_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+    prompt: str | None,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    session: aiohttp.ClientSession,
+    base_url: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2841,7 +2933,7 @@ async def transcribe_audio(
     if prompt is not None:
         form.add_field("prompt", prompt)
 
-    client_session = session or get_http_client().session
+    client_session = session
     started_at = time.monotonic()
     status_code: int | None = None
     error_code: str | None = None

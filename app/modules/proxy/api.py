@@ -75,6 +75,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
     ApiKeySelfLimitData,
     ApiKeysService,
     ApiKeyUsageReservationData,
@@ -83,6 +84,7 @@ from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
@@ -130,6 +132,10 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     }
 )
 _PUBLIC_RESPONSE_TEXT_PART_TYPES = frozenset({"output_text", "input_text", "text", "refusal"})
+_PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
+    {"response.completed", "response.incomplete", "response.failed", "error"}
+)
+_PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -185,12 +191,6 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
-_V1_FULL_CONTEXT_WINDOW_OVERRIDES: Final[dict[str, int]] = {
-    "gpt-5.4": 1_000_000,
-    "gpt-5.5": 400_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.3-codex": 400_000,
-}
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,
@@ -1521,6 +1521,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
@@ -1531,9 +1532,17 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     entries: list[CodexModelEntry] = []
     for slug, model in models.items():
-        if not is_public_model(model, allowed_models):
+        if visibility_allowed_models is None:
+            if not is_public_model(model, allowed_models):
+                continue
+            entries.append(_to_codex_model_entry(model))
             continue
-        entries.append(_to_codex_model_entry(model))
+        entries.append(
+            _to_codex_model_entry(
+                model,
+                visibility="list" if slug in visibility_allowed_models else "hide",
+            )
+        )
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
 
@@ -1579,7 +1588,13 @@ def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     return allowed_models
 
 
-def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
+def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
+    if api_key is None or not api_key.apply_to_codex_model or not api_key.allowed_models:
+        return None
+    return _allowed_models_for_api_key(api_key)
+
+
+def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
 
     extra: dict[str, JsonValue] = {}
@@ -1633,7 +1648,7 @@ def _to_codex_model_entry(model: UpstreamModel) -> CodexModelEntry:
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
-        visibility=_model_visibility(model),
+        visibility=visibility or _model_visibility(model),
         **extra,
     )
 
@@ -1643,34 +1658,13 @@ def _effective_context_window(model: UpstreamModel) -> int:
     return overrides.get(model.slug, model.context_window)
 
 
-def _raw_positive_int(raw: Mapping[str, JsonValue], key: str) -> int | None:
-    value = raw.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
-
-
 def _v1_full_context_window(model: UpstreamModel) -> int:
     overrides = get_settings().model_context_window_overrides
-    explicit_override = overrides.get(model.slug)
-    if explicit_override is not None:
-        return explicit_override
-
-    known_context_window = _V1_FULL_CONTEXT_WINDOW_OVERRIDES.get(model.slug)
-    if known_context_window is not None:
-        return known_context_window
-
-    upstream_context_window = model.context_window
-    raw_max_context_window = _raw_positive_int(model.raw, "max_context_window")
-    if raw_max_context_window is not None and raw_max_context_window > upstream_context_window:
-        return raw_max_context_window
-
-    return upstream_context_window
+    return overrides.get(model.slug, model.context_window)
 
 
-def _v1_input_context_window(model: UpstreamModel) -> int | None:
-    input_context_window = model.context_window
-    return input_context_window if input_context_window != _v1_full_context_window(model) else None
+def _v1_input_context_window(model: UpstreamModel) -> int:
+    return model.context_window
 
 
 def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
@@ -1751,13 +1745,14 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
+    apply_api_key_enforcement(responses_payload, api_key)
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=effective_model,
+        request_model=responses_payload.model,
         request_service_tier=responses_payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(responses_payload),
     )
     responses_payload.stream = True
-    apply_api_key_enforcement(responses_payload, api_key)
     stream = context.service.stream_responses(
         responses_payload,
         request.headers,
@@ -1843,6 +1838,7 @@ async def _stream_responses(
             api_key,
             request_model=payload.model,
             request_service_tier=payload.service_tier,
+            request_usage_budget=estimate_api_key_request_usage(payload),
         )
     )
 
@@ -1942,6 +1938,7 @@ async def _collect_responses(
         api_key,
         request_model=payload.model,
         request_service_tier=payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
@@ -2064,6 +2061,7 @@ async def _compact_responses(
         api_key,
         request_model=payload.model,
         request_service_tier=_compact_request_service_tier(payload),
+        request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
     rate_limit_headers = await context.service.rate_limit_headers()
@@ -2166,13 +2164,17 @@ async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> Async
         yield line
 
 
+async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
+    return await anext(stream)
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
-    first_task = asyncio.create_task(anext(stream))
+    first_task = asyncio.create_task(_read_first_stream_item(stream))
     try:
         first = await asyncio.wait_for(
             asyncio.shield(first_task),
@@ -2394,6 +2396,7 @@ async def _enforce_request_limits(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget | None = None,
 ) -> ApiKeyUsageReservationData | None:
     if api_key is None:
         return None
@@ -2405,6 +2408,7 @@ async def _enforce_request_limits(
                 api_key.id,
                 request_model=request_model,
                 request_service_tier=request_service_tier,
+                request_usage_budget=request_usage_budget,
             )
         except ApiKeyRateLimitExceededError as exc:
             message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
@@ -2598,6 +2602,7 @@ async def _normalize_public_responses_stream(
             relies on the upstream's native event shape.
     """
     terminal_seen = False
+    done_seen = False
     contract_violation_kind: str | None = None
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
     # Collect output items from streamed ``response.output_item.added`` /
@@ -2619,17 +2624,49 @@ async def _normalize_public_responses_stream(
     # we synthesize a ``response.created`` snapshot from the terminal event's
     # ``response`` envelope so the SDK parser can complete the stream.
     created_emitted = False
+    # Anonymous pre-created events cannot be made SDK-safe until a response
+    # envelope arrives: the public OpenAI SDK requires response.created first.
+    # Buffer them temporarily. Once an envelope arrives, replay only lightweight
+    # visible content events (text/content-part deltas) after the created event;
+    # drop unowned output_item lifecycle events so cancelled-request orphans are
+    # not attached to the later response.
+    pre_created_buffer: list[dict[str, JsonValue]] = []
+
+    def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
+        return [
+            *[
+                format_sse_event(synthetic_payload)
+                for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
+            ],
+            format_sse_event(payload),
+        ]
+
+    def buffered_pre_created_payloads_to_replay(response_id: str | None) -> list[str]:
+        try:
+            if _pre_created_buffer_has_indexed_lifecycle(pre_created_buffer):
+                return []
+            return _format_legacy_pre_created_payloads(
+                pre_created_buffer,
+                response_id=response_id,
+                seen_text_delta_keys=seen_text_delta_keys,
+            )
+        finally:
+            pre_created_buffer.clear()
+
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
+            done_seen = True
             if terminal_seen:
                 yield event_block
+            continue
+        if _looks_like_sse_comment_block(event_block):
+            yield event_block
             continue
         payload = _parse_sse_payload(event_block)
         if payload is None:
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
-        _collect_output_item_event(payload, output_items)
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract
@@ -2657,46 +2694,288 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
-        if event_type == "response.output_text.delta":
-            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        # Ensure the public stream always starts with ``response.created``.
-        # When the upstream stream jumps straight to a non-created event
-        # (terminal failure, or any other ordering quirk), synthesize a
-        # ``response.created`` envelope from whatever ``response`` envelope is
-        # available on the current event so the OpenAI SDK parser can begin.
-        # Only enforced on the OpenAI SDK contract path; the Codex CLI route
-        # forwards the upstream sequence verbatim.
-        if (
-            enforce_openai_sdk_contract
-            and not created_emitted
-            and isinstance(event_type, str)
-            and event_type != "response.created"
-        ):
+
+        if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
+            if event_type == "response.created":
+                created_emitted = True
+                yield format_sse_event(normalized_payload)
+                response_id = _response_id_from_event_payload(normalized_payload)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
+                continue
+
             synthetic_created = _synthetic_response_created_envelope(normalized_payload)
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True
-        if event_type == "response.created":
-            created_emitted = True
-        for synthetic_payload in _synthetic_text_delta_events(normalized_payload, seen_text_delta_keys):
-            yield format_sse_event(synthetic_payload)
-        if isinstance(event_type, str) and event_type in {
-            "response.completed",
-            "response.incomplete",
-            "response.failed",
-            "error",
-        }:
+                response_id = _response_id_from_event_payload(synthetic_created)
+                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                    yield formatted_payload
+            elif _should_buffer_public_pre_created_event(event_type):
+                if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
+                    error_kind = contract_violation_kind or "upstream_stream_truncated"
+                    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                        yield formatted_payload
+                    return
+                pre_created_buffer.append(normalized_payload)
+                continue
+            elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                if event_type == "error":
+                    for formatted_payload in _public_response_failed_event_blocks_from_error(
+                        normalized_payload,
+                        include_created=True,
+                    ):
+                        yield formatted_payload
+                    return
+                error_kind = contract_violation_kind or "upstream_stream_truncated"
+                for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                    yield formatted_payload
+                return
+
+        _collect_output_item_event(normalized_payload, output_items)
+        if event_type == "response.output_text.delta":
+            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
+        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+            yield formatted_payload
+        if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
             terminal_seen = True
-        yield format_sse_event(normalized_payload)
     if terminal_seen:
+        if not done_seen and not enforce_openai_sdk_contract:
+            yield "data: [DONE]\n\n"
         return
     error_kind = contract_violation_kind or "upstream_stream_truncated"
-    yield format_sse_event(
+    include_created = enforce_openai_sdk_contract and not created_emitted
+    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
+        yield formatted_payload
+
+
+def _should_buffer_public_pre_created_event(event_type: str) -> bool:
+    return (
+        event_type.startswith("response.")
+        and event_type != "response.created"
+        and event_type not in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
+    )
+
+
+def _public_response_failed_event_blocks(error_kind: str, *, include_created: bool) -> list[str]:
+    failed_payload = cast(
+        dict[str, JsonValue],
         response_failed_event(
             error_kind,
             _public_contract_error_message(error_kind),
-        )
+            response_id=f"resp_{error_kind}",
+        ),
     )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
+
+
+def _public_response_failed_event_blocks_from_error(
+    payload: dict[str, JsonValue],
+    *,
+    include_created: bool,
+) -> list[str]:
+    envelope = _parse_event_error_envelope(payload)
+    error = envelope.error
+    if error is None:
+        error = _default_error_envelope().error
+    assert error is not None
+    failed_payload = cast(
+        dict[str, JsonValue],
+        response_failed_event(
+            error.code or "upstream_error",
+            error.message or "Upstream error",
+            error.type or "server_error",
+            response_id=f"resp_{error.code or 'upstream_error'}",
+            error_param=error.param,
+        ),
+    )
+    blocks: list[str] = []
+    if include_created:
+        synthetic_created = _synthetic_response_created_envelope(failed_payload)
+        if synthetic_created is not None:
+            blocks.append(format_sse_event(synthetic_created))
+    blocks.append(format_sse_event(failed_payload))
+    return blocks
+
+
+_REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.refusal.delta",
+        "response.refusal.done",
+    }
+)
+
+
+_INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.content_part.added",
+    }
+)
+
+
+def _pre_created_buffer_has_indexed_lifecycle(payloads: list[dict[str, JsonValue]]) -> bool:
+    for payload in payloads:
+        event_type = payload.get("type")
+        if isinstance(event_type, str) and event_type in _INDEXED_PRE_CREATED_LIFECYCLE_EVENT_TYPES:
+            return True
+        if isinstance(payload.get("output_index"), int) or isinstance(payload.get("item_id"), str):
+            return True
+    return False
+
+
+def _format_legacy_pre_created_payloads(
+    payloads: list[dict[str, JsonValue]],
+    *,
+    response_id: str | None,
+    seen_text_delta_keys: set[tuple[str | None, int | None]],
+) -> list[str]:
+    formatted: list[str] = []
+    if not payloads:
+        return formatted
+
+    item_id = _synthetic_pre_created_item_id(response_id)
+    output_index = 0
+    content_index = 0
+    text_item_opened = False
+    text_parts: list[str] = []
+    final_text: str | None = None
+
+    def open_text_item(sequence_number: int) -> None:
+        nonlocal text_item_opened
+        if text_item_opened:
+            return
+        output_item_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_added))
+        content_part_added = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.content_part.added",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "content_index": content_index,
+                "item_id": item_id,
+                "part": {"type": "output_text", "text": ""},
+            },
+        )
+        formatted.append(format_sse_event(content_part_added))
+        text_item_opened = True
+
+    sequence_number = 0
+    for payload in payloads:
+        event_type = payload.get("type")
+        if not isinstance(event_type, str) or event_type not in _REPLAYABLE_PUBLIC_PRE_CREATED_EVENT_TYPES:
+            continue
+        sequence_number = _payload_sequence_number(payload, sequence_number + 1)
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                continue
+            open_text_item(sequence_number)
+            text_parts.append(delta)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            seen_text_delta_keys.add((item_id, output_index))
+            continue
+        if event_type in {"response.output_text.done", "response.refusal.done"}:
+            text = payload.get("text")
+            if not isinstance(text, str):
+                text = "".join(text_parts)
+            open_text_item(sequence_number)
+            final_text = text
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            normalized.setdefault("logprobs", [])
+            formatted.append(format_sse_event(normalized))
+            continue
+        part = payload.get("part")
+        if is_json_mapping(part) and part.get("type") in _PUBLIC_RESPONSE_TEXT_PART_TYPES:
+            text = part.get("text")
+            if isinstance(text, str):
+                final_text = text
+            open_text_item(sequence_number)
+            normalized = dict(payload)
+            normalized["sequence_number"] = sequence_number
+            normalized["output_index"] = output_index
+            normalized["content_index"] = content_index
+            normalized["item_id"] = item_id
+            formatted.append(format_sse_event(normalized))
+        else:
+            # Preserve legacy unindexed non-text content_part.done events for
+            # raw SSE clients. They are not used to assemble SDK output.
+            formatted.append(format_sse_event(payload))
+
+    if text_item_opened:
+        seen_text_delta_keys.add((None, output_index))
+        text = final_text if final_text is not None else "".join(text_parts)
+        output_item_done = cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence_number + 1,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            },
+        )
+        formatted.append(format_sse_event(output_item_done))
+    return formatted
+
+
+def _payload_sequence_number(payload: Mapping[str, JsonValue], fallback: int) -> int:
+    sequence_number = payload.get("sequence_number")
+    return sequence_number if isinstance(sequence_number, int) else fallback
+
+
+def _response_id_from_event_payload(payload: Mapping[str, JsonValue]) -> str | None:
+    response = payload.get("response")
+    if not is_json_mapping(response):
+        return None
+    response_id = response.get("id")
+    return response_id if isinstance(response_id, str) and response_id else None
+
+
+def _synthetic_pre_created_item_id(response_id: str | None) -> str:
+    if response_id:
+        return f"msg_{response_id}_precreated"
+    return "msg_precreated"
 
 
 def _normalize_public_stream_payload(
@@ -2989,6 +3268,12 @@ def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | Non
 
 def _looks_like_sse_data_block(event_block: str) -> bool:
     return "data:" in event_block
+
+
+def _looks_like_sse_comment_block(event_block: str) -> bool:
+    return bool(event_block.strip()) and all(
+        not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
+    )
 
 
 def _public_contract_error_message(kind: str) -> str:

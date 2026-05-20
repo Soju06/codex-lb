@@ -139,7 +139,7 @@ def _decompose_assistant_tool_calls(message: OpenAIMessage) -> list[JsonValue]:
     if content is not None or refusal is not None:
         parts = _to_content_list(_normalize_content_parts(content, "assistant")) if content is not None else []
         if refusal is not None:
-            parts.append(RefusalContentPart(type="refusal", refusal=refusal))
+            parts.append(cast(JsonValue, RefusalContentPart(type="refusal", refusal=refusal)))
         msg_item: OpenAIMessage = {"role": "assistant", "content": parts}
         items.append(cast(JsonValue, msg_item))
     tool_calls = message.get("tool_calls")

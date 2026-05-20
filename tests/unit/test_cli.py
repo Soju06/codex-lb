@@ -31,6 +31,22 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     formatters = log_config["formatters"]
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
+    assert kwargs["timeout_keep_alive"] == 300
+
+
+def test_main_passes_custom_keep_alive_timeout(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb", "--timeout-keep-alive", "900"])
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    cli.main()
+
+    assert captured["kwargs"]["timeout_keep_alive"] == 900
 
 
 def test_utc_default_formatter_formats_without_converter_binding_error():

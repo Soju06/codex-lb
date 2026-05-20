@@ -492,6 +492,81 @@ async def test_sdk_responses_stream_upstream_rejection_synthesizes_created(
 
 
 @pytest.mark.asyncio
+async def test_sdk_responses_stream_replays_legacy_precreated_text(
+    sdk_client,
+    monkeypatch,
+) -> None:
+    """Legacy pre-created text events are replayed after synthetic SDK lifecycle.
+
+    Some compatibility tests model older upstream streams that emit unindexed
+    text events before any response.created. The public /v1 stream must preserve
+    those visible events without triggering the SDK's response-created or
+    output-index state-machine errors.
+    """
+    resp_id = "resp_legacy_precreated"
+    _patch_upstream_stream(
+        monkeypatch,
+        [
+            _sse({"type": "response.output_text.delta", "delta": "legacy text"}),
+            _sse({"type": "response.output_text.done", "text": "legacy text"}),
+            _response_completed_empty(resp_id, 3),
+        ],
+    )
+
+    event_types: list[str] = []
+    deltas: list[str] = []
+    async with sdk_client.responses.stream(
+        model=DEFAULT_MODEL,
+        input=[{"role": "user", "content": "legacy stream"}],
+    ) as stream:
+        async for event in stream:
+            event_types.append(event.type)
+            if event.type == "response.output_text.delta":
+                deltas.append(event.delta)
+        final = await stream.get_final_response()
+
+    assert event_types[:3] == ["response.created", "response.output_item.added", "response.content_part.added"]
+    assert "response.output_text.done" in event_types
+    assert deltas == ["legacy text"]
+    assert final.id == resp_id
+
+
+@pytest.mark.asyncio
+async def test_sdk_responses_stream_drops_precreated_anonymous_output(
+    sdk_client,
+    monkeypatch,
+) -> None:
+    """Defense-in-depth for cancel/retry demux contamination.
+
+    If anonymous output-item events reach /v1 before any response.created, the
+    public stream must remain parseable by the stock OpenAI SDK without
+    attaching those unowned orphan events to the later response envelope.
+    """
+    resp_id = "resp_precreated_buffered"
+    _patch_upstream_stream(
+        monkeypatch,
+        [
+            *_message_output_block("msg_precreated", "buffered text", 0, 0),
+            _response_completed_empty(resp_id, 6),
+        ],
+    )
+
+    events_seen: list[str] = []
+    async with sdk_client.responses.stream(
+        model=DEFAULT_MODEL,
+        input=[{"role": "user", "content": "retry after cancel"}],
+    ) as stream:
+        async for event in stream:
+            events_seen.append(event.type)
+        final = await stream.get_final_response()
+
+    assert events_seen[0] == "response.created"
+    assert "response.output_item.done" not in events_seen
+    assert final.id == resp_id
+    assert final.output == []
+
+
+@pytest.mark.asyncio
 async def test_sdk_responses_non_streaming(sdk_client, monkeypatch) -> None:
     """Non-streaming /v1/responses: SDK must parse the returned JSON into a
     valid Response object with populated output. The non-streaming path already

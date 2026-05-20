@@ -15,6 +15,7 @@ from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestLog
+from app.db.session import sqlite_writer_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,45 +185,46 @@ class RequestLogsRepository:
         session_id: str | None = None,
         plan_type: str | None = None,
     ) -> RequestLog:
-        resolved_request_id = ensure_request_id(request_id)
-        resolved_plan_type = plan_type
-        if resolved_plan_type is None and account_id:
-            resolved_plan_type = await self._resolve_account_plan_type(account_id)
-        log = RequestLog(
-            account_id=account_id,
-            api_key_id=api_key_id,
-            session_id=session_id,
-            request_id=resolved_request_id,
-            model=model,
-            plan_type=resolved_plan_type,
-            transport=transport,
-            service_tier=service_tier,
-            requested_service_tier=requested_service_tier,
-            actual_service_tier=actual_service_tier,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_input_tokens,
-            reasoning_tokens=reasoning_tokens,
-            cost_usd=None,
-            reasoning_effort=reasoning_effort,
-            latency_ms=latency_ms,
-            latency_first_token_ms=latency_first_token_ms,
-            status=status,
-            error_code=error_code,
-            error_message=error_message,
-            requested_at=requested_at or utcnow(),
-        )
-        log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
-        self._session.add(log)
-        try:
-            await self._session.commit()
-            await self._session.refresh(log)
-            return log
-        except sa_exc.ResourceClosedError:
-            return log
-        except BaseException:
-            await _safe_rollback(self._session)
-            raise
+        async with sqlite_writer_section():
+            resolved_request_id = ensure_request_id(request_id)
+            resolved_plan_type = plan_type
+            if resolved_plan_type is None and account_id:
+                resolved_plan_type = await self._resolve_account_plan_type(account_id)
+            log = RequestLog(
+                account_id=account_id,
+                api_key_id=api_key_id,
+                session_id=session_id,
+                request_id=resolved_request_id,
+                model=model,
+                plan_type=resolved_plan_type,
+                transport=transport,
+                service_tier=service_tier,
+                requested_service_tier=requested_service_tier,
+                actual_service_tier=actual_service_tier,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cost_usd=None,
+                reasoning_effort=reasoning_effort,
+                latency_ms=latency_ms,
+                latency_first_token_ms=latency_first_token_ms,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                requested_at=requested_at or utcnow(),
+            )
+            log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+            self._session.add(log)
+            try:
+                await self._session.commit()
+                await self._session.refresh(log)
+                return log
+            except sa_exc.ResourceClosedError:
+                return log
+            except BaseException:
+                await _safe_rollback(self._session)
+                raise
 
     async def update_model_for_request(self, request_id: str, model: str) -> int:
         """Override the ``model`` field of any logs matching ``request_id``.
@@ -235,28 +237,29 @@ class RequestLogsRepository:
 
         Returns the number of rows that were updated.
         """
-        resolved_request_id = ensure_request_id(request_id)
-        try:
-            # Fetch the affected rows so we can recompute ``cost_usd``
-            # from the new model. ``add_log`` derives the cost at insert
-            # time from the original (host) model; without recomputing
-            # here, dashboards would mix the public ``gpt-image-*`` model
-            # label with host-model pricing and report inaccurate cost.
-            stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
-            result_rows = await self._session.execute(stmt)
-            logs = list(result_rows.scalars())
-            if not logs:
+        async with sqlite_writer_section():
+            resolved_request_id = ensure_request_id(request_id)
+            try:
+                # Fetch the affected rows so we can recompute ``cost_usd``
+                # from the new model. ``add_log`` derives the cost at insert
+                # time from the original (host) model; without recomputing
+                # here, dashboards would mix the public ``gpt-image-*`` model
+                # label with host-model pricing and report inaccurate cost.
+                stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
+                result_rows = await self._session.execute(stmt)
+                logs = list(result_rows.scalars())
+                if not logs:
+                    return 0
+                for log in logs:
+                    log.model = model
+                    log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+                await self._session.commit()
+            except sa_exc.ResourceClosedError:
                 return 0
-            for log in logs:
-                log.model = model
-                log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
-            await self._session.commit()
-        except sa_exc.ResourceClosedError:
-            return 0
-        except BaseException:
-            await _safe_rollback(self._session)
-            raise
-        return len(logs)
+            except BaseException:
+                await _safe_rollback(self._session)
+                raise
+            return len(logs)
 
     async def list_recent(
         self,

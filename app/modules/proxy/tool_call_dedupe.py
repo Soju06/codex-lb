@@ -479,7 +479,7 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> tuple[s
         argument_key = canonical_json_key(operation_value)
     else:
         return None
-    return (cast(str, item_type), item_name, argument_key)
+    return (item_type, item_name, argument_key)
 
 
 def replayed_input_segment_boundary(item: Mapping[str, JsonValue]) -> bool:
@@ -581,7 +581,7 @@ def _tool_call_has_side_effect_arguments(item_name: str | None, argument_value: 
     return False
 
 
-def canonical_parallel_tool_use_key(tool_use: dict[str, JsonValue]) -> str:
+def canonical_parallel_tool_use_key(tool_use: Mapping[str, JsonValue]) -> str:
     recipient_name = tool_use.get("recipient_name")
     parameters = tool_use.get("parameters")
     if not isinstance(recipient_name, str):

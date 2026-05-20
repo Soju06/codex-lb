@@ -11768,6 +11768,95 @@ async def test_emit_websocket_terminal_error_releases_response_create_gate():
     assert request_state.response_create_gate is None
 
 
+@pytest.mark.asyncio
+async def test_emit_websocket_terminal_error_masks_previous_response_override():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_terminal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_leak",
+        session_id="sid-terminal",
+    )
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+
+    await service._emit_websocket_terminal_error(
+        websocket,
+        client_send_lock=anyio.Lock(),
+        request_state=request_state,
+        error_code="previous_response_not_found",
+        error_message="Previous response with id 'resp_terminal_leak' not found.",
+        error_type="invalid_request_error",
+        error_param="previous_response_id",
+    )
+
+    websocket_send.assert_awaited_once()
+    send_call = websocket_send.await_args
+    assert send_call is not None
+    payload_text = send_call.args[0]
+    assert "previous_response_not_found" not in payload_text
+    assert "resp_terminal_leak" not in payload_text
+    payload = json.loads(payload_text)
+    error = payload["response"]["error"]
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_masks_previous_response_override_in_queued_event(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_pending_leak",
+        session_id="sid-pending",
+        event_queue=event_queue,
+        skip_request_log=True,
+    )
+    request_state.error_code_override = "invalid_request_error"
+    request_state.error_message_override = "Previous response with id 'resp_pending_leak' not found."
+    request_state.error_type_override = "invalid_request_error"
+    request_state.error_param_override = "previous_response_id"
+
+    await service._fail_pending_websocket_requests(
+        account_id_value=None,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="fallback",
+        api_key=None,
+        penalize_account=False,
+    )
+
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    assert "previous_response_not_found" not in event_block
+    assert "resp_pending_leak" not in event_block
+    payload = parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+
+
 def test_sanitize_websocket_connect_failure_leaves_unrelated_previous_response_error_unchanged():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure_unrelated",

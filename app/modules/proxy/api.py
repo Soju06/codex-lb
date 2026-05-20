@@ -40,7 +40,13 @@ from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
+from app.core.errors import (
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    OpenAIErrorEnvelope,
+    is_previous_response_not_found_error,
+    openai_error,
+    response_failed_event,
+)
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
@@ -2987,7 +2993,7 @@ def _normalize_public_stream_payload(
                     dict[str, JsonValue],
                     response_failed_event(
                         "stream_incomplete",
-                        "Upstream websocket closed before response.completed",
+                        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
                     ),
                 ),
                 None,
@@ -3337,15 +3343,10 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
 def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
     if error_value is None:
         return False
-    if error_value.code == "previous_response_not_found":
-        return True
-    message = error_value.message or ""
-    normalized_message = " ".join(message.lower().split())
-    return (
-        error_value.code == "invalid_request_error"
-        and error_value.param == "previous_response_id"
-        and "previous response" in normalized_message
-        and "not found" in normalized_message
+    return is_previous_response_not_found_error(
+        code=error_value.code,
+        param=error_value.param,
+        message=error_value.message,
     )
 
 
@@ -3360,7 +3361,7 @@ def _mask_previous_response_not_found_error(
         502,
         OpenAIErrorEnvelopeModel(
             error=OpenAIError(
-                message="Upstream websocket closed before response.completed",
+                message=PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
                 type="server_error",
                 code="stream_incomplete",
             )

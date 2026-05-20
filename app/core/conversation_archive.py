@@ -40,6 +40,7 @@ _WRITE_QUEUE_MAX_RECORDS = 4096
 _WRITE_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 _WRITE_QUEUE_BYTES = 0
 _WRITE_QUEUE_BYTES_LOCK = threading.Lock()
+_WRITE_QUEUE_BYTES_CONDITION = threading.Condition(_WRITE_QUEUE_BYTES_LOCK)
 _WRITE_QUEUE: queue.Queue[tuple[Path, dict[str, Any], int] | None] = queue.Queue(maxsize=_WRITE_QUEUE_MAX_RECORDS)
 _WRITER_THREAD: threading.Thread | None = None
 _BACKPRESSURE_WARNING_INTERVAL_SECONDS = 60.0
@@ -182,16 +183,14 @@ def _enqueue_record(path: Path, record: dict[str, Any]) -> None:
         should_warn, suppressed_warnings = _archive_backpressure_warning_state()
         if should_warn:
             logger.warning(
-                "Conversation archive writer queue byte budget is full; "
-                "applying synchronous archive write backpressure",
+                "Conversation archive writer queue byte budget is full; waiting for async archive writer capacity",
                 extra={
                     "queue_max_bytes": _archive_queue_max_bytes(),
                     "record_bytes": queued_bytes,
                     "suppressed_warnings": suppressed_warnings,
                 },
             )
-        _append_record(path, record)
-        return
+        _reserve_archive_queue_bytes_blocking(queued_bytes)
     queued = False
     try:
         _ensure_writer_thread()
@@ -199,10 +198,11 @@ def _enqueue_record(path: Path, record: dict[str, Any]) -> None:
         queued = True
     except queue.Full:
         logger.warning(
-            "Conversation archive writer queue is full; applying synchronous archive write backpressure",
+            "Conversation archive writer queue is full; waiting for async archive writer capacity",
             extra={"queue_max_records": _WRITE_QUEUE_MAX_RECORDS},
         )
-        _append_record(path, record)
+        _WRITE_QUEUE.put((path, record, queued_bytes))
+        queued = True
     except Exception:
         logger.warning("Failed to enqueue conversation archive record; dropping it", exc_info=True)
     finally:
@@ -243,8 +243,6 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
     if _archive_disk_pressure_active():
         return
 
-    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    data = gzip.compress(f"{line}\n".encode("utf-8"))
     try:
         with _WRITE_LOCK:
             if _archive_disk_pressure_active():
@@ -252,7 +250,7 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.parent.chmod(_ARCHIVE_DIR_MODE)
             _recover_corrupt_gzip_archive(path)
-            _write_gzip_member(path, data)
+            _write_gzip_jsonl_record(path, record)
     except Exception as exc:
         _RECOVERY_CHECKED_PATHS.discard(path.resolve())
         if _is_disk_pressure_error(exc):
@@ -266,19 +264,51 @@ def _serialized_record_size(record: Mapping[str, Any]) -> int:
     return len(line.encode("utf-8")) + 1
 
 
+def _estimated_record_size(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 4
+    if isinstance(value, int | float):
+        return len(str(value))
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, bytes | bytearray | memoryview):
+        return len(value)
+    if isinstance(value, Mapping):
+        return 2 + sum(_estimated_record_size(key) + _estimated_record_size(item) + 2 for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return 2 + sum(_estimated_record_size(item) + 1 for item in value)
+    return len(str(value).encode("utf-8"))
+
+
 def _reserve_archive_queue_bytes(size: int) -> bool:
     global _WRITE_QUEUE_BYTES
     with _WRITE_QUEUE_BYTES_LOCK:
-        if _WRITE_QUEUE_BYTES + size > _archive_queue_max_bytes():
+        if not _can_reserve_archive_queue_bytes(size):
             return False
         _WRITE_QUEUE_BYTES += size
         return True
 
 
+def _reserve_archive_queue_bytes_blocking(size: int) -> None:
+    global _WRITE_QUEUE_BYTES
+    with _WRITE_QUEUE_BYTES_CONDITION:
+        while not _can_reserve_archive_queue_bytes(size):
+            _WRITE_QUEUE_BYTES_CONDITION.wait(timeout=0.1)
+        _WRITE_QUEUE_BYTES += size
+
+
+def _can_reserve_archive_queue_bytes(size: int) -> bool:
+    max_bytes = _archive_queue_max_bytes()
+    if _WRITE_QUEUE_BYTES + size <= max_bytes:
+        return True
+    return size > max_bytes and _WRITE_QUEUE_BYTES == 0
+
+
 def _release_archive_queue_bytes(size: int) -> None:
     global _WRITE_QUEUE_BYTES
-    with _WRITE_QUEUE_BYTES_LOCK:
+    with _WRITE_QUEUE_BYTES_CONDITION:
         _WRITE_QUEUE_BYTES = max(0, _WRITE_QUEUE_BYTES - size)
+        _WRITE_QUEUE_BYTES_CONDITION.notify_all()
 
 
 def _archive_queue_max_bytes() -> int:
@@ -299,13 +329,15 @@ def _archive_backpressure_warning_state() -> tuple[bool, int]:
         return False, 0
 
 
-def _write_gzip_member(path: Path, data: bytes) -> None:
+def _write_gzip_jsonl_record(path: Path, record: Mapping[str, Any]) -> None:
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, _ARCHIVE_FILE_MODE)
     try:
         os.fchmod(fd, _ARCHIVE_FILE_MODE)
         with os.fdopen(fd, "ab") as fh:
             fd = -1
-            fh.write(data)
+            with gzip.open(fh, "at", encoding="utf-8") as gzip_fh:
+                json.dump(record, gzip_fh, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                gzip_fh.write("\n")
     finally:
         if fd >= 0:
             os.close(fd)

@@ -131,6 +131,21 @@ describe("ApiDetail", () => {
 		expect(screen.getByTestId("api-trend-panel")).toHaveClass("lg:border-l");
 	});
 
+	it("does not render an empty trend pane when only donut data is available", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({ cost: [], tokens: [] }),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const usagePanel = screen.getByTestId("api-usage-panel");
+		expect(usagePanel).toContainElement(screen.getByTestId("account-cost-panel"));
+		expect(screen.queryByTestId("api-trend-panel")).not.toBeInTheDocument();
+		expect(screen.queryByText("Usage Trend")).not.toBeInTheDocument();
+	});
+
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {
 		renderApiDetail({
 			apiKey: createApiKey({

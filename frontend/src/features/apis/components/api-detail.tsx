@@ -140,35 +140,51 @@ export function ApiDetail({
 			</div>
 
 			{hasDonutData || hasTrends ? (
-				<div className={`grid gap-4 ${hasDonutData ? "lg:grid-cols-[25fr_75fr]" : ""}`}>
+				<div
+					className="rounded-xl border bg-card p-4 lg:flex lg:items-start"
+					data-testid="api-usage-panel"
+				>
 					{hasDonutData && (
-						<AccountCostDonut
-							accountCosts={usage7Day.accountCosts}
-							totalCostUsd={usage7Day.totalCostUsd}
-						/>
-					)}
-					<div className="rounded-xl border bg-card p-4">
-						<div className="mb-2">
-							<h3 className="text-sm font-semibold">Usage Trend</h3>
-							<p className="text-xs text-muted-foreground">7-day token and cost activity</p>
-						</div>
-						<div className="flex items-center justify-end gap-1.5 rounded-md border px-2 py-1 w-fit ml-auto mb-3">
-							<span className="text-[10px]">Accumulated</span>
-							<Switch
-								size="sm"
-								checked={showAccumulated}
-								onCheckedChange={setShowAccumulated}
+						<div className="lg:w-[25%] lg:shrink-0 lg:pr-4">
+							<AccountCostDonut
+								accountCosts={usage7Day.accountCosts}
+								totalCostUsd={usage7Day.totalCostUsd}
 							/>
 						</div>
-						<div className="flex items-center gap-3 text-[10px] text-muted-foreground mb-3">
-							<span className="flex items-center gap-1.5">
-								Tokens
-								<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-							</span>
-							<span className="flex items-center gap-1.5">
-								Cost
-								<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-							</span>
+					)}
+					<div
+						className={
+							hasDonutData
+								? "mt-4 border-t pt-4 lg:mt-0 lg:max-w-[75%] lg:flex-1 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0"
+								: ""
+						}
+						data-testid="api-trend-panel"
+					>
+						<div className="mb-3 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+							<div>
+								<h3 className="text-sm font-semibold">Usage Trend</h3>
+								<p className="text-xs text-muted-foreground">7-day token and cost activity</p>
+							</div>
+							<div className="flex flex-wrap items-center justify-start gap-3 md:justify-end">
+								<div className="flex items-center gap-3 text-[10px] text-muted-foreground" data-testid="api-trend-legend">
+									<span className="flex items-center gap-1.5">
+										Tokens
+										<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+									</span>
+									<span className="flex items-center gap-1.5">
+										Cost
+										<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+									</span>
+								</div>
+								<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+									<span className="text-[10px]">Accumulated</span>
+									<Switch
+										size="sm"
+										checked={showAccumulated}
+										onCheckedChange={setShowAccumulated}
+									/>
+								</div>
+							</div>
 						</div>
 						{hasTrends && chartData && (
 							<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />

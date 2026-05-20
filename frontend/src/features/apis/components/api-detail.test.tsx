@@ -70,6 +70,7 @@ describe("ApiDetail", () => {
 		expect(screen.getByRole("heading", { name: "Analytics Key" })).toBeInTheDocument();
 		expect(screen.getByText("Tokens")).toBeInTheDocument();
 		expect(screen.getByText("Cost")).toBeInTheDocument();
+		expect(screen.getByTestId("api-trend-legend")).toBeInTheDocument();
 		expect(screen.getByRole("switch")).toBeInTheDocument();
 		expect(screen.getByText("Key Details")).toBeInTheDocument();
 	});
@@ -110,6 +111,24 @@ describe("ApiDetail", () => {
 
 		expect(screen.getByText("Unknown Account")).toBeInTheDocument();
 		expect(screen.getByText("Deleted Account")).toBeInTheDocument();
+	});
+
+	it("renders the donut and trend sections inside a shared usage panel", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.12 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1200 }],
+			}),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const usagePanel = screen.getByTestId("api-usage-panel");
+		expect(usagePanel).toContainElement(screen.getByTestId("account-cost-panel"));
+		expect(usagePanel).toContainElement(screen.getByTestId("api-trend-panel"));
+		expect(screen.getByTestId("api-trend-panel")).toHaveClass("lg:border-l");
 	});
 
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {

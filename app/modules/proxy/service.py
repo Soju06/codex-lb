@@ -12767,6 +12767,24 @@ def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
 ) -> dict[str, JsonValue]:
+    error = payload["error"]
+    error_code = _normalize_error_code(
+        cast(str | None, error.get("code")),
+        cast(str | None, error.get("type")),
+    )
+    error_param = cast(str | None, error.get("param"))
+    error_message = cast(str | None, error.get("message"))
+    if _is_previous_response_not_found_error(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        status_code = 502
+        payload = openai_error(
+            "stream_incomplete",
+            "Upstream websocket closed before response.completed",
+            error_type="server_error",
+        )
     error_payload = cast(JsonValue, dict(payload["error"]))
     event: dict[str, JsonValue] = {
         "type": "error",

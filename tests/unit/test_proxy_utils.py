@@ -11627,6 +11627,27 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
     assert rewritten_error_message == "Upstream websocket closed before response.completed"
 
 
+def test_wrapped_websocket_error_event_masks_previous_response_not_found():
+    payload = proxy_module.openai_error(
+        "previous_response_not_found",
+        "Previous response with id 'resp_prev_anchor' not found.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+
+    event = proxy_service._wrapped_websocket_error_event(400, payload)
+
+    assert event["type"] == "error"
+    assert event["status"] == 502
+    error = event["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert error["type"] == "server_error"
+    assert "previous_response_not_found" not in json.dumps(event)
+    assert "resp_prev_anchor" not in json.dumps(event)
+
+
 def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_missing_tool_output_connect",

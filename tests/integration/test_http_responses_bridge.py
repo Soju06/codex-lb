@@ -5948,6 +5948,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6121,6 +6122,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6207,6 +6209,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6312,6 +6315,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],

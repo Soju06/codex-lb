@@ -12569,6 +12569,43 @@ async def test_response_create_admission_failure_releases_session_gate(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_response_create_admission_session_gate_timeout_returns_proxy_overloaded(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_response_create_limit = 64
+    settings.proxy_admission_wait_timeout_seconds = 0.01
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_gate_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                request_state,
+                response_create_gate=response_create_gate,
+            )
+    finally:
+        response_create_gate.release()
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 429
+    assert _proxy_error_code(exc) == "proxy_overloaded"
+    assert request_state.response_create_gate is None
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+
+
+@pytest.mark.asyncio
 async def test_response_create_admission_waits_on_session_gate_before_shared_capacity(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.proxy_response_create_limit = 2

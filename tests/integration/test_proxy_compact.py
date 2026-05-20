@@ -395,6 +395,49 @@ async def test_proxy_compact_hides_upstream_quota_for_api_key_clients_when_setti
     assert response.headers.get("x-codex-credits-unlimited") is None
     assert response.headers.get("x-codex-credits-balance") is None
 
+@pytest.mark.asyncio
+async def test_proxy_compact_does_not_forward_client_transport_headers(async_client, monkeypatch):
+    email = "compact-headers@example.com"
+    raw_account_id = "acc_compact_headers"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen: dict[str, object] = {}
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, access_token, account_id
+        seen["headers"] = dict(headers)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={
+            "Accept": "text/event-stream",
+            "Connection": "keep-alive",
+            "Content-Length": "999",
+            "Content-Type": "application/json",
+            "Transfer-Encoding": "chunked",
+            "X-Codex-Session-Id": "sid-compact",
+            "X-OpenAI-Client-Version": "0.1.0",
+        },
+    )
+
+    assert response.status_code == 200
+    sent_headers = cast(dict[str, str], seen["headers"])
+    lowered = {key.lower() for key in sent_headers}
+    assert "connection" not in lowered
+    assert "content-length" not in lowered
+    assert "transfer-encoding" not in lowered
+    normalized = {key.lower(): value for key, value in sent_headers.items()}
+    assert normalized["x-codex-session-id"] == "sid-compact"
+    assert normalized["x-openai-client-version"] == "0.1.0"
+
 
 @pytest.mark.asyncio
 async def test_proxy_compact_success_preserves_compaction_payload(async_client, monkeypatch):

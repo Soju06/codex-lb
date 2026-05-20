@@ -254,6 +254,14 @@ As of 2026-03-10, the following findings were reproduced from this repo workspac
 - Several imported `plus` and `team` accounts completed successfully but returned `response.service_tier = "default"`.
 - `codex-lb` now preserves websocket `response.create.client_metadata` when bridging backend Codex websocket traffic and treats real first-party originators like `codex_exec` as native Codex signals, so future parity investigations can focus on deeper upstream session-envelope differences instead of those already-fixed gaps.
 
+As of 2026-05-17, a live `codex-lb-direct` snapshot on this host showed the same operational shape for current Codex traffic:
+
+- Docker process health was clean: container running, restart count `0`, OOM `false`, and both `/health/ready` and `/backend-api/codex/health` returned `200` in single-digit milliseconds.
+- Recent request logs showed websocket traffic requesting `ultrafast` while upstream reported actual `default`.
+- The proxy was therefore healthy enough to route requests, but the traffic still had a slow tail and upstream caveats: p95 request latency was about `42s` over the sampled 30-minute window, with recent `stream_incomplete` rows and one `upstream_websocket_open_timeout`.
+
+Interpret this as a health/performance split: local readiness and websocket routing can be green while upstream tier resolution and stream stability still need investigation.
+
 ## HTTP `/v1/responses` Session Bridge Operations
 
 HTTP `/v1/responses` now uses an internal upstream websocket session bridge by default.

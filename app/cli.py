@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,46 @@ from app.codex_sessions_retag import RetagResult, default_codex_home, retag_code
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
+
+
+def _default_worker_count() -> int:
+    return 1
+
+
+def _http_responses_session_bridge_enabled() -> bool:
+    from app.core.config.settings import get_settings
+
+    return get_settings().http_responses_session_bridge_enabled
+
+
+@dataclass(frozen=True)
+class RuntimeOptions:
+    host: str
+    port: int
+    workers: int
+    loop: str
+    http: str
+    timeout_keep_alive: int
+    ssl_certfile: str | None
+    ssl_keyfile: str | None
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _env_str(*names: str, default: str) -> str:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return value
+    return default
 
 
 class _CliHelpFormatter(argparse.HelpFormatter):
@@ -68,6 +109,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "client writing to a stale socket before the request reaches the app."
         ),
     )
+    parser.add_argument(
+        "--workers",
+        default=_env_str(
+            "CODEX_LB_UVICORN_WORKERS",
+            "UVICORN_WORKERS",
+            default=str(_default_worker_count()),
+        ),
+    )
+    parser.add_argument(
+        "--loop",
+        choices=("auto", "asyncio", "uvloop"),
+        default=_env_str("CODEX_LB_UVICORN_LOOP", "UVICORN_LOOP", default="auto"),
+    )
+    parser.add_argument(
+        "--http",
+        choices=("auto", "h11", "httptools"),
+        default=_env_str("CODEX_LB_UVICORN_HTTP", "UVICORN_HTTP", default="auto"),
+    )
 
     return parser.parse_args(argv)
 
@@ -86,12 +145,33 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
+    workers = _parse_server_workers(args.workers)
     os.environ["PORT"] = str(port)
+    if workers > 1 and _http_responses_session_bridge_enabled():
+        from app.core.runtime.bridge_worker_pool import run_bridge_worker_pool
+
+        run_bridge_worker_pool(
+            RuntimeOptions(
+                host=args.host,
+                port=port,
+                workers=workers,
+                loop=args.loop,
+                http=args.http,
+                timeout_keep_alive=timeout_keep_alive,
+                ssl_certfile=args.ssl_certfile,
+                ssl_keyfile=args.ssl_keyfile,
+            ),
+            log_config=_build_log_config(),
+        )
+        return
 
     _load_uvicorn().run(
         "app.main:app",
         host=args.host,
         port=port,
+        workers=workers,
+        loop=args.loop,
+        http=args.http,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
@@ -124,6 +204,15 @@ def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
     except ValueError as exc:
         message = f"--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer, got {raw_timeout!r}."
         raise SystemExit(message) from exc
+
+
+def _parse_server_workers(raw_workers: str) -> int:
+    try:
+        return _positive_int(raw_workers)
+    except ValueError as exc:
+        raise SystemExit(f"--workers/CODEX_LB_UVICORN_WORKERS must be an integer, got {raw_workers!r}.") from exc
+    except argparse.ArgumentTypeError as exc:
+        raise SystemExit(f"--workers/CODEX_LB_UVICORN_WORKERS {exc}.") from exc
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:

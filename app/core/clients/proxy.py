@@ -81,9 +81,19 @@ CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 IGNORE_INBOUND_HEADERS = {
     "authorization",
     "chatgpt-account-id",
+    "content-encoding",
     "content-length",
+    "connection",
     "host",
     "forwarded",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
     "x-real-ip",
     CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
@@ -174,9 +184,7 @@ _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
 )
 _HOP_BY_HOP_HEADER_NAMES = frozenset(
     {
-        "accept",
         "connection",
-        "content-type",
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
@@ -187,6 +195,7 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+_WEBSOCKET_EXCLUDED_HEADER_NAMES = _HOP_BY_HOP_HEADER_NAMES | frozenset({"accept", "content-type"})
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
@@ -631,6 +640,17 @@ def _build_upstream_transcribe_headers(
     return headers
 
 
+def _build_upstream_compact_headers(access_token: str, account_id: str | None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    return headers
+
+
 def _build_upstream_websocket_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -643,7 +663,7 @@ def _build_upstream_websocket_headers(
         connected_header_tokens.update(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
-    blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
+    blocked_header_names = _WEBSOCKET_EXCLUDED_HEADER_NAMES | connected_header_tokens
     filtered = filter_inbound_headers(inbound)
     headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
     native = _is_native_codex_request(headers)

@@ -95,3 +95,89 @@ The application MUST resolve its default data directory from operator intent bef
 - **THEN** each explicitly configured related path keeps its configured value
 - **AND** only omitted related paths derive from the resolved data directory
 
+
+
+### Requirement: Direct Docker respects addressable worker-pool startup
+
+The direct Docker helper MUST rebuild the current checkout and recreate the local container without forcing the runtime worker count to one. If the env file configures multiple workers while the HTTP responses session bridge is enabled, the image startup path MUST use the addressable bridge worker pool rather than a plain multi-worker Uvicorn process.
+
+#### Scenario: direct Docker uses env-file worker count
+
+- **WHEN** an operator runs the local Docker helper
+- **AND** `.env.local` configures `CODEX_LB_UVICORN_WORKERS` greater than one
+- **THEN** the helper does not add a conflicting `CODEX_LB_UVICORN_WORKERS=1` override
+- **AND** the container startup path is responsible for selecting the safe worker-pool runtime
+
+### Requirement: Docker guidance includes a SQLite-conservative profile
+
+Docker installation guidance MUST include a SQLite-conservative runtime profile for operators who intentionally stay on SQLite. This profile MUST be distinct from the PostgreSQL higher-concurrency profile.
+
+#### Scenario: SQLite-conservative Docker profile limits request workers
+
+- **WHEN** an operator follows the documented SQLite-conservative Docker profile
+- **THEN** the example keeps the SQLite database URL
+- **AND** the example configures a single request worker or an equivalent write-serialized runtime
+- **AND** the guidance explains that this profile trades throughput for fewer SQLite writer-lock failures
+
+#### Scenario: Higher-concurrency Docker guidance remains PostgreSQL-backed
+
+- **WHEN** an operator needs sustained multi-worker throughput
+- **THEN** Docker guidance points to the PostgreSQL-backed profile rather than recommending unconstrained multi-worker SQLite
+- **AND** the standard listener and OAuth callback ports remain unchanged
+
+### Requirement: Docker installation documents a PostgreSQL performance profile
+
+Docker-based installation guidance MUST provide a PostgreSQL-backed path for operators who need throughput beyond the default SQLite profile. This guidance MUST preserve the existing SQLite-first quick start for simple local usage.
+
+#### Scenario: Docker quick start remains SQLite-first
+
+- **WHEN** an operator follows the default Docker quick-start flow
+- **THEN** the documented path continues to use the SQLite-backed default storage path
+- **AND** PostgreSQL is not required for basic local startup
+
+#### Scenario: Docker performance profile uses PostgreSQL
+
+- **WHEN** an operator wants the documented higher-throughput Docker deployment profile
+- **THEN** the guidance provides a PostgreSQL-backed example using `CODEX_LB_DATABASE_URL`
+- **AND** the example keeps the standard `2455` and `1455` service ports
+- **AND** the guidance identifies PostgreSQL as the recommended backend for that profile
+
+### Requirement: Greenfield Docker runtime baseline is explicit and bridge-safe
+
+Docker and operator installation guidance MUST define a greenfield runtime baseline for new sustained deployments. The baseline MUST be PostgreSQL-backed, MUST keep the standard `2455` API port and `1455` OAuth callback port, and MUST use a bridge-safe worker strategy when the HTTP Responses session bridge is enabled.
+
+#### Scenario: Greenfield baseline combines PostgreSQL and worker settings
+
+- **WHEN** an operator follows the greenfield runtime baseline
+- **THEN** the example configures `CODEX_LB_DATABASE_URL` for PostgreSQL
+- **AND** it configures request-worker concurrency only through a bridge-safe startup path when the HTTP Responses session bridge remains enabled
+- **AND** it keeps the standard listener and OAuth callback ports unchanged
+
+#### Scenario: Plain multi-worker guidance requires bridge disabled
+
+- **WHEN** the guidance shows plain Uvicorn multi-worker serving
+- **THEN** it requires the HTTP Responses session bridge to be disabled
+- **AND** it does not present plain multi-worker serving with a shared bridge instance id as a valid greenfield baseline
+
+### Requirement: Greenfield baseline preserves operator tier preference
+
+Operator guidance for tiered traffic in the greenfield baseline MUST preserve the operator's selected Codex CLI service tier. The guidance MUST NOT recommend changing an existing ultrafast preference solely because the runtime is busy. The guidance MUST instead require verification of requested tier versus actual upstream served tier.
+
+#### Scenario: Greenfield baseline verifies ultrafast
+
+- **WHEN** an operator uses Codex CLI with service_tier set to ultrafast
+- **THEN** the greenfield baseline keeps that requested tier unchanged
+- **AND** provides a verification path that compares requested_service_tier to actual_service_tier
+
+### Requirement: Helm PostgreSQL helpers track the PostgreSQL runtime major
+
+The Helm chart MUST use PostgreSQL client images on the same major runtime
+baseline as bundled database coverage for migration and database initialization
+helpers.
+
+#### Scenario: Hook helper images use PostgreSQL 18
+
+- **WHEN** the Helm chart renders the migration job with bundled PostgreSQL
+  enabled
+- **THEN** the wait-for-db init container uses a PostgreSQL 18 image
+- **AND** the database initialization job uses a PostgreSQL 18 image

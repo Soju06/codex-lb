@@ -59,6 +59,8 @@ docker run -d --name codex-lb \
 uvx codex-lb
 ```
 
+SQLite is the conservative direct-container profile. Keep `CODEX_LB_UVICORN_WORKERS=1` when `CODEX_LB_DATABASE_URL` points at SQLite; this trades throughput for fewer single-writer lock failures while preserving zero-config storage. Use PostgreSQL before increasing workers for sustained multi-worker traffic.
+
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
 ## Remote Setup
@@ -112,6 +114,9 @@ Model availability is discovered from the upstream Codex model catalog and can v
 model = "gpt-5.3-codex"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
+# Optional: keep whichever service tier you already selected.
+# For an ultrafast Codex setup, leave this as ultrafast.
+service_tier = "ultrafast"
 
 [model_providers.codex-lb]
 name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
@@ -147,6 +152,17 @@ present. `wss://` handshakes check `wss_proxy`, `socks_proxy`, `https_proxy`, an
 plain `ws://` handshakes also check `ws_proxy` and `http_proxy`. Set
 `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=false` only when websocket handshakes must bypass those
 environment proxies and connect directly.
+
+**Verify requested vs actual service tier**
+
+Keep the Codex CLI `service_tier` setting you already use. To prove codex-lb is receiving the requested tier and to compare it with the upstream actual tier without printing prompts, bearer tokens, or auth headers, run:
+
+```bash
+rg -n "service_tier|model_provider|base_url|wire_api" ~/.codex/config.toml
+uv run python scripts/codex_lb_live_snapshot.py --container codex-lb --minutes 15
+```
+
+In the snapshot output, check `request_logs.service_tier_counts` and `request_logs.tier_mismatches`. A requested `ultrafast` row with actual `default` or `auto` means upstream returned a different served tier; it is visible without changing the Codex CLI preference.
 
 **With [API key auth](#api-key-authentication):**
 
@@ -371,7 +387,7 @@ The protected proxy routes covered by this setting are:
 ## Configuration
 
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
+SQLite is the default database backend and the SQLite live profile should stay on one request worker. PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`) and is the recommended backend for sustained multi-worker throughput.
 
 The Docker Compose `postgres` profile uses the Postgres 18 image and mounts the named data volume at
 `/var/lib/postgresql`, the parent of the image's versioned `PGDATA` directory.
@@ -416,6 +432,48 @@ CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
 If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
 
 ### Docker examples
+
+**SQLite-conservative / local persistence**
+
+```bash
+docker run -d --name codex-lb \
+  -p 2455:2455 -p 1455:1455 \
+  -e CODEX_LB_DATABASE_URL=sqlite+aiosqlite:////var/lib/codex-lb/store.db \
+  -e CODEX_LB_UVICORN_WORKERS=1 \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+Use PostgreSQL via `CODEX_LB_DATABASE_URL=postgresql+asyncpg://...` before raising `CODEX_LB_UVICORN_WORKERS` for sustained multi-worker traffic. Keep the standard `2455` and `1455` ports unchanged.
+
+**PostgreSQL performance profile**
+
+```bash
+# Edit .env.local so these keys are set
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@postgres:5432/codex_lb
+CODEX_LB_UVICORN_WORKERS=2
+
+docker compose --profile postgres up --build
+```
+
+Use this profile for sustained concurrent traffic or multi-worker serving. The app remains on port `2455`, and the OAuth callback remains on port `1455`.
+
+**Greenfield sustained baseline**
+
+For a new always-on codex-lb gateway, start from the production Compose file or packaged image entrypoint, keep the standard `2455` API port and `1455` OAuth callback port, and enable metrics:
+
+```bash
+CODEX_LB_DATABASE_URL=postgresql+asyncpg://codex_lb:codex_lb@db.example.com:5432/codex_lb
+CODEX_LB_UVICORN_WORKERS=2
+CODEX_LB_METRICS_ENABLED=true
+CODEX_LB_METRICS_PORT=9090
+
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+When the HTTP Responses session bridge remains enabled, use the packaged image entrypoint or `python -m app.cli` so `CODEX_LB_UVICORN_WORKERS>1` starts the addressable bridge worker pool. Plain Uvicorn multi-worker serving is only suitable when `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED=false`.
+
+The minimum greenfield observability bundle is `/health/ready`, the Prometheus `/metrics` endpoint, and alerting for request success rate, p95 latency, upstream timeout or `stream_incomplete` spikes, SQLite lock pressure, bridge continuity errors, service-tier mismatches, and container restart/OOM signals. The Helm chart ships a `PrometheusRule` for those signals; for Docker or bare-metal installs, copy the rule expressions from `deploy/helm/codex-lb/templates/prometheusrule.yaml`.
 
 **Authelia / trusted header**
 

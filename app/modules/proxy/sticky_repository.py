@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TypeVar
 
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -12,7 +14,7 @@ from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, StickySession, StickySessionKind
-from app.db.session import sqlite_writer_section
+from app.db.sqlite_retry import retry_sqlite_write as retry_session_sqlite_write
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
 # Each (key, kind) pair in delete_entries contributes 2 bind parameters to
@@ -23,6 +25,8 @@ from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessi
 # ships with current Python interpreters. Postgres allows up to 65535
 # bind parameters, which this chunk size also respects.
 _DELETE_ENTRIES_CHUNK_SIZE = 250
+_T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,27 +69,40 @@ class StickySessionsRepository:
         return result.scalar_one_or_none()
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        statement = self._build_upsert_statement(key, account_id, kind)
-        async with sqlite_writer_section():
+        async def _upsert_once() -> StickySession:
+            statement = self._build_upsert_statement(key, account_id, kind)
             await self._session.execute(statement)
             await self._session.commit()
-        row = await self.get_entry(key, kind=kind)
-        if row is None:
-            raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
-        await self._session.refresh(row)
-        return row
+            row = await self.get_entry(key, kind=kind)
+            if row is None:
+                raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
+            await self._session.refresh(row)
+            return row
+
+        return await _retry_sqlite_write(
+            self._session,
+            _upsert_once,
+            operation_name="sticky_session_upsert",
+        )
 
     async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
         if not key:
             return False
-        statement = delete(StickySession).where(
-            StickySession.key == key,
-            StickySession.kind == kind,
-        )
-        async with sqlite_writer_section():
+
+        async def _delete_once() -> bool:
+            statement = delete(StickySession).where(
+                StickySession.key == key,
+                StickySession.kind == kind,
+            )
             result = await self._session.execute(statement.returning(StickySession.key))
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+            return result.scalar_one_or_none() is not None
+
+        return await _retry_sqlite_write(
+            self._session,
+            _delete_once,
+            operation_name="sticky_session_delete",
+        )
 
     async def delete_entries(
         self,
@@ -99,13 +116,22 @@ class StickySessionsRepository:
         targets_list = list(targets)
         for offset in range(0, len(targets_list), _DELETE_ENTRIES_CHUNK_SIZE):
             chunk = targets_list[offset : offset + _DELETE_ENTRIES_CHUNK_SIZE]
-            statement = delete(StickySession).where(
-                or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in chunk))
-            )
-            async with sqlite_writer_section():
+
+            async def _delete_entries_once() -> list[tuple[str, StickySessionKind]]:
+                statement = delete(StickySession).where(
+                    or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in chunk))
+                )
                 result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
                 await self._session.commit()
-            deleted.extend((key, kind) for key, kind in result.all())
+                return [(key, kind) for key, kind in result.all()]
+
+            deleted.extend(
+                await _retry_sqlite_write(
+                    self._session,
+                    _delete_entries_once,
+                    operation_name="sticky_session_delete_entries",
+                )
+            )
         return deleted
 
     async def list_entry_identifiers(
@@ -190,14 +216,20 @@ class StickySessionsRepository:
         return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE)
 
     async def purge_before(self, cutoff: datetime, *, kind: StickySessionKind | None = None) -> int:
-        stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
-        if kind is not None:
-            stmt = stmt.where(StickySession.kind == kind)
-        async with sqlite_writer_section():
+        async def _purge_once() -> int:
+            stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
+            if kind is not None:
+                stmt = stmt.where(StickySession.kind == kind)
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())
             await self._session.commit()
-        return deleted
+            return deleted
+
+        return await _retry_sqlite_write(
+            self._session,
+            _purge_once,
+            operation_name="sticky_session_purge_before",
+        )
 
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
         dialect = self._session.get_bind().dialect.name
@@ -272,3 +304,12 @@ class StickySessionsRepository:
             StickySession.updated_at.desc(),
             StickySession.created_at.desc(),
         )
+
+
+async def _retry_sqlite_write(
+    session: AsyncSession,
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    operation_name: str,
+) -> _T:
+    return await retry_session_sqlite_write(session, operation, operation_name=operation_name, logger=logger)

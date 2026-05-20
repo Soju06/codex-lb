@@ -20,7 +20,6 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
-from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -56,6 +55,24 @@ HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+_OWNER_FORWARD_STRIPPED_HEADER_NAMES = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+        "content-encoding",
+        "expect",
+    }
+)
+_OWNER_FORWARD_STRIPPED_HEADER_PREFIXES = ("x-codex-bridge-",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +120,7 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        proxy_request_budget_seconds: float,
     ) -> AsyncIterator[str]:
         settings = get_settings()
         timeout = _owner_forward_timeout(
@@ -130,7 +148,7 @@ class HTTPBridgeOwnerClient:
                     async for event_block in _iter_sse_event_blocks(
                         response,
                         request_started_at=request_started_at,
-                        proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
+                        proxy_request_budget_seconds=proxy_request_budget_seconds,
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
                         yielded_event = True
@@ -161,27 +179,7 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    filtered = filter_inbound_headers(headers)
-    # Per the hop-by-hop contract, also drop any header named by the inbound
-    # Connection header in addition to the fixed unsafe set.
-    connection_value = next(
-        (value for key, value in headers.items() if key.lower() == "connection"),
-        "",
-    )
-    connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
-    drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
-    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
-    # filter_inbound_headers strips Authorization, but the owner instance
-    # re-validates the client API key from this header (see
-    # _validate_internal_bridge_api_key) before swapping in its own upstream
-    # access token. Preserve it so api_key_auth_enabled deployments still
-    # authenticate forwarded bridge requests.
-    authorization = next(
-        (value for key, value in headers.items() if key.lower() == "authorization"),
-        None,
-    )
-    if authorization is not None:
-        forwarded["authorization"] = authorization
+    forwarded = _owner_forward_request_headers(headers)
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
@@ -207,6 +205,30 @@ def build_owner_forward_headers(
         context=context,
         include_client_ip=False,
     )
+    return forwarded
+
+
+def _owner_forward_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    stripped_names = set(_OWNER_FORWARD_STRIPPED_HEADER_NAMES | _BRIDGE_UNSAFE_HEADER_NAMES)
+    for key, value in headers.items():
+        if key.lower() == "connection":
+            stripped_names.update(part.strip().lower() for part in value.split(",") if part.strip())
+    filtered = filter_inbound_headers(headers)
+    forwarded = {
+        key: value
+        for key, value in filtered.items()
+        if key.lower() not in stripped_names
+        and not any(key.lower().startswith(prefix) for prefix in _OWNER_FORWARD_STRIPPED_HEADER_PREFIXES)
+    }
+    # The owner instance re-validates the client API key from Authorization
+    # before swapping in its own upstream token, so preserve it even though the
+    # generic upstream filter strips Authorization.
+    authorization = next(
+        (value for key, value in headers.items() if key.lower() == "authorization"),
+        None,
+    )
+    if authorization is not None:
+        forwarded["authorization"] = authorization
     return forwarded
 
 

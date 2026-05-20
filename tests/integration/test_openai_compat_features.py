@@ -153,17 +153,14 @@ async def test_v1_responses_accepts_previous_response_id(async_client, monkeypat
     ],
 )
 async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, tool_payload):
-    await _import_account(async_client, "acc_builtin_tools", "builtin-tools@example.com")
-
+    await _import_account(async_client, "acc_v1_builtin_tools", "v1-builtin-tools@example.com")
     seen = {}
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        del headers, access_token, account_id, base_url, raise_for_status
         seen["payload"] = payload
-        yield _completed_event("resp_builtin_tools")
+        yield _completed_event("resp_v1_builtin_tools")
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-
     request_payload = {
         "model": "gpt-5.2",
         "input": [
@@ -316,6 +313,52 @@ async def test_backend_responses_normalizes_fast_service_tier_for_upstream(async
     resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
     assert resp.status_code == 200
     assert seen["payload"]["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_strips_default_service_tier_for_upstream(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_default_tier", "backend-default-tier@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_backend_default_tier")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Default"}]}],
+        "service_tier": "default",
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert "service_tier" not in seen["payload"]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserves_ultrafast_service_tier_literal(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_ultrafast_tier", "backend-ultrafast-tier@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_backend_ultrafast_tier")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Ultrafast"}]}],
+        "service_tier": "ultrafast",
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"]["service_tier"] == "ultrafast"
 
 
 @pytest.mark.asyncio
@@ -506,6 +549,49 @@ async def test_backend_responses_preserve_required_image_generation_tool_choice(
     assert resp.status_code == 200
     assert seen["payload"].tools == [image_tool]
     assert seen["payload"].tool_choice == "required"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_allows_native_codex_tool_surface(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_native_tools", "backend-native-tools@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_native_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Create a tool response."}]}],
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JS",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+            },
+            {
+                "type": "function",
+                "name": "shell_command",
+                "description": "Run shell",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {"type": "image_generation"},
+            {"type": "web_search_preview"},
+        ],
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [
+        request_payload["tools"][0],
+        request_payload["tools"][1],
+        request_payload["tools"][2],
+        {"type": "web_search"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -951,14 +1037,24 @@ async def test_v1_chat_completions_rejects_audio_input(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_chat_completions_rejects_builtin_tools(async_client):
+async def test_v1_chat_completions_drops_unsupported_builtin_tools(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_builtin_tools", "chat-builtin-tools@example.com")
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
     payload = {
         "model": "gpt-5.2",
         "messages": [{"role": "user", "content": "Search the web."}],
         "tools": [{"type": "image_generation"}],
     }
     resp = await async_client.post("/v1/chat/completions", json=payload)
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert seen["payload"].tools == []
 
 
 @pytest.mark.asyncio

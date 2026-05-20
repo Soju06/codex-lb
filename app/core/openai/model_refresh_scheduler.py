@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
@@ -21,6 +22,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
+_model_refresh_auth_cooldowns: dict[str, float] = {}
 
 
 class _LeaderElectionLike(Protocol):
@@ -35,6 +37,13 @@ class _TransportRecoveryState:
 def _get_leader_election() -> _LeaderElectionLike:
     module = importlib.import_module("app.core.scheduling.leader_election")
     return cast(_LeaderElectionLike, module.get_leader_election())
+
+
+@dataclass(slots=True)
+class _ModelFetchPlanResult:
+    models: list[UpstreamModel] | None
+    attempted: bool
+    cooled_down_only: bool = False
 
 
 @dataclass(slots=True)
@@ -84,15 +93,18 @@ class ModelRefreshScheduler:
 
                 encryptor = TokenEncryptor()
                 per_plan_results: dict[str, list[UpstreamModel]] = {}
+                cooldown_only_plans = 0
 
                 for plan_type, candidates in grouped.items():
-                    models = await _fetch_with_failover(
+                    result = await _fetch_with_failover(
                         candidates,
                         encryptor,
                         accounts_repo,
                     )
-                    if models is not None:
-                        per_plan_results[plan_type] = models
+                    if result.models is not None:
+                        per_plan_results[plan_type] = result.models
+                    elif result.cooled_down_only:
+                        cooldown_only_plans += 1
 
                 if per_plan_results:
                     registry = get_model_registry()
@@ -105,6 +117,8 @@ class ModelRefreshScheduler:
                         total_models,
                     )
                     get_account_selection_cache().invalidate()
+                elif cooldown_only_plans == len(grouped):
+                    logger.info("Model registry refresh skipped; all plan candidates are in auth-failure cooldown")
                 else:
                     logger.warning("Model registry refresh failed for all plans")
         except Exception:
@@ -149,12 +163,25 @@ async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
-) -> list[UpstreamModel] | None:
+) -> _ModelFetchPlanResult:
     transport_recovery = _TransportRecoveryState()
+    _prune_model_refresh_auth_cooldowns()
+    attempted = False
+    skipped_due_to_cooldown = 0
 
     for account in candidates:
+        if _model_refresh_auth_cooldown_active(account.id):
+            skipped_due_to_cooldown += 1
+            logger.debug(
+                "Skipping model fetch during auth cooldown account=%s plan=%s",
+                account.id,
+                account.plan_type,
+            )
+            continue
+
         auth_manager = AuthManager(accounts_repo)
         try:
+            attempted = True
             account = await _ensure_fresh_with_transport_recovery(
                 auth_manager,
                 account,
@@ -165,7 +192,8 @@ async def _fetch_with_failover(
                 encryptor,
                 transport_recovery=transport_recovery,
             )
-            return models
+            _clear_model_refresh_auth_cooldown(account.id)
+            return _ModelFetchPlanResult(models=models, attempted=True)
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
@@ -180,21 +208,37 @@ async def _fetch_with_failover(
                         encryptor,
                         transport_recovery=transport_recovery,
                     )
-                    return models
-                except (ModelFetchError, RefreshError) as retry_exc:
+                    _clear_model_refresh_auth_cooldown(account.id)
+                    return _ModelFetchPlanResult(models=models, attempted=True)
+                except ModelFetchError as retry_exc:
+                    _mark_model_refresh_auth_cooldown(account.id, retry_exc.status_code)
                     logger.warning(
-                        "Model fetch auth retry failed account=%s plan=%s initial_error=%s retry_error=%s",
+                        "Model fetch retry failed account=%s plan=%s status=%d upstream_request_id=%s preview=%r",
                         account.id,
                         account.plan_type,
-                        _error_summary(exc),
+                        retry_exc.status_code,
+                        retry_exc.upstream_request_id,
+                        retry_exc.response_preview,
+                        exc_info=True,
+                    )
+                    continue
+                except RefreshError as retry_exc:
+                    logger.warning(
+                        "Token refresh failed for model fetch retry account=%s plan=%s error=%s",
+                        account.id,
+                        account.plan_type,
                         _error_summary(retry_exc),
                     )
                     continue
+            _mark_model_refresh_auth_cooldown(account.id, exc.status_code)
             logger.warning(
-                "Model fetch failed account=%s plan=%s error=%s",
+                "Model fetch failed account=%s plan=%s status=%d upstream_request_id=%s preview=%r",
                 account.id,
                 account.plan_type,
-                _error_summary(exc),
+                exc.status_code,
+                exc.upstream_request_id,
+                exc.response_preview,
+                exc_info=True,
             )
             continue
         except RefreshError as exc:
@@ -214,7 +258,11 @@ async def _fetch_with_failover(
                 exc_info=True,
             )
             continue
-    return None
+    return _ModelFetchPlanResult(
+        models=None,
+        attempted=attempted,
+        cooled_down_only=not attempted and skipped_due_to_cooldown == len(candidates),
+    )
 
 
 async def _ensure_fresh_with_transport_recovery(
@@ -297,6 +345,36 @@ async def _refresh_http_client_after_transport_error(account: Account, transport
         account.plan_type,
         _error_summary(transport_exc),
     )
+
+
+def _mark_model_refresh_auth_cooldown(account_id: str, status_code: int) -> None:
+    if status_code not in {401, 403}:
+        return
+    cooldown_seconds = max(0.0, float(get_settings().model_registry_refresh_auth_failure_cooldown_seconds))
+    if cooldown_seconds <= 0:
+        return
+    _model_refresh_auth_cooldowns[account_id] = time.monotonic() + cooldown_seconds
+
+
+def _model_refresh_auth_cooldown_active(account_id: str) -> bool:
+    expires_at = _model_refresh_auth_cooldowns.get(account_id)
+    if expires_at is None:
+        return False
+    if expires_at > time.monotonic():
+        return True
+    _model_refresh_auth_cooldowns.pop(account_id, None)
+    return False
+
+
+def _clear_model_refresh_auth_cooldown(account_id: str) -> None:
+    _model_refresh_auth_cooldowns.pop(account_id, None)
+
+
+def _prune_model_refresh_auth_cooldowns() -> None:
+    now = time.monotonic()
+    stale = [account_id for account_id, expires_at in _model_refresh_auth_cooldowns.items() if expires_at <= now]
+    for account_id in stale:
+        _model_refresh_auth_cooldowns.pop(account_id, None)
 
 
 def build_model_refresh_scheduler() -> ModelRefreshScheduler:

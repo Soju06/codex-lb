@@ -23,6 +23,7 @@ from app.db.models import (
     RequestLog,
 )
 from app.db.session import sqlite_writer_section
+from app.db.sqlite_retry import session_uses_sqlite
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
 
@@ -136,6 +137,9 @@ class ApiKeysRepository:
     @staticmethod
     def _exclude_warmup_clause():
         return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
+
+    def uses_sqlite(self) -> bool:
+        return session_uses_sqlite(self._session)
 
     def _select_api_key(self):
         return (

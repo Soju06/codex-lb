@@ -30,7 +30,10 @@ class ApiKeyCreateRequest(DashboardModel):
     apply_to_codex_model: bool = False
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    enforced_service_tier: str | None = Field(
+        default=None,
+        pattern=r"(?i)^(auto|default|priority|flex|fast|ultrafast)$",
+    )
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None
@@ -46,7 +49,10 @@ class ApiKeyUpdateRequest(DashboardModel):
     apply_to_codex_model: bool | None = None
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    enforced_service_tier: str | None = Field(
+        default=None,
+        pattern=r"(?i)^(auto|default|priority|flex|fast|ultrafast)$",
+    )
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None

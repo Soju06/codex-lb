@@ -124,6 +124,20 @@ def test_responses_preserves_service_tier():
     assert dumped["service_tier"] == "priority"
 
 
+def test_responses_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "default",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
+
+
 def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     payload = {
         "model": "gpt-5.1",
@@ -136,6 +150,20 @@ def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_responses_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "ultrafast",
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
 
 
 def test_compact_known_unsupported_upstream_fields_are_stripped():
@@ -173,6 +201,34 @@ def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_compact_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "ultrafast",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
+
+
+def test_compact_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "default",
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
 
 
 def test_openai_prompt_cache_aliases_are_normalized():
@@ -321,6 +377,19 @@ def test_v1_responses_preserves_service_tier():
     assert dumped["service_tier"] == "priority"
 
 
+def test_v1_responses_strips_default_service_tier_from_upstream_payload():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "service_tier": "default",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.service_tier == "default"
+    dumped = request.to_payload()
+    assert "service_tier" not in dumped
+
+
 def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     payload = {
         "model": "gpt-5.1",
@@ -332,6 +401,19 @@ def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():
     assert request.service_tier == "priority"
     dumped = request.to_payload()
     assert dumped["service_tier"] == "priority"
+
+
+def test_v1_responses_preserves_ultrafast_service_tier_literal():
+    payload = {
+        "model": "gpt-5.1",
+        "input": "hello",
+        "service_tier": "ultrafast",
+    }
+    request = V1ResponsesRequest.model_validate(payload).to_responses_request()
+
+    assert request.service_tier == "ultrafast"
+    dumped = request.to_payload()
+    assert dumped["service_tier"] == "ultrafast"
 
 
 def test_interleaved_reasoning_fields_are_sanitized_from_input():
@@ -433,33 +515,6 @@ def test_responses_accepts_builtin_tools(tool_type, expected):
     request = ResponsesRequest.model_validate(payload)
 
     assert request.tools == [{"type": expected}]
-
-
-@pytest.mark.parametrize(
-    "tool_payload",
-    [
-        {"type": "image_generation"},
-        {
-            "type": "computer_use_preview",
-            "display_width": 1024,
-            "display_height": 768,
-            "environment": "browser",
-        },
-        {"type": "computer_use", "display_width": 1024, "display_height": 768, "environment": "browser"},
-        {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
-        {"type": "code_interpreter", "container": {"type": "auto"}},
-    ],
-)
-def test_responses_accepts_builtin_tool_passthrough(tool_payload):
-    payload = {
-        "model": "gpt-5.1",
-        "instructions": "hi",
-        "input": [],
-        "tools": [tool_payload],
-    }
-    request = ResponsesRequest.model_validate(payload)
-
-    assert request.tools == [tool_payload]
 
 
 @pytest.mark.parametrize("tool_choice", [{"type": "web_search"}, {"type": "web_search_preview"}])
@@ -721,26 +776,11 @@ def test_v1_input_string_passthrough():
     assert request.input == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
 
 
-@pytest.mark.parametrize(
-    "tool_payload",
-    [
-        {"type": "image_generation"},
-        {
-            "type": "computer_use_preview",
-            "display_width": 1024,
-            "display_height": 768,
-            "environment": "browser",
-        },
-        {"type": "computer_use", "display_width": 1024, "display_height": 768, "environment": "browser"},
-        {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
-        {"type": "code_interpreter", "container": {"type": "auto"}},
-    ],
-)
-def test_v1_responses_accepts_builtin_tools(tool_payload):
-    payload = {"model": "gpt-5.1", "input": [], "tools": [tool_payload]}
+def test_v1_allows_native_tool_surface_by_default():
+    payload = {"model": "gpt-5.1", "input": [], "tools": [{"type": "image_generation"}]}
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
-    assert request.tools == [tool_payload]
+    assert request.tools == payload["tools"]
 
 
 def test_compact_strips_tool_fields():
@@ -1214,6 +1254,28 @@ def test_v1_compact_strips_tool_fields():
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
     assert "parallel_tool_calls" not in dumped
+
+
+def test_v1_allows_native_tool_surface_with_context_opt_in():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [],
+        "tools": [
+            {"type": "image_generation"},
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JS",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+            },
+        ],
+    }
+    request = V1ResponsesRequest.model_validate(
+        payload,
+        context={"allow_native_tool_types": True},
+    ).to_responses_request(allow_native_tool_types=True)
+
+    assert request.tools == payload["tools"]
 
 
 def test_v1_compact_messages_convert():

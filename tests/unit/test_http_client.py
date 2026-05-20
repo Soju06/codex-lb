@@ -13,8 +13,8 @@ pytestmark = pytest.mark.unit
 
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
-        http_connector_limit=100,
-        http_connector_limit_per_host=50,
+        http_connector_limit=200,
+        http_connector_limit_per_host=100,
         upstream_websocket_trust_env=False,
     )
 
@@ -85,8 +85,8 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
 
     assert ssl_context_factory.call_count == 1
     assert tcp_connector_cls.call_args_list[0].kwargs == {
-        "limit": 100,
-        "limit_per_host": 50,
+        "limit": 200,
+        "limit_per_host": 100,
         "ssl": ssl_context,
     }
     assert tcp_connector_cls.call_args_list[1].kwargs == {"ssl": ssl_context}

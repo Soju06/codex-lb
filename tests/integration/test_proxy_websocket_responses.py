@@ -154,6 +154,7 @@ def _websocket_settings(**overrides):
         "sse_keepalive_interval_seconds": 10.0,
         "log_proxy_request_shape": False,
         "log_proxy_request_shape_raw_cache_key": False,
+        "log_proxy_service_tier_trace": False,
         "proxy_token_refresh_limit": 32,
         "proxy_upstream_websocket_connect_limit": 64,
         "proxy_response_create_limit": 64,
@@ -161,6 +162,20 @@ def _websocket_settings(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _websocket_account(account_id: str = "acct_ws_proxy") -> proxy_module.Account:
+    return proxy_module.Account(
+        id=account_id,
+        chatgpt_account_id=account_id,
+        email=f"{account_id}@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=proxy_module.utcnow(),
+        status=proxy_module.AccountStatus.ACTIVE,
+    )
 
 
 def test_backend_responses_websocket_session_ended_auth_failure_fails_over_before_visible_output(
@@ -1771,6 +1786,159 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
             }
         ],
     )
+
+
+def test_backend_responses_websocket_allows_native_codex_tool_surface(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_native_tools", "object": "response", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_native_tools",
+                        "object": "response",
+                        "status": "completed",
+                        "service_tier": "fast",
+                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(id="acct_ws_native_tools"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": "draw something",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JS",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /x/"},
+            },
+            {"type": "image_generation"},
+            {"type": "web_search_preview"},
+        ],
+        "tool_choice": "auto",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    sent_payloads = [json.loads(message) for message in fake_upstream.sent_text]
+    assert len(sent_payloads) == 1
+    assert sent_payloads[0]["type"] == "response.create"
+    assert sent_payloads[0]["model"] == "gpt-5.4"
+    assert sent_payloads[0]["instructions"] == ""
+    assert sent_payloads[0]["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "draw something"}]}
+    ]
+    assert sent_payloads[0]["tools"] == [
+        request_payload["tools"][1],
+        {"type": "web_search"},
+        request_payload["tools"][0],
+    ]
+    assert sent_payloads[0]["tool_choice"] == "auto"
+
+
+def test_v1_responses_websocket_allows_native_tool_surface(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {"type": "response.created", "response": {"id": "resp_v1_native_tools", "status": "in_progress"}},
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {"type": "response.completed", "response": {"id": "resp_v1_native_tools", "status": "completed"}},
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(id="acct_v1_ws_native_tools"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "draw something",
+        "tools": [{"type": "image_generation"}, {"type": "web_search_preview"}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            json.loads(websocket.receive_text())
+            json.loads(websocket.receive_text())
+
+    sent_payloads = [json.loads(message) for message in fake_upstream.sent_text]
+    assert sent_payloads[0]["tools"] == [{"type": "image_generation"}, {"type": "web_search"}]
 
 
 def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch):
@@ -4966,7 +5134,7 @@ def test_backend_responses_websocket_treats_typeless_upstream_error_as_terminal(
         del prefer_earlier_reset, routing_strategy, model, request_state, api_key
         del client_send_lock, websocket
         connect_attempts["count"] += 1
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -5051,7 +5219,7 @@ def test_backend_responses_websocket_emits_terminal_failure_when_upstream_send_b
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -5247,7 +5415,7 @@ def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succe
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -5385,7 +5553,7 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
             websocket,
         )
         connect_models.append(model)
-        return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstreams[len(connect_models) - 1]
+        return _websocket_account(f"acct_ws_proxy_{len(connect_models)}"), upstreams[len(connect_models) - 1]
 
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
@@ -5497,7 +5665,7 @@ def test_backend_responses_websocket_reclaims_idle_downstream_session_and_upstre
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -5617,7 +5785,7 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -6502,7 +6670,7 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return _websocket_account("acct_ws_proxy"), fake_upstream
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -6614,7 +6782,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), upstreams.pop(0)
+        return _websocket_account("acct_ws_proxy"), upstreams.pop(0)
 
     async def fake_write_request_log(self, **kwargs):
         del self

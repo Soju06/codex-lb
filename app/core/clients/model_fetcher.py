@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import cast
 
 import aiohttp
@@ -23,14 +24,40 @@ logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 15.0
 _FILTERED_FIELDS = {"model_messages"}
+_REQUEST_ID_HEADER_NAMES = ("x-request-id", "request-id", "openai-request-id")
 
 
 class ModelFetchError(Exception):
-    def __init__(self, status_code: int, message: str, *, transport_error: bool = False) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        transport_error: bool = False,
+        upstream_request_id: str | None = None,
+        response_preview: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
         self.transport_error = transport_error
+        self.upstream_request_id = upstream_request_id
+        self.response_preview = response_preview
+
+
+def _response_request_id(headers: Mapping[str, str]) -> str | None:
+    for header_name in _REQUEST_ID_HEADER_NAMES:
+        value = headers.get(header_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _response_preview(text: str, *, max_chars: int = 200) -> str | None:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return None
+    return normalized[:max_chars]
 
 
 def _str(data: dict[str, JsonValue], key: str, default: str = "") -> str:
@@ -154,7 +181,13 @@ async def fetch_models_for_plan(
                 async with session.get(url, headers=headers, timeout=timeout) as resp:
                     if resp.status >= 400:
                         text = await resp.text()
-                        raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+                        preview = _response_preview(text)
+                        raise ModelFetchError(
+                            resp.status,
+                            f"HTTP {resp.status}: {preview or ''}",
+                            upstream_request_id=_response_request_id(resp.headers),
+                            response_preview=preview,
+                        )
 
                     data = await resp.json(content_type=None)
     except ModelFetchError:

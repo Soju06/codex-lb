@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
+from app.core.clients.model_fetcher import ModelFetchError, _response_preview, fetch_models_for_plan
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
@@ -109,3 +109,8 @@ async def test_fetch_models_for_plan_uses_resolved_codex_route(monkeypatch: pyte
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert str(client.calls[0]["url"]).endswith("/codex/models?client_version=0.128.0")
+
+
+def test_response_preview_normalizes_whitespace_and_bounds_length() -> None:
+    preview = _response_preview("  Forbidden \n request   details  ", max_chars=12)
+    assert preview == "Forbidden re"

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
+import anyio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeVar
 from typing import cast as typing_cast
 
-import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +18,12 @@ from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
-from app.db.session import sqlite_writer_section
+from app.db.sqlite_retry import retry_sqlite_write as retry_session_sqlite_write
+
+_T = TypeVar("_T")
+logger = logging.getLogger(__name__)
+
+_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,17 +262,19 @@ class RequestLogsRepository:
         upstream_proxy_fail_closed_reason: str | None = None,
         archive_request_id: str | None = None,
     ) -> RequestLog:
-        async with sqlite_writer_section():
-            resolved_request_id = ensure_request_id(request_id)
-            resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
-            resolved_plan_type = plan_type
-            if resolved_plan_type is None and account_id:
-                resolved_plan_type = await self._resolve_account_plan_type(account_id)
-            resolved_useragent = useragent if not isinstance(useragent, str) or useragent.strip() else None
-            resolved_useragent_group = (
-                useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
-            )
-            resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
+        resolved_request_id = ensure_request_id(request_id)
+        resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
+        resolved_plan_type = plan_type
+        if resolved_plan_type is None and account_id:
+            resolved_plan_type = await self._resolve_account_plan_type(account_id)
+        resolved_useragent = useragent if not isinstance(useragent, str) or useragent.strip() else None
+        resolved_useragent_group = (
+            useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
+        )
+        resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
+        resolved_requested_at = requested_at or utcnow()
+
+        async def _add_once() -> RequestLog:
             log = RequestLog(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -304,7 +314,7 @@ class RequestLogsRepository:
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
-                requested_at=requested_at or utcnow(),
+                requested_at=resolved_requested_at,
             )
             log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
             self._session.add(log)
@@ -314,9 +324,12 @@ class RequestLogsRepository:
                 return log
             except sa_exc.ResourceClosedError:
                 return log
-            except BaseException:
-                await _safe_rollback(self._session)
-                raise
+
+        return await _retry_sqlite_write(
+            self._session,
+            _add_once,
+            operation_name="request_log_add",
+        )
 
     async def update_model_for_request(self, request_id: str, model: str) -> int:
         """Override the ``model`` field of any logs matching ``request_id``.
@@ -329,29 +342,33 @@ class RequestLogsRepository:
 
         Returns the number of rows that were updated.
         """
-        async with sqlite_writer_section():
-            resolved_request_id = ensure_request_id(request_id)
+        resolved_request_id = ensure_request_id(request_id)
+
+        async def _update_once() -> int:
+            # Fetch the affected rows so we can recompute ``cost_usd``
+            # from the new model. ``add_log`` derives the cost at insert
+            # time from the original (host) model; without recomputing
+            # here, dashboards would mix the public ``gpt-image-*`` model
+            # label with host-model pricing and report inaccurate cost.
+            stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
+            result_rows = await self._session.execute(stmt)
+            logs = list(result_rows.scalars())
+            if not logs:
+                return 0
+            for log in logs:
+                log.model = model
+                log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
             try:
-                # Fetch the affected rows so we can recompute ``cost_usd``
-                # from the new model. ``add_log`` derives the cost at insert
-                # time from the original (host) model; without recomputing
-                # here, dashboards would mix the public ``gpt-image-*`` model
-                # label with host-model pricing and report inaccurate cost.
-                stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
-                result_rows = await self._session.execute(stmt)
-                logs = list(result_rows.scalars())
-                if not logs:
-                    return 0
-                for log in logs:
-                    log.model = model
-                    log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
                 await self._session.commit()
             except sa_exc.ResourceClosedError:
                 return 0
-            except BaseException:
-                await _safe_rollback(self._session)
-                raise
             return len(logs)
+
+        return await _retry_sqlite_write(
+            self._session,
+            _update_once,
+            operation_name="request_log_update_model",
+        )
 
     async def list_recent(
         self,
@@ -605,3 +622,16 @@ async def _safe_rollback(session: AsyncSession) -> None:
             await session.rollback()
     except BaseException:
         return
+
+
+def _normal_traffic_clause():
+    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)
+
+
+async def _retry_sqlite_write(
+    session: AsyncSession,
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    operation_name: str,
+) -> _T:
+    return await retry_session_sqlite_write(session, operation, operation_name=operation_name, logger=logger)

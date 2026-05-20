@@ -213,6 +213,36 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    failover_total = Counter(
+        "codex_lb_failover_total",
+        "Total pre-commit failover decisions",
+        ["transport", "failure_class", "action"],
+        registry=REGISTRY,
+    )
+    drain_transitions_total = Counter(
+        "codex_lb_drain_transitions_total",
+        "Total account health-tier transitions",
+        ["from_tier", "to_tier"],
+        registry=REGISTRY,
+    )
+    client_exposed_errors_total = Counter(
+        "codex_lb_client_exposed_errors_total",
+        "Total client-visible pre-commit upstream errors",
+        ["transport", "error_code"],
+        registry=REGISTRY,
+    )
+    sqlite_lock_retries_total = Counter(
+        "codex_lb_sqlite_lock_retries_total",
+        "Total SQLite lock retry events by operation and outcome",
+        ["operation", "outcome"],
+        registry=REGISTRY,
+    )
+    service_tier_mismatch_total = Counter(
+        "codex_lb_service_tier_mismatch_total",
+        "Total requested service tier mismatches observed in upstream responses",
+        ["kind", "requested_tier", "actual_tier"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -260,6 +290,11 @@ else:
     account_lease_released_total: CounterLike | None = None
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    failover_total: CounterLike | None = None
+    drain_transitions_total: CounterLike | None = None
+    client_exposed_errors_total: CounterLike | None = None
+    sqlite_lock_retries_total: CounterLike | None = None
+    service_tier_mismatch_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -291,15 +326,20 @@ __all__ = [
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
+    "client_exposed_errors_total",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",
+    "drain_transitions_total",
+    "failover_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",
     "rate_limit_hits_total",
     "request_duration_seconds",
     "requests_total",
+    "service_tier_mismatch_total",
+    "sqlite_lock_retries_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",

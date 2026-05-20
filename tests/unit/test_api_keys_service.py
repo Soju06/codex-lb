@@ -10,6 +10,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType, UsageHistory
+from app.db.sqlite_retry import is_sqlite_lock_error
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -30,7 +31,6 @@ from app.modules.api_keys.service import (
     ApiKeyValidationError,
     LimitRuleInput,
     _build_api_key_trends,
-    _is_sqlite_database_locked,
     _normalize_usage_sections,
 )
 from app.modules.usage.repository import UsageRepository
@@ -47,7 +47,7 @@ pytestmark = pytest.mark.unit
     ],
 )
 def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
-    assert _is_sqlite_database_locked(OperationalError("sqlite busy", {}, Exception(message))) is True
+    assert is_sqlite_lock_error(OperationalError("sqlite busy", {}, Exception(message))) is True
 
 
 class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
@@ -716,6 +716,23 @@ async def test_create_key_normalizes_fast_service_tier_alias() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_key_preserves_ultrafast_service_tier_literal() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="service-tier-ultrafast-policy",
+            allowed_models=None,
+            enforced_service_tier="ULTRAFAST",
+            expires_at=None,
+        )
+    )
+
+    assert created.enforced_service_tier == "ultrafast"
+
+
+@pytest.mark.asyncio
 async def test_update_key_normalizes_service_tier_alias() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -737,6 +754,30 @@ async def test_update_key_normalizes_service_tier_alias() -> None:
     )
 
     assert updated.enforced_service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_update_key_preserves_ultrafast_service_tier_literal() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="service-tier-ultrafast-update",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            enforced_service_tier="ultrafast",
+            enforced_service_tier_set=True,
+        ),
+    )
+
+    assert updated.enforced_service_tier == "ultrafast"
 
 
 @pytest.mark.asyncio
@@ -1449,7 +1490,7 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(ApiKeyCreateData(name="busy-retry-key", allowed_models=None, expires_at=None))
     initial_commit_count = repo.commit_count
 
@@ -1486,7 +1527,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="busy-lazy-reset-retry-key",
@@ -1851,7 +1892,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-finalize-busy-key",
@@ -1898,7 +1939,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-release-busy-key",

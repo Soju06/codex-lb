@@ -37,6 +37,7 @@ PLAN_TYPE_PRIORITY = (
 _RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
 _TRANSIENT_CODES = frozenset({"server_error", "upstream_error", "stream_incomplete", "overloaded_error"})
+_CONNECT_PHASE_TRANSIENT_403_CODES = frozenset({"forbidden", "insufficient_permissions", "permission_error"})
 
 
 def classify_upstream_failure(
@@ -51,6 +52,8 @@ def classify_upstream_failure(
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
+    elif phase == "connect" and http_status == 403 and error_code in _CONNECT_PHASE_TRANSIENT_403_CODES:
+        failure_class = "retryable_transient"
     elif error_code in _TRANSIENT_CODES or (http_status is not None and http_status >= 500):
         failure_class = "retryable_transient"
     else:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
 from typing import Any, cast
+from typing import TypeVar
 
 from anyio import to_thread
 from sqlalchemy import Integer, and_, delete, func, literal_column, or_, select, true
@@ -17,7 +19,7 @@ from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
-from app.db.session import sqlite_writer_section
+from app.db.sqlite_retry import retry_sqlite_write as retry_session_sqlite_write
 from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
@@ -26,6 +28,9 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+_T = TypeVar("_T")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,6 +562,15 @@ def _merge_latest_additional_usage_entries(
         )
 
 
+async def _retry_sqlite_write(
+    session: AsyncSession,
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    operation_name: str,
+) -> _T:
+    return await retry_session_sqlite_write(session, operation, operation_name=operation_name, logger=logger)
+
+
 class UsageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -591,23 +605,30 @@ class UsageRepository:
         credits_unlimited: bool | None = None,
         credits_balance: float | None = None,
     ) -> UsageHistory:
-        entry = UsageHistory(
-            account_id=account_id,
-            used_percent=used_percent,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            window=window,
-            reset_at=reset_at,
-            window_minutes=window_minutes,
-            credits_has=credits_has,
-            credits_unlimited=credits_unlimited,
-            credits_balance=credits_balance,
-            recorded_at=recorded_at or utcnow(),
-        )
-        self._session.add(entry)
-        async with sqlite_writer_section():
+        async def _add_once() -> UsageHistory:
+            entry = UsageHistory(
+                account_id=account_id,
+                used_percent=used_percent,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                window=window,
+                reset_at=reset_at,
+                window_minutes=window_minutes,
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+                recorded_at=recorded_at or utcnow(),
+            )
+            self._session.add(entry)
             await self._session.commit()
-            await self._session.refresh(entry)
+            return entry
+
+        entry = await _retry_sqlite_write(
+            self._session,
+            _add_once,
+            operation_name="usage_history_add_entry",
+        )
+        await self._session.refresh(entry)
         return entry
 
     async def aggregate_since(
@@ -996,38 +1017,58 @@ class AdditionalUsageRepository:
         )
         if effective_quota_key is None:
             raise ValueError("additional usage quota_key could not be determined")
-        entry = AdditionalUsageHistory(
-            account_id=account_id,
-            quota_key=effective_quota_key,
-            limit_name=limit_name,
-            metered_feature=metered_feature,
-            window=window,
-            used_percent=used_percent,
-            reset_at=reset_at,
-            window_minutes=window_minutes,
-            recorded_at=recorded_at or utcnow(),
-        )
-        self._session.add(entry)
-        async with sqlite_writer_section():
+
+        async def _add_once() -> None:
+            entry = AdditionalUsageHistory(
+                account_id=account_id,
+                quota_key=effective_quota_key,
+                limit_name=limit_name,
+                metered_feature=metered_feature,
+                window=window,
+                used_percent=used_percent,
+                reset_at=reset_at,
+                window_minutes=window_minutes,
+                recorded_at=recorded_at or utcnow(),
+            )
+            self._session.add(entry)
             await self._session.commit()
 
+        await _retry_sqlite_write(
+            self._session,
+            _add_once,
+            operation_name="additional_usage_add_entry",
+        )
+
     async def delete_for_account(self, account_id: str) -> None:
-        stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
-        async with sqlite_writer_section():
+        async def _delete_once() -> None:
+            stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
             await self._session.execute(stmt)
             await self._session.commit()
+
+        await _retry_sqlite_write(
+            self._session,
+            _delete_once,
+            operation_name="additional_usage_delete_account",
+        )
 
     async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
         scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
         if scope is None:
             raise ValueError("additional usage quota_key could not be determined")
-        stmt = delete(AdditionalUsageHistory).where(
-            AdditionalUsageHistory.account_id == account_id,
-            _additional_quota_match_clause(scope),
-        )
-        async with sqlite_writer_section():
+
+        async def _delete_once() -> None:
+            stmt = delete(AdditionalUsageHistory).where(
+                AdditionalUsageHistory.account_id == account_id,
+                _additional_quota_match_clause(scope),
+            )
             await self._session.execute(stmt)
             await self._session.commit()
+
+        await _retry_sqlite_write(
+            self._session,
+            _delete_once,
+            operation_name="additional_usage_delete_quota_key",
+        )
 
     async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
         await self.delete_for_account_and_quota_key(account_id, limit_name)
@@ -1041,14 +1082,21 @@ class AdditionalUsageRepository:
         scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
         if scope is None:
             raise ValueError("additional usage quota_key could not be determined")
-        stmt = delete(AdditionalUsageHistory).where(
-            AdditionalUsageHistory.account_id == account_id,
-            _additional_quota_match_clause(scope),
-            AdditionalUsageHistory.window == window,
-        )
-        async with sqlite_writer_section():
+
+        async def _delete_once() -> None:
+            stmt = delete(AdditionalUsageHistory).where(
+                AdditionalUsageHistory.account_id == account_id,
+                _additional_quota_match_clause(scope),
+                AdditionalUsageHistory.window == window,
+            )
             await self._session.execute(stmt)
             await self._session.commit()
+
+        await _retry_sqlite_write(
+            self._session,
+            _delete_once,
+            operation_name="additional_usage_delete_quota_key_window",
+        )
 
     async def delete_for_account_limit_window(
         self,

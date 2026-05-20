@@ -13,22 +13,22 @@ spec:
   groups:
     - name: codex-lb.rules
       rules:
-        - alert: CodexLBHighErrorRate
+        - alert: CodexLBHighNonSuccessRate
           expr: |
             (
-              rate(codex_lb_requests_total{status=~"5.."}[5m])
-              / rate(codex_lb_requests_total[5m])
+              sum(rate(codex_lb_requests_total{status!~"2..|3.."}[5m]))
+              / sum(rate(codex_lb_requests_total[5m]))
             ) > 0.05
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "codex-lb high error rate"
-            description: "5xx error rate is above 5% for 5 minutes"
+            summary: "codex-lb high non-success rate"
+            description: "Non-2xx/3xx request rate is above 5% for 5 minutes"
         - alert: CodexLBHighLatency
           expr: |
             histogram_quantile(0.99,
-              rate(codex_lb_request_duration_seconds_bucket[5m])
+              sum by (le) (rate(codex_lb_request_duration_seconds_bucket[5m]))
             ) > 10
           for: 5m
           labels:
@@ -36,6 +36,56 @@ spec:
           annotations:
             summary: "codex-lb high p99 latency"
             description: "p99 request latency is above 10 seconds"
+        - alert: CodexLBHighP95Latency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(codex_lb_request_duration_seconds_bucket[5m]))
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb high p95 latency"
+            description: "p95 request latency is above 5 seconds"
+        - alert: CodexLBUpstreamTimeoutOrIncomplete
+          expr: |
+            sum(rate(codex_lb_client_exposed_errors_total{error_code=~"upstream_timeout|upstream_unavailable|stream_incomplete"}[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb upstream timeout or incomplete stream spike"
+            description: "Client-visible upstream timeout/unavailable/stream_incomplete errors are elevated"
+        - alert: CodexLBSqliteLockPressure
+          expr: |
+            sum(rate(codex_lb_sqlite_lock_retries_total[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb SQLite lock pressure"
+            description: "SQLite lock retries are elevated; sustained deployments should use PostgreSQL"
+        - alert: CodexLBBridgeContinuityErrors
+          expr: |
+            (
+              sum(rate(codex_lb_continuity_fail_closed_total[5m]))
+              + sum(rate(codex_lb_bridge_owner_forward_total{outcome="fail"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb bridge continuity errors"
+            description: "Bridge continuity fail-closed or owner-forward failures are elevated"
+        - alert: CodexLBServiceTierMismatch
+          expr: |
+            sum(rate(codex_lb_service_tier_mismatch_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb service tier mismatch"
+            description: "Upstream actual service tier differs from the requested tier"
         - alert: CodexLBPodDown
           expr: |
             kube_statefulset_status_replicas_ready{statefulset="{{ include "codex-lb.workloadName" . }}"}
@@ -46,6 +96,24 @@ spec:
           annotations:
             summary: "codex-lb pods unavailable"
             description: "Available replicas is less than desired"
+        - alert: CodexLBContainerRestarting
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }}, container="codex-lb"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "codex-lb container restarting"
+            description: "codex-lb container restarted within the last 15 minutes"
+        - alert: CodexLBContainerOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{namespace={{ .Release.Namespace | quote }}, container="codex-lb", reason="OOMKilled"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "codex-lb container OOMKilled"
+            description: "codex-lb container was last terminated due to OOMKilled"
         - alert: CodexLBHPAAtMax
           expr: |
             kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="{{ include "codex-lb.fullname" . }}"}

@@ -380,7 +380,7 @@ jobs:
     needs: changes
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: codex_lb
           POSTGRES_PASSWORD: codex_lb
@@ -463,7 +463,7 @@ jobs:
     if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: codex_lb
           POSTGRES_PASSWORD: codex_lb

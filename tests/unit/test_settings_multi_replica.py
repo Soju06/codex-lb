@@ -9,8 +9,9 @@ from app.core.config.settings import Settings
 pytestmark = pytest.mark.unit
 
 
-def test_settings_multi_replica_defaults():
-    settings = Settings()
+def test_settings_multi_replica_defaults(monkeypatch):
+    monkeypatch.delenv("CODEX_LB_METRICS_ENABLED", raising=False)
+    settings = Settings(_env_file=None)
     assert settings.metrics_enabled is False
     assert settings.metrics_port == 9090
     assert settings.log_format == "text"
@@ -31,18 +32,23 @@ def test_settings_multi_replica_defaults():
     assert settings.compact_request_budget_seconds == 180.0
     assert settings.proxy_request_budget_seconds == 600.0
     assert settings.http_responses_session_bridge_request_budget_seconds == 7200.0
+    assert settings.stream_idle_timeout_seconds == 600.0
+    assert settings.http_responses_session_bridge_codex_request_budget_seconds == 600.0
+    assert settings.http_responses_session_bridge_codex_prewarm_enabled is True
     assert settings.stream_idle_timeout_seconds == 7200.0
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.http_responses_stream_request_budget_seconds == 7200.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
     assert settings.proxy_refresh_failure_cooldown_seconds == 5.0
     assert settings.conversation_archive_queue_max_bytes == 256 * 1024 * 1024
+    assert settings.proxy_connect_forbidden_cooldown_seconds == 30.0
     assert settings.usage_refresh_auth_failure_cooldown_seconds == 300.0
+    assert settings.model_registry_refresh_auth_failure_cooldown_seconds == 300.0
     assert settings.otel_enabled is False
     assert settings.otel_exporter_endpoint == ""
     assert settings.shutdown_drain_timeout_seconds == 30
-    assert settings.http_connector_limit == 100
-    assert settings.http_connector_limit_per_host == 50
+    assert settings.http_connector_limit == 200
+    assert settings.http_connector_limit_per_host == 100
     assert settings.http_downstream_transport_policy == "smart"
 
 

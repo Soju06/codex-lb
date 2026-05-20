@@ -12985,7 +12985,8 @@ def _extract_message_content_text(content: object) -> str | None:
     if isinstance(content, str):
         return content
     if isinstance(content, dict):
-        text = content.get("text")
+        content_mapping = cast(Mapping[str, object], content)
+        text = content_mapping.get("text")
         return text if isinstance(text, str) else None
     if not isinstance(content, list):
         return None
@@ -12996,7 +12997,8 @@ def _extract_message_content_text(content: object) -> str | None:
             continue
         if not isinstance(part, dict):
             continue
-        text = part.get("text")
+        part_mapping = cast(Mapping[str, object], part)
+        text = part_mapping.get("text")
         if isinstance(text, str):
             parts.append(text)
     return "".join(parts) if parts else None

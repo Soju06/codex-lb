@@ -258,6 +258,18 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
+# Maximum time (seconds) to wait for a prewarm upstream response before
+# giving up and letting the actual request proceed without prewarming.
+# A blocked prewarm holds the response_create_gate semaphore and prevents
+# the real request from being sent, leading to an indefinite :keepalive hang.
+_PREWARM_RESPONSE_TIMEOUT_SECONDS = 2.0
+# Maximum consecutive keepalive frames sent before terminating the stream.
+# 6 × 10s (default interval) = 60s.  Combined with the 0.5s startup-probe
+# window this ensures the client sees a terminal event within ≈70s when the
+# upstream silently stops responding.
+_STREAM_KEEPALIVE_MAX_COUNT = 6
+
+
 async def _await_cancelled_task(
     task: asyncio.Task[_TaskResultT],
     *,
@@ -1491,6 +1503,7 @@ class ProxyService:
             assert event_queue is not None
             yielded_any = False
             keepalive_sent = False
+            keepalive_count = 0
             while True:
                 keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -1500,6 +1513,24 @@ class ProxyService:
                     try:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
+                        keepalive_count += 1
+                        if keepalive_count > _STREAM_KEEPALIVE_MAX_COUNT:
+                            logger.info(
+                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s",
+                                request_state.request_id,
+                                keepalive_count,
+                            )
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    response_failed_event(
+                                        "stream_idle_timeout",
+                                        "Upstream did not respond within the keepalive window",
+                                        response_id=request_state.response_id or request_state.request_id,
+                                    ),
+                                )
+                            )
+                            break
                         keepalive_sent = True
                         yielded_any = True
                         if request_state.response_id:
@@ -1522,6 +1553,7 @@ class ProxyService:
                     event_block = await event_queue.get()
                 if event_block is None:
                     break
+                keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
@@ -6331,7 +6363,27 @@ class ProxyService:
                 request_enqueued = True
                 await session.upstream.send_text(warmup_text)
                 while True:
-                    event_block = await event_queue.get()
+                    try:
+                        event_block = await asyncio.wait_for(
+                            event_queue.get(),
+                            timeout=_PREWARM_RESPONSE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "HTTP bridge prewarm timed out request_id=%s model=%s",
+                            request_state.request_id,
+                            request_state.model,
+                        )
+                        session.prewarmed = False
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        async with session.pending_lock:
+                            if warmup_state in session.pending_requests:
+                                session.pending_requests.remove(warmup_state)
+                        self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
+                        if gate_acquired:
+                            _release_websocket_response_create_gate(warmup_state, session.response_create_gate)
+                        return
                     if event_block is None:
                         break
                     payload = parse_sse_data_json(event_block)
@@ -6402,10 +6454,15 @@ class ProxyService:
                 session.upstream_control.retire_after_drain = True
                 detached = True
         request_state.event_queue = None
+        # event_queue is nulled unconditionally because by the time
+        # _detach is called from the finally block in
+        # _stream_http_bridge_session_events, the terminal event has
+        # already been delivered via _pop_terminal_websocket_request_state.
+        # A late-arriving event on a nulled queue is a no-op.
+        _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        _release_websocket_response_create_gate(request_state, session.response_create_gate)
         await self._release_websocket_request_state_reservation(request_state)
         request_state.api_key_reservation = None
         await self._retire_http_bridge_after_drain_if_ready(session)
@@ -8223,6 +8280,7 @@ class ProxyService:
                 settlement.error_code or "upstream_error",
             )
             upstream_control.reconnect_requested = True
+            upstream_control.retire_after_drain = True
         elif settlement.record_success:
             await self._load_balancer.record_success(account)
             self._remember_websocket_previous_response_owner(

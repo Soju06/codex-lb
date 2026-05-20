@@ -9,6 +9,7 @@ import queue
 import stat
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -300,18 +301,18 @@ def test_archive_writer_streams_gzip_without_precompressing_record(monkeypatch, 
 
 def test_archive_writer_batches_queued_records(monkeypatch, tmp_path):
     archive_queue: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue()
-    first = (tmp_path / "archive.jsonl.gz", {"payload": "one"}, 11)
-    second = (tmp_path / "archive.jsonl.gz", {"payload": "two"}, 13)
+    first: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "one"}, 11)
+    second: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "two"}, 13)
     archive_queue.put(first)
     archive_queue.put(second)
     archive_queue.put(None)
     monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", archive_queue)
     with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
-        conversation_archive._WRITE_QUEUE_BYTES = 24
+        setattr(conversation_archive, "_WRITE_QUEUE_BYTES", 24)
 
-    batches: list[list[tuple[Path, object, int]]] = []
+    batches: list[list[tuple[Path, dict[str, object], int]]] = []
 
-    def capture_batch(items):
+    def capture_batch(items: Sequence[tuple[Path, dict[str, object], int]]) -> None:
         batches.append(list(items))
 
     monkeypatch.setattr(conversation_archive, "_append_records", capture_batch)

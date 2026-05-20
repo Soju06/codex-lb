@@ -31,7 +31,7 @@ def test_settings_multi_replica_defaults():
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
     assert settings.proxy_refresh_failure_cooldown_seconds == 5.0
-    assert settings.conversation_archive_queue_max_bytes == 8 * 1024 * 1024
+    assert settings.conversation_archive_queue_max_bytes == 256 * 1024 * 1024
     assert settings.usage_refresh_auth_failure_cooldown_seconds == 300.0
     assert settings.otel_enabled is False
     assert settings.otel_exporter_endpoint == ""

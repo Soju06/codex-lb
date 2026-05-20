@@ -11,7 +11,7 @@ import queue
 import threading
 import time
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -258,7 +258,7 @@ def _append_record(path: Path, record: Mapping[str, Any]) -> None:
     _append_records([(path, record, 0)])
 
 
-def _append_records(items: list[tuple[Path, Mapping[str, Any], int]]) -> None:
+def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> None:
     if not items:
         return
     if _archive_disk_pressure_active():

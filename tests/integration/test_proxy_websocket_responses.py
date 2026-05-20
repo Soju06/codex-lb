@@ -5471,17 +5471,24 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
 
 
 def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(app_instance, monkeypatch):
-    upstream_messages = [
-        _FakeUpstreamMessage(
-            "text",
-            text=json.dumps(
-                {"type": "response.created", "response": {"id": "resp_ws_eof", "status": "in_progress"}},
-                separators=(",", ":"),
-            ),
-        ),
-        _FakeUpstreamMessage("close", close_code=1011),
+    def upstream_created_then_eof(response_id: str) -> _FakeUpstreamWebSocket:
+        return _FakeUpstreamWebSocket(
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage("close", close_code=1011),
+            ]
+        )
+
+    upstreams = [
+        upstream_created_then_eof("resp_ws_eof"),
+        upstream_created_then_eof("resp_ws_eof_retry"),
     ]
-    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
     log_calls: list[dict[str, object]] = []
 
     class _FakeSettingsCache:
@@ -5525,7 +5532,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
             client_send_lock,
             websocket,
         )
-        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+        return SimpleNamespace(id="acct_ws_proxy"), upstreams.pop(0)
 
     async def fake_write_request_log(self, **kwargs):
         del self
@@ -5553,10 +5560,10 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
 
     assert created_event["type"] == "response.created"
     assert failed_event["type"] == "response.failed"
-    assert failed_event["response"]["id"] == "resp_ws_eof"
+    assert failed_event["response"]["id"] == "resp_ws_eof_retry"
     assert failed_event["response"]["error"]["code"] == "stream_incomplete"
     assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1
-    assert log_calls[0]["request_id"] == "resp_ws_eof"
+    assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"

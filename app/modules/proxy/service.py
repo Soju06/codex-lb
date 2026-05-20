@@ -6926,6 +6926,7 @@ class ProxyService:
         async with session.pending_lock:
             matched_request_state = None
             created_request_state = None
+            suppress_downstream_event = False
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
@@ -6974,6 +6975,9 @@ class ProxyService:
                     return
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     matched_request_state.downstream_visible = True
+                if event_type == "response.created" and matched_request_state.suppress_next_created_downstream:
+                    matched_request_state.suppress_next_created_downstream = False
+                    suppress_downstream_event = True
                 if payload is not None:
                     event_block = format_sse_event(payload)
 
@@ -7280,7 +7284,11 @@ class ProxyService:
                 ),
             )
 
-        if matched_request_state is not None and matched_request_state.event_queue is not None:
+        if (
+            matched_request_state is not None
+            and matched_request_state.event_queue is not None
+            and not suppress_downstream_event
+        ):
             await matched_request_state.event_queue.put(event_block)
 
         if terminal_request_state is None:
@@ -7881,6 +7889,9 @@ class ProxyService:
                     return text
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     request_state.downstream_visible = True
+                if event_type == "response.created" and request_state.suppress_next_created_downstream:
+                    request_state.suppress_next_created_downstream = False
+                    upstream_control.suppress_downstream_event = True
                 if payload is not None:
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             if (
@@ -10929,6 +10940,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    suppress_replayed_created = request_state.response_id is not None and not request_state.awaiting_response_created
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
@@ -10936,6 +10948,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.suppress_next_created_downstream = suppress_replayed_created
     return request_text
 
 
@@ -11002,6 +11015,7 @@ class _WebSocketRequestState:
     api_key_reservation_heartbeat_stop: asyncio.Event | None = None
     api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
     downstream_visible: bool = False
+    suppress_next_created_downstream: bool = False
     draining_until_terminal: bool = False
 
 

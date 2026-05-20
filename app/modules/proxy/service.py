@@ -4148,26 +4148,49 @@ class ProxyService:
         last_failover_account: Account | None = None
         for attempt in range(max_attempts):
             is_retry = attempt > 0
-            account = await self._select_websocket_connect_account(
-                deadline,
-                sticky_key=sticky_key,
-                sticky_kind=sticky_kind,
-                prefer_earlier_reset=prefer_earlier_reset,
-                routing_strategy=routing_strategy,
-                model=model,
-                request_state=request_state,
-                api_key=api_key,
-                client_send_lock=client_send_lock,
-                websocket=websocket,
-                reallocate_sticky=True if is_retry else reallocate_sticky,
-                sticky_max_age_seconds=sticky_max_age_seconds,
-                exclude_account_ids=excluded_account_ids,
-                preferred_account_id=request_state.preferred_account_id,
-                require_preferred_account=(
-                    request_state.previous_response_id is not None and request_state.preferred_account_id is not None
-                ),
+            require_preferred_account = (
+                request_state.previous_response_id is not None and request_state.preferred_account_id is not None
             )
+            select_kwargs: dict[str, Any] = {
+                "sticky_key": sticky_key,
+                "sticky_kind": sticky_kind,
+                "prefer_earlier_reset": prefer_earlier_reset,
+                "routing_strategy": routing_strategy,
+                "model": model,
+                "request_state": request_state,
+                "api_key": api_key,
+                "client_send_lock": client_send_lock,
+                "websocket": websocket,
+                "reallocate_sticky": True if is_retry else reallocate_sticky,
+                "sticky_max_age_seconds": sticky_max_age_seconds,
+                "exclude_account_ids": excluded_account_ids,
+                "preferred_account_id": request_state.preferred_account_id,
+                "require_preferred_account": require_preferred_account,
+            }
+            if "defer_no_account_error" in inspect.signature(self._select_websocket_connect_account).parameters:
+                select_kwargs["defer_no_account_error"] = (
+                    last_failover_exc is not None and not require_preferred_account
+                )
+            try:
+                account = await self._select_websocket_connect_account(deadline, **select_kwargs)
+            except _WebSocketConnectFailureEmitted:
+                return None, None
             if account is None:
+                if (
+                    last_failover_exc is not None
+                    and not require_preferred_account
+                    and _remaining_budget_seconds(deadline) <= 0
+                ):
+                    await self._emit_websocket_connect_timeout(
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                        account_id=None,
+                        api_key=api_key,
+                        request_state=request_state,
+                    )
+                    return None, None
+                if last_failover_exc is not None and not require_preferred_account:
+                    break
                 return None, None
 
             try:
@@ -4249,6 +4272,7 @@ class ProxyService:
         exclude_account_ids: set[str],
         preferred_account_id: str | None,
         require_preferred_account: bool,
+        defer_no_account_error: bool = False,
     ) -> Account | None:
         try:
             selection = await self._select_account_with_budget_compatible(
@@ -4275,7 +4299,7 @@ class ProxyService:
                     api_key=api_key,
                     request_state=request_state,
                 )
-                return None
+                raise _WebSocketConnectFailureEmitted
             raise
 
         account = selection.account
@@ -4311,6 +4335,8 @@ class ProxyService:
             return None
         if account:
             return account
+        if defer_no_account_error:
+            return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
         if require_preferred_account and preferred_account_id is not None:
@@ -4436,22 +4462,14 @@ class ProxyService:
             return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"
-            await self._emit_websocket_connect_failure(
-                websocket,
-                client_send_lock=client_send_lock,
-                account_id=account.id,
-                api_key=api_key,
-                request_state=request_state,
-                status_code=502,
-                payload=openai_error(
+            raise ProxyResponseError(
+                502,
+                openai_error(
                     "upstream_unavailable",
                     message,
                     error_type="server_error",
                 ),
-                error_code="upstream_unavailable",
-                error_message=message,
-            )
-            return None
+            ) from exc
 
     async def _retry_websocket_connect_after_401(
         self,
@@ -4501,22 +4519,14 @@ class ProxyService:
             return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as refresh_transport_exc:
             message = str(refresh_transport_exc) or "Request to upstream timed out"
-            await self._emit_websocket_connect_failure(
-                websocket,
-                client_send_lock=client_send_lock,
-                account_id=account.id,
-                api_key=api_key,
-                request_state=request_state,
-                status_code=502,
-                payload=openai_error(
+            raise ProxyResponseError(
+                502,
+                openai_error(
                     "upstream_unavailable",
                     message,
                     error_type="server_error",
                 ),
-                error_code="upstream_unavailable",
-                error_message=message,
-            )
-            return None
+            ) from refresh_transport_exc
 
         try:
             remaining_budget = _remaining_budget_seconds(deadline)
@@ -4600,10 +4610,13 @@ class ProxyService:
         *,
         timeout_seconds: float,
     ) -> UpstreamResponsesWebSocket:
+        started_at = time.monotonic()
         try:
             with anyio.fail_after(timeout_seconds):
                 return await self._open_upstream_websocket(account, headers)
         except TimeoutError:
+            if time.monotonic() - started_at < timeout_seconds:
+                raise
             _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
@@ -10765,6 +10778,10 @@ class _RetryableStreamError(Exception):
         self.code = code
         self.error = error
         self.exclude_account = exclude_account
+
+
+class _WebSocketConnectFailureEmitted(Exception):
+    pass
 
 
 class _TransientStreamError(Exception):

@@ -109,7 +109,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
@@ -1558,7 +1558,7 @@ class ProxyService:
                                 )
                             )
                         else:
-                            yield ": keepalive\n\n"
+                            yield CODEX_KEEPALIVE_FRAME
                         continue
                 else:
                     event_block = await event_queue.get()

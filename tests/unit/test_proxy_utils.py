@@ -14263,7 +14263,7 @@ async def test_http_bridge_session_events_emit_keepalive_while_pending(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_session_events_emit_comment_keepalive_before_response_id(monkeypatch):
+async def test_http_bridge_session_events_emit_codex_keepalive_before_response_id(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
@@ -14313,7 +14313,7 @@ async def test_http_bridge_session_events_emit_comment_keepalive_before_response
     finally:
         await events.aclose()
 
-    assert keepalive == ": keepalive\n\n"
+    assert keepalive == proxy_service.CODEX_KEEPALIVE_FRAME
 
 
 @pytest.mark.asyncio

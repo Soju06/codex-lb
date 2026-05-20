@@ -2170,7 +2170,7 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatch):
+async def test_stream_responses_maps_inner_pre_response_timeout_to_upstream_unavailable(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -2201,7 +2201,8 @@ async def test_stream_responses_maps_total_timeout_to_request_timeout(monkeypatc
     ]
 
     event = json.loads(events[0].split("data: ", 1)[1])
-    assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert event["response"]["error"]["message"] == "Request to upstream timed out"
 
 
 @pytest.mark.asyncio

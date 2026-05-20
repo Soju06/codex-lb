@@ -6702,13 +6702,10 @@ class ProxyService:
             if len(retryable_requests) != 1:
                 return False
             request_state = retryable_requests[0]
-            if (
-                request_state.previous_response_id is not None
-                and not (
-                    request_state.proxy_injected_previous_response_id
-                    and request_state.fresh_upstream_request_is_retry_safe
-                    and request_state.fresh_upstream_request_text
-                )
+            if request_state.previous_response_id is not None and not (
+                request_state.proxy_injected_previous_response_id
+                and request_state.fresh_upstream_request_is_retry_safe
+                and request_state.fresh_upstream_request_text
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it

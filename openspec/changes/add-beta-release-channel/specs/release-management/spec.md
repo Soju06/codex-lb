@@ -18,6 +18,12 @@ Beta releases SHALL be prepared by an automatically maintained pull request agai
 - **WHEN** the beta PR sync workflow runs
 - **THEN** it exits without creating a beta release pull request
 
+#### Scenario: automation ignores forked release-please branch names
+
+- **GIVEN** a fork has an open pull request whose head branch is named `release-please--branches--main`
+- **WHEN** the beta PR sync workflow looks for the release-please PR
+- **THEN** it ignores that pull request unless the head repository owner is the canonical repository owner
+
 #### Scenario: merged beta release already covers main
 
 - **GIVEN** tag `v1.19.0-beta.1` points to `HEAD`

@@ -49,12 +49,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          repo_owner="${GITHUB_REPOSITORY_OWNER:-${GITHUB_REPOSITORY%%/*}}"
           release_pr="$(gh pr list \
             --base main \
-            --head release-please--branches--main \
             --state open \
-            --json number \
-            --jq '.[0].number // empty')"
+            --json number,headRefName,headRepositoryOwner \
+            --jq '[.[] | select(.headRefName == "release-please--branches--main" and .headRepositoryOwner.login == "'"${repo_owner}"'")][0].number // empty')"
           if [ -z "${release_pr}" ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No open release-please PR; beta PR sync is a no-op."

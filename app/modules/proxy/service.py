@@ -11610,15 +11610,21 @@ async def _pop_replayable_precreated_websocket_request_state(
         if len(pending_requests) != 1:
             return None
         request_state = pending_requests[0]
-        if request_state.response_id is not None:
-            return None
-        if not request_state.awaiting_response_created:
-            return None
         if not request_state.request_text:
             return None
         if request_state.replay_count >= 1:
             return None
-        if request_state.response_event_count > 0:
+        if request_state.downstream_visible:
+            return None
+        precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
+        created_only_pending = (
+            request_state.response_id is not None
+            and not request_state.awaiting_response_created
+            and request_state.response_event_count <= 1
+        )
+        if precreated_pending and request_state.response_event_count > 0:
+            return None
+        if not (precreated_pending or created_only_pending):
             return None
         pending_requests.popleft()
     if (
@@ -11634,6 +11640,7 @@ async def _pop_replayable_precreated_websocket_request_state(
     request_state.replay_count += 1
     request_state.awaiting_response_created = True
     request_state.response_id = None
+    request_state.response_event_count = 0
     return request_state
 
 

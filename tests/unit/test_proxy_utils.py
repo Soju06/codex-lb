@@ -11070,6 +11070,62 @@ async def test_pop_replayable_precreated_request_refreshes_fresh_replay_fingerpr
 
 
 @pytest.mark.asyncio
+async def test_pop_replayable_created_without_visible_output_request_state():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_no_output_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        response_id="resp_created_then_closed",
+        awaiting_response_created=False,
+        response_event_count=1,
+        downstream_visible=False,
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 1
+    assert pending_request.awaiting_response_created is True
+    assert pending_request.response_id is None
+    assert pending_request.response_event_count == 0
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_created_request_refuses_visible_output():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_visible_refuse",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        response_id="resp_created_visible",
+        awaiting_response_created=False,
+        response_event_count=2,
+        downstream_visible=True,
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is None
+    assert list(pending_requests) == [pending_request]
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_masks_previous_response_not_found_for_unique_followup_request(
     monkeypatch,
 ):

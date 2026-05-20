@@ -10921,6 +10921,14 @@ def _websocket_request_can_replay_before_visible_output(request_state: "_WebSock
         request_state.response_id is not None
         and not request_state.awaiting_response_created
         and request_state.response_event_count <= 1
+        and (
+            request_state.previous_response_id is None
+            or (
+                request_state.proxy_injected_previous_response_id
+                and request_state.fresh_upstream_request_is_retry_safe
+                and bool(request_state.fresh_upstream_request_text)
+            )
+        )
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
@@ -10940,7 +10948,6 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
-    suppress_replayed_created = request_state.response_id is not None and not request_state.awaiting_response_created
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
@@ -10948,7 +10955,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
-    request_state.suppress_next_created_downstream = suppress_replayed_created
+    request_state.suppress_next_created_downstream = False
     return request_text
 
 

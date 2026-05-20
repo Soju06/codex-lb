@@ -11098,6 +11098,37 @@ async def test_pop_replayable_created_without_visible_output_request_state():
     assert pending_request.awaiting_response_created is True
     assert pending_request.response_id is None
     assert pending_request.response_event_count == 0
+    assert pending_request.suppress_next_created_downstream is False
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_created_request_refuses_client_previous_response_id():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_client_previous_response_id",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.1","previous_response_id":"resp_anchor","input":"retry"}'
+        ),
+        response_id="resp_created_then_closed",
+        previous_response_id="resp_anchor",
+        awaiting_response_created=False,
+        response_event_count=1,
+        downstream_visible=False,
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is None
+    assert list(pending_requests) == [pending_request]
+    assert pending_request.replay_count == 0
 
 
 @pytest.mark.asyncio
@@ -14435,8 +14466,8 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
         await events.aclose()
 
     assert len(collected) == 3, f"Expected 3 events (2 keepalives + stream_idle_timeout), got {len(collected)}"
-    assert collected[0] == ": keepalive\n\n"
-    assert collected[1] == ": keepalive\n\n"
+    assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
+    assert collected[1] == proxy_service.CODEX_KEEPALIVE_FRAME
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"

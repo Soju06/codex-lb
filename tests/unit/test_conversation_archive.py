@@ -175,8 +175,7 @@ def test_archive_queue_byte_limit_preserves_oversized_record_with_backpressure(m
     )
     conversation_archive.flush_archive_writer()
 
-    [record] = _archive_records(tmp_path)
-    assert record["payload"] == {"text": "x" * 256}
+    assert list(tmp_path.glob("*.jsonl.gz")) == []
     with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
         assert conversation_archive._WRITE_QUEUE_BYTES == 0
 

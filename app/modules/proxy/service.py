@@ -3539,6 +3539,7 @@ class ProxyService:
                             proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
+                            codex_session_affinity=codex_session_affinity,
                         )
                     )
 
@@ -7220,6 +7221,7 @@ class ProxyService:
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
         downstream_activity: _DownstreamWebSocketActivity,
+        codex_session_affinity: bool = True,
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
         try:
@@ -7257,6 +7259,7 @@ class ProxyService:
                                 pending_lock=pending_lock,
                                 client_send_lock=client_send_lock,
                                 downstream_activity=downstream_activity,
+                                codex_session_affinity=codex_session_affinity,
                             )
                         except Exception:
                             downstream_activity.mark_disconnected()
@@ -7858,13 +7861,16 @@ class ProxyService:
         pending_lock: anyio.Lock,
         client_send_lock: anyio.Lock,
         downstream_activity: _DownstreamWebSocketActivity,
+        codex_session_affinity: bool,
     ) -> bool:
         async with pending_lock:
             keepalive_ids = [
                 request_state.response_id for request_state in pending_requests if request_state.response_id is not None
             ]
-        if not keepalive_ids:
-            return False
+            precreated_request_ids = [
+                request_state.request_id for request_state in pending_requests if request_state.response_id is None
+            ]
+        emitted = False
         for response_id in keepalive_ids:
             event = {
                 "type": "response.in_progress",
@@ -7876,7 +7882,22 @@ class ProxyService:
                 text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
                 downstream_activity=downstream_activity,
             )
-        return True
+            emitted = True
+        if codex_session_affinity:
+            for request_id in precreated_request_ids:
+                event = {
+                    "type": "codex.keepalive",
+                    "request_id": request_id,
+                    "status": "pending_response_created",
+                }
+                await self._send_downstream_websocket_text(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
+                    downstream_activity=downstream_activity,
+                )
+                emitted = True
+        return emitted
 
     async def _downstream_websocket_is_idle(
         self,

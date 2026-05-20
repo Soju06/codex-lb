@@ -29,6 +29,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 error_message TEXT,
                 model VARCHAR NOT NULL,
                 transport VARCHAR,
+                session_id VARCHAR,
                 latency_ms INTEGER,
                 latency_first_token_ms INTEGER,
                 service_tier VARCHAR,
@@ -52,6 +53,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 error_message,
                 model,
                 transport,
+                session_id,
                 latency_ms,
                 latency_first_token_ms,
                 service_tier,
@@ -66,7 +68,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
             )
             VALUES (
                 datetime('now', ?),
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -77,6 +79,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     None,
                     "gpt-5.5",
                     "websocket",
+                    "session_ok",
                     1000,
                     200,
                     "default",
@@ -96,6 +99,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     None,
                     "gpt-5.5",
                     "websocket",
+                    "session_slow",
                     90000,
                     500,
                     "default",
@@ -115,6 +119,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     "Upstream websocket closed before response.completed",
                     "gpt-5.5",
                     "websocket",
+                    "session_stream_error",
                     5000,
                     None,
                     "ultrafast",
@@ -127,16 +132,36 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     None,
                     None,
                 ),
+                (
+                    "-4 minutes",
+                    "error",
+                    "context_length_exceeded",
+                    "This model's maximum context length was exceeded.",
+                    "gpt-5.5",
+                    "websocket",
+                    "session_context_overflow",
+                    3000,
+                    None,
+                    "ultrafast",
+                    "ultrafast",
+                    None,
+                    "high",
+                    180000,
+                    20,
+                    1000,
+                    0,
+                    0.02,
+                ),
             ],
         )
 
     snapshot = module._request_logs(db_path, "unused", "/unused.db", 10)
 
-    assert snapshot["total"] == 3
-    assert snapshot["success_rate"] == 0.6667
+    assert snapshot["total"] == 4
+    assert snapshot["success_rate"] == 0.5
     assert snapshot["latency_ms"]["p95"] == 90000
     assert snapshot["success_latency_ms"]["count"] == 2
-    assert snapshot["tier_mismatches"]["count"] == 3
+    assert snapshot["tier_mismatches"]["count"] == 4
     assert snapshot["slowest_requests"][0]["latency_ms"] == 90000
     assert snapshot["slowest_requests"][0]["output_tokens"] == 3200
     assert snapshot["output_token_buckets"][0]["bucket"] == "3000-6000"
@@ -144,4 +169,14 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
     assert snapshot["runtime_correlation"]["groups"][0]["model"] == "gpt-5.5"
     assert any(
         row["error_code"] == "stream_incomplete" for row in snapshot["runtime_correlation"]["recent_requests"]
+    )
+    assert snapshot["context_length_exceeded"]["count"] == 1
+    assert snapshot["context_length_exceeded"]["groups"][0]["input_token_bucket"] == "150k+"
+    assert snapshot["context_length_exceeded"]["groups"][0]["max_input_tokens"] == 180000
+    assert snapshot["context_length_exceeded"]["recent_requests"][0]["error_code"] == "context_length_exceeded"
+    assert snapshot["context_length_exceeded"]["recent_requests"][0]["cached_input_tokens"] == 1000
+    assert "session_id" not in snapshot["context_length_exceeded"]["recent_requests"][0]
+    assert snapshot["context_length_exceeded"]["recent_requests"][0]["session_id_hash"].startswith("sha256:")
+    assert snapshot["context_length_exceeded"]["recent_requests"][0]["message"].startswith(
+        "This model's maximum context length"
     )

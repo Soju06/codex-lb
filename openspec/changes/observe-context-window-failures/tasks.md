@@ -1,0 +1,4 @@
+- [x] 1.1 Lower the host Codex auto-compaction threshold to preserve more request headroom.
+- [x] 1.2 Add bounded context-window failure diagnostics to the live snapshot helper.
+- [x] 1.3 Add focused unit coverage for the new diagnostics and redacted session ids.
+- [x] 1.4 Run focused tests, OpenSpec validation, and a live snapshot verification.

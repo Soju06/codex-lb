@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -318,6 +319,8 @@ def _request_log_queries(
 
     has_cost_usd = columns is None or "cost_usd" in columns
     has_request_id = columns is None or "request_id" in columns
+    has_error_message = columns is None or "error_message" in columns
+    has_session_id = columns is None or "session_id" in columns
     if has_cost_usd and dialect == "postgresql":
         runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0))::numeric, 6) AS cost_usd"
     elif has_cost_usd:
@@ -326,6 +329,18 @@ def _request_log_queries(
         runtime_cost_usd_expr = "0.0 AS cost_usd"
     request_cost_usd_expr = "cost_usd" if has_cost_usd else "NULL AS cost_usd"
     response_id_expr = "request_id AS response_id" if has_request_id else "NULL AS response_id"
+    session_id_expr = "session_id" if has_session_id else "NULL AS session_id"
+    like_wildcard = "%%" if dialect == "postgresql" else "%"
+    if has_error_message:
+        context_length_where = (
+            "coalesce(error_code, '') = 'context_length_exceeded' "
+            f"OR lower(coalesce(error_message, '')) LIKE '{like_wildcard}context_length_exceeded{like_wildcard}' "
+            f"OR lower(coalesce(error_message, '')) LIKE '{like_wildcard}context length{like_wildcard}'"
+        )
+        context_length_message_expr = "substr(coalesce(error_message, ''), 1, 240) AS message"
+    else:
+        context_length_where = "coalesce(error_code, '') = 'context_length_exceeded'"
+        context_length_message_expr = "NULL AS message"
 
     return {
         "status_rows": (
@@ -529,6 +544,65 @@ def _request_log_queries(
             """,
             params,
         ),
+        "context_length_rows": (
+            f"""
+            SELECT
+                status,
+                model,
+                coalesce(transport, '') AS transport,
+                coalesce(reasoning_effort, '') AS reasoning_effort,
+                coalesce(requested_service_tier, '') AS requested_service_tier,
+                coalesce(actual_service_tier, '') AS actual_service_tier,
+                coalesce(error_code, '') AS error_code,
+                CASE
+                    WHEN input_tokens IS NULL THEN 'unknown'
+                    WHEN input_tokens < 10000 THEN '<10k'
+                    WHEN input_tokens < 30000 THEN '10-30k'
+                    WHEN input_tokens < 70000 THEN '30-70k'
+                    WHEN input_tokens < 150000 THEN '70-150k'
+                    ELSE '150k+'
+                END AS input_token_bucket,
+                count(*) AS count,
+                round(avg(input_tokens), 1) AS avg_input_tokens,
+                max(input_tokens) AS max_input_tokens,
+                round(avg(output_tokens), 1) AS avg_output_tokens,
+                max(output_tokens) AS max_output_tokens,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND ({context_length_where})
+            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+            ORDER BY count DESC, max_input_tokens DESC
+            LIMIT 20
+            """,
+            params,
+        ),
+        "context_length_recent": (
+            f"""
+            SELECT
+                requested_at,
+                {response_id_expr},
+                status,
+                model,
+                transport,
+                requested_service_tier,
+                actual_service_tier,
+                reasoning_effort,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                latency_ms,
+                error_code,
+                {session_id_expr},
+                {context_length_message_expr}
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND ({context_length_where})
+            ORDER BY requested_at DESC, id DESC
+            LIMIT 10
+            """,
+            params,
+        ),
         "correlation_request_rows": (
             f"""
             SELECT
@@ -585,6 +659,8 @@ def _build_request_logs_snapshot(
     output_bucket_rows = rows["output_bucket_rows"]
     input_bucket_rows = rows["input_bucket_rows"]
     runtime_correlation_rows = rows["runtime_correlation_rows"]
+    context_length_rows = rows["context_length_rows"]
+    context_length_recent = rows["context_length_recent"]
     correlation_request_rows = rows["correlation_request_rows"]
     recent_errors = rows["recent_errors"]
     total = sum(row["count"] for row in status_rows)
@@ -612,9 +688,34 @@ def _build_request_logs_snapshot(
             "groups": runtime_correlation_rows,
             "recent_requests": correlation_request_rows,
         },
+        "context_length_exceeded": {
+            "count": sum(row["count"] for row in context_length_rows),
+            "groups": context_length_rows,
+            "recent_requests": _redact_context_length_recent(context_length_recent),
+        },
         "recent_requests": recent_requests,
         "recent_errors": recent_errors,
     }
+
+
+def _redact_context_length_recent(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    redacted: list[dict[str, Any]] = []
+    for row in rows:
+        safe_row = dict(row)
+        session_id_hash = _hash_identifier(safe_row.pop("session_id", None))
+        safe_row["session_id_hash"] = session_id_hash
+        redacted.append(safe_row)
+    return redacted
+
+
+def _hash_identifier(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    digest = hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:12]}"
 
 
 def _copy_sqlite_snapshot(container: str, container_db_path: str, local_db: Path) -> str | None:

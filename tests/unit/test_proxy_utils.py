@@ -6472,9 +6472,7 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
 
 
 def test_websocket_client_previous_response_full_resend_retry_requires_matching_prefix() -> None:
-    stored_prefix: list[JsonValue] = [
-        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]}
-    ]
+    stored_prefix: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "old question"}]}]
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_input_count=1,
         last_completed_response_id="resp_client_anchor",

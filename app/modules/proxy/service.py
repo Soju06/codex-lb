@@ -6786,9 +6786,10 @@ class ProxyService:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         settings = await get_settings_cache().get()
         session.api_key = request_state.api_key
-        excluded_account_ids: set[str] = set()
-        retry_same_account_once = session.last_upstream_close_code not in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        preferred_candidate_id: str | None = session.account.id
+        skip_same_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
+        excluded_account_ids: set[str] = {session.account.id} if skip_same_account else set()
+        retry_same_account_once = not skip_same_account
+        preferred_candidate_id: str | None = None if skip_same_account else session.account.id
         while True:
             selection = await self._select_account_with_budget_compatible(
                 deadline,

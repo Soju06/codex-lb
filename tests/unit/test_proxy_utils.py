@@ -13887,18 +13887,16 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
         seen_excluded_account_ids.append(excluded_account_ids)
         seen_account_ids.append(cast(set[str] | None, account_ids))
-        if account_ids == {account_a.id}:
-            return AccountSelection(account=account_a, error_message=None)
-        if len(seen_excluded_account_ids) == 1:
+        if account_a.id not in excluded_account_ids:
             return AccountSelection(account=account_a, error_message=None)
         return AccountSelection(account=account_b, error_message=None)
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account_b))
     monkeypatch.setattr(
         service,
         "_open_upstream_websocket_with_budget",
-        AsyncMock(side_effect=[asyncio.TimeoutError(), new_upstream]),
+        AsyncMock(return_value=new_upstream),
     )
 
     request_state = proxy_service._WebSocketRequestState(
@@ -13928,8 +13926,8 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
 
     await service._reconnect_http_bridge_session(session, request_state=request_state)
 
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
-    assert seen_account_ids == [{account_a.id}, None]
+    assert seen_excluded_account_ids == [{account_a.id}]
+    assert seen_account_ids == [None]
     assert session.account == account_b
     assert session.upstream is new_upstream
 

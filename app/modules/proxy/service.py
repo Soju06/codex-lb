@@ -3648,14 +3648,30 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        client_full_resend_payload: ResponsesRequest | None = None
+        client_full_resend_input_items: list[JsonValue] | None = None
+        client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
+            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=responses_payload.previous_response_id,
+                input_value=responses_payload.input,
+                continuity_state=continuity_state,
+            )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        if client_full_resend_retry_safe and client_full_resend_input_items is not None:
+            client_full_resend_payload = responses_payload.model_copy(
+                update={
+                    "previous_response_id": None,
+                    "input": client_full_resend_input_items,
+                }
+            )
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
         rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
@@ -3763,6 +3779,25 @@ class ProxyService:
                 else None,
                 responses_payload.previous_response_id,
             )
+        if client_full_resend_payload is not None and not request_state.proxy_injected_previous_response_id:
+            request_state.fresh_upstream_request_text = _response_create_text_with_size_guard(
+                client_full_resend_payload,
+                include_type_field=True,
+                client_metadata=client_metadata,
+                request_state=request_state,
+                transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            )
+            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            if request_state.fresh_upstream_request_is_retry_safe:
+                logger.info(
+                    (
+                        "websocket_client_previous_response_full_resend_retry_prepared request_id=%s "
+                        "previous_response_id=%s input_items=%s"
+                    ),
+                    request_state.request_id,
+                    responses_payload.previous_response_id,
+                    request_state.input_item_count,
+                )
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
             headers,
@@ -10790,6 +10825,33 @@ def _websocket_continuity_anchor_for_payload(
         previous_response_id=previous_response_id,
         stored_input_item_count=stored_count,
     )
+
+
+def _websocket_client_previous_response_full_resend_is_retry_safe(
+    *,
+    previous_response_id: str | None,
+    input_value: JsonValue,
+    continuity_state: _WebSocketContinuityState | None,
+) -> bool:
+    if previous_response_id is None or not isinstance(input_value, list):
+        return False
+    input_items = cast(list[JsonValue], input_value)
+    if len(input_items) <= 1:
+        return False
+    if (
+        continuity_state is not None
+        and continuity_state.last_completed_response_id == previous_response_id
+        and (
+            continuity_state.last_completed_input_count > 0
+            or continuity_state.last_completed_input_prefix_fingerprint is not None
+        )
+    ):
+        return _input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.last_completed_input_count,
+            stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
+        )
+    return True
 
 
 def _record_websocket_continuity_completion(

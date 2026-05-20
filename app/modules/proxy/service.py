@@ -97,7 +97,7 @@ from app.core.openai.requests import (
     extract_input_file_ids,
     extract_input_image_file_references,
 )
-from app.core.resilience.overload import is_local_overload_error_code
+from app.core.resilience.overload import is_local_overload_error_code, local_overload_error
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
@@ -211,6 +211,51 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
+_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
+
+
+def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
+    settings = settings or get_settings()
+    raw_timeout = getattr(
+        settings,
+        "proxy_admission_wait_timeout_seconds",
+        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
+    )
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
+    return max(0.001, timeout)
+
+
+def _http_bridge_startup_wait_timeout_error(stage: str) -> ProxyResponseError:
+    message = f"codex-lb is temporarily overloaded during {stage}"
+    return ProxyResponseError(429, local_overload_error(message))
+
+
+def _log_http_bridge_startup_wait_timeout(
+    *,
+    stage: str,
+    timeout_seconds: float,
+    key: "_HTTPBridgeSessionKey | None" = None,
+    request_id: str | None = None,
+    request_model: str | None = None,
+    pending_count: int | None = None,
+    inflight_count: int | None = None,
+    available: int | None = None,
+) -> None:
+    logger.warning(
+        "http_bridge_startup_wait_timeout request_id=%s stage=%s wait_timeout_seconds=%.1f "
+        "affinity_kind=%s model_class=%s pending_count=%s inflight_count=%s available=%s",
+        request_id or get_request_id() or "unknown",
+        stage,
+        timeout_seconds,
+        key.affinity_kind if key is not None else None,
+        _extract_model_class(request_model) if request_model else None,
+        pending_count,
+        inflight_count,
+        available,
+    )
 
 
 async def _await_cancelled_task(
@@ -3649,14 +3694,30 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        client_full_resend_payload: ResponsesRequest | None = None
+        client_full_resend_input_items: list[JsonValue] | None = None
+        client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
+            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=responses_payload.previous_response_id,
+                input_value=responses_payload.input,
+                continuity_state=continuity_state,
+            )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        if client_full_resend_retry_safe and client_full_resend_input_items is not None:
+            client_full_resend_payload = responses_payload.model_copy(
+                update={
+                    "previous_response_id": None,
+                    "input": client_full_resend_input_items,
+                }
+            )
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
         rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
@@ -3764,6 +3825,25 @@ class ProxyService:
                 else None,
                 responses_payload.previous_response_id,
             )
+        if client_full_resend_payload is not None and not request_state.proxy_injected_previous_response_id:
+            request_state.fresh_upstream_request_text = _response_create_text_with_size_guard(
+                client_full_resend_payload,
+                include_type_field=True,
+                client_metadata=client_metadata,
+                request_state=request_state,
+                transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            )
+            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            if request_state.fresh_upstream_request_is_retry_safe:
+                logger.info(
+                    (
+                        "websocket_client_previous_response_full_resend_retry_prepared request_id=%s "
+                        "previous_response_id=%s input_items=%s"
+                    ),
+                    request_state.request_id,
+                    responses_payload.previous_response_id,
+                    request_state.input_item_count,
+                )
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
             headers,
@@ -3962,8 +4042,22 @@ class ProxyService:
         response_create_gate: asyncio.Semaphore,
         compact: bool = False,
     ) -> None:
+        timeout_seconds = _proxy_admission_wait_timeout_seconds()
         request_state.response_create_gate = response_create_gate
-        await response_create_gate.acquire()
+        try:
+            await asyncio.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            request_state.response_create_gate = None
+            request_state.response_create_gate_acquired = False
+            request_state.awaiting_response_created = False
+            _log_http_bridge_startup_wait_timeout(
+                stage="response_create_gate",
+                timeout_seconds=timeout_seconds,
+                request_id=request_state.request_id,
+                request_model=request_state.model,
+                available=getattr(response_create_gate, "_value", None),
+            )
+            raise _http_bridge_startup_wait_timeout_error("http_bridge_response_create_gate") from exc
         request_state.response_create_gate_acquired = True
         request_state.awaiting_response_created = True
         try:
@@ -4537,6 +4631,47 @@ class ProxyService:
 
         supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
         return await create_session_any(key, **supported_kwargs)
+
+    async def _fail_http_bridge_inflight_session_creation(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        inflight_future: asyncio.Future["_HTTPBridgeSession"] | None,
+        exc: BaseException,
+    ) -> bool:
+        if inflight_future is None:
+            return False
+        async with self._http_bridge_lock:
+            current_future = self._http_bridge_inflight_sessions.get(key)
+            if current_future is not inflight_future:
+                return False
+            self._http_bridge_inflight_sessions.pop(key, None)
+            if inflight_future.done():
+                return True
+            if isinstance(exc, asyncio.CancelledError):
+                inflight_future.cancel()
+            else:
+                inflight_future.set_exception(exc)
+                inflight_future.exception()
+            return True
+
+    async def _evict_http_bridge_inflight_waiter(
+        self,
+        inflight_future: asyncio.Future["_HTTPBridgeSession"],
+        exc: BaseException,
+    ) -> "_HTTPBridgeSessionKey | None":
+        async with self._http_bridge_lock:
+            stale_key = None
+            for candidate_key, candidate_future in self._http_bridge_inflight_sessions.items():
+                if candidate_future is inflight_future:
+                    stale_key = candidate_key
+                    break
+            if stale_key is None:
+                return None
+            self._http_bridge_inflight_sessions.pop(stale_key, None)
+            if not inflight_future.done():
+                inflight_future.set_exception(exc)
+                inflight_future.exception()
+            return stale_key
 
     @overload
     async def _get_or_create_http_bridge_session(
@@ -5335,8 +5470,13 @@ class ProxyService:
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
 
-            for stale_session in sessions_to_close:
-                await self._close_http_bridge_session(stale_session)
+            try:
+                for stale_session in sessions_to_close:
+                    await self._close_http_bridge_session(stale_session)
+            except BaseException as exc:
+                if owns_creation:
+                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
+                raise
 
             if session_to_return_after_close is not None:
                 return session_to_return_after_close
@@ -5351,12 +5491,28 @@ class ProxyService:
                 raise continuity_error
 
             if capacity_wait_future is not None:
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    await asyncio.shield(capacity_wait_future)
+                    await asyncio.wait_for(
+                        asyncio.shield(capacity_wait_future),
+                        timeout=wait_timeout_seconds,
+                    )
                 except asyncio.CancelledError:
                     if capacity_wait_future.cancelled():
                         continue
                     raise
+                except TimeoutError as exc:
+                    timeout_error = _http_bridge_startup_wait_timeout_error("http_bridge_capacity")
+                    stale_key = await self._evict_http_bridge_inflight_waiter(capacity_wait_future, timeout_error)
+                    _log_http_bridge_startup_wait_timeout(
+                        stage="capacity",
+                        timeout_seconds=wait_timeout_seconds,
+                        key=stale_key or key,
+                        request_model=request_model,
+                        pending_count=len(self._http_bridge_sessions),
+                        inflight_count=len(self._http_bridge_inflight_sessions),
+                    )
+                    raise timeout_error from exc
                 except ProxyResponseError:
                     raise
                 except Exception:
@@ -5364,12 +5520,28 @@ class ProxyService:
                 continue
 
             if inflight_future is not None and not owns_creation:
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    session = await asyncio.shield(inflight_future)
+                    session = await asyncio.wait_for(
+                        asyncio.shield(inflight_future),
+                        timeout=wait_timeout_seconds,
+                    )
                 except asyncio.CancelledError:
                     if inflight_future.cancelled():
                         continue
                     raise
+                except TimeoutError as exc:
+                    timeout_error = _http_bridge_startup_wait_timeout_error("http_bridge_inflight_session")
+                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, timeout_error)
+                    _log_http_bridge_startup_wait_timeout(
+                        stage="inflight_session",
+                        timeout_seconds=wait_timeout_seconds,
+                        key=key,
+                        request_model=request_model,
+                        pending_count=len(self._http_bridge_sessions),
+                        inflight_count=len(self._http_bridge_inflight_sessions),
+                    )
+                    raise timeout_error from exc
                 except Exception:
                     raise
                 if session is None:
@@ -5435,6 +5607,8 @@ class ProxyService:
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
                             inflight_future.set_result(created_session)
+                if not session_registered:
+                    raise _http_bridge_startup_wait_timeout_error("http_bridge_session_registration")
             except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -10811,6 +10985,33 @@ def _websocket_continuity_anchor_for_payload(
         previous_response_id=previous_response_id,
         stored_input_item_count=stored_count,
     )
+
+
+def _websocket_client_previous_response_full_resend_is_retry_safe(
+    *,
+    previous_response_id: str | None,
+    input_value: JsonValue,
+    continuity_state: _WebSocketContinuityState | None,
+) -> bool:
+    if previous_response_id is None or not isinstance(input_value, list):
+        return False
+    input_items = cast(list[JsonValue], input_value)
+    if len(input_items) <= 1:
+        return False
+    if (
+        continuity_state is not None
+        and continuity_state.last_completed_response_id == previous_response_id
+        and (
+            continuity_state.last_completed_input_count > 0
+            or continuity_state.last_completed_input_prefix_fingerprint is not None
+        )
+    ):
+        return _input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.last_completed_input_count,
+            stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
+        )
+    return True
 
 
 def _record_websocket_continuity_completion(

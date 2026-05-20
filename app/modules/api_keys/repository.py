@@ -842,18 +842,16 @@ class ApiKeysRepository:
             )
             .cte("filtered_logs")
         )
-        usage_totals = (
-            select(
-                func.count(filtered_logs.c.id).label("total_requests"),
-                func.coalesce(func.sum(filtered_logs.c.input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(
-                    func.sum(func.coalesce(filtered_logs.c.output_tokens, filtered_logs.c.reasoning_tokens, 0)),
-                    0,
-                ).label("total_output_tokens"),
-                func.coalesce(func.sum(filtered_logs.c.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("total_cost_usd"),
-            ).cte("usage_totals")
-        )
+        usage_totals = select(
+            func.count(filtered_logs.c.id).label("total_requests"),
+            func.coalesce(func.sum(filtered_logs.c.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(
+                func.sum(func.coalesce(filtered_logs.c.output_tokens, filtered_logs.c.reasoning_tokens, 0)),
+                0,
+            ).label("total_output_tokens"),
+            func.coalesce(func.sum(filtered_logs.c.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("total_cost_usd"),
+        ).cte("usage_totals")
         deleted_expr = func.coalesce(filtered_logs.c.deleted_at.is_not(None), False)
         usage_grouped = (
             select(

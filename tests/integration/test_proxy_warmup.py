@@ -475,6 +475,65 @@ async def test_warmup_account_rate_limit_failure_does_not_abort_summary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_warmup_api_key_limit_mid_fanout_does_not_abort_summary(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    first_raw_id = "acc-warmup-key-limit-a"
+    first_id = await _import_account(async_client, first_raw_id, "warmup-key-limit-a@example.com")
+    second_id = await _import_account(async_client, "acc-warmup-key-limit-b", "warmup-key-limit-b@example.com")
+    await _add_primary_usage(first_id, used_percent=0.0, window_minutes=300)
+    await _add_primary_usage(second_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-key-limit-mid-fanout")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    reservation_attempts = 0
+
+    async def _fake_reserve(self, api_key, *, request_model, request_service_tier, request_usage_budget=None):
+        del self, api_key, request_model, request_service_tier, request_usage_budget
+        nonlocal reservation_attempts
+        reservation_attempts += 1
+        if reservation_attempts == 2:
+            raise ProxyRateLimitError("api key limit exhausted")
+        return None
+
+    async def _fake_compact(payload, headers, access_token, account_id, session=None):
+        del payload, headers, access_token, session
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": f"resp-{account_id}",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", _fake_reserve)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_accounts"] == 2
+    assert len(payload["submitted"]) == 1
+    assert payload["submitted"][0]["account_id"] == first_id
+    assert payload["failed"] == [
+        {
+            "account_id": second_id,
+            "error_code": "rate_limit_exceeded",
+            "error_message": "api key limit exhausted",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_warmup_uses_unique_request_ids_per_account(async_client, monkeypatch):
     await _enable_api_key_auth(async_client)
     first_id = await _import_account(async_client, "acc-warmup-reqid-a", "warmup-reqid-a@example.com")

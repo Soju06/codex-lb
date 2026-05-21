@@ -23,7 +23,7 @@ The call is made per account on the configured refresh tick, which defaults to
 60 seconds. The client lives in
 [`app/core/clients/usage.py`](../../../app/core/clients/usage.py), and the
 scheduler lives in
-[`app/modules/usage/service.py`](../../../app/modules/usage/service.py).
+[`app/core/usage/refresh_scheduler.py`](../../../app/core/usage/refresh_scheduler.py).
 
 ## Status Derivation
 
@@ -31,8 +31,7 @@ The fetched usage is fed through
 [`apply_usage_quota`](../../../app/core/usage/quota.py), which derives account
 status from `primary_window.used_percent`:
 
-- `used_percent >= 100` and a secondary quota window is also full:
-  `QUOTA_EXCEEDED`
+- `secondary_used >= 100`, regardless of `primary_used`: `QUOTA_EXCEEDED`
 - `used_percent >= 100` on the primary rate-limit window: `RATE_LIMITED`
 - `used_percent < 100`: `ACTIVE`
 

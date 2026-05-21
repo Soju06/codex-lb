@@ -186,6 +186,8 @@ def test_settings_upstream_websocket_proxy_env_defaults_to_direct_when_unset(mon
         "HTTP_PROXY",
         "https_proxy",
         "HTTPS_PROXY",
+        "socks_proxy",
+        "SOCKS_PROXY",
         "all_proxy",
         "ALL_PROXY",
     ):
@@ -199,6 +201,15 @@ def test_settings_upstream_websocket_proxy_env_defaults_to_direct_when_unset(mon
 
 def test_settings_upstream_websocket_proxy_env_auto_enables_when_proxy_is_present(monkeypatch):
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
+    monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is True
+
+
+def test_settings_upstream_websocket_proxy_env_auto_enables_when_socks_proxy_is_present(monkeypatch):
+    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
 
     settings = Settings()

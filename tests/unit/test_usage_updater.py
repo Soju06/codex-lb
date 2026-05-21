@@ -367,7 +367,8 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
         account,
         usage_account_id=account.chatgpt_account_id,
     )
-    sync_account.assert_awaited_once_with(account)
+    assert sync_account.await_count == 2
+    sync_account.assert_awaited_with(account)
     get_settings.cache_clear()
 
 
@@ -407,17 +408,22 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
     stale_task = asyncio.create_task(updater.refresh_accounts([account], latest_usage={}))
     await stale_started.wait()
 
-    refreshed = await updater.force_refresh(account)
+    force_task = asyncio.create_task(updater.force_refresh(account))
+    await asyncio.sleep(0)
+
+    force_refresh_account.assert_not_awaited()
+    release_stale.set()
+    assert await stale_task is False
+    refreshed = await force_task
 
     assert refreshed is True
     force_refresh_account.assert_awaited_once_with(
         account,
         usage_account_id=account.chatgpt_account_id,
     )
-    sync_account.assert_awaited_once_with(account)
+    assert sync_account.await_count == 2
+    sync_account.assert_awaited_with(account)
 
-    release_stale.set()
-    assert await stale_task is False
     get_settings.cache_clear()
 
 

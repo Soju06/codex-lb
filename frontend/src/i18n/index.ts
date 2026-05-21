@@ -10,6 +10,10 @@ export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
 
 export const LANGUAGE_STORAGE_KEY = "codex-lb-language";
 
+function normalizeDetectedLanguage(lng: string): string {
+  return lng.toLowerCase().startsWith("zh") ? "zh-CN" : lng;
+}
+
 const resources = {
   en: { translation: en },
   "zh-CN": { translation: zhCN },
@@ -22,14 +26,14 @@ void i18n
     resources,
     supportedLngs: [...SUPPORTED_LANGUAGES],
     fallbackLng: "en",
-    nonExplicitSupportedLngs: true,
-    load: "languageOnly",
+    load: "currentOnly",
     interpolation: { escapeValue: false },
     detection: {
       order: ["querystring", "localStorage", "navigator"],
       lookupQuerystring: "lang",
       lookupLocalStorage: LANGUAGE_STORAGE_KEY,
       caches: ["localStorage"],
+      convertDetectedLanguage: normalizeDetectedLanguage,
     },
     returnNull: false,
   });

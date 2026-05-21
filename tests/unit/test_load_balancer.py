@@ -1275,7 +1275,7 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
 
 
 @pytest.mark.asyncio
-async def test_non_sticky_selection_keeps_secondary_threshold_out_of_global_budget_gate(monkeypatch):
+async def test_non_sticky_selection_applies_split_secondary_threshold(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
     secondary_over = _make_test_account("secondary-over")
@@ -1317,7 +1317,7 @@ async def test_non_sticky_selection_keeps_secondary_threshold_out_of_global_budg
     )
 
     assert result.account is not None
-    assert result.account.id == "secondary-over"
+    assert result.account.id == "secondary-safe"
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

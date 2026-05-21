@@ -343,6 +343,7 @@ class LoadBalancer:
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
                             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            apply_secondary_budget_threshold=True,
                             budget_threshold_pct=budget_threshold_pct,
                         )
 

@@ -264,8 +264,8 @@ opencode
     "defaults": {
       "model": { "primary": "codex-lb/gpt-5.4" },
       "models": {
-        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } },
+        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } },
         "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
       }
     }

@@ -13358,12 +13358,14 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
 
 
 def _relative_availability_power(settings: DashboardSettings) -> float:
-    value = float(getattr(settings, "relative_availability_power", 2.0))
+    raw_value = getattr(settings, "relative_availability_power", None)
+    value = float(raw_value) if raw_value is not None else 2.0
     return value if value > 0.0 else 2.0
 
 
 def _relative_availability_top_k(settings: DashboardSettings) -> int:
-    value = int(getattr(settings, "relative_availability_top_k", 5))
+    raw_value = getattr(settings, "relative_availability_top_k", None)
+    value = int(raw_value) if raw_value is not None else 5
     return min(max(value, 1), 20)
 
 

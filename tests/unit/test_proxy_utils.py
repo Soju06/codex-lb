@@ -51,6 +51,13 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_relative_availability_settings_default_when_stored_values_are_null():
+    settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
+
+    assert proxy_service._relative_availability_power(settings) == 2.0
+    assert proxy_service._relative_availability_top_k(settings) == 5
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_missing_tool_precreated",

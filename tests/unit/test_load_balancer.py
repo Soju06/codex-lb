@@ -1799,6 +1799,76 @@ def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_buc
     assert abs(pro_ratio - expected_pro_ratio) <= 0.05
 
 
+def test_select_account_capacity_weighted_preserves_sampling_with_equal_planner_costs():
+    random.seed(67)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"pro": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account(
+            [pro, plus],
+            routing_strategy="capacity_weighted",
+            routing_costs={
+                "pro": RoutingCost(total=1.0, reason="same_planner_cost"),
+                "plus": RoutingCost(total=1.0, reason="same_planner_cost"),
+            },
+        )
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    expected_pro_ratio = 50400.0 / (50400.0 + 7560.0)
+    assert abs(pro_ratio - expected_pro_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_filters_higher_planner_costs_before_sampling():
+    random.seed(68)
+    low_cost_plus = AccountState(
+        "low-cost-plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_cost_pro = AccountState(
+        "high-cost-pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(100):
+        result = select_account(
+            [low_cost_plus, high_cost_pro],
+            routing_strategy="capacity_weighted",
+            routing_costs={
+                "low-cost-plus": RoutingCost(total=1.0, reason="inside_work"),
+                "high-cost-pro": RoutingCost(total=5.0, reason="cold_start"),
+            },
+        )
+        assert result.account is not None
+        assert result.account.account_id == "low-cost-plus"
+
+
 def test_select_account_capacity_weighted_with_prefer_deprioritizes_missing_reset():
     random.seed(77)
     now = time.time()

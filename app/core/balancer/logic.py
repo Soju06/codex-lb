@@ -318,9 +318,10 @@ def select_account(
             if effective_prefer_earlier_reset
             else effective_pool
         )
-        if deterministic_probe or routing_costs:
+        if deterministic_probe:
             selected = min(candidate_pool, key=lambda state: _capacity_probe_sort_key_with_cost(state, routing_costs))
         else:
+            candidate_pool = _lowest_planner_cost_candidates(candidate_pool, routing_costs)
             selected = _select_capacity_weighted(candidate_pool)
     elif routing_strategy == "relative_availability":
         selected = _select_relative_availability(
@@ -547,6 +548,16 @@ def _capacity_probe_sort_key_with_cost(
         last_selected,
         account_id,
     )
+
+
+def _lowest_planner_cost_candidates(
+    available: list[AccountState],
+    routing_costs: RoutingCostsByAccount | None,
+) -> list[AccountState]:
+    if not routing_costs:
+        return available
+    lowest_cost = min(_planner_cost(state, routing_costs) for state in available)
+    return [state for state in available if _planner_cost(state, routing_costs) == lowest_cost]
 
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:

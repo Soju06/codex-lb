@@ -532,6 +532,26 @@
         "doc",
         "bug"
       ]
+    },
+    {
+      "login": "timefox",
+      "name": "timefox",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5635109?v=4",
+      "profile": "https://github.com/timefox",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "datfooldive",
+      "name": "hikki",
+      "avatar_url": "https://avatars.githubusercontent.com/u/110718021?v=4",
+      "profile": "https://datfooldive.github.io/",
+      "contributions": [
+        "code",
+        "design"
+      ]
     }
   ],
   "contributorsPerLine": 7,

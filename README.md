@@ -517,6 +517,10 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/linusmixson"><img src="https://avatars.githubusercontent.com/u/7087013?v=4?s=100" width="100px;" alt="Linus Mixson"/><br /><sub><b>Linus Mixson</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=linusmixson" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=linusmixson" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Lotfree618"><img src="https://avatars.githubusercontent.com/u/91266981?v=4?s=100" width="100px;" alt="Lotfree"/><br /><sub><b>Lotfree</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3ALotfree618" title="Bug reports">🐛</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/timefox"><img src="https://avatars.githubusercontent.com/u/5635109?v=4?s=100" width="100px;" alt="timefox"/><br /><sub><b>timefox</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=timefox" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=timefox" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://datfooldive.github.io/"><img src="https://avatars.githubusercontent.com/u/110718021?v=4?s=100" width="100px;" alt="hikki"/><br /><sub><b>hikki</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=datfooldive" title="Code">💻</a> <a href="#design-datfooldive" title="Design">🎨</a></td>
+    </tr>
   </tbody>
 </table>
 

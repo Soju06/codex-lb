@@ -3184,6 +3184,7 @@ class ProxyService:
                     api_key=api_key,
                     headers=filtered_headers,
                     warmup_model=effective_model,
+                    allow_pre_submit_errors_as_result=len(accounts_to_submit) > 1,
                 )
 
         submission_results = await asyncio.gather(*(_submit_account_warmup(account) for account in accounts_to_submit))
@@ -3234,6 +3235,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
         headers: Mapping[str, str],
         warmup_model: str,
+        allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
         live_account = _materialize_warmup_account(account)
@@ -3311,12 +3313,12 @@ class ProxyService:
             error_code = "upstream_unavailable"
             error_message = str(exc) or "Request to upstream timed out"
         except ProxyAuthError as exc:
-            if not usage_reservation_checked:
+            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
                 raise
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
         except ProxyRateLimitError as exc:
-            if not usage_reservation_checked:
+            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
                 raise
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"

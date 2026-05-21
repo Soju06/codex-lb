@@ -181,6 +181,7 @@ from app.modules.proxy.types import (
 )
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -10153,17 +10154,7 @@ class ProxyService:
         if not account_map:
             return []
         latest = await repos.usage.latest_by_account(window=window)
-        return [
-            UsageWindowRow(
-                account_id=entry.account_id,
-                used_percent=entry.used_percent,
-                reset_at=entry.reset_at,
-                window_minutes=entry.window_minutes,
-                recorded_at=entry.recorded_at,
-            )
-            for entry in latest.values()
-            if entry.account_id in account_map
-        ]
+        return [usage_history_to_window_row(entry) for entry in latest.values() if entry.account_id in account_map]
 
     async def _latest_usage_entries(
         self,

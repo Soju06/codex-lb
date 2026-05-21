@@ -32,6 +32,7 @@ from app.modules.usage.depletion_service import (
     compute_aggregate_depletion,
     compute_depletion_for_account,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 
 
 class DashboardService:
@@ -273,16 +274,7 @@ def _build_depletion_by_window(
 
 
 def _rows_from_latest(latest: dict[str, UsageHistory]) -> list[UsageWindowRow]:
-    return [
-        UsageWindowRow(
-            account_id=entry.account_id,
-            used_percent=entry.used_percent,
-            reset_at=entry.reset_at,
-            window_minutes=entry.window_minutes,
-            recorded_at=entry.recorded_at,
-        )
-        for entry in latest.values()
-    ]
+    return [usage_history_to_window_row(entry) for entry in latest.values()]
 
 
 def _should_use_weekly_primary_history(
@@ -290,18 +282,8 @@ def _should_use_weekly_primary_history(
     secondary_entry: UsageHistory | None,
 ) -> bool:
     return usage_core.should_use_weekly_primary(
-        _usage_history_to_window_row(primary_entry),
-        _usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None,
-    )
-
-
-def _usage_history_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
+        usage_history_to_window_row(primary_entry),
+        usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None,
     )
 
 

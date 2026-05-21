@@ -20,6 +20,7 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 
 
 def build_account_summaries(
@@ -157,19 +158,11 @@ def _effective_usage_windows(
         return primary_usage, secondary_usage
     if secondary_usage is None:
         return None, primary_usage
-    if usage_core.should_use_weekly_primary(_to_window_row(primary_usage), _to_window_row(secondary_usage)):
+    if usage_core.should_use_weekly_primary(
+        usage_history_to_window_row(primary_usage), usage_history_to_window_row(secondary_usage)
+    ):
         return None, primary_usage
     return None, secondary_usage
-
-
-def _to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:

@@ -1,8 +1,7 @@
 """Adapters between usage ORM rows and the `UsageWindowRow` value type.
 
-The mapping itself is trivial, but it lives in three places today
-(``app/modules/proxy/api.py``, ``app/modules/proxy/load_balancer.py``,
-``app/modules/usage/service.py``). Pulling it into a single helper keeps
+The mapping itself is trivial, but it is shared by proxy, usage,
+dashboard, and account-summary code. Pulling it into a single helper keeps
 future ``UsageWindowRow`` changes from drifting across call sites.
 
 Lives in ``app/modules/usage/`` rather than ``app/core/usage/types.py``
@@ -18,8 +17,8 @@ from app.db.models import UsageHistory
 def usage_history_to_window_row(entry: UsageHistory) -> UsageWindowRow:
     """Build a ``UsageWindowRow`` from a ``UsageHistory`` ORM row.
 
-    All fields map by name. Callers that already had local
-    ``_usage_entry_to_window_row`` helpers should route through this.
+    All fields map by name. Callers that need a ``UsageWindowRow`` from a
+    ``UsageHistory`` row should route through this helper.
     """
     return UsageWindowRow(
         account_id=entry.account_id,

@@ -2326,6 +2326,40 @@ async def test_refresh_accounts_forces_fetch_after_rate_limit_reset_despite_fres
 
 
 @pytest.mark.asyncio
+async def test_refresh_accounts_does_not_repeat_post_reset_rate_limit_probe(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        raise AssertionError("post-reset rate-limit probe should not repeat while usage is fresh")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    latest = UsageHistory(
+        id=1,
+        account_id="acc_rate_limited_post_reset",
+        used_percent=5.0,
+        recorded_at=now,
+        window="primary",
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    acc = _make_account("acc_rate_limited_post_reset", "workspace_rate_limited_post_reset")
+    acc.status = AccountStatus.RATE_LIMITED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={acc.id: latest})
+
+
+@pytest.mark.asyncio
 async def test_refresh_accounts_forces_fetch_after_quota_reset_despite_fresh_primary_usage(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
@@ -2381,3 +2415,37 @@ async def test_refresh_accounts_forces_fetch_after_quota_reset_despite_fresh_pri
     assert fetch_calls == 1
     assert usage_repo.entries[-2].used_percent == 10.0
     assert usage_repo.entries[-1].used_percent == 15.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        raise AssertionError("post-reset quota probe should not repeat while usage is fresh")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    latest = UsageHistory(
+        id=1,
+        account_id="acc_quota_post_reset",
+        used_percent=10.0,
+        recorded_at=now,
+        window="primary",
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    acc = _make_account("acc_quota_post_reset", "workspace_quota_post_reset")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={acc.id: latest})

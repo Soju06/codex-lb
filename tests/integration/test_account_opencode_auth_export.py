@@ -92,6 +92,9 @@ async def test_export_account_opencode_auth_json(async_client) -> None:
     export_response = await async_client.post(f"/api/accounts/{imported_account_id}/export/opencode-auth")
 
     assert export_response.status_code == 200
+    assert export_response.headers["cache-control"] == "no-store, no-cache, must-revalidate, private"
+    assert export_response.headers["pragma"] == "no-cache"
+    assert export_response.headers["expires"] == "0"
     payload = export_response.json()
     assert payload["filename"] == "opencode-auth-export-opencode-example.com.json"
     assert payload["account"] == {

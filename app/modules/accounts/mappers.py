@@ -278,11 +278,7 @@ def _extract_credit_status(
     for entry in entries:
         if entry is None:
             continue
-        if (
-            entry.credits_has is None
-            and entry.credits_unlimited is None
-            and entry.credits_balance is None
-        ):
+        if entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None:
             continue
         return entry.credits_has, entry.credits_unlimited, entry.credits_balance
     return None, None, None

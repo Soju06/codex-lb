@@ -357,25 +357,29 @@ class OauthService:
         code = params.get("code", [None])[0]
         state = params.get("state", [None])[0]
 
-        if error:
-            message = f"OAuth error: {error}"
-            await self._set_error(message, flow_id=flow_id)
-            return ManualCallbackResponse(status="error", error_message=message)
-
         async with self._store.lock:
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
             target_flow_id = flow.flow_id if flow is not None else flow_id
+            can_update_error = True
             if flow_id is not None and (flow is None or flow.flow_id != flow_id):
                 flow = None
                 verifier = None
-                target_flow_id = flow_id
+                target_flow_id = None
+                can_update_error = False
             if flow is not None and flow.status == "success" and state == flow.state_token:
                 return ManualCallbackResponse(status="success")
 
+        if error:
+            message = f"OAuth error: {error}"
+            if can_update_error:
+                await self._set_error(message, flow_id=target_flow_id)
+            return ManualCallbackResponse(status="error", error_message=message)
+
         if not code or not state or flow is None or not verifier:
             message = "Invalid OAuth callback: state mismatch or missing code."
-            await self._set_error(message, flow_id=target_flow_id)
+            if can_update_error:
+                await self._set_error(message, flow_id=target_flow_id)
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:

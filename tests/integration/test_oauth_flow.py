@@ -584,10 +584,7 @@ async def test_oauth_status_binds_camel_case_flow_id(async_client, monkeypatch):
 
     second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
     assert second_status.status_code == 200
-    assert second_status.json() == {
-        "status": "error",
-        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
-    }
+    assert second_status.json() == {"status": "pending", "errorMessage": None}
 
     typo_status = await async_client.get("/api/oauth/status", params={"flowId": f"{second_payload['flowId']}-typo"})
     assert typo_status.status_code == 200
@@ -595,10 +592,75 @@ async def test_oauth_status_binds_camel_case_flow_id(async_client, monkeypatch):
 
     latest_status = await async_client.get("/api/oauth/status")
     assert latest_status.status_code == 200
-    assert latest_status.json() == {
+    assert latest_status.json() == {"status": "pending", "errorMessage": None}
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_error_resolves_state_before_marking_flow_failed(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    first_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert first_start.status_code == 200
+    first_payload = first_start.json()
+    first_error_url = (
+        "http://localhost:1455/auth/callback?error=access_denied&state="
+        f"{_oauth_state_token(first_payload['authorizationUrl'])}"
+    )
+
+    second_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert second_start.status_code == 200
+    second_payload = second_start.json()
+    assert second_payload["flowId"] != first_payload["flowId"]
+
+    mismatched_response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": first_error_url,
+            "flowId": second_payload["flowId"],
+        },
+    )
+    assert mismatched_response.status_code == 200
+    assert mismatched_response.json() == {
         "status": "error",
-        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+        "errorMessage": "OAuth error: access_denied",
     }
+
+    first_status = await async_client.get("/api/oauth/status", params={"flowId": first_payload["flowId"]})
+    assert first_status.status_code == 200
+    assert first_status.json() == {"status": "pending", "errorMessage": None}
+
+    second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
+    assert second_status.status_code == 200
+    assert second_status.json() == {"status": "pending", "errorMessage": None}
+
+    matching_response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": first_error_url,
+            "flowId": first_payload["flowId"],
+        },
+    )
+    assert matching_response.status_code == 200
+    assert matching_response.json() == {
+        "status": "error",
+        "errorMessage": "OAuth error: access_denied",
+    }
+
+    first_status = await async_client.get("/api/oauth/status", params={"flowId": first_payload["flowId"]})
+    assert first_status.status_code == 200
+    assert first_status.json() == {
+        "status": "error",
+        "errorMessage": "OAuth error: access_denied",
+    }
+
+    second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
+    assert second_status.status_code == 200
+    assert second_status.json() == {"status": "pending", "errorMessage": None}
 
 
 @pytest.mark.asyncio
@@ -780,7 +842,4 @@ async def test_manual_callback_idempotent_success_requires_requested_flow(async_
 
     second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
     assert second_status.status_code == 200
-    assert second_status.json() == {
-        "status": "error",
-        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
-    }
+    assert second_status.json() == {"status": "pending", "errorMessage": None}

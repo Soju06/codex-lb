@@ -286,6 +286,9 @@ class UsageUpdater:
 
     async def force_refresh(self, account: Account) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
+        settings = get_settings()
+        if not settings.usage_refresh_enabled:
+            return False
         if account.status == AccountStatus.DEACTIVATED:
             return False
         if _is_usage_refresh_in_cooldown(account.id):

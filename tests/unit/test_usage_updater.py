@@ -344,6 +344,10 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
 
 @pytest.mark.asyncio
 async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
     usage_repo = StubUsageRepository()
     updater = UsageUpdater(usage_repo)
     account = _make_account("acc_force_probe", "workspace_force_probe")
@@ -364,6 +368,25 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
         usage_account_id=account.chatgpt_account_id,
     )
     sync_account.assert_awaited_once_with(account)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    updater = UsageUpdater(StubUsageRepository())
+    account = _make_account("acc_force_probe_disabled", "workspace_force_probe_disabled")
+    refresh_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is False
+    refresh_account.assert_not_awaited()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

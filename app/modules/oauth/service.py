@@ -180,9 +180,7 @@ class OAuthStateStore:
 
     def remove_pending_device_flows_locked(self) -> None:
         pending_device_flows = [
-            flow
-            for flow in self._flows.values()
-            if flow.method == "device" and flow.status == "pending"
+            flow for flow in self._flows.values() if flow.method == "device" and flow.status == "pending"
         ]
         for flow in pending_device_flows:
             task = flow.poll_task

@@ -71,6 +71,28 @@ def test_apply_decision_still_fails_on_write_denial_without_tolerance(monkeypatc
         module.apply_decision(decision(module), tolerate_permission_errors=False)
 
 
+def test_apply_decision_treats_missing_label_delete_as_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    calls: list[tuple[str, str]] = []
+
+    def missing_label(path: str, *, method: str = "GET", **_kwargs: Any) -> None:
+        calls.append((method, path))
+        raise module.GhError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(module, "gh_api", missing_label)
+
+    warnings = module.apply_decision(decision(module), tolerate_permission_errors=False)
+
+    assert warnings == ()
+    assert calls == [
+        (
+            "DELETE",
+            "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok",
+        )
+    ]
+
+
 def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 

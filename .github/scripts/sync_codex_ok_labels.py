@@ -750,11 +750,14 @@ def gh_api_write(
     method: str = "GET",
     input_json: Any | None = None,
     tolerate_permission_errors: bool,
+    tolerate_missing: bool = False,
     action: str,
 ) -> str | None:
     try:
         gh_api(path, method=method, input_json=input_json)
     except GhError as exc:
+        if tolerate_missing and "HTTP 404" in str(exc):
+            return None
         if tolerate_permission_errors and is_github_app_write_denial(exc):
             return write_warning(action, exc)
         raise
@@ -951,6 +954,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_OK_LABEL, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove {CODEX_OK_LABEL} from {decision.repo}#{decision.number}",
             )
         )
@@ -970,6 +974,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_NEEDS_WORK_LABEL, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove {CODEX_NEEDS_WORK_LABEL} from {decision.repo}#{decision.number}",
             )
         )
@@ -979,6 +984,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(label, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove legacy {label} from {decision.repo}#{decision.number}",
             )
         )

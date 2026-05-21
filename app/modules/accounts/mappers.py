@@ -80,6 +80,7 @@ def _account_to_summary(
 
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
         effective_primary_usage = None
+        primary_used_percent = None
         primary_remaining_percent = None
 
     reset_at_primary = (

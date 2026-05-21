@@ -279,6 +279,43 @@ async def test_proxy_responses_instructionless_array_input_gets_sdk_sse_contract
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_native_string_input_with_instructions_preserves_vendor_events(
+    async_client,
+    monkeypatch,
+):
+    email = "backend-native-string@example.com"
+    raw_account_id = "acc_backend_native_string"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield 'data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n'
+        yield (
+            'data: {"type":"response.completed","sequence_number":1,'
+            '"response":{"id":"resp_native_string","object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": "hello", "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"accept": "text/event-stream", "user-agent": "codex-cli/1.0"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types = [event["type"] for event in _iter_sse_events(lines)]
+    assert event_types[0] == "codex.rate_limits"
+    assert "response.created" not in event_types
+    assert "response.completed" in event_types
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_native_codex_shape_preserves_vendor_events(async_client, monkeypatch):
     email = "backend-native-codex@example.com"
     raw_account_id = "acc_backend_native_codex"

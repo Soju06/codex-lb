@@ -490,7 +490,8 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
 
     start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
     assert start.status_code == 200
-    assert start.json()["method"] == "browser"
+    payload = start.json()
+    assert payload["method"] == "browser"
 
     async with oauth_module._OAUTH_STORE.lock:
         state_token = oauth_module._OAUTH_STORE.state.state_token
@@ -526,7 +527,8 @@ async def test_manual_callback_returns_error_message_for_invalid_state(async_cli
 
     start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
     assert start.status_code == 200
-    assert start.json()["method"] == "browser"
+    payload = start.json()
+    assert payload["method"] == "browser"
 
     response = await async_client.post(
         "/api/oauth/manual-callback",
@@ -542,10 +544,11 @@ async def test_manual_callback_returns_error_message_for_invalid_state(async_cli
 
     status = await async_client.get("/api/oauth/status")
     assert status.status_code == 200
-    assert status.json() == {
-        "status": "error",
-        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
-    }
+    assert status.json() == {"status": "pending", "errorMessage": None}
+
+    flow_status = await async_client.get("/api/oauth/status", params={"flowId": payload["flowId"]})
+    assert flow_status.status_code == 200
+    assert flow_status.json() == {"status": "pending", "errorMessage": None}
 
 
 @pytest.mark.asyncio

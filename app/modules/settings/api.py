@@ -122,8 +122,7 @@ async def update_settings(
                 payload.sticky_reallocation_budget_threshold_pct
                 != payload.sticky_reallocation_primary_budget_threshold_pct
                 and (
-                    payload.sticky_reallocation_budget_threshold_pct
-                    != current.sticky_reallocation_budget_threshold_pct
+                    payload.sticky_reallocation_budget_threshold_pct != current.sticky_reallocation_budget_threshold_pct
                     or payload.sticky_reallocation_primary_budget_threshold_pct
                     != current.sticky_reallocation_primary_budget_threshold_pct
                 )

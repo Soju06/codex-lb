@@ -203,15 +203,19 @@ class OauthService:
 
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
         async with self._store.lock:
-            state = self._store.get_flow_locked(flow_id) or self._store.state
+            state = self._store.get_flow_locked(flow_id)
+            if state is None:
+                state = self._store.state if flow_id is None else OAuthState(status="pending")
             status = state.status if state.status != "idle" else "pending"
             return OauthStatusResponse(status=status, error_message=state.error_message)
 
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
         async with self._store.lock:
-            state = self._store.get_flow_locked(payload.flow_id) or self._store.state
             flow = self._store.get_flow_locked(payload.flow_id)
+            state = flow
+            if state is None:
+                state = self._store.state if payload.flow_id is None else OAuthState(status="pending")
             if payload.device_auth_id and flow is not None:
                 flow.device_auth_id = payload.device_auth_id
             if payload.user_code and flow is not None:

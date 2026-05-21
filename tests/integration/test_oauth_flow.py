@@ -459,6 +459,17 @@ async def test_oauth_status_binds_camel_case_flow_id(async_client, monkeypatch):
         "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
     }
 
+    typo_status = await async_client.get("/api/oauth/status", params={"flowId": f"{second_payload['flowId']}-typo"})
+    assert typo_status.status_code == 200
+    assert typo_status.json() == {"status": "pending", "errorMessage": None}
+
+    latest_status = await async_client.get("/api/oauth/status")
+    assert latest_status.status_code == 200
+    assert latest_status.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }
+
 
 @pytest.mark.asyncio
 async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_client, monkeypatch):

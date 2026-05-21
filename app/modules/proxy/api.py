@@ -246,8 +246,6 @@ def _accepts_event_stream(request: Request) -> bool:
 
 def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
     explicit_fields = payload.model_fields_set
-    if "instructions" in explicit_fields:
-        return payload.messages is not None or "conversation" in explicit_fields or "truncation" in explicit_fields
     return (
         isinstance(payload.input, str)
         or payload.messages is not None
@@ -266,7 +264,7 @@ def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None 
         return True
     if payload is None or not _has_openai_responses_shape(payload):
         return False
-    return _accepts_event_stream(request) or isinstance(payload.input, str) or payload.messages is not None
+    return _accepts_event_stream(request) or payload.messages is not None
 
 
 async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:

@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -347,3 +348,46 @@ jobs:
 
       - name: Helm smoke install
         run: make helm-smoke-kind
+
+  ci-required:
+    name: CI Required
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - frontend-lint
+      - frontend-typecheck
+      - frontend-test
+      - frontend-build
+      - lint
+      - typecheck
+      - test
+      - test-postgres
+      - migration-check
+      - migration-check-postgres
+      - package
+      - docker
+      - helm-lint
+      - helm-smoke-kind
+
+    steps:
+      - name: Require every CI job to pass
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: details["result"]
+              for name, details in sorted(needs.items())
+              if details.get("result") not in {"success", "skipped"}
+          }
+          if failed:
+              for name, result in failed.items():
+                  print(f"{name}: {result}")
+              sys.exit(1)
+          print("all required CI jobs passed")
+          PY

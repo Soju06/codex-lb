@@ -1250,6 +1250,7 @@ async def test_write_request_log_continues_after_caller_cancellation() -> None:
 def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespace:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
         sticky_threads_enabled=False,
         sticky_reallocation_budget_threshold_pct=95.0,
         upstream_stream_transport="default",
@@ -1291,6 +1292,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
             max_age_seconds=123,
         ),
         api_key=None,
+        prefer_earlier_reset_window="primary",
     )
 
     assert result is not None
@@ -1300,6 +1302,9 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
         reallocate_sticky=False,
         sticky_max_age_seconds=123,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
         account_ids=None,
         budget_threshold_pct=95.0,
     )
@@ -1328,6 +1333,75 @@ def _make_account(account_id: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_request_passes_dashboard_reset_window_to_selection(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.prefer_earlier_reset_accounts = True
+    settings.prefer_earlier_reset_window = "primary"
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_thread_goal")
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        return AccountSelection(account=account, error_message=None)
+
+    async def thread_goal_request(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", thread_goal_request)
+
+    response = await service.thread_goal_request("set", {}, {})
+
+    assert response == {"ok": True}
+    assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
+    assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_codex_control_request_passes_dashboard_reset_window_to_selection(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.prefer_earlier_reset_accounts = True
+    settings.prefer_earlier_reset_window = "primary"
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_codex_control")
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        return AccountSelection(account=account, error_message=None)
+
+    async def codex_control_request(*_args: object, **_kwargs: object) -> proxy_module.CodexControlResponse:
+        return proxy_module.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_codex_control_request", codex_control_request)
+
+    response = await service.codex_control_request(
+        "control",
+        method="POST",
+        payload=None,
+        query_params={},
+        headers={},
+    )
+
+    assert response.status_code == 200
+    assert response.body == b'{"ok":true}'
+    assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
+    assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
 
 
 class _JsonCompactResponse:
@@ -5351,6 +5425,7 @@ async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monke
         sticky_key="codex-session-1",
         sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5395,6 +5470,7 @@ async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5446,6 +5522,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5502,6 +5579,7 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5565,6 +5643,7 @@ async def test_connect_proxy_websocket_fails_over_on_handshake_usage_limit_reach
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5634,6 +5713,7 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5702,6 +5782,7 @@ async def test_connect_proxy_websocket_surfaces_local_connect_overload_without_p
             sticky_key=None,
             sticky_kind=None,
             prefer_earlier_reset=False,
+            prefer_earlier_reset_window="secondary",
             routing_strategy="usage_weighted",
             model="gpt-5.1",
             request_state=request_state,
@@ -5769,6 +5850,7 @@ async def test_connect_proxy_websocket_fails_over_after_refresh_transport_error(
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5932,6 +6014,7 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -5991,6 +6074,7 @@ async def test_select_websocket_connect_account_records_fail_closed_for_preferre
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -6062,6 +6146,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -6144,6 +6229,7 @@ async def test_connect_proxy_websocket_fails_over_after_forced_refresh_transport
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -6202,6 +6288,7 @@ async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeo
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
@@ -9358,6 +9445,7 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -9370,6 +9458,7 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
             headers,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             request_state,
             api_key,
@@ -9496,6 +9585,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -9511,6 +9601,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
             reallocate_sticky,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             model,
             request_state,
@@ -9979,6 +10070,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -9993,6 +10085,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
             sticky_kind,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             request_state,
             api_key,
@@ -10153,6 +10246,7 @@ async def test_proxy_responses_websocket_prefers_previous_response_owner_from_re
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -10168,6 +10262,7 @@ async def test_proxy_responses_websocket_prefers_previous_response_owner_from_re
             reallocate_sticky,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             model,
             api_key,
@@ -10302,6 +10397,7 @@ async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -10317,6 +10413,7 @@ async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session
             reallocate_sticky,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             model,
             api_key,
@@ -10451,6 +10548,7 @@ async def test_proxy_responses_websocket_prefers_turn_state_over_session_for_own
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -10466,6 +10564,7 @@ async def test_proxy_responses_websocket_prefers_turn_state_over_session_for_own
             reallocate_sticky,
             sticky_max_age_seconds,
             prefer_earlier_reset,
+            prefer_earlier_reset_window,
             routing_strategy,
             model,
             api_key,
@@ -13133,7 +13232,12 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service._select_account_with_budget(deadline=123.0, request_id="req-budget", kind="compact")
+        await service._select_account_with_budget(
+            deadline=123.0,
+            request_id="req-budget",
+            kind="compact",
+            prefer_earlier_reset_window="primary",
+        )
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502

@@ -227,15 +227,6 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 }
 
 
-_OPENAI_CLIENT_HEADER_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "openai-organization",
-        "openai-project",
-        "openai-version",
-    }
-)
-
-
 def _accepts_event_stream(request: Request) -> bool:
     for value in request.headers.getlist("accept"):
         media_ranges = (part.split(";", 1)[0].strip().lower() for part in value.split(","))
@@ -256,7 +247,7 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
 def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None = None) -> bool:
     for header_name in request.headers:
         normalized_header = header_name.lower()
-        if normalized_header.startswith("x-stainless-") or normalized_header in _OPENAI_CLIENT_HEADER_NAMES:
+        if normalized_header.startswith("x-stainless-"):
             return True
     user_agent = request.headers.get("user-agent", "").lower()
     if "openai" in user_agent:

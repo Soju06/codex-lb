@@ -1762,6 +1762,64 @@ def test_apply_usage_quota_allows_secondary_100_when_credits_exist():
     assert reset_at is None
 
 
+def test_apply_usage_quota_allows_primary_100_when_credits_balance_positive():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 100.0
+    assert reset_at is None
+
+
+def test_apply_usage_quota_keeps_primary_100_rate_limited_without_credits():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=99.0,
+        secondary_reset=1_700_010_000,
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 100.0
+    assert reset_at == 1_700_005_000
+
+
+def test_apply_usage_quota_clears_rate_limited_when_credits_balance_positive(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=1.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 100.0
+    assert reset_at is None
+
+
 def test_apply_usage_quota_clears_quota_exceeded_when_credits_balance_positive(monkeypatch):
     now = 1_700_000_000.0
     future = now + 3600.0

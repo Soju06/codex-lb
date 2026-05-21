@@ -30,24 +30,20 @@ def apply_usage_quota(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
     )
+    if has_credit_override:
+        if status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
+            status = AccountStatus.ACTIVE
+        return status, used_percent, None
 
     if secondary_used is not None:
         if secondary_used >= 100.0:
-            if has_credit_override:
-                if status == AccountStatus.QUOTA_EXCEEDED:
-                    status = AccountStatus.ACTIVE
-                    reset_at = None
-            else:
-                status = AccountStatus.QUOTA_EXCEEDED
-                used_percent = 100.0
-                if secondary_reset is not None:
-                    reset_at = secondary_reset
-                return status, used_percent, reset_at
+            status = AccountStatus.QUOTA_EXCEEDED
+            used_percent = 100.0
+            if secondary_reset is not None:
+                reset_at = secondary_reset
+            return status, used_percent, reset_at
         if status == AccountStatus.QUOTA_EXCEEDED:
-            if has_credit_override:
-                status = AccountStatus.ACTIVE
-                reset_at = None
-            elif runtime_reset and runtime_reset > time.time():
+            if runtime_reset and runtime_reset > time.time():
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE

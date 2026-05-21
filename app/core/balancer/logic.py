@@ -76,7 +76,6 @@ class AccountState:
     last_error_at: float | None = None
     last_selected_at: float | None = None
     error_count: int = 0
-    email: str | None = None
     deactivation_reason: str | None = None
     plan_type: str | None = None
     capacity_credits: float | None = None
@@ -350,7 +349,7 @@ def _relative_availability_raw_score(state: AccountState, current: float) -> flo
 
 
 def _relative_availability_label(state: AccountState) -> str:
-    return state.email or state.account_id
+    return state.account_id
 
 
 def _relative_availability_score_per_minute(raw_score: float) -> float:
@@ -430,7 +429,6 @@ def _relative_availability_weighted_candidates(
     top_candidates = weighted[:safe_top_k]
     _log_relative_availability_top_k(top_candidates, current=current)
     return top_candidates
-
 
 
 def _log_relative_availability_winner(

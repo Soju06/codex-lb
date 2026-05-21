@@ -1,7 +1,7 @@
 """add relative availability routing settings to dashboard_settings
 
 Revision ID: 20260426_000000_add_dashboard_relative_availability_settings
-Revises: 20260423_120000_add_api_key_limit_reset_at_index
+Revises: 20260520_010000_add_request_logs_api_key_account_index
 Create Date: 2026-04-26
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260426_000000_add_dashboard_relative_availability_settings"
-down_revision = "20260423_120000_add_api_key_limit_reset_at_index"
+down_revision = "20260520_010000_add_request_logs_api_key_account_index"
 branch_labels = None
 depends_on = None
 

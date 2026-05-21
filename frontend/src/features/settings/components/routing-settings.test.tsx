@@ -138,6 +138,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -146,6 +147,40 @@ describe("RoutingSettings", () => {
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
     expect(screen.queryByRole("spinbutton", { name: "Relative availability power" })).not.toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "Relative availability top K" })).not.toBeInTheDocument();
+  });
+
+  it("rejects decimal relative availability top K values", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings settings={{ ...BASE_SETTINGS, routingStrategy: "relative_availability" }} busy={false} onSave={onSave} />,
+    );
+
+    const topKInput = screen.getByRole("spinbutton", { name: "Relative availability top K" });
+    const saveTopK = screen.getByRole("button", { name: "Save top K" });
+
+    await user.clear(topKInput);
+    await user.type(topKInput, "1.5");
+
+    expect(saveTopK).toBeDisabled();
+
+    await user.clear(topKInput);
+    await user.type(topKInput, "6");
+    await user.click(saveTopK);
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "relative_availability",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 6,
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+    });
   });
 
   it("shows the configured upstream transport", () => {

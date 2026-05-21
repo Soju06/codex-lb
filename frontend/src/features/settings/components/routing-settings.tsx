@@ -74,8 +74,10 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const relativeAvailabilityPowerChanged =
     relativeAvailabilityPowerValid && parsedRelativeAvailabilityPower !== settings.relativeAvailabilityPower;
 
-  const parsedRelativeAvailabilityTopK = Number.parseInt(relativeAvailabilityTopK, 10);
+  const relativeAvailabilityTopKTrimmed = relativeAvailabilityTopK.trim();
+  const parsedRelativeAvailabilityTopK = Number(relativeAvailabilityTopKTrimmed);
   const relativeAvailabilityTopKValid =
+    /^[0-9]+$/.test(relativeAvailabilityTopKTrimmed) &&
     Number.isInteger(parsedRelativeAvailabilityTopK) &&
     parsedRelativeAvailabilityTopK >= 1 &&
     parsedRelativeAvailabilityTopK <= 20;

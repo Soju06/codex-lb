@@ -104,8 +104,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert older["outputTokens"] == 200
     assert older["cachedInputTokens"] is None
     assert older["costBreakdown"] == {
-        "inputUsd": pytest.approx(0.000125),
-        "cachedInputUsd": pytest.approx(0.0),
+        "inputUsd": None,
+        "cachedInputUsd": None,
         "outputUsd": pytest.approx(0.002),
         "totalUsd": pytest.approx(0.002125),
     }

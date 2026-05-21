@@ -168,8 +168,14 @@ class _UsageRefreshSingleflight:
                 wait_for_existing = task
             if wait_for_existing is None:
                 break
-            with contextlib.suppress(BaseException):
+            try:
                 await asyncio.shield(wait_for_existing)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception:
+                pass
         return await asyncio.shield(task)
 
     async def _run_factory(

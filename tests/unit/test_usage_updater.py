@@ -427,6 +427,53 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_cancel", "workspace_force_probe_cancel")
+    stale_started = asyncio.Event()
+    release_stale = asyncio.Event()
+
+    async def stale_refresh(
+        refresh_account: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        del refresh_account, usage_account_id, interval_seconds
+        stale_started.set()
+        await release_stale.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    force_refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    monkeypatch.setattr(updater, "_refresh_account_if_stale", stale_refresh)
+    monkeypatch.setattr(updater, "_refresh_account", force_refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", AsyncMock())
+
+    stale_task = asyncio.create_task(updater.refresh_accounts([account], latest_usage={}))
+    await stale_started.wait()
+    force_task = asyncio.create_task(updater.force_refresh(account))
+    await asyncio.sleep(0)
+
+    force_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await force_task
+
+    release_stale.set()
+    assert await stale_task is False
+    force_refresh_account.assert_not_awaited()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")

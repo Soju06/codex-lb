@@ -64,10 +64,15 @@ from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
     ResponseFailedEvent,
+    is_previous_response_not_found_error,
+    is_previous_response_not_found_message,
     openai_error,
+    previous_response_id_from_not_found_message,
+    previous_response_stream_incomplete_error,
     response_failed_event,
 )
 from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
@@ -97,7 +102,7 @@ from app.core.openai.requests import (
     extract_input_file_ids,
     extract_input_image_file_references,
 )
-from app.core.resilience.overload import is_local_overload_error_code
+from app.core.resilience.overload import is_local_overload_error_code, local_overload_error
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
@@ -212,6 +217,51 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
+_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
+
+
+def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
+    settings = settings or get_settings()
+    raw_timeout = getattr(
+        settings,
+        "proxy_admission_wait_timeout_seconds",
+        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
+    )
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
+    return max(0.001, timeout)
+
+
+def _http_bridge_startup_wait_timeout_error(stage: str) -> ProxyResponseError:
+    message = f"codex-lb is temporarily overloaded during {stage}"
+    return ProxyResponseError(429, local_overload_error(message))
+
+
+def _log_http_bridge_startup_wait_timeout(
+    *,
+    stage: str,
+    timeout_seconds: float,
+    key: "_HTTPBridgeSessionKey | None" = None,
+    request_id: str | None = None,
+    request_model: str | None = None,
+    pending_count: int | None = None,
+    inflight_count: int | None = None,
+    available: int | None = None,
+) -> None:
+    logger.warning(
+        "http_bridge_startup_wait_timeout request_id=%s stage=%s wait_timeout_seconds=%.1f "
+        "affinity_kind=%s model_class=%s pending_count=%s inflight_count=%s available=%s",
+        request_id or get_request_id() or "unknown",
+        stage,
+        timeout_seconds,
+        key.affinity_kind if key is not None else None,
+        _extract_model_class(request_model) if request_model else None,
+        pending_count,
+        inflight_count,
+        available,
+    )
 
 
 async def _await_cancelled_task(
@@ -3283,10 +3333,24 @@ class ProxyService:
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                             except ProxyResponseError as exc:
+                                (
+                                    status_code,
+                                    error_payload,
+                                    _error_code,
+                                    _error_message,
+                                ) = _sanitize_websocket_previous_response_error(
+                                    previous_response_id=_previous_response_id_from_payload(payload),
+                                    session_id=_owner_lookup_session_id_from_headers(headers),
+                                    status_code=exc.status_code,
+                                    payload=exc.payload,
+                                    error_code="upstream_error",
+                                    error_message="Upstream error",
+                                    surface="websocket_connect",
+                                )
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(exc.status_code, exc.payload)
+                                            _wrapped_websocket_error_event(status_code, error_payload)
                                         )
                                     )
                                 continue
@@ -3540,6 +3604,7 @@ class ProxyService:
                             proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
+                            codex_session_affinity=codex_session_affinity,
                         )
                     )
 
@@ -3649,14 +3714,30 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
+        client_full_resend_payload: ResponsesRequest | None = None
+        client_full_resend_input_items: list[JsonValue] | None = None
+        client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
+            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=responses_payload.previous_response_id,
+                input_value=responses_payload.input,
+                continuity_state=continuity_state,
+            )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        if client_full_resend_retry_safe and client_full_resend_input_items is not None:
+            client_full_resend_payload = responses_payload.model_copy(
+                update={
+                    "previous_response_id": None,
+                    "input": client_full_resend_input_items,
+                }
+            )
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
         rewritten_file_account_id = await self._resolve_file_account_for_responses(responses_payload, headers)
@@ -3764,6 +3845,25 @@ class ProxyService:
                 else None,
                 responses_payload.previous_response_id,
             )
+        if client_full_resend_payload is not None and not request_state.proxy_injected_previous_response_id:
+            request_state.fresh_upstream_request_text = _response_create_text_with_size_guard(
+                client_full_resend_payload,
+                include_type_field=True,
+                client_metadata=client_metadata,
+                request_state=request_state,
+                transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            )
+            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            if request_state.fresh_upstream_request_is_retry_safe:
+                logger.info(
+                    (
+                        "websocket_client_previous_response_full_resend_retry_prepared request_id=%s "
+                        "previous_response_id=%s input_items=%s"
+                    ),
+                    request_state.request_id,
+                    responses_payload.previous_response_id,
+                    request_state.input_item_count,
+                )
         affinity_policy = _sticky_key_for_responses_request(
             responses_payload,
             headers,
@@ -3962,8 +4062,22 @@ class ProxyService:
         response_create_gate: asyncio.Semaphore,
         compact: bool = False,
     ) -> None:
+        timeout_seconds = _proxy_admission_wait_timeout_seconds()
         request_state.response_create_gate = response_create_gate
-        await response_create_gate.acquire()
+        try:
+            await asyncio.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            request_state.response_create_gate = None
+            request_state.response_create_gate_acquired = False
+            request_state.awaiting_response_created = False
+            _log_http_bridge_startup_wait_timeout(
+                stage="response_create_gate",
+                timeout_seconds=timeout_seconds,
+                request_id=request_state.request_id,
+                request_model=request_state.model,
+                available=getattr(response_create_gate, "_value", None),
+            )
+            raise _http_bridge_startup_wait_timeout_error("http_bridge_response_create_gate") from exc
         request_state.response_create_gate_acquired = True
         request_state.awaiting_response_created = True
         try:
@@ -4537,6 +4651,47 @@ class ProxyService:
 
         supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
         return await create_session_any(key, **supported_kwargs)
+
+    async def _fail_http_bridge_inflight_session_creation(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        inflight_future: asyncio.Future["_HTTPBridgeSession"] | None,
+        exc: BaseException,
+    ) -> bool:
+        if inflight_future is None:
+            return False
+        async with self._http_bridge_lock:
+            current_future = self._http_bridge_inflight_sessions.get(key)
+            if current_future is not inflight_future:
+                return False
+            self._http_bridge_inflight_sessions.pop(key, None)
+            if inflight_future.done():
+                return True
+            if isinstance(exc, asyncio.CancelledError):
+                inflight_future.cancel()
+            else:
+                inflight_future.set_exception(exc)
+                inflight_future.exception()
+            return True
+
+    async def _evict_http_bridge_inflight_waiter(
+        self,
+        inflight_future: asyncio.Future["_HTTPBridgeSession"],
+        exc: BaseException,
+    ) -> "_HTTPBridgeSessionKey | None":
+        async with self._http_bridge_lock:
+            stale_key = None
+            for candidate_key, candidate_future in self._http_bridge_inflight_sessions.items():
+                if candidate_future is inflight_future:
+                    stale_key = candidate_key
+                    break
+            if stale_key is None:
+                return None
+            self._http_bridge_inflight_sessions.pop(stale_key, None)
+            if not inflight_future.done():
+                inflight_future.set_exception(exc)
+                inflight_future.exception()
+            return stale_key
 
     @overload
     async def _get_or_create_http_bridge_session(
@@ -5335,8 +5490,13 @@ class ProxyService:
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
 
-            for stale_session in sessions_to_close:
-                await self._close_http_bridge_session(stale_session)
+            try:
+                for stale_session in sessions_to_close:
+                    await self._close_http_bridge_session(stale_session)
+            except BaseException as exc:
+                if owns_creation:
+                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
+                raise
 
             if session_to_return_after_close is not None:
                 return session_to_return_after_close
@@ -5351,12 +5511,28 @@ class ProxyService:
                 raise continuity_error
 
             if capacity_wait_future is not None:
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    await asyncio.shield(capacity_wait_future)
+                    await asyncio.wait_for(
+                        asyncio.shield(capacity_wait_future),
+                        timeout=wait_timeout_seconds,
+                    )
                 except asyncio.CancelledError:
                     if capacity_wait_future.cancelled():
                         continue
                     raise
+                except TimeoutError as exc:
+                    timeout_error = _http_bridge_startup_wait_timeout_error("http_bridge_capacity")
+                    stale_key = await self._evict_http_bridge_inflight_waiter(capacity_wait_future, timeout_error)
+                    _log_http_bridge_startup_wait_timeout(
+                        stage="capacity",
+                        timeout_seconds=wait_timeout_seconds,
+                        key=stale_key or key,
+                        request_model=request_model,
+                        pending_count=len(self._http_bridge_sessions),
+                        inflight_count=len(self._http_bridge_inflight_sessions),
+                    )
+                    raise timeout_error from exc
                 except ProxyResponseError:
                     raise
                 except Exception:
@@ -5364,12 +5540,28 @@ class ProxyService:
                 continue
 
             if inflight_future is not None and not owns_creation:
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    session = await asyncio.shield(inflight_future)
+                    session = await asyncio.wait_for(
+                        asyncio.shield(inflight_future),
+                        timeout=wait_timeout_seconds,
+                    )
                 except asyncio.CancelledError:
                     if inflight_future.cancelled():
                         continue
                     raise
+                except TimeoutError as exc:
+                    timeout_error = _http_bridge_startup_wait_timeout_error("http_bridge_inflight_session")
+                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, timeout_error)
+                    _log_http_bridge_startup_wait_timeout(
+                        stage="inflight_session",
+                        timeout_seconds=wait_timeout_seconds,
+                        key=key,
+                        request_model=request_model,
+                        pending_count=len(self._http_bridge_sessions),
+                        inflight_count=len(self._http_bridge_inflight_sessions),
+                    )
+                    raise timeout_error from exc
                 except Exception:
                     raise
                 if session is None:
@@ -5435,6 +5627,8 @@ class ProxyService:
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():
                             inflight_future.set_result(created_session)
+                if not session_registered:
+                    raise _http_bridge_startup_wait_timeout_error("http_bridge_session_registration")
             except BaseException as exc:
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -7221,6 +7415,7 @@ class ProxyService:
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
         downstream_activity: _DownstreamWebSocketActivity,
+        codex_session_affinity: bool = True,
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
         try:
@@ -7258,6 +7453,7 @@ class ProxyService:
                                 pending_lock=pending_lock,
                                 client_send_lock=client_send_lock,
                                 downstream_activity=downstream_activity,
+                                codex_session_affinity=codex_session_affinity,
                             )
                         except Exception:
                             downstream_activity.mark_disconnected()
@@ -7859,13 +8055,16 @@ class ProxyService:
         pending_lock: anyio.Lock,
         client_send_lock: anyio.Lock,
         downstream_activity: _DownstreamWebSocketActivity,
+        codex_session_affinity: bool,
     ) -> bool:
         async with pending_lock:
             keepalive_ids = [
                 request_state.response_id for request_state in pending_requests if request_state.response_id is not None
             ]
-        if not keepalive_ids:
-            return False
+            precreated_request_ids = [
+                request_state.request_id for request_state in pending_requests if request_state.response_id is None
+            ]
+        emitted = False
         for response_id in keepalive_ids:
             event = {
                 "type": "response.in_progress",
@@ -7877,7 +8076,22 @@ class ProxyService:
                 text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
                 downstream_activity=downstream_activity,
             )
-        return True
+            emitted = True
+        if codex_session_affinity:
+            for request_id in precreated_request_ids:
+                event = {
+                    "type": "codex.keepalive",
+                    "request_id": request_id,
+                    "status": "pending_response_created",
+                }
+                await self._send_downstream_websocket_text(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
+                    downstream_activity=downstream_activity,
+                )
+                emitted = True
+        return emitted
 
     async def _downstream_websocket_is_idle(
         self,
@@ -8211,6 +8425,18 @@ class ProxyService:
             request_error_message = request_state.error_message_override or error_message
             request_error_type = request_state.error_type_override or "server_error"
             request_error_param = request_state.error_param_override
+            (
+                request_error_code,
+                request_error_message,
+                request_error_type,
+                request_error_param,
+            ) = _sanitize_websocket_terminal_error_fields(
+                request_state=request_state,
+                error_code=request_error_code,
+                error_message=request_error_message,
+                error_type=request_error_type,
+                error_param=request_error_param,
+            )
             if index == last_index:
                 _maybe_dump_oversized_response_create_request(
                     request_state,
@@ -8278,6 +8504,13 @@ class ProxyService:
         error_param: str | None = None,
         downstream_activity: _DownstreamWebSocketActivity | None = None,
     ) -> None:
+        error_code, error_message, error_type, error_param = _sanitize_websocket_terminal_error_fields(
+            request_state=request_state,
+            error_code=error_code,
+            error_message=error_message,
+            error_type=error_type,
+            error_param=error_param,
+        )
         event = response_failed_event(
             error_code,
             error_message,
@@ -10783,6 +11016,33 @@ def _websocket_continuity_anchor_for_payload(
     )
 
 
+def _websocket_client_previous_response_full_resend_is_retry_safe(
+    *,
+    previous_response_id: str | None,
+    input_value: JsonValue,
+    continuity_state: _WebSocketContinuityState | None,
+) -> bool:
+    if previous_response_id is None or not isinstance(input_value, list):
+        return False
+    input_items = cast(list[JsonValue], input_value)
+    if len(input_items) <= 1:
+        return False
+    if (
+        continuity_state is not None
+        and continuity_state.last_completed_response_id == previous_response_id
+        and (
+            continuity_state.last_completed_input_count > 0
+            or continuity_state.last_completed_input_prefix_fingerprint is not None
+        )
+    ):
+        return _input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.last_completed_input_count,
+            stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
+        )
+    return True
+
+
 def _record_websocket_continuity_completion(
     continuity_state: _WebSocketContinuityState,
     *,
@@ -11133,25 +11393,11 @@ def _websocket_event_error_message(event_type: str | None, payload: dict[str, Js
 
 
 def _is_previous_response_not_found_message(message: str | None) -> bool:
-    if message is None:
-        return False
-    normalized = " ".join(message.lower().split())
-    return "previous response" in normalized and "not found" in normalized
+    return is_previous_response_not_found_message(message)
 
 
 def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
-    if message is None:
-        return None
-    normalized = " ".join(message.split())
-    match = re.search(
-        r"""previous\s+response\s+with\s+id\s+['"](?P<response_id>[^'"]+)['"]\s+not\s+found""",
-        normalized,
-        re.IGNORECASE,
-    )
-    if match is None:
-        return None
-    response_id = match.group("response_id").strip()
-    return response_id or None
+    return previous_response_id_from_not_found_message(message)
 
 
 def _message_mentions_previous_response_id(message: str | None, previous_response_id: str | None) -> bool:
@@ -11324,11 +11570,7 @@ def _is_previous_response_not_found_error(
     param: str | None,
     message: str | None,
 ) -> bool:
-    if code == "previous_response_not_found":
-        return True
-    if code != "invalid_request_error" or param != "previous_response_id":
-        return False
-    return _is_previous_response_not_found_message(message)
+    return is_previous_response_not_found_error(code=code, param=param, message=message)
 
 
 def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> ProxyResponseError | None:
@@ -11344,11 +11586,7 @@ def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> Proxy
         return None
     return ProxyResponseError(
         502,
-        openai_error(
-            "stream_incomplete",
-            "Upstream websocket closed before response.completed",
-            error_type="server_error",
-        ),
+        previous_response_stream_incomplete_error(),
         failure_phase=exc.failure_phase,
         retryable_same_contract=False,
         failure_detail="previous_response_not_found",
@@ -11463,7 +11701,7 @@ def _rewrite_websocket_continuity_corruption_event(
     )
     rewritten_event_payload = response_failed_event(
         "stream_incomplete",
-        "Upstream websocket closed before response.completed",
+        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
         error_type="server_error",
         response_id=request_state.response_id or request_state.request_id,
     )
@@ -11525,9 +11763,29 @@ def _sanitize_websocket_connect_failure(
     error_code: str,
     error_message: str,
 ) -> tuple[int, OpenAIErrorEnvelope, str, str]:
-    if request_state.previous_response_id is None:
-        return status_code, payload, error_code, error_message
+    return _sanitize_websocket_previous_response_error(
+        previous_response_id=request_state.previous_response_id,
+        session_id=request_state.session_id,
+        status_code=status_code,
+        payload=payload,
+        error_code=error_code,
+        error_message=error_message,
+        surface="websocket_connect",
+    )
 
+
+def _sanitize_websocket_previous_response_error(
+    *,
+    previous_response_id: str | None,
+    session_id: str | None,
+    status_code: int,
+    payload: OpenAIErrorEnvelope,
+    error_code: str,
+    error_message: str,
+    surface: str,
+) -> tuple[int, OpenAIErrorEnvelope, str, str]:
+    if previous_response_id is None:
+        return status_code, payload, error_code, error_message
     parsed_error = _parse_openai_error(payload)
     normalized_code = _normalize_error_code(
         parsed_error.code if parsed_error else error_code,
@@ -11550,12 +11808,12 @@ def _sanitize_websocket_connect_failure(
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
-    rewritten_message = "Upstream websocket closed before response.completed"
+    rewritten_message = PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
     _record_continuity_fail_closed(
-        surface="websocket_connect",
+        surface=surface,
         reason=reason,
-        previous_response_id=request_state.previous_response_id,
-        session_id=request_state.session_id,
+        previous_response_id=previous_response_id,
+        session_id=session_id,
         upstream_error_code=normalized_code,
     )
     return (
@@ -11568,6 +11826,45 @@ def _sanitize_websocket_connect_failure(
         "stream_incomplete",
         rewritten_message,
     )
+
+
+def _sanitize_websocket_terminal_error_fields(
+    *,
+    request_state: _WebSocketRequestState,
+    error_code: str,
+    error_message: str,
+    error_type: str,
+    error_param: str | None,
+) -> tuple[str, str, str, str | None]:
+    normalized_code = _normalize_error_code(error_code, error_type)
+    if not _is_previous_response_not_found_error(
+        code=normalized_code,
+        param=error_param,
+        message=error_message,
+    ):
+        return error_code, error_message, error_type, error_param
+    _record_continuity_fail_closed(
+        surface="websocket_terminal",
+        reason="previous_response_not_found",
+        previous_response_id=request_state.previous_response_id,
+        session_id=request_state.session_id,
+        upstream_error_code=normalized_code,
+    )
+    return (
+        "stream_incomplete",
+        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        "server_error",
+        None,
+    )
+
+
+def _previous_response_id_from_payload(payload: Mapping[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    previous_response_id = payload.get("previous_response_id")
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        return previous_response_id.strip()
+    return None
 
 
 def _rewrite_previous_response_stream_error(
@@ -11594,7 +11891,7 @@ def _rewrite_previous_response_stream_error(
         )
         return (
             "stream_incomplete",
-            "Upstream websocket closed before response.completed",
+            PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
             None,
         )
     if _is_missing_tool_output_error(
@@ -11610,7 +11907,7 @@ def _rewrite_previous_response_stream_error(
         )
         return (
             "stream_incomplete",
-            "Upstream websocket closed before response.completed",
+            PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
             None,
         )
     normalized_code = _normalize_error_code(error_code, error_type)
@@ -12493,6 +12790,20 @@ def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
 ) -> dict[str, JsonValue]:
+    error = payload["error"]
+    error_code = _normalize_error_code(
+        error.get("code"),
+        error.get("type"),
+    )
+    error_param = error.get("param")
+    error_message = error.get("message")
+    if _is_previous_response_not_found_error(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        status_code = 502
+        payload = previous_response_stream_incomplete_error()
     error_payload = cast(JsonValue, dict(payload["error"]))
     event: dict[str, JsonValue] = {
         "type": "error",
@@ -12897,7 +13208,8 @@ def _derive_prompt_cache_key(
 ) -> str:
     """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
 
-    The generated key is scoped to (model-class, api-key, instructions-prefix, first-user-input) so that:
+    The generated key is scoped to (model-class, api-key, instructions-prefix,
+    instruction-role input, first-user-input) so that:
     - Different model classes get *different* keys (prevents cache pollution).
     - Parallel sessions from the same API key get *different* keys (different first input).
     - Successive turns within one session get the *same* key (first input stays constant).
@@ -12914,6 +13226,10 @@ def _derive_prompt_cache_key(
     if isinstance(instructions, str) and instructions:
         parts.append(sha256(instructions[:512].encode()).hexdigest()[:12])
 
+    instruction_input_text = _extract_instruction_input(payload)
+    if instruction_input_text:
+        parts.append(sha256(instruction_input_text[:512].encode()).hexdigest()[:12])
+
     first_user_text = _extract_first_user_input(payload)
     if first_user_text:
         parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
@@ -12923,6 +13239,28 @@ def _derive_prompt_cache_key(
         return f"{model_class}-{random_suffix}" if model_class is not None else random_suffix
 
     return "-".join([model_class, *parts]) if model_class is not None else "-".join(parts)
+
+
+def _extract_instruction_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    input_value = getattr(payload, "input", None)
+    if not isinstance(input_value, list):
+        return None
+    parts: list[str] = []
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") not in ("system", "developer"):
+            continue
+        content_text = _extract_message_content_text(item.get("content"))
+        if content_text:
+            parts.append(content_text)
+        else:
+            parts.append(json.dumps(item, sort_keys=True, ensure_ascii=False))
+        if sum(len(part) for part in parts) >= 512:
+            break
+    if not parts:
+        return None
+    return "\n".join(parts)[:512]
 
 
 def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
@@ -12938,16 +13276,34 @@ def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactReques
         role = item.get("role")
         if role == "user":
             content = item.get("content")
-            if isinstance(content, str):
-                return content[:512]
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict):
-                        text = part.get("text")
-                        if isinstance(text, str):
-                            return text[:512]
+            content_text = _extract_message_content_text(content)
+            if content_text:
+                return content_text[:512]
             return json.dumps(item, sort_keys=True, ensure_ascii=False)[:512]
     return None
+
+
+def _extract_message_content_text(content: object) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content_mapping = cast(Mapping[str, object], content)
+        text = content_mapping.get("text")
+        return text if isinstance(text, str) else None
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        part_mapping = cast(Mapping[str, object], part)
+        text = part_mapping.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts) if parts else None
 
 
 def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
@@ -13569,11 +13925,7 @@ def _http_bridge_previous_response_error_envelope(
 
 
 def _http_bridge_continuity_lost_error_envelope() -> OpenAIErrorEnvelope:
-    return openai_error(
-        "stream_incomplete",
-        "Upstream websocket closed before response.completed",
-        error_type="server_error",
-    )
+    return previous_response_stream_incomplete_error()
 
 
 def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelope:

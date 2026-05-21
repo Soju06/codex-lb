@@ -112,7 +112,7 @@ export function AccountMultiSelect({
   placeholder = "All accounts",
 }: AccountMultiSelectProps) {
   const { accountsQuery } = useAccounts();
-  const accounts = accountsQuery.data ?? [];
+  const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {

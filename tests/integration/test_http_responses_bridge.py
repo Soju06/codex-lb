@@ -5566,7 +5566,16 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings_with_limits(monkeypatch, enabled=True, max_sessions=1)
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        max_sessions=1,
+        # This test verifies pool accounting for a queued request. Keep the
+        # synthetic request queued long enough on slow CI hosts so the
+        # response-create gate timeout does not drain it before the pool-full
+        # assertion runs.
+        admission_wait_timeout_seconds=30.0,
+    )
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_queued_capacity",
@@ -5948,6 +5957,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6121,6 +6131,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6207,6 +6218,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -6312,6 +6324,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],

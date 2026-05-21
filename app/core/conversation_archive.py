@@ -42,6 +42,10 @@ _WRITE_QUEUE_BYTES = 0
 _WRITE_QUEUE_BYTES_LOCK = threading.Lock()
 _WRITE_QUEUE: queue.Queue[tuple[Path, dict[str, Any], int] | None] = queue.Queue(maxsize=_WRITE_QUEUE_MAX_RECORDS)
 _WRITER_THREAD: threading.Thread | None = None
+_BACKPRESSURE_WARNING_INTERVAL_SECONDS = 60.0
+_BACKPRESSURE_LAST_WARNING_AT = -_BACKPRESSURE_WARNING_INTERVAL_SECONDS
+_BACKPRESSURE_SUPPRESSED_WARNINGS = 0
+_BACKPRESSURE_WARNING_LOCK = threading.Lock()
 _RECOVERY_CHECKED_PATHS: set[Path] = set()
 _DISK_PRESSURE_PAUSE_SECONDS = 60.0
 _DISK_PRESSURE_WARNING_INTERVAL_SECONDS = 300.0
@@ -175,13 +179,17 @@ def _enqueue_record(path: Path, record: dict[str, Any]) -> None:
         return
     queued_bytes = _serialized_record_size(record)
     if not _reserve_archive_queue_bytes(queued_bytes):
-        logger.warning(
-            "Conversation archive writer queue byte budget is full; applying synchronous archive write backpressure",
-            extra={
-                "queue_max_bytes": _WRITE_QUEUE_MAX_BYTES,
-                "record_bytes": queued_bytes,
-            },
-        )
+        should_warn, suppressed_warnings = _archive_backpressure_warning_state()
+        if should_warn:
+            logger.warning(
+                "Conversation archive writer queue byte budget is full; "
+                "applying synchronous archive write backpressure",
+                extra={
+                    "queue_max_bytes": _archive_queue_max_bytes(),
+                    "record_bytes": queued_bytes,
+                    "suppressed_warnings": suppressed_warnings,
+                },
+            )
         _append_record(path, record)
         return
     queued = False
@@ -261,7 +269,7 @@ def _serialized_record_size(record: Mapping[str, Any]) -> int:
 def _reserve_archive_queue_bytes(size: int) -> bool:
     global _WRITE_QUEUE_BYTES
     with _WRITE_QUEUE_BYTES_LOCK:
-        if _WRITE_QUEUE_BYTES + size > _WRITE_QUEUE_MAX_BYTES:
+        if _WRITE_QUEUE_BYTES + size > _archive_queue_max_bytes():
             return False
         _WRITE_QUEUE_BYTES += size
         return True
@@ -271,6 +279,24 @@ def _release_archive_queue_bytes(size: int) -> None:
     global _WRITE_QUEUE_BYTES
     with _WRITE_QUEUE_BYTES_LOCK:
         _WRITE_QUEUE_BYTES = max(0, _WRITE_QUEUE_BYTES - size)
+
+
+def _archive_queue_max_bytes() -> int:
+    configured = getattr(get_settings(), "conversation_archive_queue_max_bytes", _WRITE_QUEUE_MAX_BYTES)
+    return max(1, int(configured))
+
+
+def _archive_backpressure_warning_state() -> tuple[bool, int]:
+    global _BACKPRESSURE_LAST_WARNING_AT, _BACKPRESSURE_SUPPRESSED_WARNINGS
+    now = time.monotonic()
+    with _BACKPRESSURE_WARNING_LOCK:
+        if now - _BACKPRESSURE_LAST_WARNING_AT >= _BACKPRESSURE_WARNING_INTERVAL_SECONDS:
+            suppressed = _BACKPRESSURE_SUPPRESSED_WARNINGS
+            _BACKPRESSURE_SUPPRESSED_WARNINGS = 0
+            _BACKPRESSURE_LAST_WARNING_AT = now
+            return True, suppressed
+        _BACKPRESSURE_SUPPRESSED_WARNINGS += 1
+        return False, 0
 
 
 def _write_gzip_member(path: Path, data: bytes) -> None:

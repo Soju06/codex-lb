@@ -73,6 +73,30 @@ async def test_account_creation_writes_audit_log(async_client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_account_export_writes_audit_log(async_client) -> None:
+    email = "audit-export@example.com"
+    raw_account_id = "acc_audit_export"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+
+    create_response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert create_response.status_code == 200
+
+    export_response = await async_client.post(
+        f"/api/accounts/{expected_account_id}/export",
+        headers={"x-request-id": "audit-account-export"},
+    )
+
+    assert export_response.status_code == 200
+
+    audit_log = await _wait_for_audit_log("account_exported")
+    assert audit_log.request_id == "audit-account-export"
+    assert audit_log.details == json.dumps({"account_id": expected_account_id})
+
+
+@pytest.mark.asyncio
 async def test_audit_log_async_is_fire_and_forget(monkeypatch: pytest.MonkeyPatch) -> None:
     tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task

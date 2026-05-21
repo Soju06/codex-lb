@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     log_upstream_request_payload: bool = False
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
+    conversation_archive_queue_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)

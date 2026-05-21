@@ -6401,6 +6401,100 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_captures_client_full_resend_anchor_replay(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_client_full_resend",
+        name="ws-client-full-resend",
+        key_prefix="sk-ws-full",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    full_resend_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_client_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(full_resend_input[:1]),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_client_anchor",
+                "input": full_resend_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_client_full_resend"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_client_anchor"
+    assert upstream_payload["input"] == full_resend_input
+    assert prepared.request_state.previous_response_id == "resp_client_anchor"
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == full_resend_input
+
+
+def test_websocket_client_previous_response_full_resend_retry_requires_matching_prefix() -> None:
+    stored_prefix: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "old question"}]}]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_client_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(stored_prefix),
+    )
+    mismatched_full_resend: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "different question"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=mismatched_full_resend,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_fills_interrupted_pending_tool_outputs(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -9504,7 +9598,7 @@ async def test_relay_upstream_websocket_emits_keepalive_while_upstream_is_silent
 
 
 @pytest.mark.asyncio
-async def test_relay_upstream_websocket_does_not_invent_keepalive_id_before_response_created(monkeypatch):
+async def test_relay_upstream_websocket_emits_codex_keepalive_before_response_created(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
@@ -9560,6 +9654,85 @@ async def test_relay_upstream_websocket_does_not_invent_keepalive_id_before_resp
             proxy_request_budget_seconds=5.0,
             stream_idle_timeout_seconds=5.0,
             downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        )
+    )
+
+    try:
+        for _ in range(20):
+            if downstream.sent_text:
+                break
+            await asyncio.sleep(0.01)
+        assert downstream.sent_text
+        emitted = json.loads(downstream.sent_text[0])
+        assert emitted == {
+            "type": "codex.keepalive",
+            "request_id": "ws_req_precreated_keepalive",
+            "status": "pending_response_created",
+        }
+    finally:
+        relay.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await relay
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_omits_codex_keepalive_for_v1_before_response_created(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sse_keepalive_interval_seconds = 0.01
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+    class _SilentBeforeCreatedUpstream:
+        def __init__(self) -> None:
+            self._closed = asyncio.Event()
+
+        async def receive(self) -> SimpleNamespace:
+            await self._closed.wait()
+            return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+
+        async def close(self) -> None:
+            self._closed.set()
+
+    downstream = _FakeDownstreamWebSocket()
+    upstream = _SilentBeforeCreatedUpstream()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_v1_precreated_keepalive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    pending_requests = deque([request_state])
+
+    relay = asyncio.create_task(
+        service._relay_upstream_websocket_messages(
+            cast(WebSocket, downstream),
+            cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+            account=_make_account("acc_ws_v1_precreated_keepalive"),
+            account_id_value="acc_ws_v1_precreated_keepalive",
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=proxy_service._WebSocketUpstreamControl(),
+            response_create_gate=asyncio.Semaphore(1),
+            proxy_request_budget_seconds=5.0,
+            stream_idle_timeout_seconds=5.0,
+            downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+            codex_session_affinity=False,
         )
     )
 
@@ -10330,6 +10503,82 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
     assert payload["response"]["status"] == "failed"
     assert payload["response"]["error"]["code"] == "upstream_unavailable"
     assert payload["response"]["error"]["message"] == "Previous response owner lookup failed; retry later."
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_masks_prepare_previous_response_not_found(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            await self._done.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    async def fail_prepare(*args, **kwargs):
+        del args, kwargs
+        error = proxy_module.openai_error(
+            "previous_response_not_found",
+            "Previous response with id 'resp_missing_prepare' not found.",
+            error_type="invalid_request_error",
+        )
+        error["error"]["param"] = "previous_response_id"
+        raise proxy_module.ProxyResponseError(400, error)
+
+    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", fail_prepare)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_missing_prepare",
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_prepare_prev_missing"},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert len(downstream.sent_text) == 1
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_missing_prepare" not in downstream.sent_text[0]
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "error"
+    assert payload["status"] == 502
+    assert payload["error"]["code"] == "stream_incomplete"
+    assert payload["error"]["message"] == "Upstream websocket closed before response.completed"
 
 
 @pytest.mark.asyncio
@@ -11378,6 +11627,27 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
     assert rewritten_error_message == "Upstream websocket closed before response.completed"
 
 
+def test_wrapped_websocket_error_event_masks_previous_response_not_found():
+    payload = proxy_module.openai_error(
+        "previous_response_not_found",
+        "Previous response with id 'resp_prev_anchor' not found.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+
+    event = proxy_service._wrapped_websocket_error_event(400, payload)
+
+    assert event["type"] == "error"
+    assert event["status"] == 502
+    error = event["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert error["type"] == "server_error"
+    assert "previous_response_not_found" not in json.dumps(event)
+    assert "resp_prev_anchor" not in json.dumps(event)
+
+
 def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_missing_tool_output_connect",
@@ -11496,6 +11766,95 @@ async def test_emit_websocket_terminal_error_releases_response_create_gate():
     assert request_state.awaiting_response_created is False
     assert request_state.response_create_gate_acquired is False
     assert request_state.response_create_gate is None
+
+
+@pytest.mark.asyncio
+async def test_emit_websocket_terminal_error_masks_previous_response_override():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_terminal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_leak",
+        session_id="sid-terminal",
+    )
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+
+    await service._emit_websocket_terminal_error(
+        websocket,
+        client_send_lock=anyio.Lock(),
+        request_state=request_state,
+        error_code="previous_response_not_found",
+        error_message="Previous response with id 'resp_terminal_leak' not found.",
+        error_type="invalid_request_error",
+        error_param="previous_response_id",
+    )
+
+    websocket_send.assert_awaited_once()
+    send_call = websocket_send.await_args
+    assert send_call is not None
+    payload_text = send_call.args[0]
+    assert "previous_response_not_found" not in payload_text
+    assert "resp_terminal_leak" not in payload_text
+    payload = json.loads(payload_text)
+    error = payload["response"]["error"]
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_masks_previous_response_override_in_queued_event(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_pending",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_pending_leak",
+        session_id="sid-pending",
+        event_queue=event_queue,
+        skip_request_log=True,
+    )
+    request_state.error_code_override = "invalid_request_error"
+    request_state.error_message_override = "Previous response with id 'resp_pending_leak' not found."
+    request_state.error_type_override = "invalid_request_error"
+    request_state.error_param_override = "previous_response_id"
+
+    await service._fail_pending_websocket_requests(
+        account_id_value=None,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="fallback",
+        api_key=None,
+        penalize_account=False,
+    )
+
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    assert "previous_response_not_found" not in event_block
+    assert "resp_pending_leak" not in event_block
+    payload = parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
 
 
 def test_sanitize_websocket_connect_failure_leaves_unrelated_previous_response_error_unchanged():
@@ -12563,6 +12922,43 @@ async def test_response_create_admission_failure_releases_session_gate(monkeypat
     assert exc.status_code == 429
     assert _proxy_error_code(exc) == "proxy_overloaded"
     assert response_create_gate.locked() is False
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+
+
+@pytest.mark.asyncio
+async def test_response_create_admission_session_gate_timeout_returns_proxy_overloaded(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_response_create_limit = 64
+    settings.proxy_admission_wait_timeout_seconds = 0.01
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_gate_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                request_state,
+                response_create_gate=response_create_gate,
+            )
+    finally:
+        response_create_gate.release()
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 429
+    assert _proxy_error_code(exc) == "proxy_overloaded"
+    assert request_state.response_create_gate is None
     assert request_state.awaiting_response_created is False
     assert request_state.response_create_gate_acquired is False
     assert request_state.response_create_admission is None

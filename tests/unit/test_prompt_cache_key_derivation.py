@@ -11,6 +11,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.service import (
     _derive_prompt_cache_key,
     _extract_first_user_input,
+    _extract_instruction_input,
 )
 
 pytestmark = pytest.mark.unit
@@ -128,6 +129,26 @@ class TestExtractFirstUserInput:
         assert _extract_first_user_input(payload) == "compact hello"
 
 
+class TestExtractInstructionInput:
+    def test_extracts_system_and_developer_input(self):
+        payload = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
+                    {"role": "developer", "content": "Keep it short."},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+        assert _extract_instruction_input(payload) == "Return JSON.\nKeep it short."
+
+    def test_ignores_string_input(self):
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input="hello")
+        assert _extract_instruction_input(payload) is None
+
+
 class TestDerivePromptCacheKey:
     def test_same_session_across_turns_produces_same_key(self):
         turn1 = ResponsesRequest(
@@ -189,6 +210,31 @@ class TestDerivePromptCacheKey:
             instructions="You are a reviewer",
             input=_json_value([{"role": "user", "content": "hello"}]),
         )
+        assert _derive_prompt_cache_key(p1, api_key) != _derive_prompt_cache_key(p2, api_key)
+
+    def test_different_instruction_role_input_produce_different_keys(self):
+        api_key = _make_api_key()
+        p1 = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+        p2 = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return XML."}]},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+
         assert _derive_prompt_cache_key(p1, api_key) != _derive_prompt_cache_key(p2, api_key)
 
     def test_no_api_key_still_produces_key(self):

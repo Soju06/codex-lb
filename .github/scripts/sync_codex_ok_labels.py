@@ -1125,6 +1125,17 @@ def main(argv: list[str] | None = None) -> int:
                     allowed_authors=allowed_authors,
                     ignore_checks=args.ignore_checks,
                 )
+            except GhError as exc:
+                if not args.tolerate_read_errors:
+                    had_error = True
+                print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                had_error = True
+                print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+                continue
+
+            try:
                 write_warnings: tuple[str, ...] = ()
                 if args.apply:
                     accumulated_warnings: list[str] = []
@@ -1169,8 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
                 for warning in write_warnings:
                     print(f"  write_warning={warning}", flush=True)
             except Exception as exc:  # noqa: BLE001
-                if not args.tolerate_read_errors:
-                    had_error = True
+                had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
 
     return 1 if had_error else 0

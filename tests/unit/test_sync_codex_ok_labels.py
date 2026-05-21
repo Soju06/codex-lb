@@ -134,3 +134,25 @@ def test_main_fails_read_errors_without_tolerance(monkeypatch: pytest.MonkeyPatc
     )
 
     assert module.main(["--repo", "Soju06/codex-lb", "--all-open"]) == 1
+
+
+def test_main_fails_apply_errors_even_with_read_error_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [714])
+    monkeypatch.setattr(module, "decide_pr", lambda *_args, **_kwargs: decision(module))
+
+    def fail_apply(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
+        raise module.GhError("gh: HTTP 500 while writing labels")
+
+    monkeypatch.setattr(module, "apply_decision", fail_apply)
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--apply", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "Soju06/codex-lb#714: gh: HTTP 500 while writing labels" in captured.err

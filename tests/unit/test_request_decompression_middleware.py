@@ -36,6 +36,16 @@ def _build_echo_app(*, touch_headers: bool = False) -> FastAPI:
         data = await request.json()
         return {"content_encoding": request.headers.get("content-encoding"), "data": data}
 
+    @app.post("/backend-api/codex/responses")
+    async def responses(request: Request):
+        data = await request.json()
+        return {"content_encoding": request.headers.get("content-encoding"), "data": data}
+
+    @app.post("/backend-api/codex/responses/")
+    async def responses_slash(request: Request):
+        data = await request.json()
+        return {"content_encoding": request.headers.get("content-encoding"), "data": data}
+
     return app
 
 
@@ -169,6 +179,80 @@ async def test_request_decompression_rejects_unsupported_encoding():
     response_data = resp.json()
     assert response_data["error"]["code"] == "invalid_request"
     assert response_data["error"]["message"] == "Unsupported Content-Encoding"
+
+
+@pytest.mark.asyncio
+async def test_request_decompression_allows_larger_responses_payload(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+
+    app = _build_echo_app()
+
+    payload = {"input": "x" * 512}
+    body = json.dumps(payload).encode("utf-8")
+    compressed = zstd.ZstdCompressor().compress(body)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/backend-api/codex/responses",
+            content=compressed,
+            headers={"Content-Encoding": "zstd", "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    response_data = resp.json()
+    assert response_data["content_encoding"] is None
+    assert response_data["data"] == payload
+
+
+@pytest.mark.asyncio
+async def test_request_decompression_allows_larger_trailing_slash_responses_payload(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+
+    app = _build_echo_app()
+
+    payload = {"input": "x" * 512}
+    body = json.dumps(payload).encode("utf-8")
+    compressed = zstd.ZstdCompressor().compress(body)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/backend-api/codex/responses/",
+            content=compressed,
+            headers={"Content-Encoding": "zstd", "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    response_data = resp.json()
+    assert response_data["content_encoding"] is None
+    assert response_data["data"] == payload
+
+
+@pytest.mark.asyncio
+async def test_request_decompression_keeps_default_limit_for_other_routes(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+
+    app = _build_echo_app()
+
+    payload = {"input": "x" * 512}
+    body = json.dumps(payload).encode("utf-8")
+    compressed = zstd.ZstdCompressor().compress(body)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/echo",
+            content=compressed,
+            headers={"Content-Encoding": "zstd", "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 413
+    response_data = resp.json()
+    assert response_data["error"]["code"] == "payload_too_large"
 
 
 @pytest.mark.asyncio

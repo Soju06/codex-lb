@@ -186,6 +186,7 @@ class Settings(BaseSettings):
     conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
     conversation_archive_queue_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # OpenAI Images API compatibility (POST /v1/images/{generations,edits})

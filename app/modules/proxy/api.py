@@ -99,7 +99,6 @@ from app.modules.proxy.request_policy import (
     enforce_strict_text_format,
     normalize_responses_request_payload,
     openai_client_payload_error,
-    openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
 )
@@ -455,7 +454,7 @@ async def responses(
             codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
-        error = openai_invalid_payload_error(exc.param)
+        error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     except ValidationError as exc:
         error = openai_validation_error(exc)

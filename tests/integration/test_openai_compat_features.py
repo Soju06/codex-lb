@@ -699,6 +699,35 @@ async def test_v1_responses_rejects_strict_function_tool_violation(async_client)
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_rejects_strict_schema_violation_with_specific_error(async_client):
+    """Backend /responses must preserve strict-validator error code and message."""
+    payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Return JSON."}]}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "result_schema",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            }
+        },
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_json_schema"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "text.format.schema"
+    assert "additionalProperties" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_rejects_missing_json_schema(async_client):
     payload = {
         "model": "gpt-5.2",

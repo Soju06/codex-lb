@@ -422,6 +422,37 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_cooldown", "workspace_force_probe_cooldown")
+    refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    usage_updater_module._mark_usage_refresh_auth_cooldown(account.id, 403)
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is True
+    refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    sync_account.assert_awaited_once_with(account)
+    assert usage_updater_module._is_usage_refresh_in_cooldown(account.id) is False
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
     from app.core.config.settings import get_settings

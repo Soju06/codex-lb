@@ -69,6 +69,39 @@ def test_select_account_can_prefer_earlier_primary_reset_before_secondary():
     assert result.account.account_id == "b"
 
 
+def test_select_account_primary_reset_preference_uses_subday_precision():
+    now = time.time()
+    states = [
+        AccountState(
+            "earlier-primary-reset",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            primary_reset_at=int(now + 1 * 3600),
+            secondary_reset_at=int(now + 7 * 24 * 3600),
+        ),
+        AccountState(
+            "later-primary-reset",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            primary_reset_at=int(now + 4 * 3600),
+            secondary_reset_at=int(now + 1 * 3600),
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "earlier-primary-reset"
+
+
 def test_select_account_falls_back_to_secondary_reset_when_primary_missing():
     now = time.time()
     states = [

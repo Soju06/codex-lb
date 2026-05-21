@@ -3250,6 +3250,7 @@ class ProxyService:
         cached_input_tokens: int | None = None
         reasoning_tokens: int | None = None
         reservation: ApiKeyUsageReservationData | None = None
+        usage_reservation_checked = False
 
         try:
             refresh_timeout = max(1.0, float(get_settings().upstream_connect_timeout_seconds))
@@ -3268,6 +3269,7 @@ class ProxyService:
                 request_service_tier=None,
                 request_usage_budget=estimate_api_key_request_usage(payload),
             )
+            usage_reservation_checked = True
             response = await core_compact_responses(
                 payload,
                 upstream_headers,
@@ -3309,9 +3311,13 @@ class ProxyService:
             error_code = "upstream_unavailable"
             error_message = str(exc) or "Request to upstream timed out"
         except ProxyAuthError as exc:
+            if not usage_reservation_checked:
+                raise
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
         except ProxyRateLimitError as exc:
+            if not usage_reservation_checked:
+                raise
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
         except Exception as exc:

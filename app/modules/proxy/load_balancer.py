@@ -26,7 +26,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
-from app.core.plan_types import account_plan_matches_allowed
+from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
@@ -1309,7 +1309,9 @@ def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str |
     definition = get_additional_quota_definition(quota_key)
     if definition is None or definition.applies_to_plans is None:
         return True
-    normalized_plan = plan_type.strip().lower() if plan_type is not None else None
+    normalized_plan = normalize_account_plan_type(plan_type)
+    if normalized_plan is None:
+        return True
     return normalized_plan in definition.applies_to_plans
 
 

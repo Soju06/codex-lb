@@ -18,6 +18,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
     RuntimeState,
+    _additional_quota_applies_to_plan,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -1154,6 +1155,16 @@ def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallbac
     unknown_ratio = counts["unknown-plan"] / n
     assert 0.05 <= unknown_ratio <= 0.25
     assert counts["plus"] > counts["unknown-plan"]
+
+
+@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise", "unknown", None])
+def test_additional_quota_applies_to_quota_enforced_and_unknown_plans(plan_type):
+    assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is True
+
+
+@pytest.mark.parametrize("plan_type", ["free", "plus"])
+def test_additional_quota_does_not_apply_to_known_non_additional_quota_plans(plan_type):
+    assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is False
 
 
 def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():

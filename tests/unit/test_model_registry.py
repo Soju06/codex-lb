@@ -83,6 +83,8 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
 
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
+    assert registry.prefers_websockets("gpt-5.3-codex") is True
+    assert registry.prefers_websockets("gpt-5.3-codex-spark") is True
     assert registry.prefers_websockets("gpt-5.1") is False
 
 

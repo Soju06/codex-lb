@@ -169,6 +169,10 @@ class ModelRegistry:
             if model is not None:
                 return model.prefer_websockets
 
+        bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+        if bootstrap_model is not None:
+            return bootstrap_model.prefer_websockets
+
         return any(fnmatchcase(normalized_slug, pattern) for pattern in _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS)
 
     def needs_refresh(self) -> bool:

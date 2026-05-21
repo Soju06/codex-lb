@@ -533,6 +533,8 @@ class OauthService:
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:
             flow = self._store.get_flow_locked(flow_id)
+            if flow_id is not None and flow is None:
+                return
             if flow is None:
                 self._store.state.status = "success"
                 self._store.state.error_message = None
@@ -542,6 +544,8 @@ class OauthService:
     async def _set_error(self, message: str, flow_id: str | None = None) -> None:
         async with self._store.lock:
             flow = self._store.get_flow_locked(flow_id)
+            if flow_id is not None and flow is None:
+                return
             if flow is None:
                 self._store.state.status = "error"
                 self._store.state.error_message = message

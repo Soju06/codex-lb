@@ -542,6 +542,39 @@ async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client,
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_ignores_hidden_zero_capacity_primary_for_status(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_dirty_primary", "free-dirty@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_dirty_primary",
+            100.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_free_dirty_primary",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_dirty_primary"]
+    assert account["status"] == "active"
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     stale_reset = 1735689600

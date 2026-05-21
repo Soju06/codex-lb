@@ -1065,6 +1065,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tolerate-read-errors",
+        action="store_true",
+        help=(
+            "Log and continue when a selected PR cannot be classified because of a GitHub "
+            "read/API error. Intended for broad --all-open best-effort maintenance runs."
+        ),
+    )
+    parser.add_argument(
         "--reviewer-login",
         action="append",
         default=[],
@@ -1161,7 +1169,8 @@ def main(argv: list[str] | None = None) -> int:
                 for warning in write_warnings:
                     print(f"  write_warning={warning}", flush=True)
             except Exception as exc:  # noqa: BLE001
-                had_error = True
+                if not args.tolerate_read_errors:
+                    had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
 
     return 1 if had_error else 0

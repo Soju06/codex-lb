@@ -95,3 +95,42 @@ def test_workflow_prefers_privileged_token_and_enables_tolerant_apply() -> None:
 
     assert "secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token" in workflow
     assert workflow.count("--tolerate-write-permission-errors") == 2
+    assert workflow.count("--tolerate-read-errors") == 1
+
+
+def test_main_tolerates_read_errors_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+
+    def fake_decide_pr(_repo: str, number: int, **_kwargs: Any) -> Any:
+        if number == 710:
+            raise module.GhError("gh: HTTP 502")
+        return decision(module, number=number)
+
+    monkeypatch.setattr(module, "decide_pr", fake_decide_pr)
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Soju06/codex-lb#710: gh: HTTP 502" in captured.err
+    assert "dry-run Soju06/codex-lb#714" in captured.out
+
+
+def test_main_fails_read_errors_without_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710])
+    monkeypatch.setattr(
+        module,
+        "decide_pr",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(module.GhError("gh: HTTP 502")),
+    )
+
+    assert module.main(["--repo", "Soju06/codex-lb", "--all-open"]) == 1

@@ -359,6 +359,55 @@ describe("RecentRequestsTable", () => {
     expect(costSection).not.toHaveTextContent("Output");
   });
 
+  it("renders available cost segments when total cost is unavailable", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-partial-no-total",
+            planType: "plus",
+            apiKeyName: "Key Partial No Total",
+            apiKeyId: "key-partial-no-total",
+            requestId: "req-partial-no-total",
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: null,
+            inputTokens: 1000,
+            outputTokens: null,
+            cachedInputTokens: 200,
+            reasoningEffort: null,
+            costUsd: null,
+            costBreakdown: {
+              inputUsd: 0.006,
+              cachedInputUsd: 0.004,
+              outputUsd: null,
+              totalUsd: null,
+            },
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const costSection = within(dialog).getByText("Cost").closest("div.space-y-2");
+
+    expect(within(dialog).getByText("Cost")).toBeInTheDocument();
+    expect(costSection).not.toHaveTextContent("=");
+    expect(costSection).toHaveTextContent("800 Input ($0.01)");
+    expect(costSection).toHaveTextContent("200 Cached ($0.00)");
+    expect(costSection).not.toHaveTextContent("Output");
+  });
+
   it("hides the cost section for total-only cost breakdown rows", () => {
     render(
       <RecentRequestsTable

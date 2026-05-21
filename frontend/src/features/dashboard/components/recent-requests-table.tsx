@@ -77,10 +77,6 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
   }
 
   const totalUsd = request.costBreakdown?.totalUsd ?? request.costUsd;
-  if (totalUsd == null) {
-    return null;
-  }
-
   const segments: string[] = [];
   const cachedInputTokens = request.cachedInputTokens ?? 0;
   const nonCachedInputTokens =
@@ -106,6 +102,10 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
 
   if (segments.length === 0) {
     return null;
+  }
+
+  if (totalUsd == null) {
+    return segments.join(" + ");
   }
 
   return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;

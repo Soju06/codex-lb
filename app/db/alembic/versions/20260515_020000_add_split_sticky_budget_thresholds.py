@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260515_020000_add_split_sticky_budget_thresholds"
-down_revision = "20260514_000000_add_request_logs_api_key_time_index"
+down_revision = "20260520_010000_add_request_logs_api_key_account_index"
 branch_labels = None
 depends_on = None
 

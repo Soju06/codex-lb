@@ -88,6 +88,25 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
   });
+
+  it("uses local defaults when mixed-version settings omit sticky thresholds", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    expect(parsed.stickyReallocationBudgetThresholdPct).toBe(95);
+    expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
+    expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
+  });
 });
 
 describe("SettingsUpdateRequestSchema", () => {

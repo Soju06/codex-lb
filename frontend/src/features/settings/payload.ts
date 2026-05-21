@@ -28,6 +28,12 @@ export function buildSettingsUpdateRequest(
     ...patch,
   };
   if (
+    settings.__stickyReallocationBudgetThresholdPctProvided === false &&
+    !("stickyReallocationBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationBudgetThresholdPct;
+  }
+  if (
     settings.__stickyReallocationPrimaryBudgetThresholdPctProvided === false &&
     !("stickyReallocationPrimaryBudgetThresholdPct" in patch)
   ) {

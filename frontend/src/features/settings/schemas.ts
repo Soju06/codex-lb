@@ -21,7 +21,7 @@ export const DashboardSettingsSchema = z
     relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
     openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
     dashboardSessionTtlSeconds: z.number().int().min(3600).optional().default(43200),
-    stickyReallocationBudgetThresholdPct: z.number().min(0).max(100),
+    stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
     importWithoutOverwrite: z.boolean(),
@@ -36,14 +36,22 @@ export const DashboardSettingsSchema = z
     limitWarmupMinAvailablePercent: z.number().positive().max(100).optional().default(100),
   })
   .transform((settings) => {
+    const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
     const primaryProvided = settings.stickyReallocationPrimaryBudgetThresholdPct !== undefined;
     const secondaryProvided = settings.stickyReallocationSecondaryBudgetThresholdPct !== undefined;
+    const primaryThreshold =
+      settings.stickyReallocationPrimaryBudgetThresholdPct ??
+      settings.stickyReallocationBudgetThresholdPct ??
+      95;
     return {
       ...settings,
-      stickyReallocationPrimaryBudgetThresholdPct:
-        settings.stickyReallocationPrimaryBudgetThresholdPct ?? settings.stickyReallocationBudgetThresholdPct,
+      stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct ?? primaryThreshold,
+      stickyReallocationPrimaryBudgetThresholdPct: primaryThreshold,
       stickyReallocationSecondaryBudgetThresholdPct:
-        settings.stickyReallocationSecondaryBudgetThresholdPct ?? settings.stickyReallocationBudgetThresholdPct,
+        settings.stickyReallocationSecondaryBudgetThresholdPct ??
+        settings.stickyReallocationBudgetThresholdPct ??
+        100,
+      __stickyReallocationBudgetThresholdPctProvided: legacyProvided,
       __stickyReallocationPrimaryBudgetThresholdPctProvided: primaryProvided,
       __stickyReallocationSecondaryBudgetThresholdPctProvided: secondaryProvided,
     };
@@ -75,6 +83,7 @@ export const SettingsUpdateRequestSchema = z.object({
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 type StickyThresholdPresenceFlags = Pick<
   ParsedDashboardSettings,
+  | "__stickyReallocationBudgetThresholdPctProvided"
   | "__stickyReallocationPrimaryBudgetThresholdPctProvided"
   | "__stickyReallocationSecondaryBudgetThresholdPctProvided"
 >;

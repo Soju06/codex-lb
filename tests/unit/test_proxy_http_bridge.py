@@ -903,6 +903,7 @@ async def test_select_account_with_budget_prefers_durable_account_id_when_availa
         request_id="req-1",
         kind="http_bridge",
         request_stage="reattach",
+        prefer_earlier_reset_window="primary",
         preferred_account_id="acc-preferred",
     )
 
@@ -940,6 +941,7 @@ async def test_select_account_with_budget_skips_preferred_account_outside_assign
         kind="http_bridge",
         request_stage="reattach",
         api_key=_make_api_key(key_id="key-1", assigned_account_ids=["acc-allowed"]),
+        prefer_earlier_reset_window="primary",
         preferred_account_id="acc-preferred",
     )
 
@@ -948,6 +950,80 @@ async def test_select_account_with_budget_skips_preferred_account_outside_assign
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
     assert first_call.kwargs["account_ids"] == {"acc-allowed"}
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_passes_dashboard_reset_window_to_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(account=None, error_message="No active accounts available")
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=settings))
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+    with pytest.raises(ProxyResponseError):
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="sid-123"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+        )
+
+    assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
+    assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(account=None, error_message="No active accounts available")
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=settings))
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+    with pytest.raises(ProxyResponseError):
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
+    assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
 
 
 def test_headers_with_authorization_restores_missing_proxy_api_header() -> None:

@@ -361,7 +361,7 @@ class OauthService:
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
             target_flow_id = flow.flow_id if flow is not None else flow_id
-            can_update_error = True
+            can_update_error = target_flow_id is not None
             if flow_id is not None and (flow is None or flow.flow_id != flow_id):
                 flow = None
                 verifier = None

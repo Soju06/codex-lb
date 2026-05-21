@@ -694,6 +694,36 @@ async def test_unknown_flow_error_does_not_mutate_latest_oauth_status():
 
 
 @pytest.mark.asyncio
+async def test_manual_callback_unknown_state_does_not_mutate_latest_flow(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert start.status_code == 200
+    payload = start.json()
+
+    response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": "http://localhost:1455/auth/callback?error=access_denied&state=missing-state",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "error",
+        "errorMessage": "OAuth error: access_denied",
+    }
+
+    status = await async_client.get("/api/oauth/status", params={"flowId": payload["flowId"]})
+    assert status.status_code == 200
+    assert status.json() == {"status": "pending", "errorMessage": None}
+
+
+@pytest.mark.asyncio
 async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 

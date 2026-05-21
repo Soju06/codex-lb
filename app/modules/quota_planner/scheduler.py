@@ -154,7 +154,7 @@ class QuotaPlannerScheduler:
                     ),
                 )
                 due = action.scheduled_at is None or action.scheduled_at <= now
-                if settings.mode == "auto" and action.action == "warmup" and due:
+                if settings.mode == "auto" and action.action == "warmup" and due and decision.status == "planned":
                     await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
 
 

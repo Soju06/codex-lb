@@ -112,6 +112,37 @@ def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:
     assert all(candidate >= now for candidate in candidates)
 
 
+def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
+    settings = PlannerSettings()
+    now = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    reset_at = now.timestamp() + 3600
+    forecast = PlannerForecast(
+        generated_at=now,
+        horizon_hours=1,
+        slot_seconds=15 * 60,
+        total_demand_units=120.0,
+        peak_slot_start=now,
+        peak_demand_units=120.0,
+        slots=(
+            DemandForecastSlot(
+                slot_start=now,
+                demand_units=120.0,
+                request_count=12.0,
+                source="test",
+            ),
+        ),
+    )
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=40.0, reset_at=reset_at),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=40.0, reset_at=reset_at),
+    ]
+
+    simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)
+
+    assert simulation.served_units == pytest.approx(120.0)
+    assert simulation.unmet_demand == pytest.approx(0.0)
+
+
 def test_plan_shadow_actions_reserves_cold_accounts_for_peak_aligned_staggered_windows() -> None:
     settings = PlannerSettings(
         mode="shadow",

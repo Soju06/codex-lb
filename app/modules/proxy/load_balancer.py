@@ -450,10 +450,14 @@ class LoadBalancer:
             quota_planner_repo = getattr(repos, "quota_planner", None)
             get_quota_planner_settings = getattr(quota_planner_repo, "get_settings", None)
             if callable(get_quota_planner_settings):
-                settings_result = get_quota_planner_settings()
-                quota_planner_settings = (
-                    await settings_result if inspect.isawaitable(settings_result) else settings_result
-                )
+                try:
+                    settings_result = get_quota_planner_settings()
+                    quota_planner_settings = (
+                        await settings_result if inspect.isawaitable(settings_result) else settings_result
+                    )
+                except Exception:
+                    logger.warning("Failed to load quota planner settings; using defaults", exc_info=True)
+                    quota_planner_settings = PlannerSettings()
             else:
                 quota_planner_settings = PlannerSettings()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)

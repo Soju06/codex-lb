@@ -83,6 +83,13 @@ class QuotaWarmupService:
                 status="planned",
                 idempotency_key=f"manual:{scheduled_at:%Y%m%d%H%M%S}:{account_id}:{uuid4().hex}",
             )
+        elif decision.status != "planned":
+            return WarmupExecutionResult(
+                decision_id=decision.id,
+                status=decision.status,
+                reason=decision.reason or f"decision_{decision.status}",
+                executed_at=decision.executed_at,
+            )
         allowed, reason = await self._execution_gate(
             settings=settings,
             account=account,

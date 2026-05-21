@@ -159,6 +159,59 @@ async def test_quota_planner_cancel_decision(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_quota_planner_warm_now_does_not_execute_canceled_decision(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-canceled-warm",
+            email="canceled-warm@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+            )
+        )
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="cancelled-auto-warmup",
+            account_id=account.id,
+            scheduled_at=utcnow(),
+            score=3.0,
+            reason="operator_review",
+            status="planned",
+        )
+        await repo.update_decision_status(decision.id, status="canceled", reason="admin_canceled")
+
+        async def fail_send(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("canceled decision should not execute")
+
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
+
+        result = await QuotaWarmupService(session).warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            decision_id=decision.id,
+        )
+
+    assert result.status == "canceled"
+    assert result.reason == "admin_canceled"
+
+
+@pytest.mark.asyncio
 async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch, async_client, db_setup):
     del db_setup
     encryptor = TokenEncryptor()
@@ -222,3 +275,63 @@ async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch
     async with SessionLocal() as session:
         logs = await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))
         assert logs.scalar_one().request_id == payload["requestId"]
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_ignores_failed_effect_after_prior_observed(monkeypatch, async_client, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-after-failure",
+            email="warm-after-failure@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+            observed_at=utcnow() - timedelta(minutes=10),
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="failed",
+            observed_at=utcnow(),
+        )
+
+    async def fake_send(self, *, account, model, request_id):
+        del self, account, model, request_id
+        return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+    async def noop_record_effect(self, account, model, *, source, confidence):
+        del self, account, model, source, confidence
+
+    monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+    response = await async_client.post(
+        "/api/quota-planner/warm-now",
+        json={"accountId": "acc-warm-after-failure", "model": "gpt-5.4-mini"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"

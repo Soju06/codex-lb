@@ -334,7 +334,9 @@ def simulate_pool(
     unmet = 0.0
     served = 0.0
     wasted_capacity = 0.0
-    remaining_by_reset = {reset_at: capacity for reset_at, capacity in active_windows}
+    remaining_by_reset: dict[float, float] = {}
+    for reset_at, capacity in active_windows:
+        remaining_by_reset[reset_at] = remaining_by_reset.get(reset_at, 0.0) + capacity
     for slot in demand_forecast.slots:
         slot_ts = slot.slot_start.timestamp()
         demand = slot.demand_units

@@ -180,6 +180,7 @@ class QuotaPlannerRepository:
                     QuotaWindowObservation.account_id == account_id,
                     QuotaWindowObservation.model == model,
                     QuotaWindowObservation.source == "warmup_probe",
+                    QuotaWindowObservation.confidence.in_(("observed", "known", "high")),
                 )
             )
             .order_by(QuotaWindowObservation.observed_at.desc(), QuotaWindowObservation.id.desc())

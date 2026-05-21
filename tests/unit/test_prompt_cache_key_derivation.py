@@ -8,7 +8,7 @@ import pytest
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy.service import (
+from app.modules.proxy.affinity import (
     _derive_prompt_cache_key,
     _extract_first_user_input,
     _extract_instruction_input,

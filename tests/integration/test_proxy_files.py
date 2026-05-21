@@ -491,7 +491,7 @@ async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
 
     from app.core.openai.requests import ResponsesRequest
     from app.dependencies import get_proxy_service_for_app
-    from app.modules.proxy.service import ensure_downstream_turn_state
+    from app.modules.proxy.affinity import ensure_downstream_turn_state
 
     service = get_proxy_service_for_app(async_client._transport.app)
     await service._pin_file_account("file_synth_ts", "acc_ts_a")

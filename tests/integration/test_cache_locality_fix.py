@@ -54,7 +54,7 @@ def test_mini_and_large_requests_use_different_cache_keys():
     """Verify that gpt-5.4-mini and gpt-5.3-codex requests produce different prompt_cache_keys
     due to model-class prefix separation."""
     from app.core.openai.requests import ResponsesRequest
-    from app.modules.proxy.service import _derive_prompt_cache_key
+    from app.modules.proxy.affinity import _derive_prompt_cache_key
 
     mini_payload = ResponsesRequest(
         model="gpt-5.4-mini",
@@ -79,7 +79,7 @@ def test_mini_and_large_requests_use_different_cache_keys():
 def test_same_model_class_produces_same_cache_key():
     """Verify that two requests with the same model class produce the same cache key."""
     from app.core.openai.requests import ResponsesRequest
-    from app.modules.proxy.service import _derive_prompt_cache_key
+    from app.modules.proxy.affinity import _derive_prompt_cache_key
 
     payload = ResponsesRequest(
         model="gpt-5.3-codex",
@@ -135,7 +135,7 @@ def test_codex_session_idle_ttl_unchanged():
 
 def test_model_class_extraction_for_all_model_types():
     """Verify model class extraction works correctly for mini, codex, and standard models."""
-    from app.modules.proxy.service import _extract_model_class
+    from app.modules.proxy.affinity import _extract_model_class
 
     assert _extract_model_class("gpt-5.4-mini") == "mini"
     assert _extract_model_class("gpt-4-mini") == "mini"

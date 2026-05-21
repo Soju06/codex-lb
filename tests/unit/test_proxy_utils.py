@@ -36,6 +36,7 @@ from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
@@ -1309,6 +1310,7 @@ def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> 
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_affinity, "get_settings", lambda: settings)
 
 
 def _make_account(account_id: str) -> Account:
@@ -1851,6 +1853,7 @@ def test_log_proxy_request_shape_reports_derived_key_after_affinity_resolution(m
         openai_prompt_cache_key_derivation_enabled = True
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())
 
     payload = ResponsesRequest.model_validate(
         {
@@ -4483,6 +4486,7 @@ def test_sticky_key_for_responses_request_respects_prompt_cache_derivation_flag(
         openai_prompt_cache_key_derivation_enabled = False
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())
 
     payload = ResponsesRequest.model_validate(
         {
@@ -4511,6 +4515,7 @@ def test_sticky_key_for_responses_request_preserves_client_supplied_prompt_cache
         openai_prompt_cache_key_derivation_enabled = False
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())
 
     payload = ResponsesRequest.model_validate(
         {

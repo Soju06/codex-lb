@@ -3026,8 +3026,12 @@ class ProxyService:
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             error_code = "upstream_unavailable"
             error_message = str(exc) or "Request to upstream timed out"
-        except (ProxyAuthError, ProxyRateLimitError):
-            raise
+        except ProxyAuthError as exc:
+            error_code = "auth_error"
+            error_message = str(exc) or "Warmup authentication failed"
+        except ProxyRateLimitError as exc:
+            error_code = "rate_limit_exceeded"
+            error_message = str(exc) or "Warmup request was rate limited"
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"

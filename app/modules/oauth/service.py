@@ -178,6 +178,18 @@ class OAuthStateStore:
         for flow in expired_flows:
             self.remove_flow_locked(flow)
 
+    def remove_pending_device_flows_locked(self) -> None:
+        pending_device_flows = [
+            flow
+            for flow in self._flows.values()
+            if flow.method == "device" and flow.status == "pending"
+        ]
+        for flow in pending_device_flows:
+            task = flow.poll_task
+            if task and not task.done():
+                task.cancel()
+            self.remove_flow_locked(flow)
+
     def remove_flow_locked(self, flow: OAuthState) -> None:
         removed_latest = flow.flow_id is not None and flow.flow_id == self._state.flow_id
         if flow.flow_id is not None:
@@ -418,6 +430,7 @@ class OauthService:
                 interval_seconds=device.interval_seconds,
                 expires_at=time.time() + device.expires_in_seconds,
             )
+            self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
             self._ensure_device_poll_task_locked(flow)
 

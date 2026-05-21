@@ -90,6 +90,57 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_starting_new_device_flow_cancels_previous_pending_poll(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+    issued = 0
+
+    async def fake_device_code(**_):
+        nonlocal issued
+        issued += 1
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code=f"CODE-{issued}",
+            device_auth_id=f"dev_{issued}",
+            interval_seconds=30,
+            expires_in_seconds=300,
+        )
+
+    async def fake_exchange_device_token(**_):
+        await asyncio.sleep(300)
+        raise AssertionError("device token polling should be cancelled by the test")
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+
+    first = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert first.status_code == 200
+    await asyncio.sleep(0)
+    async with oauth_module._OAUTH_STORE.lock:
+        first_flow_id = first.json()["flowId"]
+        first_flow = oauth_module._OAUTH_STORE.get_flow_locked(first_flow_id)
+        assert first_flow is not None
+        first_task = first_flow.poll_task
+        assert first_task is not None
+
+    second = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert second.status_code == 200
+    second_flow_id = second.json()["flowId"]
+    await asyncio.sleep(0)
+
+    async with oauth_module._OAUTH_STORE.lock:
+        pending_device_flows = [
+            flow
+            for flow in oauth_module._OAUTH_STORE._flows.values()
+            if flow.method == "device" and flow.status == "pending"
+        ]
+        assert [flow.flow_id for flow in pending_device_flows] == [second_flow_id]
+        assert oauth_module._OAUTH_STORE.get_flow_locked(first_flow_id) is None
+    assert first_task.cancelled()
+
+    await oauth_module._OAUTH_STORE.reset()
+
+
+@pytest.mark.asyncio
 async def test_device_oauth_flow_keeps_separate_accounts_when_import_without_overwrite_enabled(
     async_client,
     monkeypatch,

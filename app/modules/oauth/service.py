@@ -301,6 +301,10 @@ class OauthService:
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
             target_flow_id = flow.flow_id if flow is not None else flow_id
+            if flow_id is not None and (flow is None or flow.flow_id != flow_id):
+                flow = None
+                verifier = None
+                target_flow_id = flow_id
             if flow is not None and flow.status == "success" and state == flow.state_token:
                 return ManualCallbackResponse(status="success")
 

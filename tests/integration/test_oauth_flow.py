@@ -419,6 +419,48 @@ async def test_manual_callback_returns_error_message_for_invalid_state(async_cli
 
 
 @pytest.mark.asyncio
+async def test_oauth_status_binds_camel_case_flow_id(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    first_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert first_start.status_code == 200
+    first_payload = first_start.json()
+    assert first_payload["flowId"]
+
+    second_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert second_start.status_code == 200
+    second_payload = second_start.json()
+    assert second_payload["flowId"]
+    assert second_payload["flowId"] != first_payload["flowId"]
+
+    error_response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": "http://localhost:1455/auth/callback?code=manual-code&state=wrong",
+            "flowId": second_payload["flowId"],
+        },
+    )
+    assert error_response.status_code == 200
+    assert error_response.json()["status"] == "error"
+
+    first_status = await async_client.get("/api/oauth/status", params={"flowId": first_payload["flowId"]})
+    assert first_status.status_code == 200
+    assert first_status.json() == {"status": "pending", "errorMessage": None}
+
+    second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
+    assert second_status.status_code == 200
+    assert second_status.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 
@@ -496,3 +538,78 @@ async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_clie
         generate_unique_account_id("acc_code-second", "code-second@example.com"),
     }
     assert expected_ids.issubset({account["accountId"] for account in data})
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_idempotent_success_requires_requested_flow(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    exchange_calls: list[str] = []
+
+    async def fake_exchange_authorization_code(**kwargs):
+        code = kwargs["code"]
+        exchange_calls.append(code)
+        payload = {
+            "email": f"{code}@example.com",
+            "chatgpt_account_id": f"acc_{code}",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token=f"access-{code}",
+            refresh_token=f"refresh-{code}",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    first_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert first_start.status_code == 200
+    first_payload = first_start.json()
+    first_callback_url = (
+        f"http://localhost:1455/auth/callback?code=code-first&state="
+        f"{_oauth_state_token(first_payload['authorizationUrl'])}"
+    )
+
+    second_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert second_start.status_code == 200
+    second_payload = second_start.json()
+    assert second_payload["flowId"] != first_payload["flowId"]
+
+    first_response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": first_callback_url,
+            "flowId": first_payload["flowId"],
+        },
+    )
+    assert first_response.status_code == 200
+    assert first_response.json() == {"status": "success", "errorMessage": None}
+
+    replay_with_wrong_flow = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": first_callback_url,
+            "flowId": second_payload["flowId"],
+        },
+    )
+    assert replay_with_wrong_flow.status_code == 200
+    assert replay_with_wrong_flow.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }
+    assert exchange_calls == ["code-first"]
+
+    first_status = await async_client.get("/api/oauth/status", params={"flowId": first_payload["flowId"]})
+    assert first_status.status_code == 200
+    assert first_status.json() == {"status": "success", "errorMessage": None}
+
+    second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
+    assert second_status.status_code == 200
+    assert second_status.json() == {
+        "status": "error",
+        "errorMessage": "Invalid OAuth callback: state mismatch or missing code.",
+    }

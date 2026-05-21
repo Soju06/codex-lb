@@ -329,6 +329,19 @@ _TRANSIENT_RETRY_CODES = frozenset(
         "upstream_request_timeout",
     }
 )
+_UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS = (
+    "broken pipe",
+    "cannot connect",
+    "connection aborted",
+    "connection closed",
+    "connection reset",
+    "keepalive ping timeout",
+    "no close frame",
+    "server disconnected",
+    "timed out",
+    "timeout",
+    "upstream closed",
+)
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
 _COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
@@ -1997,13 +2010,23 @@ class ProxyService:
                 try:
                     account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
                     logger.warning(
                         "Compact refresh/connect failed request_id=%s account_id=%s",
                         request_id,
                         account.id,
                         exc_info=True,
                     )
-                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                    if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                        _raise_proxy_unavailable(message)
+                    await self._handle_stream_error(
+                        account,
+                        {"message": message},
+                        "upstream_unavailable",
+                    )
+                    last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                    excluded_account_ids.add(account.id)
+                    continue
                 request_service_tier = _service_tier_from_compact_payload(payload)
 
                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
@@ -9861,7 +9884,7 @@ class ProxyService:
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
-        response_create_lease = AdmissionLease(None)
+        response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
@@ -10009,7 +10032,7 @@ class ProxyService:
                         raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_retry and _should_retry_stream_error(code):
                         raise _RetryableStreamError(code, settlement.error)
-                    if allow_transient_retry and code in _TRANSIENT_RETRY_CODES and code != "stream_idle_timeout":
+                    if allow_transient_retry and _should_retry_transient_stream_error(code, error_message):
                         raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -10832,6 +10855,17 @@ def _should_penalize_stream_error(code: str | None) -> bool:
     if code is None:
         return False
     return code in _ACCOUNT_RECOVERY_RETRY_CODES or code in _TRANSIENT_RETRY_CODES
+
+
+def _should_retry_transient_stream_error(code: str | None, message: str | None) -> bool:
+    if code is None or code == "stream_idle_timeout":
+        return False
+    if code in _TRANSIENT_RETRY_CODES:
+        return True
+    if code != "upstream_unavailable" or not message:
+        return False
+    normalized_message = message.lower()
+    return any(marker in normalized_message for marker in _UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS)
 
 
 def _is_account_neutral_error_code(code: str | None) -> bool:

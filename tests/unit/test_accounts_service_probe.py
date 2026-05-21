@@ -202,10 +202,16 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
             captured.update(kwargs)
             return _Response()
 
-    monkeypatch.setattr(
-        "app.modules.accounts.service.get_http_client",
-        lambda: SimpleNamespace(session=_Session()),
-    )
+    class _Lease:
+        async def __aenter__(self):
+            captured["leased"] = True
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            captured["released"] = True
+            return False
+
+    monkeypatch.setattr("app.modules.accounts.service.lease_http_session", lambda: _Lease())
 
     status = await service._send_probe_request(
         access_token=_PROBE_TOKEN_PLAINTEXT,
@@ -214,6 +220,8 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     )
 
     assert status == 204
+    assert captured["leased"] is True
+    assert captured["released"] is True
     assert captured["url"].endswith("/backend-api/codex/responses")
     assert captured["headers"]["Authorization"] == f"Bearer {_PROBE_TOKEN_PLAINTEXT}"
     assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID

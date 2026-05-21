@@ -19,7 +19,7 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -455,10 +455,11 @@ class AccountsService:
             connect=PROBE_CONNECT_TIMEOUT_SECONDS,
         )
         try:
-            async with get_http_client().session.post(url, headers=headers, json=body, timeout=timeout) as resp:
-                # Initiating the request is enough to wake the upstream
-                # rate-limiter; we do not consume the SSE body.
-                return resp.status
+            async with lease_http_session() as session:
+                async with session.post(url, headers=headers, json=body, timeout=timeout) as resp:
+                    # Initiating the request is enough to wake the upstream
+                    # rate-limiter; we do not consume the SSE body.
+                    return resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning(
                 "Probe upstream request failed account=%s error=%s",

@@ -101,6 +101,7 @@ def test_codex_sessions_retag_ignores_invalid_server_port_env(monkeypatch, capsy
     session_file.write_text(json.dumps({"model_provider": "openai"}) + "\n", encoding="utf-8")
     monkeypatch.setenv("PORT", "not-a-port")
     monkeypatch.setenv("UVICORN_TIMEOUT_KEEP_ALIVE", "not-a-timeout")
+    monkeypatch.setenv("CODEX_LB_UVICORN_WORKERS", "not-workers")
 
     cli.main(
         [
@@ -198,6 +199,14 @@ def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
     assert json.loads(session_file.read_text(encoding="utf-8"))["model_provider"] == "codex-lb"
     with sqlite3.connect(state_db) as conn:
         assert conn.execute("SELECT model_provider FROM threads").fetchone()[0] == "codex-lb"
+
+
+def test_main_reports_invalid_worker_env(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setenv("CODEX_LB_UVICORN_WORKERS", "not-workers")
+
+    with pytest.raises(SystemExit, match="--workers/CODEX_LB_UVICORN_WORKERS must be an integer"):
+        cli.main()
 
 
 def test_main_passes_worker_and_parser_overrides(monkeypatch):

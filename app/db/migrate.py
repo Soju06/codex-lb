@@ -133,6 +133,9 @@ class MigrationBootstrapError(RuntimeError):
     pass
 
 
+_POLICY_CHECK_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+
 def _script_location() -> str:
     return str((Path(__file__).resolve().parent / "alembic").resolve())
 
@@ -410,7 +413,7 @@ def _collect_migration_policy_violations(config: Config) -> tuple[str, ...]:
     return tuple(sorted(violations))
 
 
-def check_migration_policy(database_url: str) -> tuple[str, ...]:
+def check_migration_policy(database_url: str = _POLICY_CHECK_DATABASE_URL) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     return _collect_migration_policy_violations(config)
 
@@ -758,6 +761,7 @@ def _parse_args() -> argparse.Namespace:
         help="Disable automatic remap of legacy Alembic revision IDs.",
     )
 
+    subparsers.add_parser("check-policy", help="Check DB-free Alembic migration policy.")
     subparsers.add_parser("current", help="Print current alembic revision.")
 
     subparsers.add_parser("check", help="Check Alembic policy and model/schema drift.")
@@ -804,6 +808,17 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+
+    if args.command == "check-policy":
+        policy_violations = check_migration_policy(args.db_url or _POLICY_CHECK_DATABASE_URL)
+        if policy_violations:
+            print("migration_policy_violations_detected")
+            for violation in policy_violations:
+                print(violation)
+            raise SystemExit(1)
+        print("migration_policy=ok")
+        return
+
     database_url = args.db_url or get_settings().database_url
 
     if args.command == "upgrade":

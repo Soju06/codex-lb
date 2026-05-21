@@ -984,6 +984,26 @@ def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, 
     wrapper_violations = check_migration_policy(_db_url(tmp_path / "policy-wrapper.db"))
     assert wrapper_violations == violations
 
+    default_url_violations = check_migration_policy()
+    assert default_url_violations == violations
+
+
+def test_check_policy_command_does_not_load_settings(monkeypatch, capsys) -> None:
+    def _check_migration_policy(database_url: str = migrate_module._POLICY_CHECK_DATABASE_URL) -> tuple[str, ...]:
+        return ()
+
+    monkeypatch.setattr(migrate_module, "check_migration_policy", _check_migration_policy)
+    monkeypatch.setattr(
+        migrate_module,
+        "get_settings",
+        lambda: pytest.fail("check-policy should not load runtime settings"),
+    )
+    monkeypatch.setattr("sys.argv", ["codex-lb-db", "check-policy"])
+
+    migrate_module.main()
+
+    assert capsys.readouterr().out == "migration_policy=ok\n"
+
 
 def test_create_sqlite_pre_migration_backup_rotates_old_files(tmp_path: Path) -> None:
     db_path = tmp_path / "store.db"

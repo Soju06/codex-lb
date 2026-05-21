@@ -35,6 +35,8 @@ case "${metrics_enabled}" in
 esac
 
 docker build --pull -t "${image_name}" .
+echo "Checking migration graph in ${image_name}"
+docker run --rm "${image_name}" python -m app.db.migrate check-policy
 docker volume create "${volume_name}" >/dev/null
 docker rm -f "${container_name}" >/dev/null 2>&1 || true
 docker run -d --name "${container_name}" \

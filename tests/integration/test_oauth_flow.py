@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -383,6 +384,57 @@ async def test_terminal_oauth_flows_are_bounded_outside_full_reset():
         assert "state-1" not in oauth_module._OAUTH_STORE._state_token_index
         assert f"flow-{retained_limit + 1}" in oauth_module._OAUTH_STORE._flows
         assert oauth_module._OAUTH_STORE.state.error_message == f"failure-{retained_limit + 1}"
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_browser_oauth_flows_are_pruned():
+    await oauth_module._OAUTH_STORE.reset()
+
+    now = time.time()
+    async with oauth_module._OAUTH_STORE.lock:
+        expired = oauth_module.OAuthState(
+            flow_id="expired-flow",
+            status="pending",
+            method="browser",
+            state_token="expired-state",
+            code_verifier="expired-verifier",
+            expires_at=now - 1,
+        )
+        active = oauth_module.OAuthState(
+            flow_id="active-flow",
+            status="pending",
+            method="browser",
+            state_token="active-state",
+            code_verifier="active-verifier",
+            expires_at=now + oauth_module._PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
+        )
+        oauth_module._OAUTH_STORE.remember_flow_locked(expired)
+        oauth_module._OAUTH_STORE.remember_flow_locked(active)
+
+        assert oauth_module._OAUTH_STORE.has_pending_browser_flows_locked()
+        assert "expired-flow" not in oauth_module._OAUTH_STORE._flows
+        assert "expired-state" not in oauth_module._OAUTH_STORE._state_token_index
+        assert oauth_module._OAUTH_STORE.state.flow_id == "active-flow"
+
+
+@pytest.mark.asyncio
+async def test_only_expired_pending_browser_flow_no_longer_keeps_callback_server_alive():
+    await oauth_module._OAUTH_STORE.reset()
+
+    async with oauth_module._OAUTH_STORE.lock:
+        flow = oauth_module.OAuthState(
+            flow_id="expired-flow",
+            status="pending",
+            method="browser",
+            state_token="expired-state",
+            code_verifier="expired-verifier",
+            expires_at=time.time() - 1,
+        )
+        oauth_module._OAUTH_STORE.remember_flow_locked(flow)
+
+        assert not oauth_module._OAUTH_STORE.has_pending_browser_flows_locked()
+        assert oauth_module._OAUTH_STORE._flows == {}
+        assert oauth_module._OAUTH_STORE.state.status == "idle"
 
 
 @pytest.mark.asyncio

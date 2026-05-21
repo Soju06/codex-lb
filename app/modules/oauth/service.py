@@ -45,6 +45,7 @@ _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
+_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
 
 
 @dataclass
@@ -97,6 +98,7 @@ class OAuthStateStore:
     def remember_flow_locked(self, flow: OAuthState) -> None:
         if flow.flow_id is None:
             raise ValueError("flow_id is required")
+        self.prune_expired_pending_browser_flows_locked()
         self._flows[flow.flow_id] = flow
         if flow.state_token is not None:
             self._state_token_index[flow.state_token] = flow.flow_id
@@ -127,6 +129,7 @@ class OAuthStateStore:
             self.prune_terminal_flows_locked()
 
     def has_pending_browser_flows_locked(self) -> bool:
+        self.prune_expired_pending_browser_flows_locked()
         return any(flow.method == "browser" and flow.status == "pending" for flow in self._flows.values())
 
     async def reset(self) -> None:
@@ -162,11 +165,37 @@ class OAuthStateStore:
         for flow in terminal_flows[:extra_count]:
             self.remove_flow_locked(flow)
 
+    def prune_expired_pending_browser_flows_locked(self) -> None:
+        now = time.time()
+        expired_flows = [
+            flow
+            for flow in self._flows.values()
+            if flow.method == "browser"
+            and flow.status == "pending"
+            and flow.expires_at is not None
+            and flow.expires_at <= now
+        ]
+        for flow in expired_flows:
+            self.remove_flow_locked(flow)
+
     def remove_flow_locked(self, flow: OAuthState) -> None:
+        removed_latest = flow.flow_id is not None and flow.flow_id == self._state.flow_id
         if flow.flow_id is not None:
             self._flows.pop(flow.flow_id, None)
         if flow.state_token is not None:
             self._state_token_index.pop(flow.state_token, None)
+        if removed_latest:
+            self._restore_latest_flow_locked()
+
+    def _restore_latest_flow_locked(self) -> None:
+        if not self._flows:
+            self._state = OAuthState(status="idle")
+            return
+        latest_flow = max(
+            self._flows.values(),
+            key=lambda flow: flow.finished_at or flow.expires_at or 0,
+        )
+        self.set_latest_flow_locked(latest_flow)
 
 
 class OAuthCallbackServer:
@@ -286,6 +315,7 @@ class OauthService:
                     method="browser",
                     state_token=state_token,
                     code_verifier=code_verifier,
+                    expires_at=time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
                 )
             )
             if self._store._callback_server is None:

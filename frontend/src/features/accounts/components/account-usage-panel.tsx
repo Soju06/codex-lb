@@ -128,7 +128,9 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
-  const hasTrends = trends && (trends.primary.length > 0 || trends.secondary.length > 0);
+  const hasTrends =
+    trends &&
+    (trends.primary.length > 0 || trends.secondary.length > 0 || trends.secondaryScheduled.length > 0);
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
@@ -189,9 +191,19 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
                 Weekly
               </span>
+              {trends.secondaryScheduled.length > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
+                  Weekly plan
+                </span>
+              ) : null}
             </div>
           </div>
-          <AccountTrendChart primary={trends.primary} secondary={trends.secondary} />
+          <AccountTrendChart
+            primary={trends.primary}
+            secondary={trends.secondary}
+            secondaryScheduled={trends.secondaryScheduled}
+          />
         </div>
       )}
     </div>

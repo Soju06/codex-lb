@@ -21,6 +21,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyNotFoundError,
     ApiKeyUpdateData,
+    ApiKeyValidationError,
     LimitRuleInput,
 )
 
@@ -37,6 +38,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
+        apply_to_codex_model=row.apply_to_codex_model,
         enforced_model=row.enforced_model,
         enforced_reasoning_effort=row.enforced_reasoning_effort,
         enforced_service_tier=row.enforced_service_tier,
@@ -114,14 +116,16 @@ async def create_api_key(
             ApiKeyCreateData(
                 name=payload.name,
                 allowed_models=payload.allowed_models,
+                apply_to_codex_model=payload.apply_to_codex_model,
                 enforced_model=payload.enforced_model,
                 enforced_reasoning_effort=payload.enforced_reasoning_effort,
                 enforced_service_tier=payload.enforced_service_tier,
                 expires_at=payload.expires_at,
+                assigned_account_ids=payload.assigned_account_ids,
                 limits=limit_inputs,
             )
         )
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     resp = _to_response(created)
     AuditService.log_async(
@@ -160,6 +164,8 @@ async def update_api_key(
         name_set="name" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
+        apply_to_codex_model=payload.apply_to_codex_model,
+        apply_to_codex_model_set="apply_to_codex_model" in fields,
         enforced_model=payload.enforced_model,
         enforced_model_set="enforced_model" in fields,
         enforced_reasoning_effort=payload.enforced_reasoning_effort,
@@ -180,7 +186,7 @@ async def update_api_key(
         row = await context.service.update_key(key_id, update)
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
         AuditService.log_async(

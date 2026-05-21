@@ -35,7 +35,7 @@ from typing import Any
 
 import aiohttp
 
-from app.core.clients.http import get_http_client
+from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
@@ -186,37 +186,37 @@ async def create_file(
         total=effective_total,
         sock_connect=effective_connect,
     )
-    client_session = session or get_http_client().session
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     try:
-        async with client_session.post(
-            url,
-            data=body,
-            headers=upstream_headers,
-            timeout=timeout,
-        ) as response:
-            text = await response.text()
-            if response.status >= 400:
-                raise FileProxyError(response.status, _parse_upstream_error_body(text))
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise FileProxyError(
-                    502,
-                    openai_error(
-                        "upstream_error",
-                        f"Upstream /files response was not JSON: {exc}",
-                    ),
-                ) from exc
-            if not isinstance(parsed, dict):
-                raise FileProxyError(
-                    502,
-                    openai_error(
-                        "upstream_error",
-                        "Upstream /files response was not a JSON object",
-                    ),
-                )
-            return parsed
+        async with lease_http_session(session) as client_session:
+            async with client_session.post(
+                url,
+                data=body,
+                headers=upstream_headers,
+                timeout=timeout,
+            ) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    raise FileProxyError(response.status, _parse_upstream_error_body(text))
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise FileProxyError(
+                        502,
+                        openai_error(
+                            "upstream_error",
+                            f"Upstream /files response was not JSON: {exc}",
+                        ),
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise FileProxyError(
+                        502,
+                        openai_error(
+                            "upstream_error",
+                            "Upstream /files response was not a JSON object",
+                        ),
+                    )
+                return parsed
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
         raise FileProxyError(
@@ -260,77 +260,76 @@ async def finalize_file(
     # of the standard 60 s request budget and the override (if set).
     effective_per_poll_total = _effective_files_total_timeout()
     effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
-    client_session = session or get_http_client().session
+    async with lease_http_session(session) as client_session:
+        # The finalize budget cannot exceed the caller's per-request budget;
+        # otherwise we would keep polling well past the parent timeout.
+        finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)
+        deadline = time.monotonic() + finalize_budget
+        parsed: dict[str, JsonValue] = {"status": "retry"}
+        while True:
+            # Recompute the per-poll timeout each iteration from the time
+            # left until ``deadline``. A late retry must not start with the
+            # full original budget when only a few hundred ms remain --
+            # otherwise we can blow past both the 30 s finalize budget and
+            # the parent request budget on slow networks.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Already past the deadline before issuing the next ``POST``;
+                # surface the previous payload (or the seeded ``retry``
+                # placeholder when we have not yet polled even once).
+                return parsed
+            per_poll_total = min(effective_per_poll_total, remaining)
+            timeout = aiohttp.ClientTimeout(
+                total=per_poll_total,
+                sock_connect=min(effective_connect, per_poll_total),
+            )
+            try:
+                async with client_session.post(
+                    url,
+                    data=b"{}",
+                    headers=upstream_headers,
+                    timeout=timeout,
+                ) as response:
+                    text = await response.text()
+                    if response.status >= 400:
+                        raise FileProxyError(response.status, _parse_upstream_error_body(text))
+                    try:
+                        parsed = json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        raise FileProxyError(
+                            502,
+                            openai_error(
+                                "upstream_error",
+                                f"Upstream /files/{file_id}/uploaded response was not JSON: {exc}",
+                            ),
+                        ) from exc
+                    if not isinstance(parsed, dict):
+                        raise FileProxyError(
+                            502,
+                            openai_error(
+                                "upstream_error",
+                                "Upstream /files/{file_id}/uploaded response was not a JSON object",
+                            ),
+                        )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                message = str(exc) or "Request to upstream timed out"
+                raise FileProxyError(
+                    502,
+                    openai_error("upstream_unavailable", message),
+                ) from exc
 
-    # The finalize budget cannot exceed the caller's per-request budget;
-    # otherwise we would keep polling well past the parent timeout.
-    finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)
-    deadline = time.monotonic() + finalize_budget
-    parsed: dict[str, JsonValue] = {"status": "retry"}
-    while True:
-        # Recompute the per-poll timeout each iteration from the time
-        # left until ``deadline``. A late retry must not start with the
-        # full original budget when only a few hundred ms remain --
-        # otherwise we can blow past both the 30 s finalize budget and
-        # the parent request budget on slow networks.
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            # Already past the deadline before issuing the next ``POST``;
-            # surface the previous payload (or the seeded ``retry``
-            # placeholder when we have not yet polled even once).
-            return parsed
-        per_poll_total = min(effective_per_poll_total, remaining)
-        timeout = aiohttp.ClientTimeout(
-            total=per_poll_total,
-            sock_connect=min(effective_connect, per_poll_total),
-        )
-        try:
-            async with client_session.post(
-                url,
-                data=b"{}",
-                headers=upstream_headers,
-                timeout=timeout,
-            ) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    raise FileProxyError(response.status, _parse_upstream_error_body(text))
-                try:
-                    parsed = json.loads(text)
-                except json.JSONDecodeError as exc:
-                    raise FileProxyError(
-                        502,
-                        openai_error(
-                            "upstream_error",
-                            f"Upstream /files/{file_id}/uploaded response was not JSON: {exc}",
-                        ),
-                    ) from exc
-                if not isinstance(parsed, dict):
-                    raise FileProxyError(
-                        502,
-                        openai_error(
-                            "upstream_error",
-                            "Upstream /files/{file_id}/uploaded response was not a JSON object",
-                        ),
-                    )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            message = str(exc) or "Request to upstream timed out"
-            raise FileProxyError(
-                502,
-                openai_error("upstream_unavailable", message),
-            ) from exc
-
-        status = parsed.get("status")
-        if status != "retry":
-            return parsed
-        if time.monotonic() >= deadline:
-            # Budget exhausted while still ``retry`` -- return the last
-            # payload verbatim so the caller can decide what to do (the
-            # upstream contract treats a final ``retry`` as a soft
-            # failure that the client should surface).
-            return parsed
-        await asyncio.sleep(_FILE_FINALIZE_POLL_DELAY_SECONDS)
-        if time.monotonic() >= deadline:
-            # Re-check after sleeping so we never overshoot the budget by
-            # issuing one extra ``POST`` whose own request timeout could
-            # block well past ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``.
-            return parsed
+            status = parsed.get("status")
+            if status != "retry":
+                return parsed
+            if time.monotonic() >= deadline:
+                # Budget exhausted while still ``retry`` -- return the last
+                # payload verbatim so the caller can decide what to do (the
+                # upstream contract treats a final ``retry`` as a soft
+                # failure that the client should surface).
+                return parsed
+            await asyncio.sleep(_FILE_FINALIZE_POLL_DELAY_SECONDS)
+            if time.monotonic() >= deadline:
+                # Re-check after sleeping so we never overshoot the budget by
+                # issuing one extra ``POST`` whose own request timeout could
+                # block well past ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``.
+                return parsed

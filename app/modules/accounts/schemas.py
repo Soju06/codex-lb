@@ -16,6 +16,7 @@ class UsageTrendPoint(DashboardModel):
 class AccountUsageTrend(DashboardModel):
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)
 
 
 class AccountUsage(DashboardModel):
@@ -101,7 +102,16 @@ class AccountDeleteResponse(DashboardModel):
     status: str
 
 
+class AccountExportResponse(DashboardModel):
+    account_id: str
+    email: str
+    plan_type: str
+    status: str
+    auth_json: str
+
+
 class AccountTrendsResponse(DashboardModel):
     account_id: str
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
+    secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)

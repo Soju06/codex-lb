@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Mark needs-info issues stale and close after timeout
-        uses: actions/stale@v9
+        uses: actions/stale@v9.1.0
         with:
           # 7 days with no activity after needs-info is applied -> mark stale
           days-before-issue-stale: 7

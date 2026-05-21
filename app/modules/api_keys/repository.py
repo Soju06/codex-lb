@@ -20,6 +20,7 @@ from app.db.models import (
     LimitWindow,
     RequestLog,
 )
+from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
 
@@ -79,6 +80,7 @@ class _Unset(Enum):
 
 _UNSET = _Unset.UNSET
 _EXPIRED_LIMIT_RESET_BATCH_SIZE = 500
+_STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE = 500
 
 
 class ApiKeysRepository:
@@ -95,9 +97,10 @@ class ApiKeysRepository:
             )
         )
 
-    async def create(self, row: ApiKey) -> ApiKey:
+    async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
         self._session.add(row)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
         created = await self.get_by_id(row.id)
         assert created is not None
         return created
@@ -192,6 +195,7 @@ class ApiKeysRepository:
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -211,6 +215,9 @@ class ApiKeysRepository:
         if allowed_models is not _UNSET:
             assert allowed_models is None or isinstance(allowed_models, str)
             row.allowed_models = allowed_models
+        if apply_to_codex_model is not _UNSET:
+            assert isinstance(apply_to_codex_model, bool)
+            row.apply_to_codex_model = apply_to_codex_model
         if enforced_model is not _UNSET:
             assert enforced_model is None or isinstance(enforced_model, str)
             row.enforced_model = enforced_model
@@ -247,9 +254,10 @@ class ApiKeysRepository:
         await self._session.commit()
         return True
 
-    async def update_last_used(self, key_id: str) -> None:
+    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
         await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
 
     async def commit(self) -> None:
         await self._session.commit()
@@ -601,6 +609,105 @@ class ApiKeysRepository:
                 cost_microdollars=cost_microdollars,
             )
         )
+
+    async def touch_usage_reservation(self, reservation_id: str) -> bool:
+        result = await self._session.execute(
+            update(ApiKeyUsageReservation)
+            .where(ApiKeyUsageReservation.id == reservation_id)
+            .where(ApiKeyUsageReservation.status == "reserved")
+            .values(updated_at=utcnow())
+            .returning(ApiKeyUsageReservation.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def release_stale_usage_reservations(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE,
+    ) -> int:
+        released_count = 0
+
+        try:
+            while True:
+                async with sqlite_writer_section():
+                    result = await self._session.execute(
+                        select(ApiKeyUsageReservation.id)
+                        .where(ApiKeyUsageReservation.status == "reserved")
+                        .where(ApiKeyUsageReservation.updated_at < cutoff)
+                        .order_by(ApiKeyUsageReservation.updated_at.asc())
+                        .limit(batch_size)
+                    )
+                    reservation_ids = list(result.scalars().all())
+                    if not reservation_ids:
+                        break
+
+                    item_result = await self._session.execute(
+                        select(
+                            ApiKeyUsageReservationItem.reservation_id,
+                            ApiKeyUsageReservationItem.limit_id,
+                            ApiKeyUsageReservationItem.limit_type,
+                            ApiKeyUsageReservationItem.reserved_delta,
+                            ApiKeyUsageReservationItem.expected_reset_at,
+                            ApiKeyUsageReservationItem.actual_delta,
+                        ).where(ApiKeyUsageReservationItem.reservation_id.in_(reservation_ids))
+                    )
+                    items_by_reservation_id: dict[str, list[UsageReservationItemData]] = {
+                        reservation_id: [] for reservation_id in reservation_ids
+                    }
+                    for item in item_result.all():
+                        items_by_reservation_id[item.reservation_id].append(
+                            UsageReservationItemData(
+                                limit_id=item.limit_id,
+                                limit_type=LimitType(item.limit_type),
+                                reserved_delta=item.reserved_delta,
+                                expected_reset_at=item.expected_reset_at,
+                                actual_delta=item.actual_delta,
+                            )
+                        )
+
+                    for reservation_id in reservation_ids:
+                        claimed = await self._session.execute(
+                            update(ApiKeyUsageReservation)
+                            .where(ApiKeyUsageReservation.id == reservation_id)
+                            .where(ApiKeyUsageReservation.status == "reserved")
+                            .where(ApiKeyUsageReservation.updated_at < cutoff)
+                            .values(
+                                status="released",
+                                input_tokens=None,
+                                output_tokens=None,
+                                cached_input_tokens=None,
+                                cost_microdollars=None,
+                            )
+                            .returning(ApiKeyUsageReservation.id)
+                        )
+                        if claimed.scalar_one_or_none() is None:
+                            continue
+
+                        for item in items_by_reservation_id[reservation_id]:
+                            await self.adjust_reserved_usage(
+                                item.limit_id,
+                                delta=-item.reserved_delta,
+                                expected_reset_at=item.expected_reset_at,
+                            )
+                            await self.upsert_reservation_item_actual(
+                                reservation_id,
+                                item=UsageReservationItemData(
+                                    limit_id=item.limit_id,
+                                    limit_type=item.limit_type,
+                                    reserved_delta=item.reserved_delta,
+                                    expected_reset_at=item.expected_reset_at,
+                                    actual_delta=item.actual_delta,
+                                ),
+                                actual_delta=0,
+                            )
+                        released_count += 1
+                    await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        return released_count
 
     async def trends_by_key(
         self,

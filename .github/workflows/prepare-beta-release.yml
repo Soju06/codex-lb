@@ -1,0 +1,151 @@
+name: Sync Beta Release PR
+
+on:
+  push:
+    branches: ["main"]
+  workflow_run:
+    workflows: ["Release Please"]
+    types: [completed]
+
+concurrency:
+  group: ${{ github.workflow }}-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-beta-release-pr:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+    steps:
+      - name: Require release automation token
+        shell: bash
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_PLEASE_TOKEN}" ]; then
+            echo "::error::RELEASE_PLEASE_TOKEN is required so beta release events trigger artifact publishing."
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Find open release-please PR
+        id: release_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_owner="${GITHUB_REPOSITORY_OWNER:-${GITHUB_REPOSITORY%%/*}}"
+          release_pr="$(gh pr list \
+            --base main \
+            --state open \
+            --limit 200 \
+            --json number,headRefName,headRepositoryOwner \
+            --jq '[.[] | select(.headRefName == "release-please--branches--main" and .headRepositoryOwner.login == "'"${repo_owner}"'")][0].number // empty')"
+          if [ -z "${release_pr}" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No open release-please PR; beta PR sync is a no-op."
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "number=${release_pr}" >> "$GITHUB_OUTPUT"
+            echo "Found release-please PR #${release_pr}."
+          fi
+
+      - name: Fetch release metadata
+        if: steps.release_pr.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          git fetch origin release-please--branches--main:refs/remotes/origin/release-please--branches--main
+
+      - name: Prepare beta version bump
+        if: steps.release_pr.outputs.found == 'true'
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.prepare_beta_release
+
+      - name: Detect changes
+        if: steps.release_pr.outputs.found == 'true' && steps.prepare.outputs.should_create != 'false'
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No beta version changes to propose."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff -- . ':!uv.lock' || true
+          fi
+
+      - name: Commit beta release PR branch
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        env:
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}"
+          git add pyproject.toml app/__init__.py frontend/package.json deploy/helm/codex-lb/Chart.yaml uv.lock
+          git commit -m "chore: release ${TAG}"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin "${BRANCH}"
+
+      - name: Open or update beta release PR
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        env:
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+          BASE_VERSION: ${{ steps.prepare.outputs.base_version }}
+          PYPI_VERSION: ${{ steps.prepare.outputs.pypi_version }}
+          RELEASE_PR: ${{ steps.release_pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          body_file="${RUNNER_TEMP}/beta-release-pr.md"
+          cat > "${body_file}" <<EOF
+          ## Summary
+          - Prepares beta release ${TAG} for the ${BASE_VERSION} stable train.
+          - Updates release-managed version files only; release-please remains the stable release owner.
+          - Merging this PR will publish ${TAG} as a GitHub prerelease and trigger package/image/chart publishing.
+          - Synced automatically from release-please PR #${RELEASE_PR}; no manual beta workflow dispatch is required.
+
+          ## Install after publish
+          \`\`\`bash
+          uvx --from "codex-lb==${PYPI_VERSION}" codex-lb
+          docker pull ghcr.io/${GITHUB_REPOSITORY}:${VERSION}
+          helm install codex-lb oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/codex-lb --version ${VERSION} --devel
+          \`\`\`
+
+          ## Promotion
+          Merge the normal release-please PR to promote this beta-tested train to ${BASE_VERSION}.
+          EOF
+
+          existing_pr="$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "${existing_pr}" ]; then
+            gh pr edit "${existing_pr}" --title "chore: release ${TAG}" --body-file "${body_file}"
+            echo "Updated PR #${existing_pr}"
+          else
+            gh pr create --base main --head "${BRANCH}" --title "chore: release ${TAG}" --body-file "${body_file}"
+          fi

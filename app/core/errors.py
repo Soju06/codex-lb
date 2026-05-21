@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Literal, NotRequired, TypedDict
 
@@ -41,12 +42,58 @@ class ResponseFailedEvent(TypedDict):
     response: ResponseFailedResponse
 
 
+PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
+
+
 def openai_error(code: str, message: str, error_type: str = "server_error") -> OpenAIErrorEnvelope:
     return {"error": {"message": message, "type": error_type, "code": code}}
 
 
 def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:
     return {"error": {"code": code, "message": message}}
+
+
+def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:
+    return openai_error(
+        "stream_incomplete",
+        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        error_type="server_error",
+    )
+
+
+def is_previous_response_not_found_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return "previous response" in normalized and "not found" in normalized
+
+
+def previous_response_id_from_not_found_message(message: str | None) -> str | None:
+    if message is None:
+        return None
+    normalized = " ".join(message.split())
+    match = re.search(
+        r"""previous\s+response\s+with\s+id\s+['"](?P<response_id>[^'"]+)['"]\s+not\s+found""",
+        normalized,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    response_id = match.group("response_id").strip()
+    return response_id or None
+
+
+def is_previous_response_not_found_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    if code == "previous_response_not_found":
+        return True
+    if code != "invalid_request_error" or param != "previous_response_id":
+        return False
+    return is_previous_response_not_found_message(message)
 
 
 def response_failed_event(

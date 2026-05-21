@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 
@@ -10,11 +11,16 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.service import (
     _derive_prompt_cache_key,
     _extract_first_user_input,
+    _extract_instruction_input,
 )
 
 pytestmark = pytest.mark.unit
 
 _NOW = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+
+def _json_value(value: object) -> JsonValue:
+    return cast(JsonValue, value)
 
 
 def _make_api_key(id: str = "ak_test_001122334455") -> ApiKeyData:
@@ -47,11 +53,13 @@ class TestExtractFirstUserInput:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[
-                {"role": "user", "content": "first question"},
-                {"role": "assistant", "content": "response"},
-                {"role": "user", "content": "second question"},
-            ],
+            input=_json_value(
+                [
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "response"},
+                    {"role": "user", "content": "second question"},
+                ]
+            ),
         )
         assert _extract_first_user_input(payload) == "first question"
 
@@ -59,12 +67,14 @@ class TestExtractFirstUserInput:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "structured msg"}],
-                },
-            ],
+            input=_json_value(
+                [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "structured msg"}],
+                    },
+                ]
+            ),
         )
         assert _extract_first_user_input(payload) == "structured msg"
 
@@ -72,13 +82,15 @@ class TestExtractFirstUserInput:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "typed item"}],
-                },
-            ],
+            input=_json_value(
+                [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "typed item"}],
+                    },
+                ]
+            ),
         )
         assert _extract_first_user_input(payload) == "typed item"
 
@@ -86,25 +98,29 @@ class TestExtractFirstUserInput:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[
-                {"role": "assistant", "content": "I am assistant"},
-                {"type": "function_call", "name": "shell", "arguments": "{}"},
-                {"role": "user", "content": "the real first input"},
-            ],
+            input=_json_value(
+                [
+                    {"role": "assistant", "content": "I am assistant"},
+                    {"type": "function_call", "name": "shell", "arguments": "{}"},
+                    {"role": "user", "content": "the real first input"},
+                ]
+            ),
         )
         assert _extract_first_user_input(payload) == "the real first input"
 
     def test_empty_input_array(self):
-        payload = ResponsesRequest(model="gpt-5.4", instructions="sys", input=[])
+        payload = ResponsesRequest(model="gpt-5.4", instructions="sys", input=_json_value([]))
         assert _extract_first_user_input(payload) is None
 
     def test_no_user_items(self):
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[
-                {"role": "assistant", "content": "only assistant"},
-            ],
+            input=_json_value(
+                [
+                    {"role": "assistant", "content": "only assistant"},
+                ]
+            ),
         )
         assert _extract_first_user_input(payload) is None
 
@@ -113,21 +129,43 @@ class TestExtractFirstUserInput:
         assert _extract_first_user_input(payload) == "compact hello"
 
 
+class TestExtractInstructionInput:
+    def test_extracts_system_and_developer_input(self):
+        payload = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
+                    {"role": "developer", "content": "Keep it short."},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+        assert _extract_instruction_input(payload) == "Return JSON.\nKeep it short."
+
+    def test_ignores_string_input(self):
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input="hello")
+        assert _extract_instruction_input(payload) is None
+
+
 class TestDerivePromptCacheKey:
     def test_same_session_across_turns_produces_same_key(self):
         turn1 = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are a helpful assistant",
-            input=[{"role": "user", "content": "build a server"}],
+            input=_json_value([{"role": "user", "content": "build a server"}]),
         )
         turn2 = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are a helpful assistant",
-            input=[
-                {"role": "user", "content": "build a server"},
-                {"role": "assistant", "content": "Sure, here is..."},
-                {"role": "user", "content": "add logging"},
-            ],
+            input=_json_value(
+                [
+                    {"role": "user", "content": "build a server"},
+                    {"role": "assistant", "content": "Sure, here is..."},
+                    {"role": "user", "content": "add logging"},
+                ]
+            ),
         )
         api_key = _make_api_key()
         key1 = _derive_prompt_cache_key(turn1, api_key)
@@ -138,12 +176,12 @@ class TestDerivePromptCacheKey:
         session_a = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are a helpful assistant",
-            input=[{"role": "user", "content": "build a server"}],
+            input=_json_value([{"role": "user", "content": "build a server"}]),
         )
         session_b = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are a helpful assistant",
-            input=[{"role": "user", "content": "write tests"}],
+            input=_json_value([{"role": "user", "content": "write tests"}]),
         )
         api_key = _make_api_key()
         key_a = _derive_prompt_cache_key(session_a, api_key)
@@ -154,7 +192,7 @@ class TestDerivePromptCacheKey:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="same instructions",
-            input=[{"role": "user", "content": "same input"}],
+            input=_json_value([{"role": "user", "content": "same input"}]),
         )
         key_a = _derive_prompt_cache_key(payload, _make_api_key(id="key_AAAAAA"))
         key_b = _derive_prompt_cache_key(payload, _make_api_key(id="key_BBBBBB"))
@@ -165,33 +203,58 @@ class TestDerivePromptCacheKey:
         p1 = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are Codex",
-            input=[{"role": "user", "content": "hello"}],
+            input=_json_value([{"role": "user", "content": "hello"}]),
         )
         p2 = ResponsesRequest(
             model="gpt-5.4",
             instructions="You are a reviewer",
-            input=[{"role": "user", "content": "hello"}],
+            input=_json_value([{"role": "user", "content": "hello"}]),
         )
+        assert _derive_prompt_cache_key(p1, api_key) != _derive_prompt_cache_key(p2, api_key)
+
+    def test_different_instruction_role_input_produce_different_keys(self):
+        api_key = _make_api_key()
+        p1 = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+        p2 = ResponsesRequest(
+            model="gpt-5.4",
+            instructions="",
+            input=_json_value(
+                [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Return XML."}]},
+                    {"role": "user", "content": "hello"},
+                ]
+            ),
+        )
+
         assert _derive_prompt_cache_key(p1, api_key) != _derive_prompt_cache_key(p2, api_key)
 
     def test_no_api_key_still_produces_key(self):
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[{"role": "user", "content": "hi"}],
+            input=_json_value([{"role": "user", "content": "hi"}]),
         )
         key = _derive_prompt_cache_key(payload, None)
         assert isinstance(key, str)
         assert len(key) > 0
 
     def test_empty_instructions_and_empty_input(self):
-        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=[])
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=_json_value([]))
         key = _derive_prompt_cache_key(payload, None)
         assert isinstance(key, str)
         assert len(key) > 0
 
     def test_empty_requests_without_api_key_remain_unique(self):
-        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=[])
+        payload = ResponsesRequest(model="gpt-5.4", instructions="", input=_json_value([]))
         key1 = _derive_prompt_cache_key(payload, None)
         key2 = _derive_prompt_cache_key(payload, None)
 
@@ -203,7 +266,7 @@ class TestDerivePromptCacheKey:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="sys",
-            input=[{"role": "user", "content": "hello"}],
+            input=_json_value([{"role": "user", "content": "hello"}]),
         )
         api_key = _make_api_key()
         keys = {_derive_prompt_cache_key(payload, api_key) for _ in range(10)}
@@ -219,7 +282,7 @@ class TestDerivePromptCacheKey:
         payload = ResponsesRequest(
             model="gpt-5.4",
             instructions="instructions here",
-            input=[{"role": "user", "content": "hello"}],
+            input=_json_value([{"role": "user", "content": "hello"}]),
         )
         key = _derive_prompt_cache_key(payload, _make_api_key(id="ak_12345678ABCD"))
         parts = key.split("-")

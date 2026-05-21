@@ -372,6 +372,56 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_singleflight", "workspace_force_probe_singleflight")
+    stale_started = asyncio.Event()
+    release_stale = asyncio.Event()
+
+    async def stale_refresh(
+        refresh_account: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        assert refresh_account is account
+        assert usage_account_id == account.chatgpt_account_id
+        assert interval_seconds > 0
+        stale_started.set()
+        await release_stale.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    force_refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account_if_stale", stale_refresh)
+    monkeypatch.setattr(updater, "_refresh_account", force_refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    stale_task = asyncio.create_task(updater.refresh_accounts([account], latest_usage={}))
+    await stale_started.wait()
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is True
+    force_refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    sync_account.assert_awaited_once_with(account)
+
+    release_stale.set()
+    assert await stale_task is False
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
     from app.core.config.settings import get_settings

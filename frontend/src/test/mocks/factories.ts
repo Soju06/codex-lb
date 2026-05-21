@@ -398,6 +398,7 @@ export function createDashboardSettings(
 		relativeAvailabilityTopK: 5,
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
+		warmupModel: "gpt-5.4-mini",
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,

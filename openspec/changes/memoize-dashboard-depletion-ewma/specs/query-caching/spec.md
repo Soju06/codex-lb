@@ -9,6 +9,7 @@
 - **THEN** the service MUST reuse the cached EWMA state for that account instead of replaying every history row
 - **AND** the depletion metrics for that account MUST match the previously returned values for rate-bearing fields
 - **AND** the cache hit check MUST use bounded signature metadata rather than building or retaining a per-row signature tuple
+- **AND** the service MUST prune cached depletion state for account/window keys that are absent from the current dashboard history set
 
 #### Scenario: Memoized EWMA state is invalidated when a new usage row is appended
 - **WHEN** a later dashboard request supplies the same account's in-window history with an additional row appended (a new `recorded_at` past the previous latest)

@@ -32,6 +32,7 @@ from app.modules.usage.depletion_service import (
     compute_aggregate_depletion,
     compute_depletion_for_account,
     filter_depletion_history_since,
+    prune_depletion_cache,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -247,6 +248,8 @@ def _build_depletion_by_window(
     now,
 ) -> tuple[DepletionResponse | None, DepletionResponse | None]:
     """Compute depletion independently per window."""
+    active_cache_keys = {(account_id, "standard", "primary") for account_id in primary_history}
+    active_cache_keys.update((account_id, "standard", "secondary") for account_id in secondary_history)
 
     def _aggregate(history: dict[str, list[UsageHistory]], window: str) -> DepletionResponse | None:
         metrics = []
@@ -271,7 +274,10 @@ def _build_depletion_by_window(
             seconds_until_exhaustion=agg.seconds_until_exhaustion,
         )
 
-    return _aggregate(primary_history, "primary"), _aggregate(secondary_history, "secondary")
+    primary_depletion = _aggregate(primary_history, "primary")
+    secondary_depletion = _aggregate(secondary_history, "secondary")
+    prune_depletion_cache(active_cache_keys)
+    return primary_depletion, secondary_depletion
 
 
 def _rows_from_latest(latest: dict[str, UsageHistory]) -> list[UsageWindowRow]:

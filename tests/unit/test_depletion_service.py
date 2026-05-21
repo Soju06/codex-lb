@@ -10,6 +10,7 @@ from app.modules.usage.depletion_service import (
     attach_depletion_history_signature,
     compute_aggregate_depletion,
     compute_depletion_for_account,
+    prune_depletion_cache,
     reset_ewma_state,
 )
 
@@ -289,11 +290,13 @@ def test_repeated_call_with_unchanged_history_skips_rebuild(monkeypatch: pytest.
     from app.modules.usage import depletion_service
 
     reset_ewma_state()
-    history = _signed([
-        _entry(10.0, BASE_TIME),
-        _entry(20.0, BASE_TIME + timedelta(minutes=1)),
-        _entry(30.0, BASE_TIME + timedelta(minutes=2)),
-    ])
+    history = _signed(
+        [
+            _entry(10.0, BASE_TIME),
+            _entry(20.0, BASE_TIME + timedelta(minutes=1)),
+            _entry(30.0, BASE_TIME + timedelta(minutes=2)),
+        ]
+    )
     now = BASE_TIME + timedelta(minutes=3)
 
     rebuild_calls = 0
@@ -335,16 +338,75 @@ def test_repeated_call_with_unchanged_history_skips_rebuild(monkeypatch: pytest.
     assert digest_rebuild_calls == 0
 
 
+def test_signature_cache_stores_compact_digest_not_per_row_tuple() -> None:
+    """The retained cache signature should stay bounded for large histories."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    history = _signed([_entry(float(index), BASE_TIME + timedelta(minutes=index)) for index in range(100)])
+
+    result = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", history, now=BASE_TIME + timedelta(minutes=101)
+    )
+
+    assert result is not None
+    signature = depletion_service._history_signatures[("acc1", "codex_other", "primary")]
+    assert signature.row_count == 100
+    assert isinstance(signature.content_digest, str)
+    assert len(signature.content_digest) == 32
+
+
+def test_prune_depletion_cache_drops_absent_account_window_entries() -> None:
+    """Dashboard lifecycle pruning prevents churned account/window keys from
+    accumulating in the EWMA and signature caches."""
+    from app.modules.usage import depletion_service
+
+    reset_ewma_state()
+    primary_history = _signed(
+        [
+            _entry(10.0, BASE_TIME, account_id="acc1"),
+            _entry(20.0, BASE_TIME + timedelta(minutes=1), account_id="acc1"),
+        ]
+    )
+    secondary_history = _signed(
+        [
+            _entry(30.0, BASE_TIME, account_id="acc2"),
+            _entry(40.0, BASE_TIME + timedelta(minutes=1), account_id="acc2"),
+        ]
+    )
+
+    primary = compute_depletion_for_account(
+        "acc1", "codex_other", "primary", primary_history, now=BASE_TIME + timedelta(minutes=2)
+    )
+    secondary = compute_depletion_for_account(
+        "acc2", "codex_other", "secondary", secondary_history, now=BASE_TIME + timedelta(minutes=2)
+    )
+
+    assert primary is not None
+    assert secondary is not None
+    assert set(depletion_service._history_signatures) == {
+        ("acc1", "codex_other", "primary"),
+        ("acc2", "codex_other", "secondary"),
+    }
+
+    prune_depletion_cache({("acc1", "codex_other", "primary")})
+
+    assert set(depletion_service._history_signatures) == {("acc1", "codex_other", "primary")}
+    assert set(depletion_service._ewma_states) == {("acc1", "codex_other", "primary")}
+
+
 def test_new_history_row_invalidates_memoized_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """When a new usage row lands the cache must rebuild so the rate reflects
     the latest observations."""
     from app.modules.usage import depletion_service
 
     reset_ewma_state()
-    history = _signed([
-        _entry(10.0, BASE_TIME),
-        _entry(15.0, BASE_TIME + timedelta(minutes=1)),
-    ])
+    history = _signed(
+        [
+            _entry(10.0, BASE_TIME),
+            _entry(15.0, BASE_TIME + timedelta(minutes=1)),
+        ]
+    )
 
     rebuild_calls = 0
     real_rebuild = depletion_service._rebuild_ewma_state
@@ -380,11 +442,13 @@ def test_aged_out_row_invalidates_memoized_state(monkeypatch: pytest.MonkeyPatch
     from app.modules.usage import depletion_service
 
     reset_ewma_state()
-    full_history = _signed([
-        _entry(10.0, BASE_TIME),
-        _entry(70.0, BASE_TIME + timedelta(minutes=1)),
-        _entry(80.0, BASE_TIME + timedelta(minutes=2)),
-    ])
+    full_history = _signed(
+        [
+            _entry(10.0, BASE_TIME),
+            _entry(70.0, BASE_TIME + timedelta(minutes=1)),
+            _entry(80.0, BASE_TIME + timedelta(minutes=2)),
+        ]
+    )
 
     rebuild_calls = 0
     real_rebuild = depletion_service._rebuild_ewma_state
@@ -420,11 +484,13 @@ def test_inplace_value_correction_invalidates_memoized_state(
     from app.modules.usage import depletion_service
 
     reset_ewma_state()
-    history = _signed([
-        _entry(10.0, BASE_TIME),
-        _entry(20.0, BASE_TIME + timedelta(minutes=1)),
-        _entry(30.0, BASE_TIME + timedelta(minutes=2)),
-    ])
+    history = _signed(
+        [
+            _entry(10.0, BASE_TIME),
+            _entry(20.0, BASE_TIME + timedelta(minutes=1)),
+            _entry(30.0, BASE_TIME + timedelta(minutes=2)),
+        ]
+    )
     now = BASE_TIME + timedelta(minutes=3)
 
     rebuild_calls = 0
@@ -446,14 +512,14 @@ def test_inplace_value_correction_invalidates_memoized_state(
     # the corrected series remains monotonically non-decreasing. Window-
     # endpoint-only signatures would treat this as unchanged and reuse the
     # stale EWMA state.
-    corrected_history = _signed([
-        history[0],
-        _entry(25.0, BASE_TIME + timedelta(minutes=1)),
-        history[2],
-    ])
-    second = compute_depletion_for_account(
-        "acc1", "codex_other", "primary", corrected_history, now=now
+    corrected_history = _signed(
+        [
+            history[0],
+            _entry(25.0, BASE_TIME + timedelta(minutes=1)),
+            history[2],
+        ]
     )
+    second = compute_depletion_for_account("acc1", "codex_other", "primary", corrected_history, now=now)
     assert second is not None
     assert rebuild_calls == 2
     # Rate must reflect the correction, not the stale cached state.
@@ -469,11 +535,13 @@ def test_inplace_reset_at_correction_invalidates_memoized_state(
 
     reset_ewma_state()
     reset_epoch = int((BASE_TIME + timedelta(minutes=30)).timestamp())
-    history = _signed([
-        _entry(10.0, BASE_TIME, reset_at=reset_epoch, window_minutes=60),
-        _entry(20.0, BASE_TIME + timedelta(minutes=1), reset_at=reset_epoch, window_minutes=60),
-        _entry(30.0, BASE_TIME + timedelta(minutes=2), reset_at=reset_epoch, window_minutes=60),
-    ])
+    history = _signed(
+        [
+            _entry(10.0, BASE_TIME, reset_at=reset_epoch, window_minutes=60),
+            _entry(20.0, BASE_TIME + timedelta(minutes=1), reset_at=reset_epoch, window_minutes=60),
+            _entry(30.0, BASE_TIME + timedelta(minutes=2), reset_at=reset_epoch, window_minutes=60),
+        ]
+    )
     now = BASE_TIME + timedelta(minutes=3)
 
     rebuild_calls = 0
@@ -494,13 +562,10 @@ def test_inplace_reset_at_correction_invalidates_memoized_state(
     # (per-row consistency keeps ewma_update from treating it as a mid-stream
     # window change and dropping the rate).
     extended_reset = int((BASE_TIME + timedelta(minutes=90)).timestamp())
-    corrected_history = _signed([
-        _entry(e.used_percent, e.recorded_at, reset_at=extended_reset, window_minutes=60)
-        for e in history
-    ])
-    second = compute_depletion_for_account(
-        "acc1", "codex_other", "primary", corrected_history, now=now
+    corrected_history = _signed(
+        [_entry(e.used_percent, e.recorded_at, reset_at=extended_reset, window_minutes=60) for e in history]
     )
+    second = compute_depletion_for_account("acc1", "codex_other", "primary", corrected_history, now=now)
     assert second is not None
     assert rebuild_calls == 2
     # Extending reset_at lengthens seconds_until_reset which lowers the

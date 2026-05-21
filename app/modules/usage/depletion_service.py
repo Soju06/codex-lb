@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import blake2b
+from typing import TypeAlias
 
 from app.core.usage.depletion import (
     EWMAState,
@@ -16,7 +17,7 @@ from app.core.usage.depletion import (
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 
 # Per-account cache key: (account_id, limit_name, window).
-_StateKey = tuple[str, str, str]
+_StateKey: TypeAlias = tuple[str, str, str]
 _RowEdgeSignature = tuple[int | None, datetime, float, float | None, int | None]
 
 
@@ -32,6 +33,7 @@ class _SignedHistory(list):
     def __init__(self, rows: Iterable, signature: _HistorySignature) -> None:
         super().__init__(rows)
         self.depletion_history_signature = signature
+
 
 # In-memory EWMA state: keyed by (account_id, limit_name, window)
 # Persists across requests; resets on process restart.
@@ -189,6 +191,15 @@ def reset_ewma_state() -> None:
     """Clear all in-memory EWMA state. Used for testing."""
     _ewma_states.clear()
     _history_signatures.clear()
+
+
+def prune_depletion_cache(active_keys: Iterable[tuple[str, str, str]]) -> None:
+    """Drop EWMA/signature cache entries outside the current account/window set."""
+    keep = set(active_keys)
+    for key in set(_ewma_states) | set(_history_signatures):
+        if key not in keep:
+            _ewma_states.pop(key, None)
+            _history_signatures.pop(key, None)
 
 
 def _rebuild_ewma_state(history: list) -> EWMAState | None:

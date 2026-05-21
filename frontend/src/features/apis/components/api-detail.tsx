@@ -145,7 +145,7 @@ export function ApiDetail({
 					data-testid="api-usage-panel"
 				>
 					{hasDonutData && (
-						<div className="lg:w-[25%] lg:shrink-0 lg:pr-4">
+						<div className={hasTrends ? "lg:w-[25%] lg:shrink-0 lg:pr-4" : "lg:w-full"}>
 							<AccountCostDonut
 								accountCosts={usage7Day.accountCosts}
 								totalCostUsd={usage7Day.totalCostUsd}
@@ -178,9 +178,10 @@ export function ApiDetail({
 										</span>
 									</div>
 									<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
-										<span className="text-[10px]">Accumulated</span>
+										<span id="api-trend-accumulated-label" className="text-[10px]">Accumulated</span>
 										<Switch
 											size="sm"
+											aria-labelledby="api-trend-accumulated-label"
 											checked={showAccumulated}
 											onCheckedChange={setShowAccumulated}
 										/>

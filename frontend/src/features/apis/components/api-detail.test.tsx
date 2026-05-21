@@ -146,6 +146,31 @@ describe("ApiDetail", () => {
 		expect(screen.queryByText("Usage Trend")).not.toBeInTheDocument();
 	});
 
+	it("lets the donut use the full usage panel width when no trend data is available", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({ cost: [], tokens: [] }),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const donutWrapper = screen.getByTestId("account-cost-panel").parentElement;
+		expect(donutWrapper).not.toHaveClass("lg:w-[25%]");
+		expect(donutWrapper).not.toHaveClass("lg:pr-4");
+	});
+
+	it("names the accumulated trend switch for assistive technology", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.12 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1200 }],
+			}),
+		});
+
+		expect(screen.getByRole("switch", { name: "Accumulated" })).toBeInTheDocument();
+	});
+
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {
 		renderApiDetail({
 			apiKey: createApiKey({

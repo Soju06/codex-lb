@@ -1,8 +1,9 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { createApiKeyUsage7Day } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 
 import { AccountCostDonut } from "./account-cost-donut";
 
@@ -83,6 +84,25 @@ describe("AccountCostDonut", () => {
 
 		expect(screen.queryByTestId("account-cost-total")).not.toBeInTheDocument();
 		expect(screen.getByTestId("account-cost-legend-list")).toHaveClass("w-full");
+	});
+
+	it("blurs active account labels but not deleted account labels in privacy mode", () => {
+		act(() => usePrivacyStore.setState({ blurred: true }));
+		const usage = createApiKeyUsage7Day({
+			totalCostUsd: 0.75,
+			accountCosts: [
+				{ accountId: "acc-1", email: "a@example.com", costUsd: 0.45, isDeleted: false },
+				{ accountId: null, email: null, costUsd: 0.3, isDeleted: true },
+			],
+		});
+
+		renderWithProviders(
+			<AccountCostDonut accountCosts={usage.accountCosts} totalCostUsd={usage.totalCostUsd} />,
+		);
+
+		expect(screen.getByText("a@example.com")).toHaveClass("privacy-blur");
+		expect(screen.getByText("Deleted Account")).not.toHaveClass("privacy-blur");
+		act(() => usePrivacyStore.setState({ blurred: false }));
 	});
 
 	it("scrolls the hovered pie item into view in the legend list", async () => {

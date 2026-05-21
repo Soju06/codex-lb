@@ -261,6 +261,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
 
+
 def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
     app_instance,
     monkeypatch,

@@ -231,6 +231,7 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
 
     assert payload.service_tier == "priority"
 
+
 def _service_tier_enforcement_key(enforced: str) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id="key_default",

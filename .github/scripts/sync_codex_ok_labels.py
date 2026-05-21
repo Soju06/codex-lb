@@ -733,18 +733,70 @@ def unresolved_codex_finding_thread_urls(
     return tuple(urls)
 
 
-def ensure_label(repo: str, label: str, *, color: str, description: str, apply: bool) -> None:
+def is_github_app_write_denial(exc: BaseException) -> bool:
+    """Return True when GitHub rejected a write from the current token."""
+
+    text = str(exc)
+    return "Resource not accessible by integration" in text and "HTTP 403" in text
+
+
+def write_warning(action: str, exc: BaseException) -> str:
+    return f"{action}: skipped because the GitHub token cannot write this resource ({exc})"
+
+
+def gh_api_write(
+    path: str,
+    *,
+    method: str = "GET",
+    input_json: Any | None = None,
+    tolerate_permission_errors: bool,
+    action: str,
+) -> str | None:
+    try:
+        gh_api(path, method=method, input_json=input_json)
+    except GhError as exc:
+        if tolerate_permission_errors and is_github_app_write_denial(exc):
+            return write_warning(action, exc)
+        raise
+    return None
+
+
+def run_gh_write(
+    args: list[str],
+    *,
+    timeout_seconds: int,
+    tolerate_permission_errors: bool,
+    action: str,
+) -> str | None:
+    try:
+        run_gh(args, timeout_seconds=timeout_seconds)
+    except GhError as exc:
+        if tolerate_permission_errors and is_github_app_write_denial(exc):
+            return write_warning(action, exc)
+        raise
+    return None
+
+
+def ensure_label(
+    repo: str,
+    label: str,
+    *,
+    color: str,
+    description: str,
+    apply: bool,
+    tolerate_permission_errors: bool = False,
+) -> tuple[str, ...]:
     if not apply:
-        return
+        return ()
     try:
         gh_api(f"/repos/{repo}/labels/{quote(label, safe='')}")
-        return
+        return ()
     except GhError as exc:
         if "HTTP 404" not in str(exc):
             raise
 
     try:
-        gh_api(
+        warning = gh_api_write(
             f"/repos/{repo}/labels",
             method="POST",
             input_json={
@@ -752,10 +804,14 @@ def ensure_label(repo: str, label: str, *, color: str, description: str, apply: 
                 "color": color,
                 "description": description,
             },
+            tolerate_permission_errors=tolerate_permission_errors,
+            action=f"create label {repo}:{label}",
         )
+        return (warning,) if warning else ()
     except GhError as exc:
         if "already_exists" not in str(exc) and "already exists" not in str(exc).lower():
             raise
+    return ()
 
 
 def decide_pr(
@@ -872,38 +928,70 @@ def decide_pr(
     )
 
 
-def apply_decision(decision: SyncDecision) -> None:
+def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool = False) -> tuple[str, ...]:
+    warnings: list[str] = []
+
+    def record(warning: str | None) -> None:
+        if warning:
+            warnings.append(warning)
+
     if decision.ok_action == "add":
-        gh_api(
-            f"/repos/{decision.repo}/issues/{decision.number}/labels",
-            method="POST",
-            input_json={"labels": [CODEX_OK_LABEL]},
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels",
+                method="POST",
+                input_json={"labels": [CODEX_OK_LABEL]},
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"add {CODEX_OK_LABEL} to {decision.repo}#{decision.number}",
+            )
         )
     elif decision.ok_action == "remove":
-        gh_api(
-            f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_OK_LABEL, safe='')}",
-            method="DELETE",
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_OK_LABEL, safe='')}",
+                method="DELETE",
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"remove {CODEX_OK_LABEL} from {decision.repo}#{decision.number}",
+            )
         )
     if decision.needs_work_action == "add":
-        gh_api(
-            f"/repos/{decision.repo}/issues/{decision.number}/labels",
-            method="POST",
-            input_json={"labels": [CODEX_NEEDS_WORK_LABEL]},
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels",
+                method="POST",
+                input_json={"labels": [CODEX_NEEDS_WORK_LABEL]},
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"add {CODEX_NEEDS_WORK_LABEL} to {decision.repo}#{decision.number}",
+            )
         )
     elif decision.needs_work_action == "remove":
-        gh_api(
-            f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_NEEDS_WORK_LABEL, safe='')}",
-            method="DELETE",
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_NEEDS_WORK_LABEL, safe='')}",
+                method="DELETE",
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"remove {CODEX_NEEDS_WORK_LABEL} from {decision.repo}#{decision.number}",
+            )
         )
     for label in decision.legacy_labels:
-        gh_api(
-            f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(label, safe='')}",
-            method="DELETE",
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(label, safe='')}",
+                method="DELETE",
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"remove legacy {label} from {decision.repo}#{decision.number}",
+            )
         )
+    return tuple(warnings)
 
 
-def trigger_codex_review(decision: SyncDecision, *, body: str) -> None:
-    run_gh(
+def trigger_codex_review(
+    decision: SyncDecision,
+    *,
+    body: str,
+    tolerate_permission_errors: bool = False,
+) -> tuple[str, ...]:
+    warning = run_gh_write(
         [
             "api",
             "--method",
@@ -913,12 +1001,28 @@ def trigger_codex_review(decision: SyncDecision, *, body: str) -> None:
             f"body={body}",
         ],
         timeout_seconds=30,
+        tolerate_permission_errors=tolerate_permission_errors,
+        action=f"request Codex review on {decision.repo}#{decision.number}",
     )
+    return (warning,) if warning else ()
 
 
-def approve_workflow_runs(decision: SyncDecision) -> None:
+def approve_workflow_runs(
+    decision: SyncDecision,
+    *,
+    tolerate_permission_errors: bool = False,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
     for run_id in decision.approve_workflow_run_ids:
-        gh_api(f"/repos/{decision.repo}/actions/runs/{run_id}/approve", method="POST")
+        warning = gh_api_write(
+            f"/repos/{decision.repo}/actions/runs/{run_id}/approve",
+            method="POST",
+            tolerate_permission_errors=tolerate_permission_errors,
+            action=f"approve workflow run {run_id} for {decision.repo}#{decision.number}",
+        )
+        if warning:
+            warnings.append(warning)
+    return tuple(warnings)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -953,6 +1057,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Ignore current-head CI state when deciding the ok label. Normally do not use this.",
     )
     parser.add_argument(
+        "--tolerate-write-permission-errors",
+        action="store_true",
+        help=(
+            "Log and continue when GitHub returns Resource not accessible by integration "
+            "for label/comment/approval writes. Read/classification errors still fail."
+        ),
+    )
+    parser.add_argument(
         "--reviewer-login",
         action="append",
         default=[],
@@ -968,20 +1080,29 @@ def main(argv: list[str] | None = None) -> int:
     had_error = False
 
     for repo in repos:
-        ensure_label(
-            repo,
-            CODEX_OK_LABEL,
-            color="0e8a16",
-            description="Current PR head has green CI and a clean Codex review",
-            apply=args.apply,
+        setup_warnings: list[str] = []
+        setup_warnings.extend(
+            ensure_label(
+                repo,
+                CODEX_OK_LABEL,
+                color="0e8a16",
+                description="Current PR head has green CI and a clean Codex review",
+                apply=args.apply,
+                tolerate_permission_errors=args.tolerate_write_permission_errors,
+            )
         )
-        ensure_label(
-            repo,
-            CODEX_NEEDS_WORK_LABEL,
-            color="d93f0b",
-            description="Codex raised issues on the current PR head that still need work",
-            apply=args.apply,
+        setup_warnings.extend(
+            ensure_label(
+                repo,
+                CODEX_NEEDS_WORK_LABEL,
+                color="d93f0b",
+                description="Codex raised issues on the current PR head that still need work",
+                apply=args.apply,
+                tolerate_permission_errors=args.tolerate_write_permission_errors,
+            )
         )
+        for warning in setup_warnings:
+            print(f"warning: {warning}", file=sys.stderr, flush=True)
         numbers = list_open_pr_numbers(repo) if args.all_open else list(args.pr or [])
         if not numbers:
             print(f"{repo}: no PRs selected; pass --pr or --all-open", file=sys.stderr)
@@ -996,12 +1117,31 @@ def main(argv: list[str] | None = None) -> int:
                     allowed_authors=allowed_authors,
                     ignore_checks=args.ignore_checks,
                 )
+                write_warnings: tuple[str, ...] = ()
                 if args.apply:
-                    apply_decision(decision)
+                    accumulated_warnings: list[str] = []
+                    accumulated_warnings.extend(
+                        apply_decision(
+                            decision,
+                            tolerate_permission_errors=args.tolerate_write_permission_errors,
+                        )
+                    )
                     if decision.approve_workflow_run_ids and not args.no_approve_workflow_runs:
-                        approve_workflow_runs(decision)
+                        accumulated_warnings.extend(
+                            approve_workflow_runs(
+                                decision,
+                                tolerate_permission_errors=args.tolerate_write_permission_errors,
+                            )
+                        )
                     if decision.trigger_codex_review and not args.no_trigger_missing_codex:
-                        trigger_codex_review(decision, body=args.codex_review_command)
+                        accumulated_warnings.extend(
+                            trigger_codex_review(
+                                decision,
+                                body=args.codex_review_command,
+                                tolerate_permission_errors=args.tolerate_write_permission_errors,
+                            )
+                        )
+                    write_warnings = tuple(accumulated_warnings)
                 mode = "apply" if args.apply else "dry-run"
                 print(
                     f"{mode} {repo}#{number}: "
@@ -1018,6 +1158,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if decision.review_url:
                     print(f"  review_url={decision.review_url}", flush=True)
+                for warning in write_warnings:
+                    print(f"  write_warning={warning}", flush=True)
             except Exception as exc:  # noqa: BLE001
                 had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)

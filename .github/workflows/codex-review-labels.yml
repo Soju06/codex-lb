@@ -43,7 +43,7 @@ jobs:
 
       - name: Sync labels
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -51,7 +51,7 @@ jobs:
             echo ".github/scripts/sync_codex_ok_labels.py is not available on the default branch yet; skipping bootstrap run"
             exit 0
           fi
-          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --pr "$PR_NUMBER" --apply
+          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --pr "$PR_NUMBER" --apply --tolerate-write-permission-errors
 
   sync-after-ci:
     name: Sync Codex labels after CI
@@ -71,11 +71,11 @@ jobs:
 
       - name: Sync labels
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
           REPO: ${{ github.repository }}
         run: |
           if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then
             echo ".github/scripts/sync_codex_ok_labels.py is not available on the default branch yet; skipping bootstrap run"
             exit 0
           fi
-          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --all-open --apply
+          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --all-open --apply --tolerate-write-permission-errors

@@ -227,12 +227,45 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
 }
 
 
-def _is_openai_sdk_request(request: Request) -> bool:
+_OPENAI_CLIENT_HEADER_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "openai-organization",
+        "openai-project",
+        "openai-version",
+    }
+)
+
+
+def _accepts_event_stream(request: Request) -> bool:
+    for value in request.headers.getlist("accept"):
+        media_ranges = (part.split(";", 1)[0].strip().lower() for part in value.split(","))
+        if "text/event-stream" in media_ranges:
+            return True
+    return False
+
+
+def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
+    explicit_fields = payload.model_fields_set
+    return (
+        isinstance(payload.input, str)
+        or payload.messages is not None
+        or "instructions" not in explicit_fields
+        or "conversation" in explicit_fields
+        or "truncation" in explicit_fields
+    )
+
+
+def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None = None) -> bool:
     for header_name in request.headers:
-        if header_name.lower().startswith("x-stainless-"):
+        normalized_header = header_name.lower()
+        if normalized_header.startswith("x-stainless-") or normalized_header in _OPENAI_CLIENT_HEADER_NAMES:
             return True
     user_agent = request.headers.get("user-agent", "").lower()
-    return "openai" in user_agent
+    if "openai" in user_agent:
+        return True
+    if payload is None or not _has_openai_responses_shape(payload):
+        return False
+    return _accepts_event_stream(request) or isinstance(payload.input, str) or payload.messages is not None
 
 
 async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
@@ -432,7 +465,7 @@ async def responses(
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
-        enforce_openai_sdk_contract=_is_openai_sdk_request(request),
+        enforce_openai_sdk_contract=_is_openai_sdk_request(request, payload),
     )
 
 

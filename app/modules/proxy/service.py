@@ -3169,7 +3169,8 @@ class ProxyService:
                 if account.id not in eligible_ids
             )
 
-        configured_model = get_settings().warmup_model
+        dashboard_settings = await get_settings_cache().get()
+        configured_model = dashboard_settings.warmup_model
         effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
         validate_model_access(api_key, effective_model)
         filtered_headers = filter_inbound_headers(headers)
@@ -3284,6 +3285,12 @@ class ProxyService:
             )
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+            )
+            await self._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=reservation,
+                response=response,
+                request_service_tier=None,
             )
         except RefreshError as exc:
             if exc.is_permanent:

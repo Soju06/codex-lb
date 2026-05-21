@@ -386,6 +386,11 @@ class DashboardSettings(Base):
         Float,
         default=100.0,
         server_default=text("100.0"),
+    )
+    warmup_model: Mapped[str] = mapped_column(
+        String,
+        default="gpt-5.4-mini",
+        server_default=text("'gpt-5.4-mini'"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

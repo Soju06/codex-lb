@@ -39,6 +39,14 @@ def upgrade() -> None:
             with op.batch_alter_table("request_logs") as batch_op:
                 batch_op.alter_column("request_kind", existing_type=sa.String(), nullable=False)
 
+    if inspector.has_table("dashboard_settings"):
+        dashboard_columns = {column["name"] for column in inspector.get_columns("dashboard_settings")}
+        if "warmup_model" not in dashboard_columns:
+            with op.batch_alter_table("dashboard_settings") as batch_op:
+                batch_op.add_column(
+                    sa.Column("warmup_model", sa.String(), nullable=False, server_default=sa.text("'gpt-5.4-mini'"))
+                )
+
 
 def downgrade() -> None:
     bind = op.get_bind()
@@ -49,3 +57,9 @@ def downgrade() -> None:
         if "request_kind" in request_log_columns:
             with op.batch_alter_table("request_logs") as batch_op:
                 batch_op.drop_column("request_kind")
+
+    if inspector.has_table("dashboard_settings"):
+        dashboard_columns = {column["name"] for column in inspector.get_columns("dashboard_settings")}
+        if "warmup_model" in dashboard_columns:
+            with op.batch_alter_table("dashboard_settings") as batch_op:
+                batch_op.drop_column("warmup_model")

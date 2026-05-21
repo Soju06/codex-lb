@@ -132,14 +132,28 @@ def _set_warmup_model_env(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
 
 @pytest.mark.asyncio
 async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
+    _set_warmup_model_env(monkeypatch, "gpt-5.4-env-ignored")
     await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
     eligible_id = await _import_account(async_client, "acc-warmup-eligible", "warmup-eligible@example.com")
     ineligible_id = await _import_account(async_client, "acc-warmup-ineligible", "warmup-ineligible@example.com")
     await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
     await _add_primary_usage(ineligible_id, used_percent=11.0, window_minutes=300)
 
-    _, key = await _create_api_key(async_client, name="warmup-normal")
+    key_id, key = await _create_api_key(
+        async_client,
+        name="warmup-normal",
+        limits=[{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 10}],
+    )
     captured_models: list[str] = []
     _install_successful_warmup_stub(monkeypatch, captured_models)
 
@@ -162,15 +176,31 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
 
     async with SessionLocal() as session:
         rows = (await session.execute(select(RequestLog).order_by(RequestLog.id.asc()))).scalars().all()
+        limit = (
+            await session.execute(
+                select(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id, ApiKeyLimit.limit_type == "total_tokens")
+            )
+        ).scalar_one()
     assert len(rows) == 1
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
+    assert limit.current_value == 2
 
 
 @pytest.mark.asyncio
 async def test_warmup_mode_path_route_runs_without_request_body(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
     eligible_id = await _import_account(async_client, "acc-warmup-path-mode", "warmup-path-mode@example.com")
     await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
 
@@ -256,6 +286,16 @@ async def test_warmup_respects_api_key_account_scope(async_client, monkeypatch):
 async def test_warmup_rejects_disallowed_model_without_upstream_calls(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
     eligible_id = await _import_account(async_client, "acc-warmup-disallowed", "warmup-disallowed@example.com")
     await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
 
@@ -297,17 +337,13 @@ async def test_warmup_enforces_api_key_limits_before_upstream_calls(async_client
         limits=[
             {
                 "limitType": "total_tokens",
-                    "limitWindow": "daily",
-                    "maxValue": 1,
+                "limitWindow": "daily",
+                "maxValue": 1,
             }
         ],
     )
     async with SessionLocal() as session:
-        await session.execute(
-            update(ApiKeyLimit)
-            .where(ApiKeyLimit.api_key_id == key_id)
-            .values(current_value=1)
-        )
+        await session.execute(update(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id).values(current_value=1))
         await session.commit()
     called = False
 

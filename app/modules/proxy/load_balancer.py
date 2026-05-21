@@ -1000,20 +1000,13 @@ class LoadBalancer:
                             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                             apply_secondary_budget_threshold=True,
                         )
-                        pool_exhausted = (
-                            _state_above_budget_threshold
-                            if _state_above_budget_threshold(pinned, budget_threshold_pct)
-                            else (
-                                lambda state, _: _state_above_sticky_budget_threshold(
-                                    state,
-                                    budget_threshold_pct,
-                                    secondary_budget_threshold_pct,
-                                )
-                            )
-                        )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
-                            or pool_exhausted(pool_best.account, budget_threshold_pct)
+                            or _state_above_sticky_budget_threshold(
+                                pool_best.account,
+                                budget_threshold_pct,
+                                secondary_budget_threshold_pct,
+                            )
                         )
                         if pool_also_exhausted:
                             pinned_result = select_account(

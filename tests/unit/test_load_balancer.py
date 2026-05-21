@@ -4,6 +4,7 @@ import random
 import time
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -15,7 +16,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.usage.quota import apply_usage_quota
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.proxy.load_balancer import (
     LoadBalancer,
     RuntimeState,
@@ -1318,6 +1319,62 @@ async def test_non_sticky_selection_applies_split_secondary_threshold(monkeypatc
 
     assert result.account is not None
     assert result.account.id == "secondary-safe"
+
+
+@pytest.mark.asyncio
+async def test_sticky_pool_exhaustion_uses_split_secondary_threshold():
+    class StickyRepo:
+        def __init__(self) -> None:
+            self.deleted: list[tuple[str, StickySessionKind]] = []
+            self.upserts: list[tuple[str, str, StickySessionKind]] = []
+
+        async def get_account_id(
+            self,
+            key: str,
+            *,
+            kind: StickySessionKind,
+            max_age_seconds: int | None,
+        ) -> str:
+            assert key == "thread-1"
+            assert kind == StickySessionKind.STICKY_THREAD
+            assert max_age_seconds is None
+            return "pinned"
+
+        async def delete(self, key: str, *, kind: StickySessionKind) -> None:
+            self.deleted.append((key, kind))
+
+        async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> None:
+            self.upserts.append((key, account_id, kind))
+
+    pinned = _make_test_account("pinned")
+    secondary_over = _make_test_account("secondary-over")
+    sticky_repo = StickyRepo()
+    balancer = LoadBalancer(repo_factory=cast(Any, lambda: None))
+
+    result = await balancer._select_with_stickiness(
+        states=[
+            AccountState("pinned", AccountStatus.ACTIVE, used_percent=96.0, secondary_used_percent=10.0),
+            AccountState("secondary-over", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=90.0),
+        ],
+        account_map={
+            pinned.id: pinned,
+            secondary_over.id: secondary_over,
+        },
+        sticky_key="thread-1",
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=80.0,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        sticky_repo=cast(Any, sticky_repo),
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "pinned"
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

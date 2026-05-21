@@ -420,7 +420,7 @@ Backup this directory to preserve your data.
 
 ## Troubleshooting
 
-- [Usage and quota — why does codex-lb still say `rate_limited` when Codex Desktop says reset?](docs/troubleshooting/usage-and-quota.md)
+- [Usage and quota - why does codex-lb still say `rate_limited` when Codex Desktop says reset?](openspec/specs/usage-refresh-policy/context.md)
 
 ## Kubernetes
 

@@ -1049,20 +1049,10 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
-    credits_has = (
-        primary_entry.credits_has
-        if primary_entry and primary_entry.credits_has is not None
-        else (effective_secondary_entry.credits_has if effective_secondary_entry else None)
-    )
-    credits_unlimited = (
-        primary_entry.credits_unlimited
-        if primary_entry and primary_entry.credits_unlimited is not None
-        else (effective_secondary_entry.credits_unlimited if effective_secondary_entry else None)
-    )
-    credits_balance = (
-        primary_entry.credits_balance
-        if primary_entry and primary_entry.credits_balance is not None
-        else (effective_secondary_entry.credits_balance if effective_secondary_entry else None)
+    credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+        primary_entry,
+        effective_secondary_entry,
+        secondary_entry,
     )
 
     # If the usage window has reset (reset_at is in the past) but the last
@@ -1277,6 +1267,26 @@ def _usage_entry_recorded_after_block(entry: UsageHistory | None, blocked_at: fl
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=timezone.utc)
     return recorded_at.timestamp() > blocked_at
+
+
+def _extract_credit_status(
+    *entries: UsageHistory | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    credit_entries = [
+        entry
+        for entry in entries
+        if entry is not None
+        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
+    ]
+    if not credit_entries:
+        return None, None, None
+    entry = max(
+        credit_entries,
+        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
+    )
+    if entry is not None:
+        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
+    return None, None, None
 
 
 def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:

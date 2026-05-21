@@ -19,6 +19,7 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
     RuntimeState,
     _additional_quota_applies_to_plan,
+    _extract_credit_status,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -527,6 +528,10 @@ def _make_test_usage(
     used_percent: float = 10.0,
     reset_at: int | None = None,
     recorded_at: datetime | None = None,
+    window_minutes: int | None = 10080,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
 ) -> UsageHistory:
     return UsageHistory(
         id=1,
@@ -535,7 +540,10 @@ def _make_test_usage(
         window=window,
         used_percent=used_percent,
         reset_at=reset_at,
-        window_minutes=10080,
+        window_minutes=window_minutes,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
 
@@ -636,6 +644,85 @@ def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_
         runtime=RuntimeState(),
     )
     assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_preserves_credits_when_weekly_primary_replaces_secondary(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    weekly_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 7200),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=10080,
+    )
+    previous_secondary_with_credits = _make_test_usage(
+        window="secondary",
+        used_percent=95.0,
+        reset_at=int(now + 5400),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10080,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=1.0,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=weekly_primary,
+        secondary_entry=previous_secondary_with_credits,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+    assert state.secondary_used_percent == 100.0
+
+
+def test_state_from_account_uses_freshest_credit_snapshot(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    stale_primary_with_credits = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=10.0,
+    )
+    fresh_secondary_without_credits = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=stale_primary_with_credits,
+        secondary_entry=fresh_secondary_without_credits,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert _extract_credit_status(stale_primary_with_credits, fresh_secondary_without_credits) == (
+        False,
+        False,
+        0.0,
+    )
 
 
 def test_state_from_account_keeps_quota_exceeded_without_blocked_at_when_usage_stays_on_same_reset_window(

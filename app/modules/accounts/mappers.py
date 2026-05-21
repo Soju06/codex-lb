@@ -275,13 +275,19 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
 def _extract_credit_status(
     *entries: UsageHistory | None,
 ) -> tuple[bool | None, bool | None, float | None]:
-    for entry in entries:
-        if entry is None:
-            continue
-        if entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None:
-            continue
-        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
-    return None, None, None
+    credit_entries = [
+        entry
+        for entry in entries
+        if entry is not None
+        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
+    ]
+    if not credit_entries:
+        return None, None, None
+    entry = max(
+        credit_entries,
+        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
+    )
+    return entry.credits_has, entry.credits_unlimited, entry.credits_balance
 
 
 def build_account_usage_trends(

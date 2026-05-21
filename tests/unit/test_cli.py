@@ -45,7 +45,7 @@ def test_main_passes_custom_keep_alive_timeout(monkeypatch):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(sys, "argv", ["codex-lb", "--timeout-keep-alive", "900"])
-    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
 
     cli.main()
 
@@ -57,6 +57,14 @@ def test_main_reports_invalid_server_port_env(monkeypatch):
     monkeypatch.setenv("PORT", "not-a-port")
 
     with pytest.raises(SystemExit, match="--port/PORT must be an integer"):
+        cli.main()
+
+
+def test_main_reports_invalid_keep_alive_timeout_env(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setenv("UVICORN_TIMEOUT_KEEP_ALIVE", "not-a-timeout")
+
+    with pytest.raises(SystemExit, match="--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer"):
         cli.main()
 
 
@@ -87,6 +95,7 @@ def test_codex_sessions_retag_ignores_invalid_server_port_env(monkeypatch, capsy
     session_file.parent.mkdir(parents=True)
     session_file.write_text(json.dumps({"model_provider": "openai"}) + "\n", encoding="utf-8")
     monkeypatch.setenv("PORT", "not-a-port")
+    monkeypatch.setenv("UVICORN_TIMEOUT_KEEP_ALIVE", "not-a-timeout")
 
     cli.main(
         [

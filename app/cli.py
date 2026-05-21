@@ -61,8 +61,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
     parser.add_argument(
         "--timeout-keep-alive",
-        type=int,
-        default=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200")),
+        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200"),
         help=(
             "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
             "connections for large compact POSTs; short keepalive windows can leave the "
@@ -86,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
     port = _parse_server_port(args.port)
+    timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
     os.environ["PORT"] = str(port)
 
     _load_uvicorn().run(
@@ -94,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         port=port,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
-        timeout_keep_alive=args.timeout_keep_alive,
+        timeout_keep_alive=timeout_keep_alive,
         log_config=_build_log_config(),
     )
 
@@ -116,6 +116,14 @@ def _parse_server_port(raw_port: str) -> int:
         return int(raw_port)
     except ValueError as exc:
         raise SystemExit(f"--port/PORT must be an integer, got {raw_port!r}.") from exc
+
+
+def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
+    try:
+        return int(raw_timeout)
+    except ValueError as exc:
+        message = f"--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer, got {raw_timeout!r}."
+        raise SystemExit(message) from exc
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:

@@ -70,7 +70,8 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     limitWarmupCooldownValid;
 
   const parsedRelativeAvailabilityPower = Number.parseFloat(relativeAvailabilityPower);
-  const relativeAvailabilityPowerValid = Number.isFinite(parsedRelativeAvailabilityPower) && parsedRelativeAvailabilityPower > 0;
+  const relativeAvailabilityPowerValid =
+    Number.isFinite(parsedRelativeAvailabilityPower) && parsedRelativeAvailabilityPower > 0;
   const relativeAvailabilityPowerChanged =
     relativeAvailabilityPowerValid && parsedRelativeAvailabilityPower !== settings.relativeAvailabilityPower;
 

@@ -144,7 +144,9 @@ def build_log_config() -> LogConfig:
     # Uvicorn's stock config only wires uvicorn.* loggers. Attach the same
     # default handler to the root logger so application loggers such as
     # app.core.balancer.logic surface in docker logs at INFO.
-    handlers.setdefault("default", {"class": "logging.StreamHandler", "formatter": "default", "stream": "ext://sys.stderr"})
+    handlers.setdefault(
+        "default", {"class": "logging.StreamHandler", "formatter": "default", "stream": "ext://sys.stderr"}
+    )
     config["root"] = {
         "handlers": ["default"],
         "level": "INFO",

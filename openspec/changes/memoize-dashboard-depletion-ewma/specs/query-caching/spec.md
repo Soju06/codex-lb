@@ -1,13 +1,14 @@
 ## ADDED Requirements
 ### Requirement: Dashboard overview memoizes per-account depletion EWMA state
-`GET /api/dashboard/overview` MUST cache per-account EWMA depletion state in memory so repeated polls do not re-walk the full in-window `usage_history` slice when its content is unchanged.
+`GET /api/dashboard/overview` MUST cache per-account EWMA depletion state in memory so repeated polls do not re-walk the full in-window `usage_history` slice in the depletion cache check when its content is unchanged.
 
 #### Scenario: Repeated polls with unchanged history reuse cached EWMA state
 - **GIVEN** the dashboard service has previously computed depletion for an account
-- **AND** a subsequent request supplies the same in-window history slice for that account (same per-row `recorded_at`, `used_percent`, `reset_at`, and `window_minutes` values)
+- **AND** a subsequent request supplies the same in-window history slice for that account with the same attached compact content signature
 - **WHEN** depletion is recomputed for the dashboard response
 - **THEN** the service MUST reuse the cached EWMA state for that account instead of replaying every history row
 - **AND** the depletion metrics for that account MUST match the previously returned values for rate-bearing fields
+- **AND** the cache hit check MUST use bounded signature metadata rather than building or retaining a per-row signature tuple
 
 #### Scenario: Memoized EWMA state is invalidated when a new usage row is appended
 - **WHEN** a later dashboard request supplies the same account's in-window history with an additional row appended (a new `recorded_at` past the previous latest)

@@ -31,6 +31,7 @@ from app.modules.usage.builders import (
 from app.modules.usage.depletion_service import (
     compute_aggregate_depletion,
     compute_depletion_for_account,
+    filter_depletion_history_since,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -192,27 +193,27 @@ class DashboardService:
         for account_id in all_account_ids:
             if account_id in normalized_primary_ids:
                 cutoff = pri_cutoffs[account_id]
-                rows = [r for r in all_pri_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
                 if rows:
                     primary_history[account_id] = rows
                 if account_id in sec_cutoffs:
                     s_cutoff = sec_cutoffs[account_id]
-                    s_rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= s_cutoff]
+                    s_rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), s_cutoff)
                     if s_rows:
                         secondary_history[account_id] = s_rows
             elif account_id in weekly_only_ids:
                 source = weekly_only_history_sources[account_id]
                 if source == "primary":
                     cutoff = pri_cutoffs[account_id]
-                    rows = [r for r in all_pri_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                    rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
                 else:
                     cutoff = sec_cutoffs[account_id]
-                    rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                    rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
                 if rows:
                     secondary_history[account_id] = rows
             else:
                 cutoff = sec_cutoffs[account_id]
-                rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
                 if rows:
                     secondary_history[account_id] = rows
 

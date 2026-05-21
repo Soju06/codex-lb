@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from hashlib import blake2b
 
 from app.core.usage.depletion import (
     EWMAState,
@@ -16,16 +17,21 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 
 # Per-account cache key: (account_id, limit_name, window).
 _StateKey = tuple[str, str, str]
-# Per-row content fingerprint: timestamp + value-bearing fields. Captured
-# row-by-row so an in-place correction to `used_percent` / `reset_at` /
-# `window_minutes` on an existing row invalidates the cache even when the
-# window endpoints and row count are unchanged.
-_RowSignature = tuple[datetime, float, float | None, int | None]
-# Signature of the history slice that produced a cached EWMAState. A tuple of
-# per-row fingerprints so any change in the in-window history (new row, aged-
-# out row, replaced row, or in-place value correction) invalidates the cache
-# and forces a rebuild.
-_HistorySignature = tuple[_RowSignature, ...]
+_RowEdgeSignature = tuple[int | None, datetime, float, float | None, int | None]
+
+
+@dataclass(frozen=True)
+class _HistorySignature:
+    row_count: int
+    first: _RowEdgeSignature
+    latest: _RowEdgeSignature
+    content_digest: str | None
+
+
+class _SignedHistory(list):
+    def __init__(self, rows: Iterable, signature: _HistorySignature) -> None:
+        super().__init__(rows)
+        self.depletion_history_signature = signature
 
 # In-memory EWMA state: keyed by (account_id, limit_name, window)
 # Persists across requests; resets on process restart.
@@ -85,14 +91,10 @@ def compute_depletion_for_account(
         _ewma_states[key] = ewma_update(
             None, entry.used_percent, naive_utc_to_epoch(entry.recorded_at), reset_at=entry.reset_at
         )
-        _history_signatures[key] = (
-            (entry.recorded_at, entry.used_percent, entry.reset_at, entry.window_minutes),
-        )
+        _history_signatures[key] = _history_signature_from_edges(history)
         return None
 
-    signature: _HistorySignature = tuple(
-        (e.recorded_at, e.used_percent, e.reset_at, e.window_minutes) for e in history
-    )
+    signature = _history_signature(history)
     cached_state = _ewma_states.get(key)
     cached_signature = _history_signatures.get(key)
 
@@ -195,3 +197,89 @@ def _rebuild_ewma_state(history: list) -> EWMAState | None:
         ts = naive_utc_to_epoch(entry.recorded_at)
         state = ewma_update(state, entry.used_percent, ts, reset_at=entry.reset_at)
     return state
+
+
+def attach_depletion_history_signature(history: Iterable) -> list:
+    """Return a list carrying a compact content signature for cache checks.
+
+    Dashboard code already iterates fetched rows while grouping/filtering them;
+    attaching the digest there keeps cache-hit checks O(1) and avoids retaining
+    a tuple per history row in the module-level cache.
+    """
+    rows = list(history)
+    return _signed_history_from_rows(rows)
+
+
+def filter_depletion_history_since(history: Iterable, cutoff: datetime) -> list:
+    """Filter rows by cutoff and attach the cache signature in the same pass."""
+    rows = []
+    digest = blake2b(digest_size=16)
+    for entry in history:
+        if entry.recorded_at < cutoff:
+            continue
+        rows.append(entry)
+        _update_history_digest(digest, entry)
+    if not rows:
+        return []
+    return _SignedHistory(
+        rows,
+        _HistorySignature(
+            row_count=len(rows),
+            first=_row_edge_signature(rows[0]),
+            latest=_row_edge_signature(rows[-1]),
+            content_digest=digest.hexdigest(),
+        ),
+    )
+
+
+def _history_signature(history: list) -> _HistorySignature:
+    attached = getattr(history, "depletion_history_signature", None)
+    if isinstance(attached, _HistorySignature):
+        return attached
+    return _history_signature_from_edges(history)
+
+
+def _history_signature_from_rows(history: list) -> _HistorySignature:
+    if not history:
+        raise ValueError("history must not be empty")
+    digest = blake2b(digest_size=16)
+    for entry in history:
+        _update_history_digest(digest, entry)
+    return _HistorySignature(
+        row_count=len(history),
+        first=_row_edge_signature(history[0]),
+        latest=_row_edge_signature(history[-1]),
+        content_digest=digest.hexdigest(),
+    )
+
+
+def _signed_history_from_rows(history: list) -> list:
+    return _SignedHistory(history, _history_signature_from_rows(history))
+
+
+def _history_signature_from_edges(history: Sequence) -> _HistorySignature:
+    if not history:
+        raise ValueError("history must not be empty")
+    return _HistorySignature(
+        row_count=len(history),
+        first=_row_edge_signature(history[0]),
+        latest=_row_edge_signature(history[-1]),
+        content_digest=None,
+    )
+
+
+def _row_edge_signature(entry) -> _RowEdgeSignature:
+    return (
+        getattr(entry, "id", None),
+        entry.recorded_at,
+        entry.used_percent,
+        entry.reset_at,
+        entry.window_minutes,
+    )
+
+
+def _update_history_digest(digest, entry) -> None:
+    for value in _row_edge_signature(entry):
+        digest.update(repr(value).encode("utf-8"))
+        digest.update(b"\0")
+    digest.update(b"\1")

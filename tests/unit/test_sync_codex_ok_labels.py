@@ -78,7 +78,7 @@ def test_apply_decision_treats_missing_label_delete_as_done(monkeypatch: pytest.
 
     def missing_label(path: str, *, method: str = "GET", **_kwargs: Any) -> None:
         calls.append((method, path))
-        raise module.GhError("gh: Not Found (HTTP 404)")
+        raise module.GhError("gh: Label does not exist (HTTP 404)")
 
     monkeypatch.setattr(module, "gh_api", missing_label)
 
@@ -91,6 +91,18 @@ def test_apply_decision_treats_missing_label_delete_as_done(monkeypatch: pytest.
             "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok",
         )
     ]
+
+
+def test_apply_decision_does_not_swallow_unrelated_delete_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    def missing_resource(*_args: Any, **_kwargs: Any) -> None:
+        raise module.GhError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(module, "gh_api", missing_resource)
+
+    with pytest.raises(module.GhError):
+        module.apply_decision(decision(module), tolerate_permission_errors=False)
 
 
 def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,6 +154,27 @@ def test_main_tolerates_read_errors_when_requested(
     assert result == 0
     assert "Soju06/codex-lb#710: gh: HTTP 502" in captured.err
     assert "dry-run Soju06/codex-lb#714" in captured.out
+
+
+def test_main_fails_tolerant_run_when_every_pr_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+    monkeypatch.setattr(
+        module,
+        "decide_pr",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(module.GhError("gh: HTTP 502")),
+    )
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "all selected PRs failed classification" in captured.err
 
 
 def test_main_fails_read_errors_without_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:

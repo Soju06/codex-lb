@@ -744,6 +744,13 @@ def write_warning(action: str, exc: BaseException) -> str:
     return f"{action}: skipped because the GitHub token cannot write this resource ({exc})"
 
 
+def is_missing_issue_label(exc: BaseException) -> bool:
+    """Return True when GitHub reports that an issue label is already absent."""
+
+    text = str(exc)
+    return "HTTP 404" in text and "Label does not exist" in text
+
+
 def gh_api_write(
     path: str,
     *,
@@ -756,7 +763,7 @@ def gh_api_write(
     try:
         gh_api(path, method=method, input_json=input_json)
     except GhError as exc:
-        if tolerate_missing and "HTTP 404" in str(exc):
+        if tolerate_missing and is_missing_issue_label(exc):
             return None
         if tolerate_permission_errors and is_github_app_write_denial(exc):
             return write_warning(action, exc)
@@ -1123,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
             had_error = True
             continue
 
+        classified_count = 0
         for number in sorted(set(numbers)):
             try:
                 decision = decide_pr(
@@ -1141,6 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
                 continue
 
+            classified_count += 1
             try:
                 write_warnings: tuple[str, ...] = ()
                 if args.apply:
@@ -1188,6 +1197,14 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+
+        if args.tolerate_read_errors and classified_count == 0:
+            had_error = True
+            print(
+                f"{repo}: all selected PRs failed classification; refusing a false-green tolerant run",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return 1 if had_error else 0
 

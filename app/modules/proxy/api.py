@@ -246,10 +246,11 @@ def _accepts_event_stream(request: Request) -> bool:
 
 def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
     explicit_fields = payload.model_fields_set
+    if "instructions" in explicit_fields:
+        return payload.messages is not None or "conversation" in explicit_fields or "truncation" in explicit_fields
     return (
         isinstance(payload.input, str)
         or payload.messages is not None
-        or "instructions" not in explicit_fields
         or "conversation" in explicit_fields
         or "truncation" in explicit_fields
     )

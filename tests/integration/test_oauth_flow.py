@@ -748,6 +748,36 @@ async def test_unknown_flow_error_does_not_mutate_latest_oauth_status():
 
 
 @pytest.mark.asyncio
+async def test_missing_flow_error_does_not_mutate_latest_oauth_status():
+    await oauth_module._OAUTH_STORE.reset()
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+
+        async with oauth_module._OAUTH_STORE.lock:
+            latest = oauth_module.OAuthState(
+                flow_id="latest-flow",
+                status="pending",
+                method="browser",
+                state_token="latest-state",
+                code_verifier="latest-verifier",
+            )
+            oauth_module._OAUTH_STORE.remember_flow_locked(latest)
+            oauth_module._OAUTH_STORE.set_latest_flow_locked(latest)
+
+        await service._set_error("wrong flow")
+
+        async with oauth_module._OAUTH_STORE.lock:
+            latest_state = oauth_module._OAUTH_STORE.state
+            latest_flow = oauth_module._OAUTH_STORE.get_flow_locked("latest-flow")
+
+    assert latest_state.status == "pending"
+    assert latest_state.error_message is None
+    assert latest_flow is not None
+    assert latest_flow.status == "pending"
+    assert latest_flow.error_message is None
+
+
+@pytest.mark.asyncio
 async def test_manual_callback_unknown_state_does_not_mutate_latest_flow(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 

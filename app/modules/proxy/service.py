@@ -3031,15 +3031,15 @@ class ProxyService:
             error_code = "upstream_unavailable"
             error_message = str(exc) or "Request to upstream timed out"
         except ProxyAuthError as exc:
-            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
-                raise
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
-        except ProxyRateLimitError as exc:
             if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
                 raise
+        except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
+            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
+                raise
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"

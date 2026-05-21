@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, select
+from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -442,7 +442,7 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
     ) -> _RequestLogFilters:
-        conditions = [_normal_traffic_clause()]
+        conditions = [self._exclude_warmup_clause()]
         if exclude_soft_deleted:
             conditions.append(RequestLog.deleted_at.is_(None))
         if since is not None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
 from websockets.asyncio.client import ClientConnection
@@ -259,38 +259,23 @@ async def connect_responses_websocket(
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
     proxy_url = resolve_websocket_proxy_from_env(url) if settings.upstream_websocket_trust_env else None
+    connect_kwargs: dict[str, Any] = {
+        "origin": origin,
+        "additional_headers": upstream_headers or None,
+        "user_agent_header": user_agent,
+        "open_timeout": settings.upstream_connect_timeout_seconds,
+        # Long Codex turns can spend minutes in upstream reasoning without
+        # sending application frames. Keep transport pings enabled so
+        # intermediaries still see liveness, but disable the library's pong
+        # watchdog so codex-lb's own request/idle budgets decide when a
+        # healthy long turn has stalled.
+        "ping_timeout": None,
+        "max_size": settings.max_sse_event_bytes,
+    }
+    if proxy_url is not None or not settings.upstream_websocket_trust_env:
+        connect_kwargs["proxy"] = proxy_url
     try:
-        if settings.upstream_websocket_trust_env and proxy_url is None:
-            response = await websocket_connect(
-                url,
-                origin=origin,
-                additional_headers=upstream_headers or None,
-                user_agent_header=user_agent,
-                open_timeout=settings.upstream_connect_timeout_seconds,
-                # Long Codex turns can spend minutes in upstream reasoning without
-                # sending application frames. Keep transport pings enabled so
-                # intermediaries still see liveness, but disable the library's pong
-                # watchdog so codex-lb's own request/idle budgets decide when a
-                # healthy long turn has stalled.
-                ping_timeout=None,
-                max_size=settings.max_sse_event_bytes,
-            )
-        else:
-            response = await websocket_connect(
-                url,
-                origin=origin,
-                additional_headers=upstream_headers or None,
-                user_agent_header=user_agent,
-                proxy=proxy_url,
-                open_timeout=settings.upstream_connect_timeout_seconds,
-                # Long Codex turns can spend minutes in upstream reasoning without
-                # sending application frames. Keep transport pings enabled so
-                # intermediaries still see liveness, but disable the library's pong
-                # watchdog so codex-lb's own request/idle budgets decide when a
-                # healthy long turn has stalled.
-                ping_timeout=None,
-                max_size=settings.max_sse_event_bytes,
-            )
+        response = await websocket_connect(url, **connect_kwargs)
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
             502,

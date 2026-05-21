@@ -308,6 +308,84 @@ async def test_oauth_start_with_existing_account_marks_success(async_client):
 
 
 @pytest.mark.asyncio
+async def test_oauth_start_with_existing_account_clears_stale_flows(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    stale_start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert stale_start.status_code == 200
+    stale_payload = stale_start.json()
+    assert stale_payload["flowId"]
+
+    async with oauth_module._OAUTH_STORE.lock:
+        assert oauth_module._OAUTH_STORE._flows
+        assert oauth_module._OAUTH_STORE._state_token_index
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_existing_after_stale_flow",
+        email="existing-after-stale-flow@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(account)
+
+    start = await async_client.post("/api/oauth/start", json={})
+    assert start.status_code == 200
+    assert start.json()["method"] == "browser"
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.status_code == 200
+    assert status.json() == {"status": "success", "errorMessage": None}
+
+    async with oauth_module._OAUTH_STORE.lock:
+        assert oauth_module._OAUTH_STORE._flows == {}
+        assert oauth_module._OAUTH_STORE._state_token_index == {}
+
+
+@pytest.mark.asyncio
+async def test_terminal_oauth_flows_are_bounded_outside_full_reset():
+    await oauth_module._OAUTH_STORE.reset()
+
+    retained_limit = oauth_module._MAX_RETAINED_TERMINAL_OAUTH_FLOWS
+
+    async with oauth_module._OAUTH_STORE.lock:
+        for index in range(retained_limit + 2):
+            flow = oauth_module.OAuthState(
+                flow_id=f"flow-{index}",
+                status="pending",
+                method="browser",
+                state_token=f"state-{index}",
+                code_verifier=f"verifier-{index}",
+            )
+            oauth_module._OAUTH_STORE.remember_flow_locked(flow)
+            oauth_module._OAUTH_STORE.set_flow_status_locked(
+                flow,
+                status="error",
+                error_message=f"failure-{index}",
+            )
+
+        assert len(oauth_module._OAUTH_STORE._flows) == retained_limit
+        assert "flow-0" not in oauth_module._OAUTH_STORE._flows
+        assert "flow-1" not in oauth_module._OAUTH_STORE._flows
+        assert "state-0" not in oauth_module._OAUTH_STORE._state_token_index
+        assert "state-1" not in oauth_module._OAUTH_STORE._state_token_index
+        assert f"flow-{retained_limit + 1}" in oauth_module._OAUTH_STORE._flows
+        assert oauth_module._OAUTH_STORE.state.error_message == f"failure-{retained_limit + 1}"
+
+
+@pytest.mark.asyncio
 async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 

@@ -43,6 +43,8 @@ from app.modules.oauth.schemas import (
 
 _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
+_TERMINAL_OAUTH_STATUSES = {"error", "success"}
+_MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 
 
 @dataclass
@@ -57,6 +59,7 @@ class OAuthState:
     user_code: str | None = None
     interval_seconds: int | None = None
     expires_at: float | None = None
+    finished_at: float | None = None
     callback_server: "OAuthCallbackServer | None" = None
     poll_task: asyncio.Task[None] | None = None
 
@@ -111,13 +114,17 @@ class OAuthStateStore:
             user_code=flow.user_code,
             interval_seconds=flow.interval_seconds,
             expires_at=flow.expires_at,
+            finished_at=flow.finished_at,
             poll_task=flow.poll_task,
         )
 
     def set_flow_status_locked(self, flow: OAuthState, *, status: str, error_message: str | None) -> None:
         flow.status = status
         flow.error_message = error_message
+        flow.finished_at = time.time() if status in _TERMINAL_OAUTH_STATUSES else None
         self.set_latest_flow_locked(flow)
+        if status in _TERMINAL_OAUTH_STATUSES:
+            self.prune_terminal_flows_locked()
 
     def has_pending_browser_flows_locked(self) -> bool:
         return any(flow.method == "browser" and flow.status == "pending" for flow in self._flows.values())
@@ -140,6 +147,26 @@ class OAuthStateStore:
         self._flows.clear()
         self._state_token_index.clear()
         return server
+
+    def prune_terminal_flows_locked(self) -> None:
+        terminal_flows = [
+            flow
+            for flow in self._flows.values()
+            if flow.flow_id is not None and flow.status in _TERMINAL_OAUTH_STATUSES
+        ]
+        extra_count = len(terminal_flows) - _MAX_RETAINED_TERMINAL_OAUTH_FLOWS
+        if extra_count <= 0:
+            return
+
+        terminal_flows.sort(key=lambda flow: flow.finished_at or 0)
+        for flow in terminal_flows[:extra_count]:
+            self.remove_flow_locked(flow)
+
+    def remove_flow_locked(self, flow: OAuthState) -> None:
+        if flow.flow_id is not None:
+            self._flows.pop(flow.flow_id, None)
+        if flow.state_token is not None:
+            self._state_token_index.pop(flow.state_token, None)
 
 
 class OAuthCallbackServer:
@@ -189,8 +216,12 @@ class OauthService:
         if not force_method:
             accounts = await self._accounts_repo.list_accounts()
             if accounts:
+                server: OAuthCallbackServer | None = None
                 async with self._store.lock:
+                    server = self._store._cleanup_locked()
                     self._store._state = OAuthState(status="success")
+                if server is not None:
+                    await server.stop()
                 return OauthStartResponse(method="browser")
 
         if force_method == "device":

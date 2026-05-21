@@ -367,8 +367,7 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
         account,
         usage_account_id=account.chatgpt_account_id,
     )
-    assert sync_account.await_count == 2
-    sync_account.assert_awaited_with(account)
+    sync_account.assert_awaited_once_with(account)
     get_settings.cache_clear()
 
 

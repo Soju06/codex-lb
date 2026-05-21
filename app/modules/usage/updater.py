@@ -153,6 +153,7 @@ class _UsageRefreshSingleflight:
         join_existing: bool = True,
     ) -> AccountRefreshResult:
         while True:
+            wait_for_existing: asyncio.Task[AccountRefreshResult] | None = None
             async with self._lock:
                 task = self._inflight.get(account_id)
                 if task is None or task.done():
@@ -161,11 +162,15 @@ class _UsageRefreshSingleflight:
                     task.add_done_callback(
                         lambda done, *, key=account_id: self._clear_if_current(key, done),
                     )
-                    return await asyncio.shield(task)
+                    break
                 if join_existing:
-                    return await asyncio.shield(task)
+                    break
+                wait_for_existing = task
+            if wait_for_existing is None:
+                break
             with contextlib.suppress(BaseException):
-                await asyncio.shield(task)
+                await asyncio.shield(wait_for_existing)
+        return await asyncio.shield(task)
 
     async def _run_factory(
         self,

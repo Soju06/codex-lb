@@ -249,7 +249,6 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
     return (
         ("input" in explicit_fields and "instructions" not in explicit_fields)
         or payload.messages is not None
-        or "conversation" in explicit_fields
         or "truncation" in explicit_fields
     )
 

@@ -1413,7 +1413,7 @@ async def _build_limit_rows_for_update(
     submitted_limits: list[LimitRuleInput],
     existing_limits: list[ApiKeyLimit],
     reset_usage: bool,
-    repository: ApiKeysRepositoryProtocol,
+    repository: ApiKeysRepositoryProtocol | None = None,
 ) -> list[ApiKeyLimit]:
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
@@ -1428,6 +1428,8 @@ async def _build_limit_rows_for_update(
             rows.append(_limit_input_to_row(submitted, key_id, now))
             continue
         if matched is None:
+            if repository is None:
+                raise TypeError("repository is required to backfill new API key limit usage")
             rows.append(await _new_limit_input_to_backfilled_row(submitted, key_id, now, repository))
             continue
         rows.append(

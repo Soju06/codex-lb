@@ -38,8 +38,9 @@ jobs:
           fi
 
       - name: Checkout main
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: main
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -110,6 +111,7 @@ jobs:
           git commit -m "chore: release ${TAG}"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force-with-lease origin "${BRANCH}"
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Open or update beta release PR
         if: steps.changes.outputs.changed == 'true'

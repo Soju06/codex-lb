@@ -36,8 +36,9 @@ jobs:
 
     steps:
       - name: Checkout trusted base
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Sync labels
@@ -63,8 +64,9 @@ jobs:
 
     steps:
       - name: Checkout trusted base
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Sync labels

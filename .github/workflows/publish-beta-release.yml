@@ -36,8 +36,9 @@ jobs:
           fi
 
       - name: Checkout merged beta release commit
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -77,6 +78,7 @@ jobs:
             git tag -a "${TAG}" "${SHA}" -m "Release ${TAG}"
             git push origin "${TAG}"
           fi
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
           notes_file="${RUNNER_TEMP}/beta-release-notes.md"
           cat > "${notes_file}" <<EOF

@@ -28,6 +28,7 @@ class SettingsRepository:
             relative_availability_top_k=5,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=43200,
+            warmup_model=get_settings().warmup_model,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -69,6 +70,7 @@ class SettingsRepository:
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
         http_responses_session_bridge_gateway_safe_mode: bool | None = None,
         sticky_reallocation_budget_threshold_pct: float | None = None,
+        warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
@@ -104,6 +106,8 @@ class SettingsRepository:
             settings.http_responses_session_bridge_gateway_safe_mode = http_responses_session_bridge_gateway_safe_mode
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
+        if warmup_model is not None:
+            settings.warmup_model = warmup_model
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:

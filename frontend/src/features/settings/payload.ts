@@ -13,6 +13,7 @@ export function buildSettingsUpdateRequest(
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+    warmupModel: settings.warmupModel,
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

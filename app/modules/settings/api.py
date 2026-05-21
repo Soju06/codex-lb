@@ -121,6 +121,12 @@ async def update_settings(
             if (
                 payload.sticky_reallocation_budget_threshold_pct
                 != payload.sticky_reallocation_primary_budget_threshold_pct
+                and (
+                    payload.sticky_reallocation_budget_threshold_pct
+                    != current.sticky_reallocation_budget_threshold_pct
+                    or payload.sticky_reallocation_primary_budget_threshold_pct
+                    != current.sticky_reallocation_primary_budget_threshold_pct
+                )
             ):
                 raise DashboardBadRequestError(
                     "stickyReallocationBudgetThresholdPct and "
@@ -128,17 +134,16 @@ async def update_settings(
                     code="conflicting_sticky_reallocation_thresholds",
                 )
             resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
+            resolved_legacy_threshold = payload.sticky_reallocation_budget_threshold_pct
         elif primary_threshold_provided:
             resolved_primary_threshold = payload.sticky_reallocation_primary_budget_threshold_pct
+            resolved_legacy_threshold = resolved_primary_threshold
         elif legacy_threshold_provided:
             resolved_primary_threshold = payload.sticky_reallocation_budget_threshold_pct
+            resolved_legacy_threshold = resolved_primary_threshold
         else:
             resolved_primary_threshold = current.sticky_reallocation_primary_budget_threshold_pct
-        resolved_legacy_threshold = (
-            resolved_primary_threshold
-            if primary_threshold_provided or legacy_threshold_provided
-            else current.sticky_reallocation_budget_threshold_pct
-        )
+            resolved_legacy_threshold = current.sticky_reallocation_budget_threshold_pct
         if resolved_primary_threshold is None:
             resolved_primary_threshold = current.sticky_reallocation_primary_budget_threshold_pct
         if resolved_legacy_threshold is None:

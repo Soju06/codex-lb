@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
+
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -162,3 +165,49 @@ async def test_settings_full_put_rejects_conflicting_sticky_threshold_aliases(as
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "conflicting_sticky_reallocation_thresholds"
+
+
+@pytest.mark.asyncio
+async def test_settings_full_put_allows_unrelated_save_with_divergent_sticky_thresholds(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE dashboard_settings
+                SET sticky_reallocation_budget_threshold_pct = 82.0,
+                    sticky_reallocation_primary_budget_threshold_pct = 91.0
+                WHERE id = 1
+                """
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["stickyReallocationBudgetThresholdPct"] == 82.0
+    assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 91.0
+    payload["importWithoutOverwrite"] = not payload["importWithoutOverwrite"]
+
+    response = await async_client.put("/api/settings", json=payload)
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["importWithoutOverwrite"] == payload["importWithoutOverwrite"]
+    assert updated["stickyReallocationBudgetThresholdPct"] == 82.0
+    assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 91.0
+
+
+@pytest.mark.asyncio
+async def test_settings_full_put_rejects_out_of_range_sticky_threshold(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    payload["stickyReallocationBudgetThresholdPct"] = 101.0
+
+    response = await async_client.put("/api/settings", json=payload)
+
+    assert response.status_code == 422

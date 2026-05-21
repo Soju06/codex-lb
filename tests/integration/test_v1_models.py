@@ -7,6 +7,16 @@ from app.core.types import JsonValue
 
 pytestmark = pytest.mark.integration
 
+BOOTSTRAP_MODEL_SLUGS = {
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2",
+    "codex-auto-review",
+}
+
 
 def _make_upstream_model(
     slug: str,
@@ -78,7 +88,8 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
     payload = resp.json()
     assert payload["object"] == "list"
     ids = {item["id"] for item in payload["data"]}
-    assert {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}.issubset(ids)
+    assert ids == BOOTSTRAP_MODEL_SLUGS
+    assert "gpt-5.5-pro" not in ids
 
 
 @pytest.mark.asyncio
@@ -400,7 +411,8 @@ async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_popu
     assert resp.status_code == 200
     payload = resp.json()
     slugs = {item["slug"] for item in payload["models"]}
-    assert {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}.issubset(slugs)
+    assert slugs == BOOTSTRAP_MODEL_SLUGS
+    assert "gpt-5.5-pro" not in slugs
 
 
 @pytest.mark.asyncio

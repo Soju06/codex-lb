@@ -19,8 +19,8 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("5h Remaining")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Remaining")).toBeInTheDocument();
+    expect(screen.getByText("Hourly Credits")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
     expect(screen.getByText("primary@example.com")).toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
   });
@@ -35,9 +35,11 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("5h Remaining")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Remaining")).toBeInTheDocument();
-    expect(screen.getAllByText("Remaining").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Hourly Credits")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
+    // Center label switched from "Remaining" -> "Credits" with the
+    // credits layout; assert that both donuts render the new label.
+    expect(screen.getAllByText("Credits").length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders safe line only for the primary donut", () => {
@@ -83,19 +85,28 @@ describe("UsageDonuts", () => {
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
 
-  it("shows remaining totals in the center while donut totals can use capacity", () => {
-    const { container } = render(
+  it("shows remaining credits as raw remaining/total fraction in the center", () => {
+    // Regression for #371: dashboard donuts previously showed
+    // compact-formatted numbers like "7.33k" / "7.56k". Operators
+    // asked for the raw remaining/total credit counts instead so the
+    // exact distance to the cap is visible at a glance.
+    render(
       <UsageDonuts
         primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
-        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 7331, remainingPercent: 97, color: "#d9a441" })]}
         primaryTotal={225}
         secondaryTotal={7560}
         primaryCenterValue={120}
-        secondaryCenterValue={80}
+        secondaryCenterValue={7331}
       />,
     );
 
-    const centerValues = Array.from(container.querySelectorAll(".text-base.font-semibold.tabular-nums")).map((node) => node.textContent);
-    expect(centerValues).toEqual(["120", "80"]);
+    const fractions = screen.getAllByTestId("donut-center-fraction").map((node) => node.textContent);
+    expect(fractions).toEqual([
+      // Primary: 120 / 225 (well under 4-digit thresholds; no separators).
+      "120/225",
+      // Secondary: 7,331 / 7,560 — locale-formatted, NOT "7.33k/7.56k".
+      "7,331/7,560",
+    ]);
   });
 });

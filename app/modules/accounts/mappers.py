@@ -62,6 +62,7 @@ def _account_to_summary(
         primary_usage,
         secondary_usage,
     )
+
     weekly_only_usage = (
         effective_primary_usage is None
         and primary_usage is not None
@@ -76,6 +77,11 @@ def _account_to_summary(
 
     if primary_remaining_percent is None and not weekly_only_usage:
         primary_remaining_percent = 100.0
+
+    if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
+        effective_primary_usage = None
+        primary_remaining_percent = None
+
     reset_at_primary = (
         from_epoch_seconds(effective_primary_usage.reset_at) if effective_primary_usage is not None else None
     )

@@ -36,7 +36,10 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.additional_quota_keys import (
+    canonicalize_additional_quota_key,
+    get_additional_quota_definition,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
@@ -553,6 +556,8 @@ class LoadBalancer:
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
+                account_plan_type=account.plan_type,
+                quota_key=limit_name,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
@@ -1271,6 +1276,8 @@ def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
 def _additional_quota_eligibility(
     *,
     account_id: str,
+    account_plan_type: str | None,
+    quota_key: str | None,
     latest_primary: dict[str, AdditionalUsageHistory],
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
@@ -1280,6 +1287,9 @@ def _additional_quota_eligibility(
     latest_secondary_entry = latest_secondary.get(account_id)
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
+
+    if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+        return "eligible"
 
     if latest_primary_entry is None and latest_secondary_entry is None:
         return "data_unavailable"
@@ -1293,6 +1303,14 @@ def _additional_quota_eligibility(
     if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry):
         return "quota_exhausted"
     return "eligible"
+
+
+def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str | None) -> bool:
+    definition = get_additional_quota_definition(quota_key)
+    if definition is None or definition.applies_to_plans is None:
+        return True
+    normalized_plan = plan_type.strip().lower() if plan_type is not None else None
+    return normalized_plan in definition.applies_to_plans
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:

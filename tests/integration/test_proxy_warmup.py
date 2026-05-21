@@ -364,6 +364,15 @@ async def test_warmup_enforces_api_key_limits_before_upstream_calls(async_client
 
     assert response.status_code == 429
     assert called is False
+    async with SessionLocal() as session:
+        log_row = (
+            await session.execute(
+                select(RequestLog).where(RequestLog.request_kind == "warmup").order_by(RequestLog.id.desc())
+            )
+        ).scalar_one()
+    assert log_row.status == "error"
+    assert log_row.error_code == "rate_limit_exceeded"
+    assert "Usage resets at" in (log_row.error_message or "")
 
 
 @pytest.mark.asyncio

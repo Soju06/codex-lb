@@ -1157,8 +1157,8 @@ def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallbac
     assert counts["plus"] > counts["unknown-plan"]
 
 
-@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise", "unknown", None])
-def test_additional_quota_applies_to_quota_enforced_and_unknown_plans(plan_type):
+@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise", "edu", "unknown", None])
+def test_additional_quota_applies_to_quota_enforced_and_unmapped_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is True
 
 

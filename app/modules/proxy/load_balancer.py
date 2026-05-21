@@ -62,6 +62,7 @@ _RECOVERABLE_STATUSES = frozenset(
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+_ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
 
 
 @dataclass
@@ -1312,7 +1313,9 @@ def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str |
     normalized_plan = normalize_account_plan_type(plan_type)
     if normalized_plan is None:
         return True
-    return normalized_plan in definition.applies_to_plans
+    if normalized_plan in definition.applies_to_plans:
+        return True
+    return normalized_plan not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:

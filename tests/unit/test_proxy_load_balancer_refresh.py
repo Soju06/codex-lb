@@ -2425,9 +2425,9 @@ async def test_select_account_allows_plus_plan_without_additional_quota_rows(mon
 
 
 @pytest.mark.asyncio
-async def test_select_account_fails_closed_for_unknown_plan_without_additional_quota_rows(monkeypatch) -> None:
-    account = _make_account("acc-unknown-no-gated-rows", "unknown-no-gated-rows@example.com")
-    account.plan_type = "chatgpt_pro_preview"
+async def test_select_account_fails_closed_for_unmapped_plan_without_additional_quota_rows(monkeypatch) -> None:
+    account = _make_account("acc-unmapped-no-gated-rows", "unmapped-no-gated-rows@example.com")
+    account.plan_type = "edu"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2446,7 +2446,7 @@ async def test_select_account_fails_closed_for_unknown_plan_without_additional_q
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"chatgpt_pro_preview"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"edu"})),
     )
 
     balancer = LoadBalancer(

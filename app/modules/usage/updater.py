@@ -9,7 +9,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Mapping, Protocol, cast
+from typing import Mapping, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, QUOTA_EXCEEDED_COOLDOWN_SECONDS
@@ -139,13 +139,11 @@ class _MergedAdditionalWindow:
 # process. Updated only after a successful refresh that wrote data.
 _last_successful_refresh: dict[str, datetime] = {}
 _usage_refresh_auth_cooldowns: dict[str, float] = {}
-_UsageRefreshSingleflightMode = Literal["stale", "force"]
-_UsageRefreshSingleflightKey = tuple[str, _UsageRefreshSingleflightMode]
 
 
 class _UsageRefreshSingleflight:
     def __init__(self) -> None:
-        self._inflight: dict[_UsageRefreshSingleflightKey, asyncio.Task[AccountRefreshResult]] = {}
+        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
         self._lock = asyncio.Lock()
 
     async def run(
@@ -153,18 +151,22 @@ class _UsageRefreshSingleflight:
         account_id: str,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
         *,
-        mode: _UsageRefreshSingleflightMode = "stale",
+        join_existing: bool = True,
     ) -> AccountRefreshResult:
-        key = (account_id, mode)
-        async with self._lock:
-            task = self._inflight.get(key)
-            if task is None or task.done():
-                task = asyncio.create_task(self._run_factory(factory))
-                self._inflight[key] = task
-                task.add_done_callback(
-                    lambda done, *, key=key: self._clear_if_current(key, done),
-                )
-        return await asyncio.shield(task)
+        while True:
+            async with self._lock:
+                task = self._inflight.get(account_id)
+                if task is None or task.done():
+                    task = asyncio.create_task(self._run_factory(factory))
+                    self._inflight[account_id] = task
+                    task.add_done_callback(
+                        lambda done, *, key=account_id: self._clear_if_current(key, done),
+                    )
+                    return await asyncio.shield(task)
+                if join_existing:
+                    return await asyncio.shield(task)
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(task)
 
     async def _run_factory(
         self,
@@ -174,7 +176,7 @@ class _UsageRefreshSingleflight:
 
     def _clear_if_current(
         self,
-        key: _UsageRefreshSingleflightKey,
+        key: str,
         task: asyncio.Task[AccountRefreshResult],
     ) -> None:
         current = self._inflight.get(key)
@@ -308,7 +310,7 @@ class UsageUpdater:
                     account,
                     usage_account_id=account.chatgpt_account_id,
                 ),
-                mode="force",
+                join_existing=False,
             )
             await self._sync_account_from_repo(account)
             if result.fetch_succeeded:

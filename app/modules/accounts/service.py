@@ -343,7 +343,7 @@ class AccountsService:
         }
         timeout = aiohttp.ClientTimeout(
             total=PROBE_REQUEST_TIMEOUT_SECONDS,
-            connect=PROBE_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=PROBE_CONNECT_TIMEOUT_SECONDS,
         )
         try:
             async with lease_http_session() as session:

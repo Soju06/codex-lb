@@ -227,3 +227,5 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID
     assert captured["json"]["model"] == "gpt-5.5-test"
     assert captured["timeout"].total == 30.0
+    assert captured["timeout"].connect is None
+    assert captured["timeout"].sock_connect == 10.0

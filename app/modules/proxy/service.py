@@ -6375,14 +6375,25 @@ class ProxyService:
                             request_state.model,
                         )
                         session.prewarmed = False
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
-                        async with session.pending_lock:
-                            if warmup_state in session.pending_requests:
-                                session.pending_requests.remove(warmup_state)
-                        self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
-                        if gate_acquired:
-                            _release_websocket_response_create_gate(warmup_state, session.response_create_gate)
+                        try:
+                            # The warmup request has already been sent upstream.  Close/reconnect the
+                            # socket while the warmup state is still attached so any late warmup
+                            # response cannot be assigned to the next visible request on this session.
+                            await self._reconnect_http_bridge_session(
+                                session,
+                                request_state=request_state,
+                                restart_reader=True,
+                            )
+                        except Exception:
+                            session.closed = True
+                            raise
+                        finally:
+                            async with session.pending_lock:
+                                if warmup_state in session.pending_requests:
+                                    session.pending_requests.remove(warmup_state)
+                            self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
+                            if gate_acquired:
+                                _release_websocket_response_create_gate(warmup_state, session.response_create_gate)
                         return
                     if event_block is None:
                         break

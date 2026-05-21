@@ -14170,6 +14170,25 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
+    reconnect_observations: list[dict[str, object]] = []
+
+    async def fake_reconnect_http_bridge_session(
+        reconnect_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        restart_reader: bool = False,
+    ) -> None:
+        reconnect_observations.append(
+            {
+                "pending_request_ids": [state.request_id for state in reconnect_session.pending_requests],
+                "request_id": request_state.request_id,
+                "restart_reader": restart_reader,
+            }
+        )
+        reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
+        reconnect_session.closed = False
+
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
 
     await asyncio.wait_for(
         service._maybe_prewarm_http_bridge_session(
@@ -14180,8 +14199,20 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         timeout=2.0,
     )
 
-    # After timeout the session should be reset to not-prewarmed
+    # After timeout the session should be reset to not-prewarmed, and the
+    # upstream must be reconnected before the warmup state is dropped so late
+    # warmup events cannot be matched to the next visible request.
     assert session.prewarmed is False
+    assert len(reconnect_observations) == 1
+    observation = reconnect_observations[0]
+    assert observation["request_id"] == "req_prewarm_timeout"
+    assert observation["restart_reader"] is True
+    pending_request_ids = cast(list[str], observation["pending_request_ids"])
+    assert len(pending_request_ids) == 1
+    assert pending_request_ids[0].startswith("http_prewarm_")
+    assert not session.pending_requests
+    assert session.upstream_control.reconnect_requested is False
+    assert session.upstream_control.retire_after_drain is False
 
 
 @pytest.mark.asyncio

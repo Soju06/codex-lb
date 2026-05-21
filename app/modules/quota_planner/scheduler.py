@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Protocol, cast
@@ -89,14 +90,29 @@ class QuotaPlannerScheduler:
             base_simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)
             actions = plan_shadow_actions(settings=settings, states=states, demand_forecast=forecast, now=now)
             if not actions:
+                target_peak_at = forecast.peak_slot_start.isoformat() if forecast.peak_slot_start else None
                 await planner_repo.log_decision(
                     mode=settings.mode,
                     action="no_op",
                     scheduled_at=None,
                     score=0.0,
-                    reason=f"loss={base_simulation.loss:.2f};unmet={base_simulation.unmet_demand:.2f}",
+                    reason=(
+                        "no_positive_peak_aligned_gain"
+                        f";target_peak_at={target_peak_at or 'none'}"
+                        f";loss={base_simulation.loss:.2f};unmet={base_simulation.unmet_demand:.2f}"
+                    ),
                     status="skipped",
                     idempotency_key=f"{now:%Y%m%d%H%M}:{settings.mode}:no_op",
+                    state_before_json=json.dumps(
+                        {
+                            "noop_reason": "no_positive_peak_aligned_gain",
+                            "target_peak_at": target_peak_at,
+                            "peak_demand_units": forecast.peak_demand_units,
+                            "loss": base_simulation.loss,
+                            "unmet_demand": base_simulation.unmet_demand,
+                        },
+                        separators=(",", ":"),
+                    ),
                 )
                 return
             scenario = simulate_pool(
@@ -109,8 +125,9 @@ class QuotaPlannerScheduler:
             expected_gain = max(0.0, base_simulation.loss - scenario.loss)
             warmup_service = QuotaWarmupService(session)
             for action in actions:
-                key = f"{now:%Y%m%d%H%M}:{settings.mode}:{action.account_id}:{action.action}"
-                await planner_repo.log_decision(
+                cycle_key = action.warmup_cycle_key or f"{now:%Y%m%d%H%M}"
+                key = f"{cycle_key}:{settings.mode}:{action.account_id}:{action.action}"
+                decision = await planner_repo.log_decision(
                     mode=settings.mode,
                     action=action.action,
                     account_id=action.account_id,
@@ -119,9 +136,26 @@ class QuotaPlannerScheduler:
                     reason=f"{action.reason};gain={expected_gain:.2f};unmet={scenario.unmet_demand:.2f}",
                     status="planned" if settings.mode in {"suggest", "auto"} else "skipped",
                     idempotency_key=key,
+                    state_before_json=json.dumps(
+                        {
+                            "target_peak_at": action.target_peak_at.isoformat() if action.target_peak_at else None,
+                            "expected_gain": action.expected_gain,
+                            "scenario_gain": expected_gain,
+                            "expected_cost": action.expected_cost,
+                            "net_score": action.score,
+                            "warmup_cycle": action.warmup_cycle_key,
+                            "scheduled_at": action.scheduled_at.isoformat() if action.scheduled_at else None,
+                            "skip_reason": (
+                                None if action.score >= settings.min_expected_gain else "score_below_threshold"
+                            ),
+                            "unmet_demand": scenario.unmet_demand,
+                        },
+                        separators=(",", ":"),
+                    ),
                 )
-                if settings.mode == "auto" and action.action == "warmup":
-                    await warmup_service.warm_now(account_id=action.account_id)
+                due = action.scheduled_at is None or action.scheduled_at <= now
+                if settings.mode == "auto" and action.action == "warmup" and due:
+                    await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
 
 
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:

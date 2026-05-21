@@ -32,6 +32,7 @@ export const QuotaPlannerDecisionSchema = z.object({
   executedAt: z.string().nullable(),
   score: z.number(),
   reason: z.string().nullable(),
+  details: z.record(z.string(), z.unknown()).nullable().optional(),
   status: z.string(),
   idempotencyKey: z.string(),
 });

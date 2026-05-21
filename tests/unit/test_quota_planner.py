@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.core.balancer import AccountState
 from app.db.models import AccountStatus
 from app.modules.quota_planner.logic import (
+    DemandForecastSlot,
+    PlannerForecast,
     PlannerSettings,
     build_demand_forecast,
     build_routing_costs,
+    candidate_start_times,
     parse_working_days,
     plan_shadow_actions,
     simulate_pool,
@@ -17,6 +20,39 @@ from app.modules.quota_planner.logic import (
 from app.modules.quota_planner.repository import DemandBin
 
 pytestmark = pytest.mark.unit
+
+
+def _forecast(
+    now: datetime,
+    *,
+    peak_at: datetime,
+    peak_units: float = 80.0,
+    flat_units: float = 0.0,
+    hours: int = 14,
+) -> PlannerForecast:
+    slots = []
+    for offset in range(hours * 4):
+        slot_start = now + timedelta(minutes=15 * offset)
+        units = flat_units
+        if slot_start == peak_at:
+            units = peak_units
+        slots.append(
+            DemandForecastSlot(
+                slot_start=slot_start,
+                demand_units=units,
+                request_count=units / 10,
+                source="test",
+            )
+        )
+    return PlannerForecast(
+        generated_at=now,
+        horizon_hours=hours,
+        slot_seconds=15 * 60,
+        total_demand_units=sum(slot.demand_units for slot in slots),
+        peak_slot_start=peak_at,
+        peak_demand_units=peak_units,
+        slots=tuple(slots),
+    )
 
 
 def test_parse_working_days_falls_back_for_invalid_json() -> None:
@@ -55,7 +91,28 @@ def test_planner_settings_default_to_nonblocking_shadow_mode() -> None:
     assert settings.dry_run is True
 
 
-def test_plan_shadow_actions_reserves_cold_accounts_in_prewarm_band() -> None:
+def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+    )
+    now = datetime(2026, 5, 18, 9, 7, tzinfo=timezone.utc)
+
+    candidates = candidate_start_times(
+        now=now,
+        account=AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
+        settings=settings,
+        demand_forecast=None,
+    )
+
+    assert candidates
+    assert all(candidate >= now for candidate in candidates)
+
+
+def test_plan_shadow_actions_reserves_cold_accounts_for_peak_aligned_staggered_windows() -> None:
     settings = PlannerSettings(
         mode="shadow",
         timezone="UTC",
@@ -68,16 +125,90 @@ def test_plan_shadow_actions_reserves_cold_accounts_in_prewarm_band() -> None:
         min_expected_gain=1.0,
     )
     now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
     states = [
         AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
         AccountState("cold-b", AccountStatus.ACTIVE, used_percent=0.0, reset_at=now.timestamp() - 1),
         AccountState("active", AccountStatus.ACTIVE, used_percent=10.0, reset_at=now.timestamp() + 60),
     ]
 
-    actions = plan_shadow_actions(settings=settings, states=states, now=now)
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
 
     assert [action.account_id for action in actions] == ["cold-a", "cold-b"]
     assert {action.action for action in actions} == {"reserve"}
+    assert len({action.scheduled_at for action in actions}) == 2
+    assert all(action.target_peak_at == peak_at for action in actions)
+    assert all(action.warmup_cycle_key for action in actions)
+    assert actions[0].scheduled_at != now
+    assert all(action.scheduled_at is not None for action in actions)
+    now_reset_gap = abs((peak_at - (now + timedelta(hours=5))).total_seconds())
+    planned_reset_gaps = [
+        abs((peak_at - (action.scheduled_at + timedelta(hours=5))).total_seconds())
+        for action in actions
+        if action.scheduled_at is not None
+    ]
+    assert max(planned_reset_gaps) < now_reset_gap
+    assert actions[0].score > 0
+
+
+def test_plan_shadow_actions_keeps_accounts_cold_when_flat_demand_has_no_peak_gain() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    states = [
+        AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
+        AccountState("cold-b", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at, peak_units=5.0, flat_units=5.0),
+        now=now,
+    )
+
+    assert actions == []
+
+
+def test_plan_shadow_actions_rejects_start_that_misses_peak() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=1,
+        min_expected_gain=100.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 23, 0, tzinfo=timezone.utc)
+    states = [AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None)]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at, peak_units=80.0),
+        now=now,
+    )
+
+    assert actions == []
 
 
 def test_forecast_and_simulation_use_history_without_requiring_user_input() -> None:

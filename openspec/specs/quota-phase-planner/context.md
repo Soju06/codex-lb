@@ -55,10 +55,20 @@ Each tick:
 - aggregates the last 28 days of real request logs into 15-minute demand bins;
 - builds a deterministic 36-hour forecast from weekday/hour history, recent usage, and the work calendar prior;
 - simulates the current pool against the forecast;
-- emits reserve/warmup decisions during the configured prewarm band when expected gain beats the threshold;
+- scores candidate starts against the forecast peak, work-block demand, warmup cost, and reset synchronization penalty;
+- considers peak starts (`peak - 5h` plus nearby stagger slots), work-block offsets, demand/capacity crossings, and
+  active-account reset spacing;
+- emits reserve/warmup decisions during the configured prewarm band only when net expected gain beats the threshold;
+- chooses no-op instead of warming when flat/low demand, stale/uncertain state, or policy costs make every candidate
+  non-positive;
 - writes a no-op decision when there is nothing useful to do, so ticks remain auditable;
-- writes decisions to `quota_planner_decisions` with an idempotency key.
-- in `auto`, passes warmup actions through the same gated executor used by the admin API.
+- writes decisions to `quota_planner_decisions` with a per-account `warmup_cycle` idempotency key;
+- in `auto`, passes due warmup actions through the same gated executor used by the admin API.
+
+The planner does not warm every idle account once per cycle. A cycle is only an idempotency and de-synchronization
+guard: candidates still need positive peak-aligned value. Multiple cold accounts are selected greedily so each
+accepted reset is included in the next account's synchronization penalty, which staggers windows across the prewarm
+band instead of creating one shared reset cliff.
 
 The simulator is deliberately simple and explainable. It treats each account window as a finite capacity bucket,
 routes forecast demand into active or planned windows, and scores unmet demand, wasted capacity, cold starts, and
@@ -84,7 +94,8 @@ The Settings page includes a quota planner section with:
 - working days/hours and prewarm lead configuration;
 - forecast quantile and gain/budget knobs;
 - current 36-hour forecast/simulation summary;
-- recent decision timeline.
+- recent decision timeline with action status, scheduled time, target peak, expected gain/cost, skip/no-op reason, and
+  `warmup_cycle` where available.
 
 The UI mirrors the safe defaults. Enabling synthetic traffic is visible and explicit, and warm-now/cancel actions call
 server-side gates rather than bypassing policy.
@@ -112,3 +123,7 @@ intentional: planner uncertainty must not block real user work or silently burn 
 - `POST /api/quota-planner/decisions/{decisionId}/cancel`
 
 The routes use dashboard session authentication and write settings changes to the audit log.
+
+Decision responses include `details` parsed from the planner audit JSON when available. Current scheduler details
+include `target_peak_at`, `expected_gain`, `scenario_gain`, `expected_cost`, `net_score`, `warmup_cycle`,
+`scheduled_at`, `skip_reason`, `noop_reason`, and `unmet_demand`. Older rows may have `details = null`.

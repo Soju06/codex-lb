@@ -17,6 +17,7 @@ STALE_USAGE_SECONDS = 15 * 60
 DEFAULT_SLOT_SECONDS = 15 * 60
 DEFAULT_PLANNING_HORIZON_HOURS = 36
 DEFAULT_ACCOUNT_WINDOW_CAPACITY = 100.0
+MIN_PEAK_EXCESS_UNITS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,10 @@ class PlannerAction:
     scheduled_at: datetime | None
     score: float
     reason: str
+    target_peak_at: datetime | None = None
+    expected_gain: float = 0.0
+    expected_cost: float = 0.0
+    warmup_cycle_key: str | None = None
 
 
 class DemandBinLike(Protocol):
@@ -169,6 +174,7 @@ def plan_shadow_actions(
         return []
 
     actions: list[PlannerAction] = []
+    skipped_candidates = 0
     current_ts = current.timestamp()
     active_resets = [
         float(state.reset_at) for state in states if state.reset_at is not None and _is_active_window(state, current_ts)
@@ -185,30 +191,56 @@ def plan_shadow_actions(
         )
         if not candidate_times:
             continue
-        scored_candidates = (
+        selected_reset_epochs = [
+            (action.scheduled_at + timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS)).timestamp()
+            for action in actions
+            if action.scheduled_at is not None
+        ]
+        scored_candidates = [
             (
                 candidate,
                 score_candidate_start(
                     scheduled_at=candidate,
                     settings=settings,
                     demand_forecast=demand_forecast,
-                    existing_reset_epochs=active_resets,
+                    existing_reset_epochs=[*active_resets, *selected_reset_epochs],
                 ),
             )
             for candidate in candidate_times
-        )
+        ]
         scheduled_at, score = max(scored_candidates, key=lambda item: (item[1], -item[0].timestamp()))
         if score < settings.min_expected_gain:
+            skipped_candidates += 1
             continue
+        reset_at = scheduled_at + timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS)
+        target_peak_at = demand_forecast.peak_slot_start if demand_forecast else None
+        expected_cost = _candidate_cost(
+            scheduled_at=scheduled_at,
+            settings=settings,
+            existing_reset_epochs=[*active_resets, *selected_reset_epochs],
+        )
         actions.append(
             PlannerAction(
                 account_id=state.account_id,
                 action="warmup" if settings.allow_synthetic_traffic and not settings.dry_run else "reserve",
                 scheduled_at=scheduled_at,
                 score=score,
-                reason="forecast_phase_alignment",
+                reason=(
+                    "peak_phase_alignment"
+                    f";target_peak_at={_format_dt(target_peak_at)}"
+                    f";reset_at={_format_dt(reset_at)}"
+                    f";expected_gain={score + expected_cost:.2f}"
+                    f";expected_cost={expected_cost:.2f}"
+                    f";warmup_cycle={_warmup_cycle_key(scheduled_at, settings)}"
+                ),
+                target_peak_at=target_peak_at,
+                expected_gain=score + expected_cost,
+                expected_cost=expected_cost,
+                warmup_cycle_key=_warmup_cycle_key(scheduled_at, settings),
             )
         )
+    if skipped_candidates and not actions:
+        return []
     actions.sort(key=lambda action: (-action.score, action.scheduled_at or current, action.account_id))
     return actions[: max(0, settings.max_warmups_per_day or 0)]
 
@@ -352,9 +384,13 @@ def candidate_start_times(
         candidates.append(now)
     candidates.extend(_next_work_starts(now, settings, count=2, offsets=(-4, -3, -2)))
     if demand_forecast and demand_forecast.peak_slot_start is not None:
-        candidates.append(demand_forecast.peak_slot_start - timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS))
+        peak_start = demand_forecast.peak_slot_start - timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS)
+        candidates.extend(peak_start + timedelta(minutes=offset) for offset in (-60, -30, 0, 30, 60))
+        candidates.extend(_demand_capacity_crossing_starts(demand_forecast))
     for reset_epoch in existing_reset_epochs or []:
-        candidates.append(datetime.fromtimestamp(reset_epoch, tz=timezone.utc) + timedelta(minutes=30))
+        reset_at = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+        candidates.append(reset_at + timedelta(minutes=30) - timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS))
+        candidates.append(reset_at - timedelta(minutes=30) - timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS))
 
     normalized: list[datetime] = []
     seen: set[int] = set()
@@ -362,6 +398,8 @@ def candidate_start_times(
         if candidate < now:
             candidate = now
         candidate = _floor_datetime(candidate, DEFAULT_SLOT_SECONDS)
+        if candidate < now:
+            candidate = now
         key = int(candidate.timestamp())
         if key in seen:
             continue
@@ -369,7 +407,7 @@ def candidate_start_times(
         if _inside_prewarm_band(candidate, settings):
             normalized.append(candidate)
     normalized.sort()
-    return normalized[:6]
+    return normalized[:10]
 
 
 def score_candidate_start(
@@ -379,20 +417,76 @@ def score_candidate_start(
     demand_forecast: PlannerForecast | None,
     existing_reset_epochs: list[float] | None = None,
 ) -> float:
+    candidate_cost = _candidate_cost(
+        scheduled_at=scheduled_at,
+        settings=settings,
+        existing_reset_epochs=existing_reset_epochs,
+    )
+    if demand_forecast is None:
+        return 0.0
+    peak_gain = _peak_aligned_gain(
+        scheduled_at=scheduled_at,
+        settings=settings,
+        demand_forecast=demand_forecast,
+    )
+    return max(0.0, peak_gain - candidate_cost)
+
+
+def _candidate_cost(
+    *,
+    scheduled_at: datetime,
+    settings: PlannerSettings,
+    existing_reset_epochs: list[float] | None = None,
+) -> float:
     window_end = scheduled_at + timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS)
-    demand_gain = 0.0
-    if demand_forecast is not None:
-        demand_gain = sum(
-            slot.demand_units
-            for slot in demand_forecast.slots
-            if scheduled_at <= slot.slot_start < window_end and _inside_work_block(slot.slot_start, settings)
-        )
-    else:
-        target = scheduled_at + timedelta(minutes=settings.prewarm_lead_minutes)
-        demand_gain = 10.0 if _inside_work_block(target, settings) else 2.0
     sync_cost = _synchronization_penalty([*(existing_reset_epochs or []), window_end.timestamp()])
     synthetic_cost = 0.5 if settings.allow_synthetic_traffic and not settings.dry_run else 0.0
-    return max(0.0, demand_gain - sync_cost - synthetic_cost)
+    return sync_cost + synthetic_cost
+
+
+def _peak_aligned_gain(
+    *,
+    scheduled_at: datetime,
+    settings: PlannerSettings,
+    demand_forecast: PlannerForecast,
+) -> float:
+    work_slots = [slot for slot in demand_forecast.slots if _inside_work_block(slot.slot_start, settings)]
+    if not work_slots or demand_forecast.peak_slot_start is None:
+        return 0.0
+    baseline = _quantile([slot.demand_units for slot in work_slots], "p50")
+    peak_excess = max(0.0, demand_forecast.peak_demand_units - baseline)
+    if peak_excess < MIN_PEAK_EXCESS_UNITS:
+        return 0.0
+
+    window_end = scheduled_at + timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS)
+    window_slots = [slot for slot in work_slots if scheduled_at <= slot.slot_start < window_end]
+    reset_aligns_peak = (
+        abs((window_end - demand_forecast.peak_slot_start).total_seconds()) <= demand_forecast.slot_seconds
+    )
+    if not window_slots and not reset_aligns_peak:
+        return 0.0
+
+    window_units = sum(slot.demand_units for slot in window_slots)
+    baseline_units = baseline * len(window_slots)
+    window_excess = max(0.0, window_units - baseline_units)
+    peak_covered = scheduled_at <= demand_forecast.peak_slot_start < window_end
+    reset_bonus = peak_excess if reset_aligns_peak else 0.0
+    if not peak_covered:
+        return max(0.0, window_excess - peak_excess) + reset_bonus
+    return window_excess + peak_excess + reset_bonus
+
+
+def _demand_capacity_crossing_starts(demand_forecast: PlannerForecast) -> list[datetime]:
+    candidates: list[datetime] = []
+    cumulative = 0.0
+    next_bucket = DEFAULT_ACCOUNT_WINDOW_CAPACITY
+    for slot in demand_forecast.slots:
+        cumulative += slot.demand_units
+        if cumulative < next_bucket:
+            continue
+        candidates.append(slot.slot_start - timedelta(seconds=FIVE_HOUR_WINDOW_SECONDS))
+        next_bucket += DEFAULT_ACCOUNT_WINDOW_CAPACITY
+    return candidates[:4]
 
 
 def _is_active_window(state: AccountState, current_ts: float) -> bool:
@@ -517,3 +611,16 @@ def _synchronization_penalty(reset_epochs: list[float]) -> float:
         elif delta < 60 * 60:
             penalty += 1.0
     return penalty
+
+
+def _warmup_cycle_key(scheduled_at: datetime, settings: PlannerSettings) -> str:
+    local = _to_planner_tz(scheduled_at, settings.timezone)
+    lead = max(1, settings.prewarm_lead_minutes)
+    cycle_minute = (local.hour * 60 + local.minute) // lead
+    return f"{local:%Y%m%d}:warmup_cycle:{cycle_minute}"
+
+
+def _format_dt(value: datetime | None) -> str:
+    if value is None:
+        return "none"
+    return value.astimezone(timezone.utc).isoformat()

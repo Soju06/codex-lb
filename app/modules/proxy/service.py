@@ -10532,7 +10532,7 @@ class ProxyService:
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_retry and _should_retry_stream_error(code):
-                        raise _RetryableStreamError(code, settlement.error)
+                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_transient_retry and _should_retry_transient_stream_error(code, error_message):
                         raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(

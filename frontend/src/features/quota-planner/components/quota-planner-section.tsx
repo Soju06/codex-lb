@@ -43,6 +43,17 @@ function formatInlineTime(value: string): string {
   return `${formatted.date} ${formatted.time}`;
 }
 
+function detailValue(details: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = details?.[key];
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  if (typeof value === "number") {
+    return formatNumber(value);
+  }
+  return String(value);
+}
+
 function settingsDraft(settings: QuotaPlannerSettings): QuotaPlannerSettings {
   return { ...settings, workingDays: [...settings.workingDays] };
 }
@@ -422,26 +433,44 @@ export function QuotaPlannerSection() {
                 </div>
               ) : (
                 <div className="divide-y">
-                  {decisions.slice(0, 8).map((decision) => (
-                    <div key={decision.id} className="grid gap-2 px-3 py-2 text-xs sm:grid-cols-[9rem_1fr_5rem_5rem]">
-                      <span className="text-muted-foreground">{formatInlineTime(decision.createdAt)}</span>
-                      <span className="truncate">
-                        {decision.action}
-                        {decision.accountId ? ` ${decision.accountId}` : ""} · {decision.reason ?? "no reason"}
-                      </span>
-                      <span className="text-right font-medium tabular-nums">{formatNumber(decision.score)}</span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs"
-                        disabled={cancelBusy || !["planned", "skipped"].includes(decision.status)}
-                        onClick={() => cancelDecisionMutation.mutate(decision.id)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  ))}
+                  {decisions.slice(0, 8).map((decision) => {
+                    const targetPeak = detailValue(decision.details, "target_peak_at");
+                    const warmupCycle = detailValue(decision.details, "warmup_cycle");
+                    const expectedGain = detailValue(decision.details, "expected_gain");
+                    const expectedCost = detailValue(decision.details, "expected_cost");
+                    const skipReason =
+                      detailValue(decision.details, "skip_reason") || detailValue(decision.details, "noop_reason");
+                    return (
+                      <div key={decision.id} className="grid gap-2 px-3 py-2 text-xs sm:grid-cols-[9rem_1fr_5rem_5rem]">
+                        <span className="text-muted-foreground">{formatInlineTime(decision.createdAt)}</span>
+                        <span className="min-w-0">
+                          <span className="block truncate">
+                            {decision.action}
+                            {decision.accountId ? ` ${decision.accountId}` : ""} · {decision.status}
+                            {decision.scheduledAt ? ` · scheduled ${formatInlineTime(decision.scheduledAt)}` : ""}
+                          </span>
+                          <span className="block truncate text-muted-foreground">
+                            {targetPeak ? `peak ${targetPeak}` : decision.reason ?? "no reason"}
+                            {expectedGain ? ` · gain ${expectedGain}` : ""}
+                            {expectedCost ? ` · cost ${expectedCost}` : ""}
+                            {warmupCycle ? ` · ${warmupCycle}` : ""}
+                            {skipReason ? ` · ${skipReason}` : ""}
+                          </span>
+                        </span>
+                        <span className="text-right font-medium tabular-nums">{formatNumber(decision.score)}</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={cancelBusy || !["planned", "skipped"].includes(decision.status)}
+                          onClick={() => cancelDecisionMutation.mutate(decision.id)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

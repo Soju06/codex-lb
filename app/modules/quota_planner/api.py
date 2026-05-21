@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Body, Depends, Query, Request
 
 from app.core.audit.service import AuditService
@@ -51,6 +53,14 @@ def _settings_response(settings: PlannerSettings) -> QuotaPlannerSettingsRespons
 
 
 def _decision_response(row) -> QuotaPlannerDecisionResponse:
+    details = None
+    if row.state_before_json:
+        try:
+            decoded = json.loads(row.state_before_json)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            details = decoded
     return QuotaPlannerDecisionResponse(
         id=row.id,
         created_at=row.created_at,
@@ -61,6 +71,7 @@ def _decision_response(row) -> QuotaPlannerDecisionResponse:
         executed_at=row.executed_at,
         score=row.score,
         reason=row.reason,
+        details=details,
         status=row.status,
         idempotency_key=row.idempotency_key,
     )

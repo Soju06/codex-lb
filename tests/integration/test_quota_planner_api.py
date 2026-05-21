@@ -85,6 +85,10 @@ async def test_quota_planner_decisions_api_returns_recent_decisions(async_client
             score=5.0,
             reason="new",
             status="planned",
+            state_before_json=(
+                '{"target_peak_at":"2026-05-18T13:00:00+00:00",'
+                '"expected_gain":9.5,"expected_cost":1.0,"warmup_cycle":"20260518:warmup_cycle:1"}'
+            ),
         )
 
     response = await async_client.get("/api/quota-planner/decisions?limit=2")
@@ -96,6 +100,8 @@ async def test_quota_planner_decisions_api_returns_recent_decisions(async_client
     assert by_key["test-decision-new"]["mode"] == "suggest"
     assert by_key["test-decision-new"]["action"] == "warmup"
     assert by_key["test-decision-new"]["reason"] == "new"
+    assert by_key["test-decision-new"]["details"]["target_peak_at"] == "2026-05-18T13:00:00+00:00"
+    assert by_key["test-decision-new"]["details"]["warmup_cycle"] == "20260518:warmup_cycle:1"
 
 
 @pytest.mark.asyncio

@@ -1305,6 +1305,26 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert result.latest_secondary == {}
 
 
+@pytest.mark.asyncio
+async def test_load_selection_inputs_preserves_sync_quota_planner_settings():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.modules.proxy.load_balancer import LoadBalancer
+    from app.modules.quota_planner.logic import PlannerSettings
+
+    planner_settings = PlannerSettings(mode="enforce", timezone="Asia/Tbilisi")
+    mock_repos = MagicMock()
+    mock_repos.accounts.list_accounts = AsyncMock(return_value=[])
+    mock_repos.quota_planner.get_settings = lambda: planner_settings
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+
+    result = await balancer._load_selection_inputs(model="gpt-sync-planner-settings")
+
+    assert result.quota_planner_settings is planner_settings
+
+
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():
     random.seed(11)
     n = 2000

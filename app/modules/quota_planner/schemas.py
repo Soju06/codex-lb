@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import Field
 
@@ -51,6 +52,7 @@ class QuotaPlannerDecisionResponse(DashboardModel):
     executed_at: datetime | None
     score: float
     reason: str | None
+    details: dict[str, Any] | None = None
     status: str
     idempotency_key: str
 

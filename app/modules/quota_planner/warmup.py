@@ -65,21 +65,24 @@ class QuotaWarmupService:
         model: str | None = None,
         api_key_id: str | None = None,
         force_probe: bool = False,
+        decision_id: str | None = None,
     ) -> WarmupExecutionResult:
         settings = await self._planner.get_settings()
         account = await self._accounts.get_by_id(account_id)
         resolved_model = (model or settings.warmup_model_preference or "gpt-5.4-mini").strip()
         scheduled_at = utcnow()
-        decision = await self._planner.log_decision(
-            mode=settings.mode,
-            action="warmup",
-            account_id=account.id if account is not None else None,
-            scheduled_at=scheduled_at,
-            score=0.0,
-            reason="manual_warm_now_requested",
-            status="planned",
-            idempotency_key=f"manual:{scheduled_at:%Y%m%d%H%M%S}:{account_id}:{uuid4().hex}",
-        )
+        decision = await self._planner.get_decision(decision_id) if decision_id is not None else None
+        if decision is None:
+            decision = await self._planner.log_decision(
+                mode=settings.mode,
+                action="warmup",
+                account_id=account.id if account is not None else None,
+                scheduled_at=scheduled_at,
+                score=0.0,
+                reason="manual_warm_now_requested",
+                status="planned",
+                idempotency_key=f"manual:{scheduled_at:%Y%m%d%H%M%S}:{account_id}:{uuid4().hex}",
+            )
         allowed, reason = await self._execution_gate(
             settings=settings,
             account=account,

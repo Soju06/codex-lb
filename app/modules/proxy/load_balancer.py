@@ -452,7 +452,7 @@ class LoadBalancer:
             if callable(get_quota_planner_settings):
                 settings_result = get_quota_planner_settings()
                 quota_planner_settings = (
-                    await settings_result if inspect.isawaitable(settings_result) else PlannerSettings()
+                    await settings_result if inspect.isawaitable(settings_result) else settings_result
                 )
             else:
                 quota_planner_settings = PlannerSettings()

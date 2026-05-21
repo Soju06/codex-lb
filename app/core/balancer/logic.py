@@ -92,14 +92,19 @@ def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, s
     return primary_used, secondary_used, last_selected, state.account_id
 
 
-def _reset_bucket_days(state: AccountState, current: float, window: ResetPreferenceWindow) -> int:
+def _reset_preference_bucket(state: AccountState, current: float, window: ResetPreferenceWindow) -> int:
     if window == "primary":
         reset_at = state.primary_reset_at if state.primary_reset_at is not None else state.secondary_reset_at
     else:
         reset_at = state.secondary_reset_at if state.secondary_reset_at is not None else state.primary_reset_at
     if reset_at is None:
+        if window == "primary":
+            return UNKNOWN_RESET_BUCKET_DAYS * SECONDS_PER_DAY
         return UNKNOWN_RESET_BUCKET_DAYS
-    return max(0, int((reset_at - current) // SECONDS_PER_DAY))
+    remaining_seconds = max(0, int(reset_at - current))
+    if window == "primary":
+        return remaining_seconds
+    return remaining_seconds // SECONDS_PER_DAY
 
 
 def _prefer_earlier_reset_candidates(
@@ -107,8 +112,8 @@ def _prefer_earlier_reset_candidates(
     current: float,
     window: ResetPreferenceWindow,
 ) -> list[AccountState]:
-    earliest_bucket = min(_reset_bucket_days(state, current, window) for state in available)
-    return [state for state in available if _reset_bucket_days(state, current, window) == earliest_bucket]
+    earliest_bucket = min(_reset_preference_bucket(state, current, window) for state in available)
+    return [state for state in available if _reset_preference_bucket(state, current, window) == earliest_bucket]
 
 
 def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
@@ -250,14 +255,14 @@ def select_account(
             return SelectionResult(None, "No available accounts")
 
     def _reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current, prefer_earlier_reset_window)
+        reset_bucket = _reset_preference_bucket(state, current, prefer_earlier_reset_window)
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
-        return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
+        return reset_bucket, secondary_used, primary_used, last_selected, account_id
 
     def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current, prefer_earlier_reset_window)
+        reset_bucket = _reset_preference_bucket(state, current, prefer_earlier_reset_window)
         primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
-        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
+        return reset_bucket, primary_used, secondary_used, last_selected, account_id
 
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.

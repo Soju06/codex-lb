@@ -446,7 +446,8 @@ def _build_candidate(
         return None
     if before.used_percent < 100.0:
         return None
-    if after.used_percent >= min_available_percent:
+    available_percent = max(0.0, 100.0 - after.used_percent)
+    if available_percent < min_available_percent:
         return None
     if after.reset_at <= before.reset_at:
         return None

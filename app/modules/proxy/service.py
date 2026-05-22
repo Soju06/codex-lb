@@ -10,6 +10,7 @@ import re
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Coroutine, Sequence
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -119,7 +120,7 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import SessionLocal
-from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
@@ -10598,6 +10599,16 @@ class ProxyService:
 
         return additional_limits
 
+    @asynccontextmanager
+    async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
+        # Fresh, self-contained accounts repo (own DB session) for AuthManager's
+        # detached/shielded token-refresh task. A client disconnect cancels the
+        # request and closes the request-scoped session below; without this the
+        # still-running refresh task would touch that closed session and strand
+        # a background-pool connection (the codex-lb pool-exhaustion leak).
+        async with self._repo_factory() as repos:
+            yield repos.accounts
+
     async def _ensure_fresh(
         self,
         account: Account,
@@ -10611,6 +10622,7 @@ class ProxyService:
                 auth_manager = AuthManager(
                     repos.accounts,
                     acquire_refresh_admission=self._get_work_admission().acquire_token_refresh,
+                    refresh_repo_factory=self._accounts_refresh_scope,
                 )
                 return await auth_manager.ensure_fresh(account, force=force)
         finally:

@@ -430,6 +430,41 @@ async def test_thread_goal_retry_failure_after_forced_refresh_updates_account_he
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_goal_invalidated_a", "goal-invalidated-a@example.com")
+    await _import_account(async_client, "acc_goal_invalidated_b", "goal-invalidated-b@example.com")
+    captured_account_ids: list[str | None] = []
+    invalidated_account_id: str | None = None
+
+    async def fake_thread_goal(operation, payload, headers, access_token, account_id, **kwargs):
+        del operation, payload, headers, access_token, kwargs
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_account_id:
+            raise ProxyResponseError(401, {"error": {"code": "invalid_api_key", "message": "token invalidated"}})
+        return {"goal": {"objective": "recovered"}}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_thread_goal_request", fake_thread_goal)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/set",
+        json={"threadId": "019debd9-2372-7f23-92b9-9f34002a6355", "objective": "recover"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["goal"]["objective"] == "recovered"
+    assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
+    assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_set_uses_active_account_when_budget_selection_is_empty(async_client, monkeypatch):
     await _import_account(async_client, "acc_goal_control", "goal-control@example.com")
     calls = []
@@ -635,6 +670,37 @@ async def test_codex_control_retry_failure_after_forced_refresh_updates_account_
     assert len(handled) == 1
     assert handled[0][0].startswith("acc_codex_retry_error")
     assert handled[0][1] == 503
+
+
+@pytest.mark.asyncio
+async def test_codex_control_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_codex_invalidated_a", "codex-invalidated-a@example.com")
+    await _import_account(async_client, "acc_codex_invalidated_b", "codex-invalidated-b@example.com")
+    captured_account_ids: list[str | None] = []
+    invalidated_account_id: str | None = None
+
+    async def fake_codex_control_request(*_args, account_id=None, **_kwargs):
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_account_id:
+            raise ProxyResponseError(401, {"error": {"code": "invalid_api_key", "message": "token invalidated"}})
+        return proxy_module.CodexControlResponse(status_code=200, headers={}, body=b'{"ok":true}')
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post("/backend-api/codex/safety/arc", json={"decision": "allow"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
+    assert captured_account_ids[2] != invalidated_account_id
 
 
 @pytest.mark.asyncio

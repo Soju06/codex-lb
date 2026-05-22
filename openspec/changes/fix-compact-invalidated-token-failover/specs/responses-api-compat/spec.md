@@ -25,3 +25,38 @@ compact client before exhausting eligible accounts.
 - **WHEN** low-level compact transport receives HTTP 401 from upstream
 - **THEN** the service-level auth refresh/failover path handles it
 - **AND** the low-level compact transport does not mark it as a generic same-contract transport retry
+
+### Requirement: Pre-visible proxy auth failures fail over after forced refresh
+
+The proxy MUST treat repeated account-local authentication failures as
+per-request account failures before any downstream-visible output is emitted.
+When a proxy request on a non-compact surface retries with a refreshed token and
+the refreshed retry still returns upstream `401 invalid_api_key`, the proxy MUST
+classify and record the selected account failure, exclude that account from the
+current request, and try another eligible account when one is available. The
+proxy MUST preserve the existing no-replay rule after downstream-visible stream
+or websocket output has been emitted.
+
+#### Scenario: Pre-visible streaming auth failure uses another account
+
+- **GIVEN** at least two accounts are eligible for a streaming responses request
+- **AND** the selected account returns `401 invalid_api_key` before downstream-visible output
+- **WHEN** another eligible account can complete the request
+- **THEN** the downstream stream succeeds from another account
+- **AND** the selected account is excluded from further attempts for that request
+
+#### Scenario: Non-stream proxy auth failure uses another account
+
+- **GIVEN** at least two accounts are eligible for a thread-goal, Codex control,
+  transcription, or file create/finalize request
+- **AND** the selected account returns `401 invalid_api_key` before and after a forced refresh
+- **WHEN** another eligible account can complete the request
+- **THEN** the downstream request succeeds from another account
+- **AND** the selected account is excluded from further attempts for that request
+
+#### Scenario: Websocket connect auth failure uses another account
+
+- **GIVEN** at least two accounts are eligible for an upstream websocket connect
+- **AND** the selected account returns `401 invalid_api_key` after a forced refresh retry
+- **WHEN** another eligible account can open the upstream websocket
+- **THEN** the websocket connect path excludes the invalidated account and tries another account

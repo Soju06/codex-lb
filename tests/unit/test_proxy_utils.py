@@ -5589,6 +5589,61 @@ async def test_connect_proxy_websocket_fails_over_on_handshake_usage_limit_reach
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_fails_over_after_repeated_401_refresh_retry(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_ws_invalidated_a")
+    account_b = _make_account("acc_ws_invalidated_b")
+    first_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    second_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still expired"))
+    upstream = SimpleNamespace()
+    record_error = AsyncMock()
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=account_a, error_message=None),
+            AccountSelection(account=account_b, error_message=None),
+        ]
+    )
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_a, account_b]))
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_401, second_401, upstream]))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_repeated_401_failover",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == account_b
+    assert selected_upstream is upstream
+    assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {account_a.id}
+    record_error.assert_awaited_once_with(account_a)
+    websocket_send.assert_not_awaited()
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

@@ -235,7 +235,9 @@ async def get_dashboard_auth_session(
         if current_settings.guest_password_hash is None:
             return _public_guest_response(decorated)
         if decorated.authenticated and decorated.role == DashboardRole.GUEST:
-            return decorated
+            session_state = get_dashboard_session_store().get(session_id)
+            if session_state is not None and session_state.password_verified:
+                return decorated
         return _guest_login_required_response(decorated)
     bootstrap_token_configured = await has_active_bootstrap_token()
     return decorated.model_copy(
@@ -337,7 +339,7 @@ async def login_guest(
     await limiter.clear_for_key(rate_key, context.session)
 
     session_id, session_ttl_seconds = await _create_dashboard_session(
-        password_verified=False,
+        password_verified=settings.guest_password_hash is not None,
         totp_verified=False,
         role=DashboardRole.GUEST,
     )

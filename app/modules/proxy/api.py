@@ -238,10 +238,11 @@ def _accepts_event_stream(request: Request) -> bool:
 
 def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonValue]) -> bool:
     if isinstance(payload, Mapping):
+        payload_dict = cast("Mapping[str, JsonValue]", payload)
         return (
-            ("input" in payload and payload.get("instructions") is None)
-            or payload.get("messages") is not None
-            or "truncation" in payload
+            ("input" in payload_dict and payload_dict.get("instructions") is None)
+            or payload_dict.get("messages") is not None
+            or "truncation" in payload_dict
         )
 
     explicit_fields = payload.model_fields_set
@@ -266,7 +267,8 @@ def _is_openai_sdk_request(
     if payload is None or not _has_openai_responses_shape(payload):
         return False
     if isinstance(payload, Mapping):
-        return _accepts_event_stream(request) or payload.get("messages") is not None
+        payload_dict = cast("Mapping[str, JsonValue]", payload)
+        return _accepts_event_stream(request) or payload_dict.get("messages") is not None
     return _accepts_event_stream(request) or payload.messages is not None
 
 
@@ -447,10 +449,12 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    openai_sdk_request = _is_openai_sdk_request(request, payload)
+    openai_compat_payload = _has_openai_responses_shape(payload)
     try:
         responses_payload = normalize_responses_request_payload(
             payload,
-            openai_compat=False,
+            openai_compat=openai_compat_payload,
             codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
@@ -471,7 +475,7 @@ async def responses(
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
-        enforce_openai_sdk_contract=_is_openai_sdk_request(request, payload),
+        enforce_openai_sdk_contract=openai_sdk_request,
     )
 
 

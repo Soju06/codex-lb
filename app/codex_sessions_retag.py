@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import cast
 from urllib.parse import quote
 
 JsonObject = dict[str, object]
@@ -219,7 +220,7 @@ def _state_db_sort_key(path: Path) -> tuple[int, str]:
 
 
 def _jsonl_contains_provider(path: Path, provider: str) -> bool:
-    return any(record.get("model_provider") == provider for record in _read_jsonl_records(path))
+    return any(_jsonl_record_provider(record) == provider for record in _read_jsonl_records(path))
 
 
 def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) -> bool:
@@ -241,10 +242,9 @@ def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) ->
                 except json.JSONDecodeError:
                     output_handle.write(raw_line)
                     continue
-                if isinstance(record, dict) and record.get("model_provider") == source_provider:
+                if isinstance(record, dict) and _retag_jsonl_record_provider(record, source_provider, target_provider):
                     # Preserve invalid or unrelated JSONL lines verbatim; only
                     # matched session records are normalized through json.dumps.
-                    record["model_provider"] = target_provider
                     changed = True
                     output_handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
                 else:
@@ -271,6 +271,36 @@ def _read_jsonl_records(path: Path) -> Iterable[JsonObject]:
                 continue
             if isinstance(record, dict):
                 yield record
+
+
+def _jsonl_record_provider(record: JsonObject) -> str | None:
+    provider = record.get("model_provider")
+    if isinstance(provider, str):
+        return provider
+    if record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    payload = cast(JsonObject, payload)
+    payload_provider = payload.get("model_provider")
+    return payload_provider if isinstance(payload_provider, str) else None
+
+
+def _retag_jsonl_record_provider(record: JsonObject, source_provider: str, target_provider: str) -> bool:
+    if record.get("model_provider") == source_provider:
+        record["model_provider"] = target_provider
+        return True
+    if record.get("type") != "session_meta":
+        return False
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    payload = cast(JsonObject, payload)
+    if payload.get("model_provider") != source_provider:
+        return False
+    payload["model_provider"] = target_provider
+    return True
 
 
 def _sqlite_count_provider_rows(db_path: Path, provider: str) -> int:
@@ -370,7 +400,7 @@ def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
     counts: dict[str, int] = {}
     for path in _find_jsonl_session_files(codex_home / "sessions"):
         for record in _read_jsonl_records(path):
-            provider = record.get("model_provider")
+            provider = _jsonl_record_provider(record)
             if isinstance(provider, str):
                 counts[provider] = counts.get(provider, 0) + 1
     for db_path in _find_state_dbs(codex_home):

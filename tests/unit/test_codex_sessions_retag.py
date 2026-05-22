@@ -93,6 +93,31 @@ def test_retag_updates_jsonl_and_sqlite_with_backup(tmp_path: Path) -> None:
     assert ProviderCount("codex-lb", 5) in result.provider_counts_after
 
 
+def test_retag_updates_nested_session_meta_provider(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_file = codex_home / "sessions" / "2026" / "session.jsonl"
+    _write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"model_provider": "openai", "id": "meta"}},
+            {"type": "turn_context", "payload": {"model_provider": "openai"}},
+        ],
+    )
+
+    result = retag_codex_sessions(
+        codex_home=codex_home,
+        source_provider="openai",
+        target_provider="codex-lb",
+    )
+
+    records = [json.loads(line) for line in session_file.read_text(encoding="utf-8").splitlines()]
+    assert records[0]["payload"]["model_provider"] == "codex-lb"
+    assert records[1]["payload"]["model_provider"] == "openai"
+    assert result.jsonl_files_matched == 1
+    assert ProviderCount("openai", 1) in result.provider_counts_before
+    assert ProviderCount("codex-lb", 1) in result.provider_counts_after
+
+
 def test_retag_streams_jsonl_rewrite_to_temp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "2026" / "session.jsonl"

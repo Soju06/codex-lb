@@ -3206,6 +3206,72 @@ async def test_automations_manual_cycle_does_not_skip_stale_claimed_run_when_acc
 
 
 @pytest.mark.asyncio
+async def test_automations_manual_cycle_does_not_reclaim_stale_claimed_run(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-manual-stale-active-a")
+    now = utcnow().replace(second=0, microsecond=0)
+    scheduled_for = now - timedelta(hours=3)
+    claimed_started_at = now - timedelta(hours=2)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Manual stale claimed no reclaim",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=1,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id],
+        )
+        cycle_id = "stalenoexec"
+        cycle_key = f"manual:{job.id}:{cycle_id}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="manual",
+            cycle_expected_accounts=1,
+            cycle_window_end=now - timedelta(hours=1),
+            accounts=[(accounts[0].id, scheduled_for)],
+        )
+        run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="manual",
+            slot_key=_manual_slot_key(job.id, cycle_id, accounts[0].id),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=scheduled_for,
+            started_at=claimed_started_at,
+            account_id=accounts[0].id,
+        )
+        assert run is not None
+
+        executed = await service.run_due_jobs(now_utc=now)
+        stored_run = await automations_repository.get_run(run.id)
+
+    assert executed == 0
+    assert called_chatgpt_account_ids == []
+    assert stored_run is not None
+    assert stored_run.status == "running"
+    assert stored_run.account_id == accounts[0].id
+    assert stored_run.started_at == claimed_started_at
+
+
+@pytest.mark.asyncio
 async def test_automations_manual_cycle_all_skipped_placeholders_are_not_reported_success(
     async_client,
     monkeypatch,

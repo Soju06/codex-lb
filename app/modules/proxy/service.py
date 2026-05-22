@@ -1542,6 +1542,8 @@ class ProxyService:
                                 )
                             )
                             break
+                        if propagate_http_errors and request_state.response_id is None:
+                            continue
                         keepalive_sent = True
                         yielded_any = True
                         if request_state.response_id:

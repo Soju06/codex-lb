@@ -229,7 +229,7 @@ def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -
     tools_value = payload.get("tools")
     if not is_json_list(tools_value):
         return payload
-    if _explicitly_requests_image_generation(payload.get("tool_choice")):
+    if _explicitly_requests_image_generation(payload.get("tool_choice"), tools_value):
         return payload
 
     sanitized_tools: list[JsonValue] = []
@@ -248,9 +248,9 @@ def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -
     return sanitized_payload
 
 
-def _explicitly_requests_image_generation(tool_choice: JsonValue | None) -> bool:
+def _explicitly_requests_image_generation(tool_choice: JsonValue | None, tools: list[JsonValue]) -> bool:
     if tool_choice == "required":
-        return True
+        return all(is_json_mapping(tool) and tool.get("type") == "image_generation" for tool in tools)
     return is_json_mapping(tool_choice) and tool_choice.get("type") == "image_generation"
 
 

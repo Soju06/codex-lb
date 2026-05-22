@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, delete, func, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -279,7 +279,7 @@ class ApiKeysRepository:
         elif limit_type == LimitType.OUTPUT_TOKENS:
             value_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
         elif limit_type == LimitType.COST_USD:
-            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), Integer)
+            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), BigInteger)
         else:
             return 0
 

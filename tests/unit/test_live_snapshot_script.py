@@ -223,3 +223,24 @@ def test_postgres_sync_url_removes_sqlalchemy_async_driver() -> None:
         snapshot._postgres_sync_url("postgresql+asyncpg://user:password@db:5432/codex_lb")
         == "postgresql://user:password@db:5432/codex_lb"
     )
+
+
+def test_container_postgres_invalid_json_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Result:
+        returncode = 0
+        stdout = "not-json"
+        stderr = ""
+
+    monkeypatch.setattr(snapshot.subprocess, "run", lambda *args, **kwargs: Result())
+
+    result = snapshot._fetch_postgres_rows_in_container("codex-lb-direct", {})
+
+    assert isinstance(result, str)
+    assert result.startswith("container PostgreSQL query returned invalid JSON:")
+
+
+def test_perf_tail_guidance_labels_db_pressure() -> None:
+    assert snapshot._perf_tail_guidance(
+        latency_summary={"count": 1, "min": 1, "avg": 1.0, "p50": 1, "p90": 1, "p95": 1, "max": 1},
+        recent_errors=[{"error_code": "sqlite_locked"}],
+    ) == ["local_db_or_log_pressure"]

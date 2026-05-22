@@ -29,6 +29,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 error_message TEXT,
                 model VARCHAR NOT NULL,
                 transport VARCHAR,
+                account_id VARCHAR,
                 session_id VARCHAR,
                 latency_ms INTEGER,
                 latency_first_token_ms INTEGER,
@@ -53,6 +54,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                 error_message,
                 model,
                 transport,
+                account_id,
                 session_id,
                 latency_ms,
                 latency_first_token_ms,
@@ -68,7 +70,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
             )
             VALUES (
                 datetime('now', ?),
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -79,6 +81,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     None,
                     "gpt-5.5",
                     "websocket",
+                    "account_fast",
                     "session_ok",
                     1000,
                     200,
@@ -99,6 +102,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     None,
                     "gpt-5.5",
                     "websocket",
+                    "account_slow",
                     "session_slow",
                     90000,
                     500,
@@ -119,6 +123,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     "Upstream websocket closed before response.completed",
                     "gpt-5.5",
                     "websocket",
+                    "account_stream",
                     "session_stream_error",
                     5000,
                     None,
@@ -139,6 +144,7 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
                     "This model's maximum context length was exceeded.",
                     "gpt-5.5",
                     "websocket",
+                    "account_context",
                     "session_context_overflow",
                     3000,
                     None,
@@ -167,9 +173,51 @@ def test_request_logs_snapshot_reports_tiers_latency_and_slowest_rows(tmp_path: 
     assert snapshot["output_token_buckets"][0]["bucket"] == "3000-6000"
     assert snapshot["recent_errors"][0]["error_code"] == "stream_incomplete"
     assert snapshot["runtime_correlation"]["groups"][0]["model"] == "gpt-5.5"
-    assert any(
-        row["error_code"] == "stream_incomplete" for row in snapshot["runtime_correlation"]["recent_requests"]
-    )
+    assert snapshot["perf_tail"]["groups"][0] == {
+        "model": "gpt-5.5",
+        "route_pattern": "/backend-api/codex/responses",
+        "output_token_bucket": "3000-6000",
+        "reasoning_effort": "high",
+        "status": "success",
+        "websocket_error_code": "",
+        "count": 1,
+        "avg_latency_ms": 90000.0,
+        "p95_latency_ms": 90000,
+        "max_latency_ms": 90000,
+        "avg_latency_first_token_ms": 500.0,
+        "avg_input_tokens": 60000.0,
+        "avg_output_tokens": 3200.0,
+    }
+    assert {
+        "model": "gpt-5.5",
+        "route_pattern": "/backend-api/codex/responses",
+        "output_token_bucket": "unknown",
+        "reasoning_effort": "low",
+        "status": "error",
+        "websocket_error_code": "stream_incomplete",
+        "count": 1,
+        "avg_latency_ms": 5000.0,
+        "p95_latency_ms": 5000,
+        "max_latency_ms": 5000,
+        "avg_latency_first_token_ms": None,
+        "avg_input_tokens": None,
+        "avg_output_tokens": None,
+    } in snapshot["perf_tail"]["groups"]
+    assert snapshot["perf_tail"]["slow_request_threshold_ms"] == 30000
+    assert snapshot["perf_tail"]["long_generation_output_token_threshold"] == 1500
+    assert snapshot["perf_tail"]["long_generation_groups"][0]["output_token_bucket"] == "3000-6000"
+    assert snapshot["perf_tail"]["websocket_instability"]["count"] == 1
+    websocket_group = snapshot["perf_tail"]["websocket_instability"]["groups"][0]
+    assert websocket_group["error_code"] == "stream_incomplete"
+    assert "account_id" not in websocket_group
+    assert websocket_group["account_id_hash"].startswith("sha256:")
+    assert snapshot["perf_tail"]["guidance"] == [
+        "slow_upstream_or_request_tail",
+        "websocket_instability",
+    ]
+    assert snapshot["query_timings_ms"]["total"] >= 0
+    assert any(row["name"] == "perf_tail_rows" for row in snapshot["query_timings_ms"]["queries"])
+    assert any(row["error_code"] == "stream_incomplete" for row in snapshot["runtime_correlation"]["recent_requests"])
     assert snapshot["context_length_exceeded"]["count"] == 1
     assert snapshot["context_length_exceeded"]["groups"][0]["input_token_bucket"] == "150k+"
     assert snapshot["context_length_exceeded"]["groups"][0]["max_input_tokens"] == 180000

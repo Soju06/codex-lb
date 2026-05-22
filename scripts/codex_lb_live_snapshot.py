@@ -30,6 +30,9 @@ LOG_PATTERNS = (
     "TimeoutError",
     "stream_incomplete",
 )
+LONG_GENERATION_OUTPUT_TOKEN_THRESHOLD = 1500
+LONG_GENERATION_OUTPUT_BUCKETS = frozenset({"1500-3000", "3000-6000", "6000+"})
+SLOW_REQUEST_THRESHOLD_MS = 30_000
 
 _POSTGRES_CONTAINER_QUERY_SCRIPT = r"""
 import json
@@ -240,16 +243,32 @@ def _request_logs_from_postgres_url(database_url: str, minutes: int) -> dict[str
 
 
 def _request_logs_from_container_postgres(container: str, minutes: int) -> dict[str, Any]:
+    query_timings: list[dict[str, Any]] = []
+    started = time.perf_counter()
     columns_or_error = _fetch_postgres_rows_in_container(container, _postgres_request_log_column_query())
+    query_timings.append(
+        {
+            "name": "container_postgres_request_log_columns",
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    )
     if isinstance(columns_or_error, str):
         return {"error": columns_or_error}
     columns = _request_log_columns_from_rows(columns_or_error["request_log_columns"])
+    started = time.perf_counter()
     rows_or_error = _fetch_postgres_rows_in_container(
         container,
         _request_log_queries("postgresql", minutes, columns=columns),
     )
+    query_timings.append(
+        {
+            "name": "container_postgres_request_log_batch",
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    )
     if isinstance(rows_or_error, str):
         return {"error": rows_or_error}
+    rows_or_error["_query_timings"] = query_timings
     return _build_request_logs_snapshot(
         rows_or_error,
         minutes,
@@ -298,10 +317,15 @@ def _fetch_request_log_rows(
     *,
     columns: frozenset[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    return {
-        name: execute(sql, params)
-        for name, (sql, params) in _request_log_queries(dialect, minutes, columns=columns).items()
-    }
+    rows: dict[str, list[dict[str, Any]]] = {}
+    query_timings: list[dict[str, Any]] = []
+    for name, (sql, params) in _request_log_queries(dialect, minutes, columns=columns).items():
+        started = time.perf_counter()
+        rows[name] = execute(sql, params)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        query_timings.append({"name": name, "elapsed_ms": elapsed_ms})
+    rows["_query_timings"] = query_timings
+    return rows
 
 
 def _request_log_queries(
@@ -321,6 +345,7 @@ def _request_log_queries(
     has_request_id = columns is None or "request_id" in columns
     has_error_message = columns is None or "error_message" in columns
     has_session_id = columns is None or "session_id" in columns
+    has_account_id = columns is None or "account_id" in columns
     if has_cost_usd and dialect == "postgresql":
         runtime_cost_usd_expr = "round(sum(coalesce(cost_usd, 0.0))::numeric, 6) AS cost_usd"
     elif has_cost_usd:
@@ -330,6 +355,7 @@ def _request_log_queries(
     request_cost_usd_expr = "cost_usd" if has_cost_usd else "NULL AS cost_usd"
     response_id_expr = "request_id AS response_id" if has_request_id else "NULL AS response_id"
     session_id_expr = "session_id" if has_session_id else "NULL AS session_id"
+    account_id_expr = "account_id" if has_account_id else "NULL AS account_id"
     like_wildcard = "%%" if dialect == "postgresql" else "%"
     if has_error_message:
         context_length_where = (
@@ -544,6 +570,64 @@ def _request_log_queries(
             """,
             params,
         ),
+        "perf_tail_rows": (
+            f"""
+            SELECT
+                model,
+                CASE
+                    WHEN coalesce(transport, '') = 'websocket' THEN '/backend-api/codex/responses'
+                    WHEN coalesce(transport, '') = 'http' THEN '/v1/responses'
+                    WHEN coalesce(transport, '') = 'chat_completions' THEN '/v1/chat/completions'
+                    ELSE coalesce(transport, 'unknown')
+                END AS route_pattern,
+                CASE
+                    WHEN output_tokens IS NULL THEN 'unknown'
+                    WHEN output_tokens < 500 THEN '<500'
+                    WHEN output_tokens < 1500 THEN '500-1500'
+                    WHEN output_tokens < 3000 THEN '1500-3000'
+                    WHEN output_tokens < 6000 THEN '3000-6000'
+                    ELSE '6000+'
+                END AS output_token_bucket,
+                coalesce(reasoning_effort, '') AS reasoning_effort,
+                status,
+                CASE
+                    WHEN coalesce(transport, '') = 'websocket' THEN coalesce(error_code, '')
+                    ELSE ''
+                END AS websocket_error_code,
+                latency_ms,
+                latency_first_token_ms,
+                input_tokens,
+                output_tokens
+            FROM request_logs
+            WHERE requested_at >= {window_expr} AND latency_ms IS NOT NULL
+            ORDER BY latency_ms DESC, id DESC
+            LIMIT 25
+            """,
+            params,
+        ),
+        "websocket_instability_rows": (
+            f"""
+            SELECT
+                {account_id_expr},
+                model,
+                coalesce(reasoning_effort, '') AS reasoning_effort,
+                coalesce(error_code, '') AS error_code,
+                count(*) AS count,
+                round(avg(latency_ms), 1) AS avg_latency_ms,
+                min(latency_ms) AS min_latency_ms,
+                max(latency_ms) AS max_latency_ms,
+                max(requested_at) AS last_requested_at
+            FROM request_logs
+            WHERE requested_at >= {window_expr}
+                AND coalesce(transport, '') = 'websocket'
+                AND status != 'success'
+                AND coalesce(error_code, '') IN ('stream_incomplete', 'upstream_websocket_open_timeout')
+            GROUP BY 1, 2, 3, 4
+            ORDER BY count DESC, max_latency_ms DESC
+            LIMIT 25
+            """,
+            params,
+        ),
         "context_length_rows": (
             f"""
             SELECT
@@ -632,7 +716,14 @@ def _request_log_queries(
         ),
         "recent_errors": (
             f"""
-            SELECT requested_at, status, error_code, substr(coalesce(error_message, ''), 1, 160) AS message
+            SELECT
+                requested_at,
+                status,
+                model,
+                transport,
+                latency_ms,
+                error_code,
+                substr(coalesce(error_message, ''), 1, 160) AS message
             FROM request_logs
             WHERE requested_at >= {window_expr} AND status != 'success'
             ORDER BY requested_at DESC, id DESC
@@ -659,15 +750,24 @@ def _build_request_logs_snapshot(
     output_bucket_rows = rows["output_bucket_rows"]
     input_bucket_rows = rows["input_bucket_rows"]
     runtime_correlation_rows = rows["runtime_correlation_rows"]
+    perf_tail_rows = rows["perf_tail_rows"]
+    websocket_instability_rows = rows["websocket_instability_rows"]
     context_length_rows = rows["context_length_rows"]
     context_length_recent = rows["context_length_recent"]
     correlation_request_rows = rows["correlation_request_rows"]
     recent_errors = rows["recent_errors"]
+    query_timings = rows.get("_query_timings", [])
     total = sum(row["count"] for row in status_rows)
     successes = sum(row["count"] for row in status_rows if row["status"] == "success")
+    latency_summary = _latency_summary(row["latency_ms"] for row in latency_rows)
+    perf_tail_groups = _build_perf_tail_groups(perf_tail_rows)
     return {
         "source": source,
         "window_minutes": minutes,
+        "query_timings_ms": {
+            "total": round(sum(row["elapsed_ms"] for row in query_timings), 1),
+            "queries": query_timings,
+        },
         "total": total,
         "success_rate": None if total == 0 else round(successes / total, 4),
         "status_counts": status_rows,
@@ -677,7 +777,7 @@ def _build_request_logs_snapshot(
             "count": sum(row["count"] for row in tier_mismatch_rows),
             "groups": tier_mismatch_rows,
         },
-        "latency_ms": _latency_summary(row["latency_ms"] for row in latency_rows),
+        "latency_ms": latency_summary,
         "success_latency_ms": _latency_summary(row["latency_ms"] for row in latency_rows if row["status"] == "success"),
         "latency_first_token_ms": _latency_summary(row["latency_first_token_ms"] for row in latency_rows),
         "slowest_requests": slowest_rows,
@@ -688,6 +788,20 @@ def _build_request_logs_snapshot(
             "groups": runtime_correlation_rows,
             "recent_requests": correlation_request_rows,
         },
+        "perf_tail": {
+            "slow_request_threshold_ms": SLOW_REQUEST_THRESHOLD_MS,
+            "long_generation_output_token_threshold": LONG_GENERATION_OUTPUT_TOKEN_THRESHOLD,
+            "guidance": _perf_tail_guidance(
+                latency_summary=latency_summary,
+                recent_errors=recent_errors,
+            ),
+            "groups": perf_tail_groups,
+            "long_generation_groups": _long_generation_groups(perf_tail_groups),
+            "websocket_instability": {
+                "count": sum(row["count"] for row in websocket_instability_rows),
+                "groups": _redact_account_group_rows(websocket_instability_rows),
+            },
+        },
         "context_length_exceeded": {
             "count": sum(row["count"] for row in context_length_rows),
             "groups": context_length_rows,
@@ -696,6 +810,92 @@ def _build_request_logs_snapshot(
         "recent_requests": recent_requests,
         "recent_errors": recent_errors,
     }
+
+
+def _perf_tail_guidance(
+    *,
+    latency_summary: dict[str, int | float] | None,
+    recent_errors: list[dict[str, Any]],
+) -> list[str]:
+    labels: list[str] = []
+    p95 = latency_summary.get("p95") if latency_summary is not None else None
+    if isinstance(p95, int | float) and p95 >= 30000:
+        labels.append("slow_upstream_or_request_tail")
+    websocket_error_codes = {"stream_incomplete", "upstream_websocket_open_timeout"}
+    if any(row.get("error_code") in websocket_error_codes for row in recent_errors):
+        labels.append("websocket_instability")
+    local_error_codes = {"database is locked", "sqlite_locked", "db_locked"}
+    if any(str(row.get("error_code", "")).lower() in local_error_codes for row in recent_errors):
+        labels.append("local_db_or_log_pressure")
+    if not labels:
+        labels.append("no_snapshot_perf_caveat")
+    return labels
+
+
+def _build_perf_tail_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("model") or ""),
+            str(row.get("route_pattern") or "unknown"),
+            str(row.get("output_token_bucket") or "unknown"),
+            str(row.get("reasoning_effort") or ""),
+            str(row.get("status") or ""),
+            str(row.get("websocket_error_code") or ""),
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "model": key[0],
+                "route_pattern": key[1],
+                "output_token_bucket": key[2],
+                "reasoning_effort": key[3],
+                "status": key[4],
+                "websocket_error_code": key[5],
+                "latencies_ms": [],
+                "latency_first_token_ms": [],
+                "input_tokens": [],
+                "output_tokens": [],
+            },
+        )
+        group["latencies_ms"].append(row.get("latency_ms"))
+        group["latency_first_token_ms"].append(row.get("latency_first_token_ms"))
+        group["input_tokens"].append(row.get("input_tokens"))
+        group["output_tokens"].append(row.get("output_tokens"))
+
+    output: list[dict[str, Any]] = []
+    for group in groups.values():
+        latency = _latency_summary(group.pop("latencies_ms"))
+        first_token = _latency_summary(group.pop("latency_first_token_ms"))
+        group["count"] = latency["count"] if latency is not None else 0
+        group["avg_latency_ms"] = latency["avg"] if latency is not None else None
+        group["p95_latency_ms"] = latency["p95"] if latency is not None else None
+        group["max_latency_ms"] = latency["max"] if latency is not None else None
+        group["avg_latency_first_token_ms"] = first_token["avg"] if first_token is not None else None
+        group["avg_input_tokens"] = _average(group.pop("input_tokens"))
+        group["avg_output_tokens"] = _average(group.pop("output_tokens"))
+        output.append(group)
+    return sorted(output, key=lambda row: (row["p95_latency_ms"] or 0, row["max_latency_ms"] or 0), reverse=True)
+
+
+def _long_generation_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if row.get("output_token_bucket") in LONG_GENERATION_OUTPUT_BUCKETS]
+
+
+def _redact_account_group_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    redacted: list[dict[str, Any]] = []
+    for row in rows:
+        safe_row = dict(row)
+        safe_row["account_id_hash"] = _hash_identifier(safe_row.pop("account_id", None))
+        redacted.append(safe_row)
+    return redacted
+
+
+def _average(values: list[Any]) -> float | None:
+    numbers = [int(value) for value in values if isinstance(value, int | float)]
+    if not numbers:
+        return None
+    return round(sum(numbers) / len(numbers), 1)
 
 
 def _redact_context_length_recent(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

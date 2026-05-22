@@ -190,6 +190,38 @@ def test_select_account_secondary_reset_fallback_uses_primary_subday_precision()
     assert result.account.account_id == "earlier-primary-fallback"
 
 
+def test_select_account_secondary_reset_preference_normalizes_fallback_units():
+    now = time.time()
+    states = [
+        AccountState(
+            "secondary-two-days",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 2 * 24 * 3600),
+        ),
+        AccountState(
+            "primary-fallback-three-hours",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            primary_reset_at=int(now + 3 * 3600),
+            secondary_reset_at=None,
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "primary-fallback-three-hours"
+
+
 def test_select_account_prefers_lower_secondary_used_with_same_reset_bucket():
     now = time.time()
     states = [

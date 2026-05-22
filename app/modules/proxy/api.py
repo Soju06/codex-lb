@@ -238,7 +238,7 @@ def _accepts_event_stream(request: Request) -> bool:
 def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
     explicit_fields = payload.model_fields_set
     return (
-        ("input" in explicit_fields and "instructions" not in explicit_fields)
+        ("input" in explicit_fields and payload.instructions is None)
         or payload.messages is not None
         or "truncation" in explicit_fields
     )

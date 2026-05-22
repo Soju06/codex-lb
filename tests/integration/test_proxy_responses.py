@@ -241,6 +241,41 @@ async def test_proxy_responses_openai_shape_custom_client_gets_sdk_sse_contract(
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_null_instructions_gets_sdk_sse_contract(async_client, monkeypatch):
+    email = "backend-openai-null-instructions@example.com"
+    raw_account_id = "acc_backend_openai_null_instructions"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        assert payload.instructions == ""
+        yield 'data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n'
+        yield (
+            'data: {"type":"response.completed","sequence_number":1,'
+            '"response":{"id":"resp_null_instructions","object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": None, "input": "hi", "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"accept": "text/event-stream", "user-agent": "custom-client/1.0"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event_types = [event["type"] for event in _iter_sse_events(lines)]
+    assert event_types[0] == "response.created"
+    assert "codex.rate_limits" not in event_types
+    assert "response.completed" in event_types
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_instructionless_array_input_gets_sdk_sse_contract(async_client, monkeypatch):
     email = "backend-openai-array@example.com"
     raw_account_id = "acc_backend_openai_array"

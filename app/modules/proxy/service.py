@@ -11525,11 +11525,11 @@ def _websocket_downstream_response_id(request_state: "_WebSocketRequestState") -
 
 
 def _rewrite_websocket_downstream_response_id(
-    payload: dict[str, JsonValue] | None,
+    payload: dict[str, JsonValue],
     request_state: "_WebSocketRequestState",
-) -> dict[str, JsonValue] | None:
+) -> dict[str, JsonValue]:
     downstream_response_id = request_state.replay_downstream_response_id
-    if downstream_response_id is None or not isinstance(payload, dict):
+    if downstream_response_id is None:
         return payload
 
     rewritten = dict(payload)

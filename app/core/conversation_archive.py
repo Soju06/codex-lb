@@ -268,11 +268,11 @@ def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> Non
     for path, record, _queued_bytes in items:
         grouped.setdefault(path, []).append(record)
 
-    try:
-        with _WRITE_LOCK:
-            if _archive_disk_pressure_active():
-                return
-            for path, records in grouped.items():
+    with _WRITE_LOCK:
+        if _archive_disk_pressure_active():
+            return
+        for path, records in grouped.items():
+            try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.parent.chmod(_ARCHIVE_DIR_MODE)
                 _recover_corrupt_gzip_archive(path)
@@ -280,14 +280,12 @@ def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> Non
                     _write_gzip_jsonl_record(path, records[0])
                 else:
                     _write_gzip_jsonl_records(path, records)
-    except Exception as exc:
-        for path in grouped:
-            _RECOVERY_CHECKED_PATHS.discard(path.resolve())
-        if _is_disk_pressure_error(exc):
-            first_path = next(iter(grouped))
-            _pause_archive_for_disk_pressure(first_path, exc)
-            return
-        logger.warning("Failed to append conversation archive record", exc_info=True)
+            except Exception as exc:
+                _RECOVERY_CHECKED_PATHS.discard(path.resolve())
+                if _is_disk_pressure_error(exc):
+                    _pause_archive_for_disk_pressure(path, exc)
+                    return
+                logger.warning("Failed to append conversation archive record", exc_info=True)
 
 
 def _serialized_record_size(record: Mapping[str, Any]) -> int:

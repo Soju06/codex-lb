@@ -15,6 +15,24 @@ const resources = {
   "zh-CN": { translation: zhCN },
 } as const;
 
+export function normalizeSupportedLanguage(lng: string | null | undefined): SupportedLanguage {
+  if (!lng) {
+    return "en";
+  }
+  const exactMatch = SUPPORTED_LANGUAGES.find((supported) => supported.toLowerCase() === lng.toLowerCase());
+  if (exactMatch) {
+    return exactMatch;
+  }
+  const baseLanguage = lng.split(/[-_]/, 1)[0]?.toLowerCase();
+  if (baseLanguage === "zh") {
+    return "zh-CN";
+  }
+  if (baseLanguage === "en") {
+    return "en";
+  }
+  return "en";
+}
+
 void i18n
   .use(LanguageDetector)
   .use(initReactI18next)
@@ -41,7 +59,7 @@ function applyHtmlLang(lng: string): void {
   document.documentElement.lang = lng;
 }
 
-applyHtmlLang(i18n.resolvedLanguage ?? i18n.language ?? "en");
-i18n.on("languageChanged", applyHtmlLang);
+applyHtmlLang(normalizeSupportedLanguage(i18n.resolvedLanguage ?? i18n.language));
+i18n.on("languageChanged", (lng) => applyHtmlLang(normalizeSupportedLanguage(lng)));
 
 export default i18n;

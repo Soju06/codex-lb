@@ -1525,6 +1525,7 @@ class ProxyService:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
                         keepalive_count += 1
+                        downstream_response_id = _websocket_downstream_response_id(request_state)
                         if keepalive_count > _STREAM_KEEPALIVE_MAX_COUNT:
                             logger.info(
                                 "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s",
@@ -1537,21 +1538,21 @@ class ProxyService:
                                     response_failed_event(
                                         "stream_idle_timeout",
                                         "Upstream did not respond within the keepalive window",
-                                        response_id=request_state.response_id or request_state.request_id,
+                                        response_id=downstream_response_id,
                                     ),
                                 )
                             )
                             break
                         keepalive_sent = True
                         yielded_any = True
-                        if request_state.response_id:
+                        if request_state.response_id or request_state.replay_downstream_response_id:
                             yield format_sse_event(
                                 cast(
                                     Mapping[str, JsonValue],
                                     {
                                         "type": "response.in_progress",
                                         "response": {
-                                            "id": request_state.response_id,
+                                            "id": downstream_response_id,
                                             "status": "in_progress",
                                         },
                                     },
@@ -1585,7 +1586,7 @@ class ProxyService:
                         block_payload,
                         block_event_type,
                     ) = _build_rewritten_stream_response_failed_event(
-                        response_id=request_state.response_id or request_state.request_id,
+                        response_id=_websocket_downstream_response_id(request_state),
                         error_code="stream_incomplete",
                         error_message="Upstream websocket closed before response.completed",
                     )

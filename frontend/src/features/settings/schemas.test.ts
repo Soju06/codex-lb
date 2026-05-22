@@ -46,6 +46,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.guestAccessEnabled).toBe(false);
+    expect(parsed.guestPasswordConfigured).toBe(false);
   });
 });
 

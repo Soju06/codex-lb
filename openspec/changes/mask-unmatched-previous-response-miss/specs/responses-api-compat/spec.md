@@ -15,4 +15,5 @@ Public Responses endpoints MUST NOT return an OpenAI-shaped previous_response_no
 - **AND** the event can be associated with exactly one pending client request or must otherwise be treated as a continuity failure
 - **THEN** the proxy MUST NOT forward the raw upstream previous_response_not_found event
 - **AND** the downstream error code is stream_incomplete when a pending request can be safely completed
+- **AND** if a downstream websocket send disconnect prevents delivery of the masked terminal event, pending request logs preserve sanitized stream_incomplete continuity metadata
 - **AND** ambiguous events that cannot be safely associated with a request are suppressed or converted into a reconnect without exposing the raw upstream error

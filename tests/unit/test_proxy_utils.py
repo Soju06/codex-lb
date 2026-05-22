@@ -11151,7 +11151,9 @@ async def test_connect_proxy_websocket_skips_failed_precreated_replay_account(mo
     assert selected == selected_account
     assert selected_upstream is upstream
     select_account.assert_awaited_once()
-    assert select_account.await_args.kwargs["exclude_account_ids"] == {failed_account.id}
+    select_account_call = select_account.await_args
+    assert select_account_call is not None
+    assert select_account_call.kwargs["exclude_account_ids"] == {failed_account.id}
     websocket_send.assert_not_awaited()
     assert request_logs.calls == []
 
@@ -15802,6 +15804,126 @@ async def test_stream_with_retry_skips_release_after_settlement_transfers_on_can
             pass
 
     release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_persists_unmatched_previous_response_miss_on_send_disconnect(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    class _DisconnectingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            raise WebSocketDisconnect(code=1006)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _PreviousResponseMissUpstream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._sent = False
+
+        async def receive(self) -> SimpleNamespace:
+            if self._sent:
+                return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+            self._sent = True
+            return SimpleNamespace(
+                kind="text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": "Previous response with id 'resp_unknown_send_fail' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+                data=None,
+                close_code=None,
+                error=None,
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    downstream = _DisconnectingDownstreamWebSocket()
+    upstream = _PreviousResponseMissUpstream()
+    pending_requests = deque(
+        [
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_prev_send_fail_a",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=time.monotonic(),
+                previous_response_id="resp_prev_a",
+            ),
+            proxy_service._WebSocketRequestState(
+                request_id="ws_req_prev_send_fail_b",
+                model="gpt-5.1",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=time.monotonic(),
+                previous_response_id="resp_prev_b",
+            ),
+        ]
+    )
+
+    await service._relay_upstream_websocket_messages(
+        cast(WebSocket, downstream),
+        cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+        account=_make_account("acc_ws_prev_send_fail"),
+        account_id_value="acc_ws_prev_send_fail",
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        proxy_request_budget_seconds=30.0,
+        stream_idle_timeout_seconds=30.0,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert upstream.closed is True
+    assert pending_requests == deque()
+    assert len(downstream.sent_text) == 1
+    downstream_payload = json.loads(downstream.sent_text[0])
+    assert downstream_payload["response"]["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_unknown_send_fail" not in downstream.sent_text[0]
+    assert [call["request_id"] for call in request_logs.calls] == [
+        "ws_req_prev_send_fail_a",
+        "ws_req_prev_send_fail_b",
+    ]
+    assert {call["status"] for call in request_logs.calls} == {"error"}
+    assert {call["error_code"] for call in request_logs.calls} == {"stream_incomplete"}
+    assert {call["error_message"] for call in request_logs.calls} == {
+        "Upstream websocket closed before response.completed"
+    }
+    assert "client_disconnected" not in {call["error_code"] for call in request_logs.calls}
+    assert "continuity_fail_closed surface=websocket_stream reason=previous_response_not_found_unmatched" in caplog.text
+    assert "resp_unknown_send_fail" not in caplog.text
 
 
 @pytest.mark.asyncio

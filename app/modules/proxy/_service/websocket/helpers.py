@@ -277,6 +277,7 @@ from app.modules.proxy._service.support import (
     _websocket_request_can_replay_before_visible_output,
     _WebSocketContinuityAnchor,
     _WebSocketContinuityState,
+    _WebSocketDownstreamSendFailure,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
@@ -863,6 +864,11 @@ def _rewrite_websocket_continuity_corruption_event(
     rewritten_code, rewritten_message = _websocket_continuity_error_fields(
         reason=reason,
         expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
+    upstream_control.downstream_send_failure = _WebSocketDownstreamSendFailure(
+        error_code=rewritten_code,
+        error_message=rewritten_message,
+        status="error",
     )
     rewritten_event_payload = response_failed_event(
         rewritten_code,

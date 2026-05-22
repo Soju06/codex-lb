@@ -7,9 +7,13 @@
 - [x] Preserve retryable stream_incomplete downstream behavior for any safely
       identified pending request.
 - [x] Include the upstream error code in owner-unavailable continuity diagnostics.
+- [x] Preserve stream_incomplete request-log persistence when a downstream send
+      disconnect follows unmatched websocket continuity masking.
 
 ## 2. Tests
 
 - [x] Cover direct websocket unmatched previous-response masking diagnostics.
 - [x] Cover HTTP bridge unmatched previous-response masking diagnostics.
+- [x] Cover direct websocket downstream disconnect after unmatched previous-response
+      masking.
 - [x] Run focused proxy tests and OpenSpec validation.

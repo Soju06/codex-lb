@@ -2555,6 +2555,21 @@ class _WebSocketMixin:
                     downstream_texts = upstream_control.downstream_texts
                     upstream_control.suppress_downstream_event = False
                     upstream_control.downstream_texts = None
+                    downstream_send_failure = upstream_control.downstream_send_failure
+                    upstream_control.downstream_send_failure = None
+                    disconnected_error_code = (
+                        downstream_send_failure.error_code
+                        if downstream_send_failure is not None
+                        else "client_disconnected"
+                    )
+                    disconnected_error_message = (
+                        downstream_send_failure.error_message
+                        if downstream_send_failure is not None
+                        else "Downstream websocket disconnected before response.completed"
+                    )
+                    disconnected_status = (
+                        downstream_send_failure.status if downstream_send_failure is not None else "cancelled"
+                    )
                     if downstream_texts is not None:
                         for emitted_text in downstream_texts:
                             try:
@@ -2574,11 +2589,11 @@ class _WebSocketMixin:
                                     account_id_value=account_id_value,
                                     pending_requests=pending_requests,
                                     pending_lock=pending_lock,
-                                    error_code="client_disconnected",
-                                    error_message="Downstream websocket disconnected before response.completed",
+                                    error_code=disconnected_error_code,
+                                    error_message=disconnected_error_message,
                                     api_key=api_key,
                                     response_create_gate=response_create_gate,
-                                    status="cancelled",
+                                    status=disconnected_status,
                                     penalize_account=False,
                                 )
                                 try:
@@ -2609,11 +2624,11 @@ class _WebSocketMixin:
                                 account_id_value=account_id_value,
                                 pending_requests=pending_requests,
                                 pending_lock=pending_lock,
-                                error_code="client_disconnected",
-                                error_message="Downstream websocket disconnected before response.completed",
+                                error_code=disconnected_error_code,
+                                error_message=disconnected_error_message,
                                 api_key=api_key,
                                 response_create_gate=response_create_gate,
-                                status="cancelled",
+                                status=disconnected_status,
                                 penalize_account=False,
                             )
                             try:

@@ -15,6 +15,8 @@ operator diagnostics.
   fail-closed continuity decisions.
 - Keep downstream/client errors on the retryable stream_incomplete shape when a
   pending request can be safely identified.
+- Preserve stream_incomplete request-log evidence when a downstream websocket
+  send disconnect races with masked continuity failure delivery.
 - Emit hashed, low-cardinality diagnostics for unmatched previous-response misses
   and owner-unavailable continuity masking.
 

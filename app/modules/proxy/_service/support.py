@@ -453,12 +453,20 @@ class _WebSocketContinuityAnchor:
 
 
 @dataclass(slots=True)
+class _WebSocketDownstreamSendFailure:
+    error_code: str
+    error_message: str
+    status: str
+
+
+@dataclass(slots=True)
 class _WebSocketUpstreamControl:
     reconnect_requested: bool = False
     retire_after_drain: bool = False
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
+    downstream_send_failure: _WebSocketDownstreamSendFailure | None = None
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
 
 

@@ -19,3 +19,10 @@ When the proxy resolves or fails closed a continuity-sensitive follow-up request
 - **THEN** the system emits a fail-closed continuity diagnostic with the continuity surface and low-cardinality reason
 - **AND** the diagnostic includes the upstream error code when available
 - **AND** any previous response id in the diagnostic is hashed rather than logged raw
+
+#### Scenario: downstream disconnect after unmatched websocket continuity masking preserves diagnostics
+- **WHEN** direct websocket handling masks an unmatched upstream previous_response_not_found event to stream_incomplete
+- **AND** pending websocket requests still need terminal request-log rows
+- **AND** the downstream client disconnects while the proxy is sending the masked terminal event
+- **THEN** those pending request-log rows are recorded with stream_incomplete rather than client_disconnected
+- **AND** the fail-closed continuity diagnostic for the upstream miss remains recorded without exposing the raw previous_response_id

@@ -621,4 +621,4 @@ def test_firewall_cache_singleton_reflects_configured_ttl() -> None:
 
     settings = get_settings()
     cache = get_firewall_ip_cache()
-    assert cache._ttl_seconds == settings.firewall_ip_cache_ttl_seconds
+    assert cache.ttl_seconds == settings.firewall_ip_cache_ttl_seconds

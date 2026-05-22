@@ -223,7 +223,7 @@ def test_retag_uses_copy_fallback_when_live_sqlite_cannot_open(monkeypatch: pyte
     assert _read_state_providers(state_db) == ["codex-lb"]
 
 
-def test_read_only_sqlite_connection_uses_immutable_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_read_only_sqlite_count_uses_non_immutable_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     state_db = tmp_path / "state_5.sqlite"
     _create_state_db(state_db, ["openai"])
     original_connect = codex_sessions_retag.sqlite3.connect
@@ -239,7 +239,28 @@ def test_read_only_sqlite_connection_uses_immutable_uri(monkeypatch: pytest.Monk
     assert calls[0][1] is True
     assert calls[0][0].startswith("file:")
     assert "mode=ro" in calls[0][0]
-    assert "immutable=1" in calls[0][0]
+    assert "immutable=1" not in calls[0][0]
+
+
+def test_retag_skips_legacy_sqlite_without_model_provider_column(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    state_db = codex_home / "state_4.sqlite"
+    session_file = codex_home / "sessions" / "2026" / "session.jsonl"
+    codex_home.mkdir()
+    _write_jsonl(session_file, [{"model_provider": "openai", "id": "a"}])
+    with sqlite3.connect(state_db) as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO threads (id) VALUES ('thread-legacy')")
+
+    result = retag_codex_sessions(
+        codex_home=codex_home,
+        source_provider="openai",
+        target_provider="codex-lb",
+    )
+
+    assert result.sqlite_dbs_scanned == 1
+    assert result.sqlite_rows_matched == 0
+    assert result.jsonl_files_updated == 1
 
 
 def test_sqlite_uri_path_normalizes_windows_separators() -> None:

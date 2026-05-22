@@ -305,8 +305,10 @@ def _retag_jsonl_record_provider(record: JsonObject, source_provider: str, targe
 
 def _sqlite_count_provider_rows(db_path: Path, provider: str) -> int:
     try:
-        with _connect_sqlite(db_path, read_only=True, immutable=True) as conn:
+        with _connect_sqlite(db_path, read_only=True) as conn:
             if not _sqlite_has_threads_table(conn):
+                return 0
+            if not _sqlite_has_model_provider_column(conn):
                 return 0
             row = conn.execute("SELECT COUNT(*) FROM threads WHERE model_provider = ?", (provider,)).fetchone()
             return int(row[0]) if row is not None else 0
@@ -396,6 +398,11 @@ def _sqlite_has_threads_table(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _sqlite_has_model_provider_column(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute("PRAGMA table_info(threads)").fetchall()
+    return any(row[1] == "model_provider" for row in rows)
+
+
 def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
     counts: dict[str, int] = {}
     for path in _find_jsonl_session_files(codex_home / "sessions"):
@@ -405,8 +412,10 @@ def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
                 counts[provider] = counts.get(provider, 0) + 1
     for db_path in _find_state_dbs(codex_home):
         try:
-            with _connect_sqlite(db_path, read_only=True, immutable=True) as conn:
+            with _connect_sqlite(db_path, read_only=True) as conn:
                 if not _sqlite_has_threads_table(conn):
+                    continue
+                if not _sqlite_has_model_provider_column(conn):
                     continue
                 rows = conn.execute(
                     "SELECT model_provider, COUNT(*) FROM threads GROUP BY model_provider",

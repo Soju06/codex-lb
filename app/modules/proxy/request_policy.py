@@ -249,6 +249,8 @@ def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -
 
 
 def _explicitly_requests_image_generation(tool_choice: JsonValue | None) -> bool:
+    if tool_choice == "required":
+        return True
     return is_json_mapping(tool_choice) and tool_choice.get("type") == "image_generation"
 
 

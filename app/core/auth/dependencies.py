@@ -154,7 +154,12 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
 
     if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not requires_auth:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
-    if state is not None and state.role == DashboardRole.GUEST and guest_access_enabled:
+    if (
+        state is not None
+        and state.role == DashboardRole.GUEST
+        and guest_access_enabled
+        and (not guest_password_required or state.password_verified)
+    ):
         return _set_dashboard_principal(request, guest_principal())
     if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
         if settings.totp_required_on_login and not state.totp_verified:

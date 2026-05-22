@@ -275,6 +275,24 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
 
             await _assert_guest_write_denied(remote_client)
 
+            async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
+                set_password = await local_client.post(
+                    "/api/dashboard-auth/guest/password",
+                    json={"password": "guest-password-123"},
+                )
+                assert set_password.status_code == 200
+
+            stale_session = await remote_client.get("/api/dashboard-auth/session")
+            assert stale_session.status_code == 200
+            stale_payload = stale_session.json()
+            assert stale_payload["authenticated"] is False
+            assert stale_payload["guestAccessEnabled"] is True
+            assert stale_payload["guestPasswordRequired"] is True
+
+            blocked_read = await remote_client.get("/api/settings")
+            assert blocked_read.status_code == 401
+            assert blocked_read.json()["error"]["code"] == "authentication_required"
+
 
 @pytest.mark.asyncio
 async def test_passwordless_guest_access_does_not_shadow_admin_session(app_instance):

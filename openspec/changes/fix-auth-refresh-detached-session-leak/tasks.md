@@ -5,4 +5,4 @@
 - [x] `uv run pytest tests/unit/test_auth_manager.py -q` green.
 - [x] `uvx ruff check` + `uvx ruff format --check` on touched files clean; `uv run ty check` on touched files clean.
 - [x] Add `ADDED Requirements` delta to `openspec/changes/fix-auth-refresh-detached-session-leak/specs/database-backends/spec.md`.
-- [ ] Run `openspec validate --specs` where the OpenSpec CLI is available.
+- [x] Run `openspec validate --specs` where the OpenSpec CLI is available.

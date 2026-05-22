@@ -94,6 +94,7 @@ async def _invoke_stickiness(
         sticky_max_age_seconds=sticky_max_age_seconds,
         budget_threshold_pct=budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
         routing_strategy=routing_strategy,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,

@@ -229,6 +229,8 @@ def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -
     tools_value = payload.get("tools")
     if not is_json_list(tools_value):
         return payload
+    if _explicitly_requests_image_generation(payload.get("tool_choice")):
+        return payload
 
     sanitized_tools: list[JsonValue] = []
     removed_any = False
@@ -244,6 +246,10 @@ def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -
     sanitized_payload = dict(payload)
     sanitized_payload["tools"] = sanitized_tools
     return sanitized_payload
+
+
+def _explicitly_requests_image_generation(tool_choice: JsonValue | None) -> bool:
+    return is_json_mapping(tool_choice) and tool_choice.get("type") == "image_generation"
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:

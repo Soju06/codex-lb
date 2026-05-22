@@ -431,6 +431,33 @@ async def test_backend_responses_strip_image_generation_tool_advertisement(async
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_preserve_explicit_image_generation_tool_choice(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_explicit_image_gen", "backend-explicit-image-gen@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_explicit_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Draw?"}]}],
+        "tools": [image_tool],
+        "tool_choice": {"type": "image_generation"},
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+    assert seen["payload"].tool_choice == {"type": "image_generation"}
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_rejects_non_text_developer(async_client):
     payload = {
         "model": "gpt-5.2",

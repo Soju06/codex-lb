@@ -453,6 +453,26 @@ def test_normalize_responses_request_payload_without_codex_compat_preserves_imag
     assert request.tools == [{"type": "image_generation", "output_format": "png"}]
 
 
+def test_normalize_responses_request_payload_preserves_explicit_image_generation_choice():
+    image_tool = {"type": "image_generation", "output_format": "png"}
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [image_tool],
+        "tool_choice": {"type": "image_generation"},
+    }
+
+    request = proxy_request_policy.normalize_responses_request_payload(
+        payload,
+        openai_compat=True,
+        codex_tool_compat=True,
+    )
+
+    assert request.tools == [image_tool]
+    assert request.tool_choice == {"type": "image_generation"}
+
+
 class _RingMembershipStub:
     def __init__(self, members: list[str]) -> None:
         self.members = members

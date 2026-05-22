@@ -4,11 +4,45 @@ import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type { ApiKey } from "@/features/api-keys/schemas";
 import { formatPercentNullable } from "@/utils/formatters";
 
+function limitBarColor(percent: number): string {
+  if (percent >= 90) return "bg-red-500";
+  if (percent >= 70) return "bg-orange-500";
+  if (percent >= 40) return "bg-amber-500";
+  return "bg-emerald-500";
+}
+
+function MiniUsageBar({ percent }: { percent: number | null }) {
+  if (percent === null) {
+    return <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted" />;
+  }
+  const clamped = Math.max(0, Math.min(100, percent));
+  return (
+    <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+      <div
+        className={cn("h-full rounded-full", limitBarColor(clamped))}
+        style={{ width: `${clamped}%` }}
+      />
+    </div>
+  );
+}
+
 export type ApiListItemProps = {
   apiKey: ApiKey;
   selected: boolean;
   onSelect: (keyId: string) => void;
 };
+
+function formatLimitPercent(apiKey: ApiKey): number | null {
+  if (apiKey.limits.length === 0) return null;
+  let maxPercent = 0;
+  for (const limit of apiKey.limits) {
+    if (limit.maxValue > 0) {
+      const pct = (limit.currentValue / limit.maxValue) * 100;
+      if (pct > maxPercent) maxPercent = pct;
+    }
+  }
+  return maxPercent;
+}
 
 function isExpired(apiKey: ApiKey): boolean {
   if (!apiKey.expiresAt) return false;
@@ -22,6 +56,7 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
   const hasPrimary = apiKey.pooledCapacityCreditsPrimary > 0 && primary !== null;
   const hasSecondary = secondary !== null;
   const visibleRows = Number(hasPrimary) + Number(hasSecondary);
+  const limitPct = formatLimitPercent(apiKey);
 
   return (
     <button
@@ -68,6 +103,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
               <MiniQuotaBar percent={secondary} testId="pooled-quota-track-weekly" />
             </div>
           ) : null}
+        </div>
+      ) : null}
+      {limitPct !== null ? (
+        <div className="mt-1.5">
+          <MiniUsageBar percent={limitPct} />
         </div>
       ) : null}
     </button>

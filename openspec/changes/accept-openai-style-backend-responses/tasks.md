@@ -8,4 +8,4 @@
 - [x] 2.1 Add regression coverage for OpenAI SDK streaming against `/backend-api/codex`.
 - [x] 2.2 Update backend Responses validation coverage for optional `instructions`.
 - [x] 2.3 Run focused pytest and lint.
-- [ ] 2.4 Validate OpenSpec once the OpenSpec CLI is available in the workspace.
+- [x] 2.4 Validate OpenSpec once the OpenSpec CLI is available in the workspace.

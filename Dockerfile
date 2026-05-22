@@ -59,6 +59,8 @@ COPY config config
 COPY scripts scripts
 COPY --from=frontend-build /app/app/static app/static
 
+# The runtime image copies source files instead of installing the project, so
+# recreate the console-script entry point that pyproject would normally install.
 RUN chmod +x /app/scripts/docker-entrypoint.sh \
     && printf '%s\n' '#!/bin/sh' 'exec python -m app.cli "$@"' > /usr/local/bin/codex-lb \
     && chmod +x /usr/local/bin/codex-lb

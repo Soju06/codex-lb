@@ -93,6 +93,31 @@ def test_retag_updates_jsonl_and_sqlite_with_backup(tmp_path: Path) -> None:
     assert ProviderCount("codex-lb", 5) in result.provider_counts_after
 
 
+def test_retag_streams_jsonl_rewrite_to_temp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_file = codex_home / "sessions" / "2026" / "session.jsonl"
+    _write_jsonl(session_file, [{"model_provider": "openai", "id": "a"}])
+    writes: list[str] = []
+    original_named_temporary_file = codex_sessions_retag.NamedTemporaryFile
+
+    def capture_named_temporary_file(*args, **kwargs):
+        handle = original_named_temporary_file(*args, **kwargs)
+        original_write = handle.write
+
+        def capture_write(text: str) -> int:
+            writes.append(text)
+            return original_write(text)
+
+        handle.write = capture_write
+        return handle
+
+    monkeypatch.setattr(codex_sessions_retag, "NamedTemporaryFile", capture_named_temporary_file)
+
+    retag_codex_sessions(codex_home=codex_home, source_provider="openai", target_provider="codex-lb")
+
+    assert writes == ['{"model_provider":"codex-lb","id":"a"}\n']
+
+
 def test_retag_surfaces_unreadable_jsonl_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "2026" / "session.jsonl"
@@ -190,6 +215,13 @@ def test_read_only_sqlite_connection_uses_immutable_uri(monkeypatch: pytest.Monk
     assert calls[0][0].startswith("file:")
     assert "mode=ro" in calls[0][0]
     assert "immutable=1" in calls[0][0]
+
+
+def test_sqlite_uri_path_normalizes_windows_separators() -> None:
+    quoted = codex_sessions_retag._quote_sqlite_uri_path(r"C:\Users\nicef\.codex\state_5.sqlite")
+
+    assert quoted == "C:/Users/nicef/.codex/state_5.sqlite"
+    assert "%5C" not in quoted
 
 
 def test_sqlite_backup_consolidates_wal_rows(tmp_path: Path) -> None:

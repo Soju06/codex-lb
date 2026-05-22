@@ -224,29 +224,41 @@ def _jsonl_contains_provider(path: Path, provider: str) -> bool:
 
 def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) -> bool:
     changed = False
-    output_lines: list[str] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.rstrip("\n")
-            if not line:
-                output_lines.append(raw_line)
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                output_lines.append(raw_line)
-                continue
-            if isinstance(record, dict) and record.get("model_provider") == source_provider:
-                # Preserve invalid or unrelated JSONL lines verbatim; only
-                # matched session records are normalized through json.dumps.
-                record["model_provider"] = target_provider
-                changed = True
-                output_lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-            else:
-                output_lines.append(raw_line)
+    temp_path: Path | None = None
+    try:
+        with (
+            path.open("r", encoding="utf-8") as input_handle,
+            NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as output_handle,
+        ):
+            temp_path = Path(output_handle.name)
+            for raw_line in input_handle:
+                line = raw_line.rstrip("\n")
+                if not line:
+                    output_handle.write(raw_line)
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    output_handle.write(raw_line)
+                    continue
+                if isinstance(record, dict) and record.get("model_provider") == source_provider:
+                    # Preserve invalid or unrelated JSONL lines verbatim; only
+                    # matched session records are normalized through json.dumps.
+                    record["model_provider"] = target_provider
+                    changed = True
+                    output_handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+                else:
+                    output_handle.write(raw_line)
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
     if not changed:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
         return False
-    _write_text_atomically(path, "".join(output_lines))
+    assert temp_path is not None
+    temp_path.replace(path)
     return True
 
 
@@ -335,12 +347,16 @@ def _replace_sqlite_db(source: Path, destination: Path) -> None:
 def _connect_sqlite(db_path: Path, *, read_only: bool = False, immutable: bool = False) -> sqlite3.Connection:
     target = str(db_path)
     if read_only:
-        quoted_path = quote(str(db_path.resolve()), safe="/:")
+        quoted_path = _quote_sqlite_uri_path(str(db_path.resolve()))
         immutable_flag = "&immutable=1" if immutable else ""
         target = f"file:{quoted_path}?mode=ro{immutable_flag}"
     conn = sqlite3.connect(target, timeout=5, uri=read_only)
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _quote_sqlite_uri_path(path_text: str) -> str:
+    return quote(path_text.replace("\\", "/"), safe="/:")
 
 
 def _sqlite_has_threads_table(conn: sqlite3.Connection) -> bool:

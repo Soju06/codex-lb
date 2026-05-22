@@ -140,13 +140,14 @@ class OAuthStateStore:
         if server is not None:
             await server.stop()
 
-    def _cleanup_locked(self) -> OAuthCallbackServer | None:
+    def _cleanup_locked(self, *, clear_callback_server: bool = True) -> OAuthCallbackServer | None:
         for flow in self._flows.values():
             task = flow.poll_task
             if task and not task.done():
                 task.cancel()
         server = self._callback_server
-        self._callback_server = None
+        if clear_callback_server:
+            self._callback_server = None
         self._flows.clear()
         self._state_token_index.clear()
         return server
@@ -257,10 +258,12 @@ class OauthService:
             if accounts:
                 server: OAuthCallbackServer | None = None
                 async with self._store.lock:
-                    server = self._store._cleanup_locked()
+                    server = self._store._cleanup_locked(clear_callback_server=False)
                     self._store._state = OAuthState(status="success")
-                if server is not None:
-                    await server.stop()
+                    if server is not None:
+                        await server.stop()
+                        if self._store._callback_server is server:
+                            self._store._callback_server = None
                 return OauthStartResponse(method="browser")
 
         if force_method == "device":
@@ -574,9 +577,10 @@ class OauthService:
             if self._store.has_pending_browser_flows_locked():
                 return
             server = self._store._callback_server
-            self._store._callback_server = None
-        if server:
-            await server.stop()
+            if server:
+                await server.stop()
+                if self._store._callback_server is server:
+                    self._store._callback_server = None
 
     @staticmethod
     def _html_response(html: str) -> web.Response:

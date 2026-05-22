@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import time
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -486,6 +487,32 @@ async def test_only_expired_pending_browser_flow_no_longer_keeps_callback_server
         assert not oauth_module._OAUTH_STORE.has_pending_browser_flows_locked()
         assert oauth_module._OAUTH_STORE._flows == {}
         assert oauth_module._OAUTH_STORE.state.status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_callback_server_remains_reserved_until_stop_completes():
+    await oauth_module._OAUTH_STORE.reset()
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class FakeCallbackServer:
+        async def stop(self) -> None:
+            stop_started.set()
+            await release_stop.wait()
+
+    fake_server = FakeCallbackServer()
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+        async with oauth_module._OAUTH_STORE.lock:
+            oauth_module._OAUTH_STORE._callback_server = cast(oauth_module.OAuthCallbackServer, fake_server)
+
+        stop_task = asyncio.create_task(service._stop_callback_server_if_idle())
+        await stop_started.wait()
+        assert oauth_module._OAUTH_STORE._callback_server is fake_server
+
+        release_stop.set()
+        await stop_task
+        assert oauth_module._OAUTH_STORE._callback_server is None
 
 
 @pytest.mark.asyncio

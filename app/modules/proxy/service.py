@@ -11724,12 +11724,20 @@ def _websocket_event_error_payload(
         return None
     if event_type == "error":
         error = payload.get("error")
-    elif event_type == "response.failed":
+        if isinstance(error, dict):
+            return cast(dict[str, JsonValue], error)
+        # The ChatGPT-backed Codex websocket can emit OpenAI-style error
+        # details directly on the event frame instead of under an ``error``
+        # envelope. Treat those frames as errors so continuity masking sees
+        # ``previous_response_not_found`` instead of relaying the raw frame.
+        if any(isinstance(payload.get(field), str) for field in ("code", "message", "param")):
+            return payload
+        return None
+    if event_type == "response.failed":
         response = payload.get("response")
         error = response.get("error") if isinstance(response, dict) else None
-    else:
-        return None
-    return cast(dict[str, JsonValue], error) if isinstance(error, dict) else None
+        return cast(dict[str, JsonValue], error) if isinstance(error, dict) else None
+    return None
 
 
 def _maybe_rewrite_websocket_previous_response_not_found_event(

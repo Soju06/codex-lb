@@ -8,7 +8,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { SUPPORTED_LANGUAGES, type SupportedLanguage } from "@/i18n";
+import { normalizeSupportedLanguage, SUPPORTED_LANGUAGES, type SupportedLanguage } from "@/i18n";
 
 const LANGUAGE_LABEL_KEY: Record<SupportedLanguage, string> = {
   en: "common.english",
@@ -17,7 +17,7 @@ const LANGUAGE_LABEL_KEY: Record<SupportedLanguage, string> = {
 
 export function LanguageToggle() {
   const { t, i18n } = useTranslation();
-  const current = (i18n.resolvedLanguage ?? i18n.language ?? "en") as SupportedLanguage;
+  const current = normalizeSupportedLanguage(i18n.resolvedLanguage ?? i18n.language);
 
   return (
     <DropdownMenu>
@@ -53,7 +53,7 @@ export function LanguageToggle() {
 
 export function LanguageToggleMobile() {
   const { t, i18n } = useTranslation();
-  const current = (i18n.resolvedLanguage ?? i18n.language ?? "en") as SupportedLanguage;
+  const current = normalizeSupportedLanguage(i18n.resolvedLanguage ?? i18n.language);
 
   return (
     <div className="flex flex-col gap-0.5">

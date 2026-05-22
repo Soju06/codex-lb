@@ -37,9 +37,9 @@ describe("UsageDonuts", () => {
 
     expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
     expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
-    // Center label switched from "Remaining" -> "Credit" with the
+    // Center label switched from "Remaining" -> "Credits" with the
     // credits layout; assert that both donuts render the new label.
-    expect(screen.getAllByText("Credit").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Credits").length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders safe line only for the primary donut", () => {

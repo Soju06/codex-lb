@@ -23,7 +23,8 @@ state, not a client-visible final answer.
   try another eligible account.
 - Apply the same post-refresh 401 failover contract to pre-visible stream
   attempts, Codex thread goal requests, Codex control requests, transcription,
-  file create/finalize calls, and upstream websocket connect retries.
+  file create/finalize calls, upstream websocket connect retries, and HTTP
+  bridge session create/reconnect handshakes.
 - Do not classify raw compact HTTP 401 responses as generic same-contract
   transport retries.
 - Add regression coverage for repeated auth 401 failover on compact and the

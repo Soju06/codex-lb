@@ -3,7 +3,7 @@
 - [x] 1.1 Keep compact's first 401 same-account forced refresh retry.
 - [x] 1.2 After the refreshed compact retry still returns 401, mark/exclude that account and continue to another eligible account.
 - [x] 1.3 Remove compact HTTP 401 from the low-level same-contract retry status set.
-- [x] 1.4 Apply repeated auth-401 failover to pre-visible stream, thread-goal, Codex control, transcription, file create/finalize, and websocket connect paths.
+- [x] 1.4 Apply repeated auth-401 failover to pre-visible stream, thread-goal, Codex control, transcription, file create/finalize, websocket connect, and HTTP bridge handshake paths.
 
 ## 2. Tests
 

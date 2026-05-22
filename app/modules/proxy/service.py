@@ -6240,6 +6240,43 @@ class ProxyService:
                     selected_account_id=account.id,
                 )
                 break
+            except ProxyResponseError as exc:
+                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                    raise
+                try:
+                    account = await self._ensure_fresh_with_budget(
+                        account,
+                        force=True,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
+                    upstream = await self._open_upstream_websocket_with_budget(
+                        account,
+                        connect_headers,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    _record_same_account_takeover(
+                        preferred_account_id=preferred_account_id,
+                        selected_account_id=account.id,
+                    )
+                    break
+                except ProxyResponseError as retry_exc:
+                    if retry_exc.status_code != 401:
+                        raise
+                    await self._handle_proxy_error(account, retry_exc)
+                    if require_preferred_account and selected_is_preferred:
+                        raise
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    if require_preferred_account and selected_is_preferred:
+                        raise
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
@@ -6962,6 +6999,42 @@ class ProxyService:
                     selected_account_id=account.id,
                 )
                 break
+            except ProxyResponseError as exc:
+                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                    raise
+                try:
+                    account = await self._ensure_fresh_with_budget(
+                        account,
+                        force=True,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    connect_headers = _headers_with_turn_state(
+                        session.headers,
+                        _preferred_http_bridge_reconnect_turn_state(session),
+                    )
+                    upstream = await self._open_upstream_websocket_with_budget(
+                        account,
+                        connect_headers,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    _record_same_account_takeover(
+                        preferred_account_id=session.account.id,
+                        selected_account_id=account.id,
+                    )
+                    break
+                except ProxyResponseError as retry_exc:
+                    if retry_exc.status_code != 401:
+                        raise
+                    await self._handle_proxy_error(account, retry_exc)
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)

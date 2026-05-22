@@ -60,3 +60,10 @@ or websocket output has been emitted.
 - **AND** the selected account returns `401 invalid_api_key` after a forced refresh retry
 - **WHEN** another eligible account can open the upstream websocket
 - **THEN** the websocket connect path excludes the invalidated account and tries another account
+
+#### Scenario: HTTP bridge handshake auth failure uses another account
+
+- **GIVEN** at least two accounts are eligible for HTTP bridge session creation or reconnect
+- **AND** the selected account returns `401 invalid_api_key` after a forced refresh retry
+- **WHEN** another eligible account can open the upstream websocket handshake
+- **THEN** the HTTP bridge path excludes the invalidated account and tries another account

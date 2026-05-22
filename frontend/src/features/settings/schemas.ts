@@ -93,8 +93,8 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(100),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
-    guestAccessEnabled: z.boolean(),
-    guestPasswordConfigured: z.boolean(),
+    guestAccessEnabled: z.boolean().optional().default(false),
+    guestPasswordConfigured: z.boolean().optional().default(false),
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;

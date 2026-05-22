@@ -89,6 +89,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
+    expect(parsed.guestAccessEnabled).toBe(false);
+    expect(parsed.guestPasswordConfigured).toBe(false);
   });
 
   it("falls back to the legacy sticky threshold during mixed-version rollout", () => {
@@ -127,6 +129,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyReallocationBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
+    expect(parsed.guestAccessEnabled).toBe(false);
+    expect(parsed.guestPasswordConfigured).toBe(false);
   });
 });
 

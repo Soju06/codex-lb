@@ -486,15 +486,25 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.execute(text("PRAGMA foreign_keys=ON"))
             dashboard_columns_rows = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).fetchall()
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
+            account_columns_rows = (await session.execute(text("PRAGMA table_info(accounts)"))).fetchall()
+            account_columns = {str(row[1]) for row in account_columns_rows if len(row) > 1}
             request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
             request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
             assert "deleted_at" in request_log_columns
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
+            assert "source" in request_log_columns
+            assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
             ).scalar_one()
             assert legacy_plan_type is None
+            assert "limit_warmup_enabled" in dashboard_columns
+            assert "limit_warmup_windows" in dashboard_columns
+            assert "limit_warmup_model" in dashboard_columns
+            assert "limit_warmup_prompt" in dashboard_columns
+            assert "limit_warmup_cooldown_seconds" in dashboard_columns
+            assert "limit_warmup_min_available_percent" in dashboard_columns
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
@@ -576,6 +586,17 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "idx_logs_model_effort_time" in request_log_index_names
             assert "idx_logs_status_error_time" in request_log_index_names
             assert "idx_logs_api_key_time" in request_log_index_names
+            assert "idx_logs_source_requested_at" in request_log_index_names
+            warmup_table_exists = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_limit_warmups'")
+                )
+            ).scalar_one()
+            assert warmup_table_exists == 1
+            warmup_index_rows = (await session.execute(text("PRAGMA index_list(account_limit_warmups)"))).fetchall()
+            warmup_index_names = {str(row[1]) for row in warmup_index_rows if len(row) > 1}
+            assert "idx_account_limit_warmups_account_attempted" in warmup_index_names
+            assert "idx_account_limit_warmups_status_attempted" in warmup_index_names
             request_log_fk_rows = (await session.execute(text("PRAGMA foreign_key_list(request_logs)"))).fetchall()
             request_log_fk_actions = {
                 (str(row[2]).lower(), str(row[3]).lower(), str(row[4]).lower(), str(row[6]).lower())

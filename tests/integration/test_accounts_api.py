@@ -101,6 +101,42 @@ async def test_pause_account(async_client):
 
 
 @pytest.mark.asyncio
+async def test_update_account_limit_warmup_opt_in(async_client):
+    email = "warmup@example.com"
+    raw_account_id = "acc_warmup"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    update = await async_client.put(f"/api/accounts/{expected_account_id}/limit-warmup", json={"enabled": True})
+    assert update.status_code == 200
+    assert update.json() == {"status": "enabled", "enabled": True}
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = accounts.json()["accounts"]
+    matched = next((account for account in data if account["accountId"] == expected_account_id), None)
+    assert matched is not None
+    assert matched["limitWarmupEnabled"] is True
+    assert matched["limitWarmup"] is None
+
+
+@pytest.mark.asyncio
 async def test_export_account_returns_latest_codex_auth_json_with_no_store_headers(async_client):
     email = "export@example.com"
     raw_account_id = "acc_export"

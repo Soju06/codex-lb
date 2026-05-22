@@ -398,6 +398,23 @@ export const handlers = [
 		return HttpResponse.json({ status: "reactivated" });
 	}),
 
+	http.put("/api/accounts/:accountId/limit-warmup", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const body = await request.json().catch(() => ({}));
+		const enabled = typeof body === "object" && body !== null && "enabled" in body
+			? Boolean((body as { enabled?: unknown }).enabled)
+			: false;
+		account.limitWarmupEnabled = enabled;
+		return HttpResponse.json({ status: enabled ? "enabled" : "disabled", enabled });
+	}),
+
 	http.get("/api/accounts/:accountId/trends", ({ params }) => {
 		const accountId = String(params.accountId);
 		const account = findAccount(accountId);

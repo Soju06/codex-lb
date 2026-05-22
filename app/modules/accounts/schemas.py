@@ -42,6 +42,17 @@ class AccountAuthStatus(DashboardModel):
     id_token: AccountTokenStatus | None = None
 
 
+class AccountLimitWarmupStatus(DashboardModel):
+    window: str
+    reset_at: int
+    status: str
+    model: str
+    attempted_at: datetime
+    completed_at: datetime | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 class AccountAdditionalWindow(DashboardModel):
     used_percent: float
     reset_at: int | None = None
@@ -77,6 +88,8 @@ class AccountSummary(DashboardModel):
     additional_quotas: list[AccountAdditionalQuota] = Field(default_factory=list)
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
+    limit_warmup_enabled: bool = False
+    limit_warmup: AccountLimitWarmupStatus | None = None
 
 
 class AccountsResponse(DashboardModel):
@@ -96,6 +109,15 @@ class AccountPauseResponse(DashboardModel):
 
 class AccountReactivateResponse(DashboardModel):
     status: str
+
+
+class AccountLimitWarmupUpdateRequest(DashboardModel):
+    enabled: bool
+
+
+class AccountLimitWarmupUpdateResponse(DashboardModel):
+    status: str
+    enabled: bool
 
 
 class AccountDeleteResponse(DashboardModel):

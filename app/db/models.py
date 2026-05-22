@@ -76,6 +76,12 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_warmup_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -85,6 +91,11 @@ class Account(Base):
     request_logs: Mapped[list["RequestLog"]] = relationship(
         "RequestLog",
         back_populates="account",
+    )
+    limit_warmups: Mapped[list["AccountLimitWarmup"]] = relationship(
+        "AccountLimitWarmup",
+        back_populates="account",
+        cascade="all, delete-orphan",
     )
 
 
@@ -136,6 +147,7 @@ class RequestLog(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -154,6 +166,42 @@ class RequestLog(Base):
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
+    )
+
+
+class AccountLimitWarmup(Base):
+    __tablename__ = "account_limit_warmups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    window: Mapped[str] = mapped_column(String, nullable=False)
+    reset_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account: Mapped[Account] = relationship(
+        "Account",
+        back_populates="limit_warmups",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "window",
+            "reset_at",
+            name="uq_account_limit_warmups_account_window_reset",
+        ),
     )
 
 
@@ -272,6 +320,42 @@ class DashboardSettings(Base):
         Float,
         default=95.0,
         server_default=text("95.0"),
+        nullable=False,
+    )
+    limit_warmup_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    limit_warmup_windows: Mapped[str] = mapped_column(
+        String,
+        default="both",
+        server_default=text("'both'"),
+        nullable=False,
+    )
+    limit_warmup_model: Mapped[str] = mapped_column(
+        String,
+        default="auto",
+        server_default=text("'auto'"),
+        nullable=False,
+    )
+    limit_warmup_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="Say OK.",
+        server_default=text("'Say OK.'"),
+        nullable=False,
+    )
+    limit_warmup_cooldown_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=3600,
+        server_default=text("3600"),
+        nullable=False,
+    )
+    limit_warmup_min_available_percent: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -632,6 +716,7 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_requested_at", RequestLog.requested_at)
+Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
     "idx_logs_deleted_at_requested_at_id",
@@ -679,6 +764,10 @@ Index(
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index(
+    "idx_account_limit_warmups_account_attempted", AccountLimitWarmup.account_id, AccountLimitWarmup.attempted_at.desc()
+)
+Index("idx_account_limit_warmups_status_attempted", AccountLimitWarmup.status, AccountLimitWarmup.attempted_at.desc())
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)

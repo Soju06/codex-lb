@@ -25,6 +25,7 @@ from app.modules.dashboard_auth.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -125,7 +126,8 @@ def get_accounts_context(
     repository = AccountsRepository(session)
     usage_repository = UsageRepository(session)
     additional_usage_repository = AdditionalUsageRepository(session)
-    service = AccountsService(repository, usage_repository, additional_usage_repository)
+    limit_warmup_repository = LimitWarmupRepository(session)
+    service = AccountsService(repository, usage_repository, additional_usage_repository, limit_warmup_repository)
     return AccountsContext(
         session=session,
         repository=repository,

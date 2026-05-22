@@ -30,6 +30,7 @@ from app.modules.accounts.schemas import (
     AccountSummary,
     AccountTrendsResponse,
 )
+from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -49,10 +50,12 @@ class AccountsService:
         repo: AccountsRepository,
         usage_repo: UsageRepository | None = None,
         additional_usage_repo: AdditionalUsageRepository | AdditionalUsageRepositoryPort | None = None,
+        limit_warmup_repo: LimitWarmupRepository | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
         self._additional_usage_repo = additional_usage_repo
+        self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
 
@@ -65,6 +68,9 @@ class AccountsService:
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
         request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
+        limit_warmups_by_account = (
+            await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
+        )
         request_usage_by_account = {
             account_id: AccountRequestUsage(
                 request_count=row.request_count,
@@ -119,6 +125,7 @@ class AccountsService:
             secondary_usage=secondary_usage,
             request_usage_by_account=request_usage_by_account,
             additional_quotas_by_account=additional_quotas_by_account,
+            limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
         )
 
@@ -193,6 +200,9 @@ class AccountsService:
         if result:
             get_account_selection_cache().invalidate()
         return result
+
+    async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
+        return await self._repo.update_limit_warmup_enabled(account_id, enabled)
 
     async def delete_account(self, account_id: str) -> bool:
         result = await self._repo.delete(account_id)

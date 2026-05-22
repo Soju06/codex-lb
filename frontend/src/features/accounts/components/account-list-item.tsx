@@ -6,7 +6,7 @@ import { StatusBadge } from "@/components/status-badge";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
 export type AccountListItemProps = {
   account: AccountSummary;
@@ -49,6 +49,10 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
   const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
+  const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
+  const warmupMeta = account.limitWarmup
+    ? `${formatSlug(account.limitWarmup.status)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    : "No attempts";
 
   return (
     <button
@@ -75,6 +79,10 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
         {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
         {showSecondaryRow ? <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} /> : null}
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+        <span>{warmupLabel}</span>
+        <span className="truncate">{warmupMeta}</span>
       </div>
     </button>
   );

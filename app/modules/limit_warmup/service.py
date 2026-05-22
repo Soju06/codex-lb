@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.core import usage as usage_core
@@ -21,8 +21,6 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
 
 logger = logging.getLogger(__name__)
@@ -46,6 +44,59 @@ class LimitWarmupSendResult:
 
 class LimitWarmupSender(Protocol):
     async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult: ...
+
+
+class LimitWarmupAttemptsRepository(Protocol):
+    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]: ...
+
+    async def try_create_attempt(
+        self,
+        *,
+        account_id: str,
+        window: str,
+        reset_at: int,
+        model: str,
+        attempted_at,
+        status: str = "pending",
+    ) -> AccountLimitWarmup | None: ...
+
+    async def complete_attempt(
+        self,
+        attempt_id: int,
+        *,
+        status: str,
+        completed_at,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> AccountLimitWarmup | None: ...
+
+
+class LimitWarmupRequestLogRepository(Protocol):
+    async def add_log(
+        self,
+        account_id: str | None,
+        request_id: str,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        latency_ms: int | None,
+        status: str,
+        error_code: str | None,
+        latency_first_token_ms: int | None = None,
+        error_message: str | None = None,
+        requested_at: datetime | None = None,
+        cached_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
+        transport: str | None = None,
+        api_key_id: str | None = None,
+        session_id: str | None = None,
+        plan_type: str | None = None,
+        source: str | None = None,
+    ) -> object: ...
 
 
 class StreamingLimitWarmupSender:
@@ -77,15 +128,17 @@ class StreamingLimitWarmupSender:
                 error_message=f"Account status is {fresh_account.status.value}",
             )
 
-        payload = ResponsesRequest(
-            model=model,
-            instructions=_DEFAULT_WARMUP_INSTRUCTIONS,
-            input=prompt,
-            tools=[],
-            parallel_tool_calls=False,
-            stream=True,
-            store=False,
-            max_output_tokens=4,
+        payload = ResponsesRequest.model_validate(
+            {
+                "model": model,
+                "instructions": _DEFAULT_WARMUP_INSTRUCTIONS,
+                "input": prompt,
+                "tools": [],
+                "parallel_tool_calls": False,
+                "stream": True,
+                "store": False,
+                "max_output_tokens": 4,
+            }
         )
         headers = {
             "x-request-id": request_id,
@@ -142,8 +195,8 @@ class StreamingLimitWarmupSender:
 class LimitWarmupService:
     def __init__(
         self,
-        warmup_repo: LimitWarmupRepository,
-        request_logs_repo: RequestLogsRepository,
+        warmup_repo: LimitWarmupAttemptsRepository,
+        request_logs_repo: LimitWarmupRequestLogRepository,
         *,
         sender: LimitWarmupSender | None = None,
     ) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -42,7 +42,7 @@ def _usage(account_id: str, *, used_percent: float, reset_at: int, window: str =
 
 
 def _settings(**overrides: object) -> DashboardSettings:
-    values = {
+    values: dict[str, object] = {
         "id": 1,
         "limit_warmup_enabled": True,
         "limit_warmup_windows": "primary",
@@ -117,8 +117,57 @@ class FakeRequestLogsRepo:
     def __init__(self) -> None:
         self.logs: list[dict[str, object]] = []
 
-    async def add_log(self, **kwargs: object) -> None:
-        self.logs.append(kwargs)
+    async def add_log(
+        self,
+        account_id: str | None,
+        request_id: str,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        latency_ms: int | None,
+        status: str,
+        error_code: str | None,
+        latency_first_token_ms: int | None = None,
+        error_message: str | None = None,
+        requested_at: datetime | None = None,
+        cached_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        service_tier: str | None = None,
+        requested_service_tier: str | None = None,
+        actual_service_tier: str | None = None,
+        transport: str | None = None,
+        api_key_id: str | None = None,
+        session_id: str | None = None,
+        plan_type: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        self.logs.append(
+            {
+                "account_id": account_id,
+                "request_id": request_id,
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": latency_ms,
+                "status": status,
+                "error_code": error_code,
+                "latency_first_token_ms": latency_first_token_ms,
+                "error_message": error_message,
+                "requested_at": requested_at,
+                "cached_input_tokens": cached_input_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "reasoning_effort": reasoning_effort,
+                "service_tier": service_tier,
+                "requested_service_tier": requested_service_tier,
+                "actual_service_tier": actual_service_tier,
+                "transport": transport,
+                "api_key_id": api_key_id,
+                "session_id": session_id,
+                "plan_type": plan_type,
+                "source": source,
+            }
+        )
 
 
 class FakeSender:

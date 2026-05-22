@@ -15,12 +15,12 @@ export const DashboardSettingsSchema = z.object({
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   apiKeyAuthEnabled: z.boolean(),
-  limitWarmupEnabled: z.boolean(),
-  limitWarmupWindows: LimitWarmupWindowsSchema,
-  limitWarmupModel: z.string().min(1),
-  limitWarmupPrompt: z.string().min(1),
-  limitWarmupCooldownSeconds: z.number().int().min(60),
-  limitWarmupMinAvailablePercent: z.number().positive().max(100),
+  limitWarmupEnabled: z.boolean().optional().default(false),
+  limitWarmupWindows: LimitWarmupWindowsSchema.optional().default("both"),
+  limitWarmupModel: z.string().min(1).optional().default("auto"),
+  limitWarmupPrompt: z.string().min(1).optional().default("Say OK."),
+  limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
+  limitWarmupMinAvailablePercent: z.number().positive().max(100).optional().default(100),
 });
 
 export const SettingsUpdateRequestSchema = z.object({

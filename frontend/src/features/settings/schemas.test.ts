@@ -50,6 +50,12 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.limitWarmupEnabled).toBe(false);
+    expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupModel).toBe("auto");
+    expect(parsed.limitWarmupPrompt).toBe("Say OK.");
+    expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
   });
 });
 

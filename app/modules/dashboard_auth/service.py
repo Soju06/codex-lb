@@ -97,6 +97,7 @@ class DashboardSessionState:
     password_verified: bool
     totp_verified: bool
     role: DashboardRole = DashboardRole.ADMIN
+    guest_verified: bool = False
 
 
 class DashboardSessionStore:
@@ -115,10 +116,17 @@ class DashboardSessionStore:
         totp_verified: bool,
         ttl_seconds: int,
         role: DashboardRole = DashboardRole.ADMIN,
+        guest_verified: bool = False,
     ) -> str:
         expires_at = int(time()) + ttl_seconds
         payload = json.dumps(
-            {"exp": expires_at, "pw": password_verified, "tv": totp_verified, "role": role.value},
+            {
+                "exp": expires_at,
+                "pw": password_verified,
+                "tv": totp_verified,
+                "role": role.value,
+                "gv": guest_verified,
+            },
             separators=(",", ":"),
         )
         return self._get_encryptor().encrypt(payload).decode("ascii")
@@ -140,8 +148,11 @@ class DashboardSessionStore:
         exp = data.get("exp")
         pw = data.get("pw")
         tv = data.get("tv")
+        gv = data.get("gv", False)
         role_raw = data.get("role", DashboardRole.ADMIN.value)
         if not isinstance(exp, int) or not isinstance(pw, bool) or not isinstance(tv, bool):
+            return None
+        if not isinstance(gv, bool):
             return None
         if not isinstance(role_raw, str):
             return None
@@ -151,19 +162,25 @@ class DashboardSessionStore:
             return None
         if exp < int(time()):
             return None
-        return DashboardSessionState(expires_at=exp, password_verified=pw, totp_verified=tv, role=role)
+        return DashboardSessionState(
+            expires_at=exp,
+            password_verified=pw,
+            totp_verified=tv,
+            role=role,
+            guest_verified=gv,
+        )
 
     def is_password_verified(self, session_id: str | None) -> bool:
         state = self.get(session_id)
         if state is None:
             return False
-        return state.password_verified
+        return state.role == DashboardRole.ADMIN and state.password_verified
 
     def is_totp_verified(self, session_id: str | None) -> bool:
         state = self.get(session_id)
         if state is None:
             return False
-        return state.totp_verified
+        return state.role == DashboardRole.ADMIN and state.totp_verified
 
     def delete(self, session_id: str | None) -> None:
         # Stateless: deletion is handled by clearing the cookie client-side.
@@ -185,7 +202,12 @@ class DashboardAuthService:
         guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
         state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
         public_guest_authenticated = bool(guest_access_enabled and not guest_password_required and password_required)
-        if state is not None and state.role == DashboardRole.GUEST and guest_access_enabled:
+        if (
+            state is not None
+            and state.role == DashboardRole.GUEST
+            and guest_access_enabled
+            and (not guest_password_required or state.guest_verified)
+        ):
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
@@ -279,7 +301,7 @@ class DashboardAuthService:
         if settings.password_hash is None:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
         session = self._session_store.get(session_id)
-        if session is None or not session.password_verified:
+        if session is None or session.role != DashboardRole.ADMIN or not session.password_verified:
             raise PasswordSessionRequiredError("Password-authenticated session is required")
         return settings, session
 

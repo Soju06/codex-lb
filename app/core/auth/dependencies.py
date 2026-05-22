@@ -160,7 +160,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
         state is not None
         and state.role == DashboardRole.GUEST
         and guest_access_enabled
-        and (not guest_password_required or state.password_verified)
+        and (not guest_password_required or state.guest_verified)
     ):
         return _set_dashboard_principal(request, guest_principal())
     if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
@@ -196,6 +196,8 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
         )
 
     if state is None:
+        raise DashboardAuthError("Authentication is required")
+    if state.role != DashboardRole.ADMIN:
         raise DashboardAuthError("Authentication is required")
     if password_required and not state.password_verified:
         raise DashboardAuthError("Authentication is required")

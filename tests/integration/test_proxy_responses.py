@@ -207,6 +207,36 @@ async def test_proxy_responses_accepts_openai_style_payload_without_instructions
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_rejects_strict_function_tool_violation(async_client):
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": "Weather in Seoul?"}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "strict": True,
+            }
+        ],
+        "stream": True,
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=payload)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_openai_shape_custom_client_gets_sdk_sse_contract(async_client, monkeypatch):
     email = "backend-openai-shape@example.com"
     raw_account_id = "acc_backend_openai_shape"

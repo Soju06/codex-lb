@@ -437,6 +437,7 @@ async def responses(
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload.tools)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)

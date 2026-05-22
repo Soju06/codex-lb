@@ -13,6 +13,10 @@ The `/backend-api/codex/responses` HTTP endpoint SHALL accept the OpenAI-compati
 - **THEN** the HTTP Responses stream omits the private event from the downstream SSE body
 - **AND** OpenAI SDK clients can consume the stream without failing their Responses event ordering checks
 
+#### Scenario: Strict function tool schemas are validated before streaming
+- **WHEN** an OpenAI-compatible client sends `POST /backend-api/codex/responses` with a strict function tool schema that violates the supported JSON Schema subset
+- **THEN** the proxy rejects the request with a deterministic 400 `invalid_function_parameters` error before opening the stream
+
 #### Scenario: Codex-native backend Responses shape is preserved
 - **WHEN** a Codex client sends `POST /backend-api/codex/responses` with `instructions`, array-shaped `input`, and Codex affinity headers
 - **THEN** the proxy preserves the normalized request content and continues applying backend Codex session affinity

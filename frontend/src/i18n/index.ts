@@ -40,7 +40,6 @@ void i18n
     resources,
     supportedLngs: [...SUPPORTED_LANGUAGES],
     fallbackLng: "en",
-    nonExplicitSupportedLngs: true,
     load: "currentOnly",
     interpolation: { escapeValue: false },
     detection: {
@@ -48,6 +47,7 @@ void i18n
       lookupQuerystring: "lang",
       lookupLocalStorage: LANGUAGE_STORAGE_KEY,
       caches: ["localStorage"],
+      convertDetectedLanguage: normalizeSupportedLanguage,
     },
     returnNull: false,
   });

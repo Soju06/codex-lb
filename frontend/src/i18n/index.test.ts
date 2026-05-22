@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeSupportedLanguage } from "@/i18n";
+import i18n, { normalizeSupportedLanguage } from "@/i18n";
 
 describe("normalizeSupportedLanguage", () => {
   it("keeps exact supported locales", () => {
@@ -18,5 +18,11 @@ describe("normalizeSupportedLanguage", () => {
   it("falls back to English for missing or unsupported locales", () => {
     expect(normalizeSupportedLanguage(undefined)).toBe("en");
     expect(normalizeSupportedLanguage("fr-FR")).toBe("en");
+  });
+
+  it("keeps normalized Chinese detections on the supported zh-CN resource", async () => {
+    await i18n.changeLanguage(normalizeSupportedLanguage("zh"));
+
+    expect(i18n.resolvedLanguage).toBe("zh-CN");
   });
 });

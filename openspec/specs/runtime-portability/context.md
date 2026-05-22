@@ -1,4 +1,8 @@
-# Codex session retagging
+# Runtime Portability Context
+
+See `openspec/specs/runtime-portability/spec.md` for normative requirements.
+
+## Codex Session Retagging
 
 `codex resume` filters sessions by `model_provider`. Sessions created before
 switching to codex-lb may still be tagged as `openai`, so they will not appear

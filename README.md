@@ -178,7 +178,7 @@ If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket up
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
 old sessions won't appear until you re-tag them. Use the built-in retag command
 instead of editing Codex files by hand; see
-[Codex session retagging](docs/codex-session-retag.md) for backups, Docker, WSL,
+[Codex session retagging](openspec/specs/runtime-portability/context.md#codex-session-retagging) for backups, Docker, WSL,
 and rollback details.
 
 ```bash

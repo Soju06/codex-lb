@@ -76,6 +76,9 @@ class ApiKeyResponse(DashboardModel):
     last_used_at: datetime | None
     limits: list[LimitRuleResponse] = Field(default_factory=list)
     usage_summary: ApiKeyUsageSummaryResponse | None = None
+    pooled_remaining_percent_primary: float | None = None
+    pooled_remaining_percent_secondary: float | None = None
+    pooled_capacity_credits_primary: float = 0.0
 
 
 class ApiKeyCreateResponse(ApiKeyResponse):

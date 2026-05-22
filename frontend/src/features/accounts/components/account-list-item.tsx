@@ -3,8 +3,9 @@ import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
+import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type { AccountSummary } from "@/features/accounts/schemas";
-import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
+import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
@@ -14,22 +15,6 @@ export type AccountListItemProps = {
   showAccountId?: boolean;
   onSelect: (accountId: string) => void;
 };
-
-function MiniQuotaBar({ percent, testId }: { percent: number | null; testId: string }) {
-  if (percent === null) {
-    return <div data-testid={testId} className="h-1 flex-1 overflow-hidden rounded-full bg-muted" />;
-  }
-  const clamped = Math.max(0, Math.min(100, percent));
-  return (
-    <div data-testid={testId} className={cn("h-1 flex-1 overflow-hidden rounded-full", quotaBarTrack(clamped))}>
-      <div
-        data-testid={`${testId}-fill`}
-        className={cn("h-full rounded-full", quotaBarColor(clamped))}
-        style={{ width: `${clamped}%` }}
-      />
-    </div>
-  );
-}
 
 export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
   const blurred = usePrivacyStore((s) => s.blurred);

@@ -216,7 +216,8 @@ def get_api_keys_context(
     session: AsyncSession = Depends(get_session),
 ) -> ApiKeysContext:
     repository = ApiKeysRepository(session)
-    service = ApiKeysService(repository)
+    usage_repository = UsageRepository(session)
+    service = ApiKeysService(repository, usage_repository=usage_repository)
     return ApiKeysContext(session=session, repository=repository, service=service)
 
 

@@ -156,7 +156,7 @@ def test_select_account_defaults_to_secondary_reset_window():
     assert result.account.account_id == "secondary-earlier"
 
 
-def test_select_account_secondary_reset_fallback_uses_primary_subday_precision():
+def test_select_account_primary_reset_preference_uses_subday_precision_with_secondary_fallback():
     now = time.time()
     states = [
         AccountState(
@@ -164,16 +164,16 @@ def test_select_account_secondary_reset_fallback_uses_primary_subday_precision()
             AccountStatus.ACTIVE,
             used_percent=1.0,
             secondary_used_percent=1.0,
-            primary_reset_at=int(now + 4 * 3600),
-            secondary_reset_at=None,
+            primary_reset_at=None,
+            secondary_reset_at=int(now + 4 * 3600),
         ),
         AccountState(
             "earlier-primary-fallback",
             AccountStatus.ACTIVE,
             used_percent=90.0,
             secondary_used_percent=90.0,
-            primary_reset_at=int(now + 1 * 3600),
-            secondary_reset_at=None,
+            primary_reset_at=None,
+            secondary_reset_at=int(now + 1 * 3600),
         ),
     ]
 
@@ -181,7 +181,7 @@ def test_select_account_secondary_reset_fallback_uses_primary_subday_precision()
         states,
         now=now,
         prefer_earlier_reset=True,
-        prefer_earlier_reset_window="secondary",
+        prefer_earlier_reset_window="primary",
         routing_strategy="usage_weighted",
     )
 

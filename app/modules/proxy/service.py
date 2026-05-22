@@ -1983,7 +1983,7 @@ class ProxyService:
                 account = selection.account
                 if not account:
                     if last_exc is not None:
-                        raise last_exc
+                        break
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
                     raise ProxyResponseError(
@@ -2043,14 +2043,11 @@ class ProxyService:
                             raise compact_continuity_error from exc
                         if exc.status_code == 401:
                             if refresh_retry_used:
-                                await self._settle_compact_api_key_usage(
-                                    api_key=api_key,
-                                    api_key_reservation=api_key_reservation,
-                                    response=None,
-                                    request_service_tier=request_service_tier,
-                                )
                                 await self._handle_proxy_error(account, exc)
-                                raise
+                                last_exc = exc
+                                excluded_account_ids.add(account.id)
+                                transient_exhausted = True
+                                break
                             try:
                                 remaining_budget = _remaining_budget_seconds(deadline)
                                 if remaining_budget <= 0:

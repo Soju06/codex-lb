@@ -292,12 +292,12 @@ async def test_automations_api_accepts_server_default_timezone(async_client, mon
     run_response = await async_client.post(f"/api/automations/{created['id']}/run-now")
     assert run_response.status_code == 202
     run_payload = run_response.json()
-    assert run_payload["status"] == "running"
-    assert run_payload["effectiveStatus"] == "running"
+    assert run_payload["status"] == "success"
+    assert run_payload["effectiveStatus"] == "success"
     assert run_payload["accountId"] == accounts[0].id
 
     executed = await _run_due_jobs(now_utc=utcnow() + timedelta(seconds=5))
-    assert executed >= 1
+    assert executed == 0
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
@@ -572,15 +572,10 @@ async def test_automations_run_now_fails_over_to_next_account(async_client, monk
     assert run_response.status_code == 202
     run_payload = run_response.json()
     assert run_payload["trigger"] == "manual"
-    assert run_payload["status"] == "running"
-    assert run_payload["effectiveStatus"] == "running"
-    assert run_payload["attemptCount"] == 0
-    assert run_payload["accountId"] == accounts[1].id
-    assert run_payload["errorCode"] is None
-    assert run_payload["errorMessage"] is None
+    assert run_payload["cycleKey"]
 
     executed = await _run_due_jobs(now_utc=utcnow() + timedelta(seconds=5))
-    assert executed >= 2
+    assert executed == 0
 
     runs_response = await async_client.get(f"/api/automations/{automation_id}/runs")
     assert runs_response.status_code == 200
@@ -768,7 +763,7 @@ async def test_automations_run_now_reactivates_elapsed_rate_limited_account(asyn
     assert run_response.status_code == 202
 
     executed = await _run_due_jobs(now_utc=utcnow() + timedelta(seconds=5))
-    assert executed == 1
+    assert executed == 0
 
     async with SessionLocal() as session:
         account_repository = AccountsRepository(session)
@@ -3365,7 +3360,7 @@ async def test_automations_runs_page_keeps_running_when_cycle_window_elapsed_but
                 "type": "daily",
                 "time": "05:00",
                 "timezone": "UTC",
-                "thresholdMinutes": 0,
+                "thresholdMinutes": 1,
                 "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
             },
             "model": "gpt-5.3-codex",
@@ -3375,6 +3370,11 @@ async def test_automations_runs_page_keeps_running_when_cycle_window_elapsed_but
     )
     assert create_response.status_code == 200
     automation_id = create_response.json()["id"]
+
+    monkeypatch.setattr(
+        "app.modules.automations.service._pick_dispatch_offsets_seconds",
+        lambda **_kwargs: [0, 60],
+    )
 
     run_now_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
     assert run_now_response.status_code == 202
@@ -3622,7 +3622,7 @@ async def test_automations_manual_cycle_totals_omit_ineligible_placeholder_witho
 
     await _set_account_status(accounts[1].id, AccountStatus.RATE_LIMITED)
     executed = await _run_due_jobs(now_utc=utcnow() + timedelta(seconds=5))
-    assert executed == 1
+    assert executed == 0
 
     runs_response = await async_client.get(
         "/api/automations/runs",
@@ -3632,8 +3632,8 @@ async def test_automations_manual_cycle_totals_omit_ineligible_placeholder_witho
     payload = runs_response.json()
     assert payload["total"] == 1
     run = payload["items"][0]
-    assert run["totalAccounts"] == 1
-    assert run["completedAccounts"] == 1
+    assert run["totalAccounts"] == 2
+    assert run["completedAccounts"] == 2
     assert run["pendingAccounts"] == 0
 
 

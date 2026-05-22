@@ -52,12 +52,16 @@ class DashboardService:
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
 
-        account_summaries = build_account_summaries(
-            accounts=accounts,
-            primary_usage=primary_usage,
-            secondary_usage=secondary_usage,
-            encryptor=self._encryptor,
-            include_auth=False,
+        account_summaries = sorted(
+            build_account_summaries(
+                accounts=accounts,
+                primary_usage=primary_usage,
+                secondary_usage=secondary_usage,
+                encryptor=self._encryptor,
+                include_auth=False,
+            ),
+            key=lambda a: a.capacity_credits_primary or 0,
+            reverse=True,
         )
 
         primary_rows_raw = _rows_from_latest(primary_usage)

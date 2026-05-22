@@ -110,3 +110,47 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         "totalUsd": pytest.approx(0.002125),
     }
     assert older["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_excludes_limit_warmup_from_normal_traffic(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_warmup_logs", "warmup-logs@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_warmup_logs",
+            request_id="req_normal_traffic",
+            model="gpt-5.2",
+            input_tokens=100,
+            output_tokens=100,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            plan_type="plus",
+        )
+        await logs_repo.add_log(
+            account_id="acc_warmup_logs",
+            request_id="req_limit_warmup",
+            model="gpt-5.1-codex-mini",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            plan_type="plus",
+            source="limit_warmup",
+        )
+
+    response = await async_client.get("/api/request-logs?limit=10")
+    assert response.status_code == 200
+    body = response.json()
+    request_ids = [entry["requestId"] for entry in body["requests"]]
+    assert request_ids == ["req_normal_traffic"]
+    assert body["total"] == 1
+
+    options_response = await async_client.get("/api/request-logs/options")
+    assert options_response.status_code == 200
+    option_models = [entry["model"] for entry in options_response.json()["modelOptions"]]
+    assert "gpt-5.1-codex-mini" not in option_models

@@ -39,7 +39,7 @@ export function DashboardPage() {
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
-  const { resumeMutation } = useAccountMutations();
+  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
 
@@ -72,9 +72,15 @@ export function DashboardPage() {
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
           break;
+        case "warmup-toggle":
+          void limitWarmupMutation.mutateAsync({
+            accountId: account.accountId,
+            enabled: !account.limitWarmupEnabled,
+          });
+          break;
       }
     },
-    [navigate, resumeMutation],
+    [limitWarmupMutation, navigate, resumeMutation],
   );
 
   const overview = dashboardQuery.data;

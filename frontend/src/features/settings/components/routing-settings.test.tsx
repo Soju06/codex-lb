@@ -5,6 +5,15 @@ import { describe, expect, it, vi } from "vitest";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import type { DashboardSettings } from "@/features/settings/schemas";
 
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+};
+
 const BASE_SETTINGS: DashboardSettings = {
   stickyThreadsEnabled: false,
   upstreamStreamTransport: "default",
@@ -16,6 +25,7 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  ...LIMIT_WARMUP_DEFAULTS,
 };
 
 describe("RoutingSettings", () => {
@@ -26,7 +36,7 @@ describe("RoutingSettings", () => {
       <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
     );
 
-    const ttlInput = screen.getByRole("spinbutton");
+    const ttlInput = screen.getByLabelText("Prompt-cache affinity TTL");
     await user.clear(ttlInput);
     await user.type(ttlInput, "180");
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
@@ -41,6 +51,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(
@@ -51,8 +62,8 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByRole("spinbutton"));
-    await user.type(screen.getByRole("spinbutton"), "240{Enter}");
+    await user.clear(screen.getByLabelText("Prompt-cache affinity TTL"));
+    await user.type(screen.getByLabelText("Prompt-cache affinity TTL"), "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
       stickyThreadsEnabled: false,
@@ -64,6 +75,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -72,7 +84,7 @@ describe("RoutingSettings", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
-    const ttlInput = screen.getByRole("spinbutton");
+    const ttlInput = screen.getByLabelText("Prompt-cache affinity TTL");
     const saveButton = screen.getByRole("button", { name: "Save TTL" });
     expect(saveButton).toBeDisabled();
 
@@ -92,6 +104,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

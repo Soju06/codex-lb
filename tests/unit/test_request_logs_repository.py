@@ -33,6 +33,7 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
             latency_ms=1,
             status="success",
             error_code=None,
+            plan_type="plus",
         )
 
         assert log.request_id == "req"

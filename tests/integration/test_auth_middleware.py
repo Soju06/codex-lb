@@ -112,6 +112,10 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_update.status_code == 403
     assert blocked_update.json()["error"]["code"] == "read_only_access"
 
+    blocked_export = await client.post("/api/accounts/missing/export")
+    assert blocked_export.status_code == 403
+    assert blocked_export.json()["error"]["code"] == "read_only_access"
+
 
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):

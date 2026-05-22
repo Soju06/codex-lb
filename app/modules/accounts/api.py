@@ -66,6 +66,7 @@ async def export_account(
     request: Request,
     response: Response,
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountExportResponse:
     result = await context.service.export_account(account_id)

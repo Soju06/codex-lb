@@ -198,7 +198,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
-_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,

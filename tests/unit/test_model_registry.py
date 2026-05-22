@@ -85,7 +85,35 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
     assert registry.prefers_websockets("gpt-5.3-codex-spark") is True
+    assert registry.prefers_websockets("gpt-5.4-mini") is True
+    assert registry.prefers_websockets("gpt-5.2") is True
     assert registry.prefers_websockets("gpt-5.1") is False
+
+
+def test_bootstrap_models_include_representative_upstream_metadata():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    models = registry.get_models_with_fallback()
+
+    mini = models["gpt-5.4-mini"]
+    assert mini.prefer_websockets is True
+    assert mini.default_verbosity == "medium"
+    assert mini.minimal_client_version == "0.98.0"
+    assert {level.effort for level in mini.supported_reasoning_levels} == {"low", "medium", "high", "xhigh"}
+
+    spark = models["gpt-5.3-codex-spark"]
+    assert spark.context_window == 128_000
+    assert spark.input_modalities == ("text",)
+    assert spark.default_reasoning_level == "high"
+    assert spark.supported_in_api is False
+    assert spark.minimal_client_version == "0.100.0"
+
+    auto_review = models["codex-auto-review"]
+    assert auto_review.raw["visibility"] == "hide"
+    assert auto_review.raw["shell_type"] == "shell_command"
+    assert auto_review.raw["max_context_window"] == 1_000_000
+    assert auto_review.minimal_client_version == "0.98.0"
+    assert len(auto_review.available_in_plans) == 14
+    assert len(models["gpt-5.3-codex"].available_in_plans) == 14
 
 
 @pytest.mark.asyncio

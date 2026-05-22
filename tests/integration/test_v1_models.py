@@ -93,6 +93,37 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_client):
+    registry = get_model_registry()
+    registry._snapshot = None
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+
+    mini = entries["gpt-5.4-mini"]
+    assert mini["prefer_websockets"] is True
+    assert mini["default_verbosity"] == "medium"
+    assert mini["minimal_client_version"] == "0.98.0"
+    assert {level["effort"] for level in mini["supported_reasoning_levels"]} == {"low", "medium", "high", "xhigh"}
+
+    spark = entries["gpt-5.3-codex-spark"]
+    assert spark["context_window"] == 128_000
+    assert spark["input_modalities"] == ["text"]
+    assert spark["default_reasoning_level"] == "high"
+    assert spark["supported_in_api"] is False
+    assert spark["minimal_client_version"] == "0.100.0"
+
+    auto_review = entries["codex-auto-review"]
+    assert auto_review["visibility"] == "hide"
+    assert auto_review["shell_type"] == "shell_command"
+    assert auto_review["max_context_window"] == 1_000_000
+    assert auto_review["minimal_client_version"] == "0.98.0"
+    assert len(auto_review["available_in_plans"]) == 14
+    assert len(entries["gpt-5.3-codex"]["available_in_plans"]) == 14
+
+
+@pytest.mark.asyncio
 async def test_v1_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [

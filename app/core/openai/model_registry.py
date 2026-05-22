@@ -85,6 +85,10 @@ _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
     }
 )
 
+_BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
+    plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "quorum"}
+)
+
 
 def _bootstrap_model(
     slug: str,
@@ -92,24 +96,43 @@ def _bootstrap_model(
     *,
     prefer_websockets: bool,
     reasoning_levels: tuple[ReasoningLevel, ...] = _REASONING_LEVELS_EXTENDED,
+    context_window: int = 272_000,
+    input_modalities: tuple[str, ...] = ("text", "image"),
+    default_reasoning_level: str | None = "medium",
+    default_verbosity: str | None = "low",
+    supported_in_api: bool = True,
+    minimal_client_version: str | None = "0.124.0",
+    available_in_plans: frozenset[str] = _BOOTSTRAP_AVAILABLE_IN_PLANS,
+    visibility: str = "list",
+    shell_type: str = "shell_command",
+    raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
+    raw_fields: dict[str, JsonValue] = {
+        "shell_type": shell_type,
+        "visibility": visibility,
+        "availability_nux": None,
+        "max_context_window": context_window,
+    }
+    if raw:
+        raw_fields.update(raw)
     return UpstreamModel(
         slug=slug,
         display_name=display_name,
         description=display_name,
-        context_window=272_000,
-        input_modalities=("text", "image"),
+        context_window=context_window,
+        input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
-        default_reasoning_level="medium",
+        default_reasoning_level=default_reasoning_level,
         supports_reasoning_summaries=True,
         support_verbosity=True,
-        default_verbosity="low",
+        default_verbosity=default_verbosity,
         prefer_websockets=prefer_websockets,
         supports_parallel_tool_calls=True,
-        supported_in_api=True,
-        minimal_client_version="0.124.0",
+        supported_in_api=supported_in_api,
+        minimal_client_version=minimal_client_version,
         priority=0,
-        available_in_plans=_BOOTSTRAP_AVAILABLE_IN_PLANS,
+        available_in_plans=available_in_plans,
+        raw=raw_fields,
     )
 
 
@@ -124,13 +147,36 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     _bootstrap_model(
         "gpt-5.4-mini",
         "GPT-5.4 Mini",
-        prefer_websockets=False,
-        reasoning_levels=_REASONING_LEVELS_STANDARD,
+        prefer_websockets=True,
+        default_verbosity="medium",
+        minimal_client_version="0.98.0",
     ),
-    _bootstrap_model("gpt-5.3-codex", "GPT-5.3 Codex", prefer_websockets=True),
-    _bootstrap_model("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", prefer_websockets=True),
-    _bootstrap_model("gpt-5.2", "GPT-5.2", prefer_websockets=False),
-    _bootstrap_model("codex-auto-review", "Codex Auto Review", prefer_websockets=True),
+    _bootstrap_model(
+        "gpt-5.3-codex",
+        "GPT-5.3 Codex",
+        prefer_websockets=True,
+        available_in_plans=_BOOTSTRAP_CORE_AVAILABLE_IN_PLANS,
+    ),
+    _bootstrap_model(
+        "gpt-5.3-codex-spark",
+        "GPT-5.3 Codex Spark",
+        prefer_websockets=True,
+        context_window=128_000,
+        input_modalities=("text",),
+        default_reasoning_level="high",
+        supported_in_api=False,
+        minimal_client_version="0.100.0",
+    ),
+    _bootstrap_model("gpt-5.2", "GPT-5.2", prefer_websockets=True, minimal_client_version="0.0.1"),
+    _bootstrap_model(
+        "codex-auto-review",
+        "Codex Auto Review",
+        prefer_websockets=True,
+        minimal_client_version="0.98.0",
+        available_in_plans=_BOOTSTRAP_CORE_AVAILABLE_IN_PLANS,
+        visibility="hide",
+        raw={"max_context_window": 1_000_000},
+    ),
 )
 
 

@@ -275,6 +275,10 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
 
             await _assert_guest_write_denied(remote_client)
 
+            passwordless_login = await remote_client.post("/api/dashboard-auth/guest/login", json={})
+            assert passwordless_login.status_code == 200
+            assert passwordless_login.json()["role"] == "guest"
+
             async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
                 set_password = await local_client.post(
                     "/api/dashboard-auth/guest/password",

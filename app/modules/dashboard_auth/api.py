@@ -107,9 +107,10 @@ def _decorate_session_response(
     store = get_dashboard_session_store()
     sid = password_session_id or request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = store.get(sid) if sid else None
+    session_role = getattr(session_state, "role", DashboardRole.ADMIN)
     has_pwd = (
         session_state is not None
-        and session_state.role == DashboardRole.ADMIN
+        and session_role == DashboardRole.ADMIN
         and session_state.password_verified
     )
     totp_pending = (

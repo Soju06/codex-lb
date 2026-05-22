@@ -108,15 +108,23 @@ def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, s
 
 def _reset_preference_bucket(state: AccountState, current: float, window: ResetPreferenceWindow) -> int:
     if window == "primary":
-        reset_at = state.primary_reset_at if state.primary_reset_at is not None else state.secondary_reset_at
+        reset_at = state.primary_reset_at
+        bucket_seconds = True
+        if reset_at is None:
+            reset_at = state.secondary_reset_at
+            bucket_seconds = False
     else:
-        reset_at = state.secondary_reset_at if state.secondary_reset_at is not None else state.primary_reset_at
+        reset_at = state.secondary_reset_at
+        bucket_seconds = False
+        if reset_at is None:
+            reset_at = state.primary_reset_at
+            bucket_seconds = True
     if reset_at is None:
-        if window == "primary":
+        if bucket_seconds:
             return UNKNOWN_RESET_BUCKET_DAYS * SECONDS_PER_DAY
         return UNKNOWN_RESET_BUCKET_DAYS
     remaining_seconds = max(0, int(reset_at - current))
-    if window == "primary":
+    if bucket_seconds:
         return remaining_seconds
     return remaining_seconds // SECONDS_PER_DAY
 

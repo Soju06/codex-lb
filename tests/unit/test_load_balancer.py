@@ -157,6 +157,39 @@ def test_select_account_defaults_to_secondary_reset_window():
     assert result.account.account_id == "secondary-earlier"
 
 
+def test_select_account_secondary_reset_fallback_uses_primary_subday_precision():
+    now = time.time()
+    states = [
+        AccountState(
+            "later-primary-fallback",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            secondary_used_percent=1.0,
+            primary_reset_at=int(now + 4 * 3600),
+            secondary_reset_at=None,
+        ),
+        AccountState(
+            "earlier-primary-fallback",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            primary_reset_at=int(now + 1 * 3600),
+            secondary_reset_at=None,
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "earlier-primary-fallback"
+
+
 def test_select_account_prefers_lower_secondary_used_with_same_reset_bucket():
     now = time.time()
     states = [

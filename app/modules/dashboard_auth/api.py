@@ -81,6 +81,7 @@ async def _create_dashboard_session(
     password_verified: bool,
     totp_verified: bool,
     role: DashboardRole = DashboardRole.ADMIN,
+    guest_verified: bool = False,
 ) -> tuple[str, int]:
     settings = await get_settings_cache().get()
     ttl_seconds = settings.dashboard_session_ttl_seconds
@@ -89,6 +90,7 @@ async def _create_dashboard_session(
         totp_verified=totp_verified,
         ttl_seconds=ttl_seconds,
         role=role,
+        guest_verified=guest_verified,
     )
     return session_id, ttl_seconds
 
@@ -105,7 +107,11 @@ def _decorate_session_response(
     store = get_dashboard_session_store()
     sid = password_session_id or request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = store.get(sid) if sid else None
-    has_pwd = session_state is not None and session_state.password_verified
+    has_pwd = (
+        session_state is not None
+        and session_state.role == DashboardRole.ADMIN
+        and session_state.password_verified
+    )
     totp_pending = (
         has_pwd and session_state is not None and response.totp_required_on_login and not session_state.totp_verified
     )
@@ -181,7 +187,7 @@ async def _validate_password_management_session(request: Request) -> None:
 
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     session_state = get_dashboard_session_store().get(session_id)
-    if session_state is None or not session_state.password_verified:
+    if session_state is None or session_state.role != DashboardRole.ADMIN or not session_state.password_verified:
         raise DashboardAuthError("Authentication is required")
 
     settings = await get_settings_cache().get()
@@ -236,7 +242,7 @@ async def get_dashboard_auth_session(
             return _public_guest_response(decorated)
         if decorated.authenticated and decorated.role == DashboardRole.GUEST:
             session_state = get_dashboard_session_store().get(session_id)
-            if session_state is not None and session_state.password_verified:
+            if session_state is not None and session_state.guest_verified:
                 return decorated
         return _guest_login_required_response(decorated)
     bootstrap_token_configured = await has_active_bootstrap_token()
@@ -339,9 +345,10 @@ async def login_guest(
     await limiter.clear_for_key(rate_key, context.session)
 
     session_id, session_ttl_seconds = await _create_dashboard_session(
-        password_verified=settings.guest_password_hash is not None,
+        password_verified=False,
         totp_verified=False,
         role=DashboardRole.GUEST,
+        guest_verified=True,
     )
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),

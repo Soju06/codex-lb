@@ -389,6 +389,10 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
 
             await _assert_guest_write_denied(remote_client)
 
+            totp_setup = await remote_client.post("/api/dashboard-auth/totp/setup/start", json={})
+            assert totp_setup.status_code == 401
+            assert totp_setup.json()["error"]["code"] == "authentication_required"
+
 
 @pytest.mark.asyncio
 async def test_trusted_header_mode_requires_proxy_header_for_open_dashboard(async_client, monkeypatch):

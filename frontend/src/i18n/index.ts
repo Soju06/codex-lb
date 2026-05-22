@@ -23,7 +23,7 @@ void i18n
     supportedLngs: [...SUPPORTED_LANGUAGES],
     fallbackLng: "en",
     nonExplicitSupportedLngs: true,
-    load: "languageOnly",
+    load: "currentOnly",
     interpolation: { escapeValue: false },
     detection: {
       order: ["querystring", "localStorage", "navigator"],

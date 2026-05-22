@@ -106,6 +106,8 @@ def _reset_preference_bucket(state: AccountState, current: float, window: ResetP
     if reset_at is None:
         return UNKNOWN_RESET_BUCKET_DAYS * SECONDS_PER_DAY
     remaining_seconds = max(0, int(reset_at - current))
+    if window == "secondary":
+        return remaining_seconds // SECONDS_PER_DAY
     return remaining_seconds
 
 

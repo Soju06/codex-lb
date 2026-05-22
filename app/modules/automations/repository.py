@@ -1031,7 +1031,7 @@ class AutomationsRepository:
             func.min(case((cycle_runs.c.trigger == "manual", cycle_runs.c.scheduled_for), else_=None)).label(
                 "manual_cycle_started_at"
             ),
-            func.max(case((cycle_runs.c.trigger != "manual", cycle_runs.c.started_at), else_=None)).label(
+            func.min(case((cycle_runs.c.trigger != "manual", cycle_runs.c.started_at), else_=None)).label(
                 "non_manual_cycle_started_at"
             ),
             (func.count(func.distinct(completed_non_null_account)) + func.sum(completed_null_account)).label(
@@ -1402,7 +1402,7 @@ class AutomationsRepository:
                 func.min(case((AutomationRun.trigger == "manual", AutomationRun.scheduled_for), else_=None)).label(
                     "manual_cycle_started_at"
                 ),
-                func.max(case((AutomationRun.trigger != "manual", AutomationRun.started_at), else_=None)).label(
+                func.min(case((AutomationRun.trigger != "manual", AutomationRun.started_at), else_=None)).label(
                     "non_manual_cycle_started_at"
                 ),
             )

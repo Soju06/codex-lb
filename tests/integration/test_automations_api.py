@@ -962,6 +962,195 @@ async def test_automations_list_last_run_uses_latest_manual_cycle_not_drifted_st
 
 
 @pytest.mark.asyncio
+async def test_grouped_scheduled_runs_keep_cycle_order_when_later_account_starts_after_next_cycle(async_client):
+    accounts = await _create_accounts("auto-scheduled-group-order-a", "auto-scheduled-group-order-b")
+    first_now = datetime(2026, 4, 22, 10, 0, 0)
+    second_now = first_now + timedelta(minutes=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Scheduled grouped order",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        first_cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{first_now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=first_now,
+            accounts=[
+                (accounts[0].id, first_now),
+                (accounts[1].id, first_now + timedelta(seconds=10)),
+            ],
+        )
+        first_cycle_first_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=first_now),
+            cycle_key=first_cycle.cycle_key,
+            cycle_expected_accounts=first_cycle.cycle_expected_accounts,
+            cycle_window_end=first_cycle.cycle_window_end,
+            scheduled_for=first_now,
+            started_at=first_now,
+            account_id=accounts[0].id,
+        )
+        first_cycle_late_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(
+                job.id,
+                account_id=accounts[1].id,
+                due_slot=first_now + timedelta(seconds=10),
+            ),
+            cycle_key=first_cycle.cycle_key,
+            cycle_expected_accounts=first_cycle.cycle_expected_accounts,
+            cycle_window_end=first_cycle.cycle_window_end,
+            scheduled_for=first_now + timedelta(seconds=10),
+            started_at=second_now + timedelta(minutes=5),
+            account_id=accounts[1].id,
+        )
+        second_cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{second_now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=second_now,
+            accounts=[
+                (accounts[0].id, second_now),
+                (accounts[1].id, second_now + timedelta(seconds=10)),
+            ],
+        )
+        second_cycle_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=second_now),
+            cycle_key=second_cycle.cycle_key,
+            cycle_expected_accounts=second_cycle.cycle_expected_accounts,
+            cycle_window_end=second_cycle.cycle_window_end,
+            scheduled_for=second_now,
+            started_at=second_now,
+            account_id=accounts[0].id,
+        )
+        assert first_cycle_first_run is not None
+        assert first_cycle_late_run is not None
+        assert second_cycle_run is not None
+
+    grouped_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": job.id, "trigger": "scheduled", "limit": 25, "offset": 0},
+    )
+    assert grouped_response.status_code == 200
+    grouped_items = grouped_response.json()["items"]
+    assert len(grouped_items) == 2
+    assert grouped_items[0]["cycleKey"] == second_cycle.cycle_key
+    assert grouped_items[1]["cycleKey"] == first_cycle.cycle_key
+
+
+@pytest.mark.asyncio
+async def test_automations_list_last_run_uses_latest_scheduled_cycle_not_late_account_dispatch(async_client):
+    accounts = await _create_accounts("auto-scheduled-last-run-a", "auto-scheduled-last-run-b")
+    first_now = datetime(2026, 4, 22, 10, 0, 0)
+    second_now = first_now + timedelta(minutes=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Scheduled last run",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        first_cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{first_now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=first_now,
+            accounts=[
+                (accounts[0].id, first_now),
+                (accounts[1].id, first_now + timedelta(seconds=10)),
+            ],
+        )
+        first_cycle_first_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=first_now),
+            cycle_key=first_cycle.cycle_key,
+            cycle_expected_accounts=first_cycle.cycle_expected_accounts,
+            cycle_window_end=first_cycle.cycle_window_end,
+            scheduled_for=first_now,
+            started_at=first_now,
+            account_id=accounts[0].id,
+        )
+        first_cycle_late_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(
+                job.id,
+                account_id=accounts[1].id,
+                due_slot=first_now + timedelta(seconds=10),
+            ),
+            cycle_key=first_cycle.cycle_key,
+            cycle_expected_accounts=first_cycle.cycle_expected_accounts,
+            cycle_window_end=first_cycle.cycle_window_end,
+            scheduled_for=first_now + timedelta(seconds=10),
+            started_at=second_now + timedelta(minutes=5),
+            account_id=accounts[1].id,
+        )
+        second_cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{second_now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=second_now,
+            accounts=[
+                (accounts[0].id, second_now),
+                (accounts[1].id, second_now + timedelta(seconds=10)),
+            ],
+        )
+        second_cycle_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=second_now),
+            cycle_key=second_cycle.cycle_key,
+            cycle_expected_accounts=second_cycle.cycle_expected_accounts,
+            cycle_window_end=second_cycle.cycle_window_end,
+            scheduled_for=second_now,
+            started_at=second_now,
+            account_id=accounts[0].id,
+        )
+        assert first_cycle_first_run is not None
+        assert first_cycle_late_run is not None
+        assert second_cycle_run is not None
+
+    jobs_response = await async_client.get("/api/automations", params={"limit": 25, "offset": 0})
+    assert jobs_response.status_code == 200
+    jobs_items = jobs_response.json()["items"]
+    matching = [item for item in jobs_items if item["id"] == job.id]
+    assert len(matching) == 1
+    assert matching[0]["lastRun"]["cycleKey"] == second_cycle.cycle_key
+
+
+@pytest.mark.asyncio
 async def test_automations_due_run_is_claimed_once_per_slot(db_setup, monkeypatch):
     del db_setup
     accounts = await _create_accounts("auto-scheduler-a")

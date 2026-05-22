@@ -2043,7 +2043,16 @@ class ProxyService:
                             raise compact_continuity_error from exc
                         if exc.status_code == 401:
                             if refresh_retry_used:
-                                await self._handle_proxy_error(account, exc)
+                                try:
+                                    await self._handle_proxy_error(account, exc)
+                                except Exception:
+                                    await self._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
+                                    )
+                                    raise
                                 last_exc = exc
                                 excluded_account_ids.add(account.id)
                                 transient_exhausted = True

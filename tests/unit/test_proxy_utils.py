@@ -10936,6 +10936,26 @@ def test_remember_websocket_previous_response_owner_eviction_keeps_latest_entrie
     assert ("resp_prev_4096", "key_1", None) in service._websocket_previous_response_account_index
 
 
+def test_websocket_continuity_response_ids_include_replay_downstream_alias_once():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_replay_alias",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        replay_downstream_response_id="resp_downstream_visible",
+    )
+
+    assert proxy_service._websocket_continuity_response_ids(request_state, "resp_upstream_retry") == (
+        "resp_upstream_retry",
+        "resp_downstream_visible",
+    )
+    assert proxy_service._websocket_continuity_response_ids(request_state, "resp_downstream_visible") == (
+        "resp_downstream_visible",
+    )
+
+
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch):
     """A precreated retry-safe full-resend turn (with both

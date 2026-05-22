@@ -8347,12 +8347,13 @@ class ProxyService:
             upstream_control.retire_after_drain = True
         elif settlement.record_success:
             await self._load_balancer.record_success(account)
-            self._remember_websocket_previous_response_owner(
-                previous_response_id=response_id,
-                api_key_id=api_key.id if api_key is not None else None,
-                account_id=account_id_value,
-                session_id=request_state.session_id,
-            )
+            for remembered_response_id in _websocket_continuity_response_ids(request_state, response_id):
+                self._remember_websocket_previous_response_owner(
+                    previous_response_id=remembered_response_id,
+                    api_key_id=api_key.id if api_key is not None else None,
+                    account_id=account_id_value,
+                    session_id=request_state.session_id,
+                )
 
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
@@ -8360,10 +8361,13 @@ class ProxyService:
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
         )
         if not request_state.skip_request_log:
+            request_log_response_id = (
+                _websocket_downstream_response_id(request_state) if settlement.record_success else response_id
+            )
             await self._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
-                request_id=response_id,
+                request_id=request_log_response_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
                 status=status,
@@ -11523,6 +11527,20 @@ def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonVal
 
 def _websocket_downstream_response_id(request_state: "_WebSocketRequestState") -> str:
     return request_state.replay_downstream_response_id or request_state.response_id or request_state.request_id
+
+
+def _websocket_continuity_response_ids(
+    request_state: "_WebSocketRequestState",
+    upstream_response_id: str | None,
+) -> tuple[str, ...]:
+    response_ids: list[str] = []
+    for response_id in (upstream_response_id, request_state.replay_downstream_response_id):
+        if not isinstance(response_id, str):
+            continue
+        stripped = response_id.strip()
+        if stripped and stripped not in response_ids:
+            response_ids.append(stripped)
+    return tuple(response_ids)
 
 
 def _rewrite_websocket_downstream_response_id(

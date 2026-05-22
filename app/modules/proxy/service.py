@@ -342,6 +342,11 @@ _UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS = (
     "timeout",
     "upstream closed",
 )
+_UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MESSAGE_MARKERS = (
+    "certificate verify failed",
+    "clientconnectorcertificateerror",
+    "sslcertverificationerror",
+)
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
 _COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
@@ -10865,6 +10870,8 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
     if code != "upstream_unavailable" or not message:
         return False
     normalized_message = message.lower()
+    if any(marker in normalized_message for marker in _UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MESSAGE_MARKERS):
+        return False
     return any(marker in normalized_message for marker in _UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS)
 
 

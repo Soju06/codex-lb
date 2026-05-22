@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -13,7 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import anyio
 import pytest
-from aiohttp.client_reqrep import RequestInfo
+from aiohttp.client_exceptions import ClientConnectorCertificateError
+from aiohttp.client_reqrep import ConnectionKey, RequestInfo
 from fastapi import WebSocket
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
@@ -127,6 +129,22 @@ def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
     return exc.payload["error"].get("message")
 
 
+def _client_connector_certificate_error() -> ClientConnectorCertificateError:
+    connection_key = ConnectionKey(
+        host="example.com",
+        port=443,
+        is_ssl=True,
+        ssl=True,
+        proxy=None,
+        proxy_auth=None,
+        proxy_headers_hash=None,
+    )
+    return ClientConnectorCertificateError(
+        connection_key,
+        ssl.SSLCertVerificationError(1, "certificate verify failed"),
+    )
+
+
 def test_trim_websocket_previous_response_input_items_accepts_untyped_assistant_replay() -> None:
     items: list[JsonValue] = [
         {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
@@ -202,6 +220,19 @@ def test_build_upstream_headers_accept_override():
     inbound = {}
     headers = _build_upstream_headers(inbound, "token", None, accept="application/json")
     assert headers["Accept"] == "application/json"
+
+
+def test_upstream_unavailable_certificate_connect_error_is_not_transient_retry() -> None:
+    message = str(_client_connector_certificate_error())
+
+    assert "Cannot connect to host" in message
+    assert (
+        proxy_service._should_retry_transient_stream_error(
+            "upstream_unavailable",
+            message,
+        )
+        is False
+    )
 
 
 def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
@@ -12710,9 +12741,8 @@ async def test_compact_responses_refresh_non_transient_client_error_does_not_pen
     )
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
-    monkeypatch.setattr(
-        service, "_ensure_fresh", AsyncMock(side_effect=aiohttp.ClientError("certificate verify failed"))
-    )
+    cert_error = _client_connector_certificate_error()
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=cert_error))
 
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
 
@@ -12722,7 +12752,7 @@ async def test_compact_responses_refresh_non_transient_client_error_does_not_pen
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_unavailable"
-    assert _proxy_error_message(exc) == "certificate verify failed"
+    assert _proxy_error_message(exc) == str(cert_error)
     record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert request_logs.calls[0]["status"] == "error"

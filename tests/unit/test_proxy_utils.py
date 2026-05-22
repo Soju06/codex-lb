@@ -11098,7 +11098,74 @@ async def test_pop_replayable_created_without_visible_output_request_state():
     assert pending_request.awaiting_response_created is True
     assert pending_request.response_id is None
     assert pending_request.response_event_count == 0
-    assert pending_request.suppress_next_created_downstream is False
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.replay_downstream_response_id == "resp_created_then_closed"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_rewrites_replayed_created_only_response_id():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_created_replay")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_replay_rewrite",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        response_id="resp_downstream_original",
+        awaiting_response_created=False,
+        response_event_count=1,
+        downstream_visible=False,
+    )
+    pending_requests = deque([pending_request])
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+    assert replayed_request is pending_request
+    pending_requests.append(pending_request)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replay_created = {
+        "type": "response.created",
+        "response": {"id": "resp_upstream_replayed", "status": "in_progress"},
+    }
+    created_text = await service._process_upstream_websocket_text(
+        json.dumps(replay_created, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    assert json.loads(created_text)["response"]["id"] == "resp_downstream_original"
+    assert upstream_control.suppress_downstream_event is True
+    assert pending_request.response_id == "resp_upstream_replayed"
+
+    upstream_control.suppress_downstream_event = False
+    replay_failed = {
+        "type": "response.failed",
+        "response": {"id": "resp_upstream_replayed", "status": "failed", "error": {"code": "upstream_unavailable"}},
+    }
+    failed_text = await service._process_upstream_websocket_text(
+        json.dumps(replay_failed, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert json.loads(failed_text)["response"]["id"] == "resp_downstream_original"
+    assert upstream_control.suppress_downstream_event is False
+    assert pending_requests == deque()
 
 
 @pytest.mark.asyncio

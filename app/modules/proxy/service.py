@@ -6979,6 +6979,7 @@ class ProxyService:
                     matched_request_state.suppress_next_created_downstream = False
                     suppress_downstream_event = True
                 if payload is not None:
+                    payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
                     event_block = format_sse_event(payload)
 
             terminal_request_state = None
@@ -7893,6 +7894,7 @@ class ProxyService:
                     request_state.suppress_next_created_downstream = False
                     upstream_control.suppress_downstream_event = True
                 if payload is not None:
+                    payload = _rewrite_websocket_downstream_response_id(payload, request_state)
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
@@ -8552,7 +8554,7 @@ class ProxyService:
                             request_error_code,
                             request_error_message,
                             error_type=request_error_type,
-                            response_id=request_state.response_id or request_state.request_id,
+                            response_id=_websocket_downstream_response_id(request_state),
                             error_param=request_error_param,
                         )
                     )
@@ -8614,7 +8616,7 @@ class ProxyService:
             error_code,
             error_message,
             error_type=error_type,
-            response_id=request_state.response_id or request_state.request_id,
+            response_id=_websocket_downstream_response_id(request_state),
             error_param=error_param,
         )
         response_create_gate = request_state.response_create_gate
@@ -10938,6 +10940,9 @@ def _websocket_request_can_replay_before_visible_output(request_state: "_WebSock
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
+    downstream_response_id = None
+    if request_state.response_id is not None and not request_state.awaiting_response_created:
+        downstream_response_id = request_state.response_id
     if (
         request_state.proxy_injected_previous_response_id
         and request_state.fresh_upstream_request_is_retry_safe
@@ -10955,7 +10960,8 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
-    request_state.suppress_next_created_downstream = False
+    request_state.replay_downstream_response_id = downstream_response_id
+    request_state.suppress_next_created_downstream = downstream_response_id is not None
     return request_text
 
 
@@ -11023,6 +11029,7 @@ class _WebSocketRequestState:
     api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
     downstream_visible: bool = False
     suppress_next_created_downstream: bool = False
+    replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
 
 
@@ -11513,6 +11520,27 @@ def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonVal
     return stripped or None
 
 
+def _websocket_downstream_response_id(request_state: "_WebSocketRequestState") -> str:
+    return request_state.replay_downstream_response_id or request_state.response_id or request_state.request_id
+
+
+def _rewrite_websocket_downstream_response_id(
+    payload: dict[str, JsonValue] | None,
+    request_state: "_WebSocketRequestState",
+) -> dict[str, JsonValue] | None:
+    downstream_response_id = request_state.replay_downstream_response_id
+    if downstream_response_id is None or not isinstance(payload, dict):
+        return payload
+
+    rewritten = dict(payload)
+    if isinstance(rewritten.get("response_id"), str):
+        rewritten["response_id"] = downstream_response_id
+    response = rewritten.get("response")
+    if isinstance(response, dict) and isinstance(response.get("id"), str):
+        rewritten["response"] = {**response, "id": downstream_response_id}
+    return rewritten
+
+
 def _websocket_event_error_code(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
@@ -11857,7 +11885,7 @@ def _rewrite_websocket_continuity_corruption_event(
         "stream_incomplete",
         PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
         error_type="server_error",
-        response_id=request_state.response_id or request_state.request_id,
+        response_id=_websocket_downstream_response_id(request_state),
     )
     rewritten_text = json.dumps(rewritten_event_payload, ensure_ascii=True, separators=(",", ":"))
     rewritten_event_block = format_sse_event(rewritten_event_payload)
@@ -11881,7 +11909,7 @@ def _rewrite_websocket_previous_response_owner_unavailable_event(
         "upstream_unavailable",
         "Previous response owner account is unavailable; retry later.",
         error_type="server_error",
-        response_id=request_state.response_id or request_state.request_id,
+        response_id=_websocket_downstream_response_id(request_state),
     )
     rewritten_text = json.dumps(rewritten_event_payload, ensure_ascii=True, separators=(",", ":"))
     rewritten_event_block = format_sse_event(rewritten_event_payload)
@@ -11899,7 +11927,7 @@ def _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
         "stream_incomplete",
         _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
         error_type="server_error",
-        response_id=request_state.response_id or request_state.request_id,
+        response_id=_websocket_downstream_response_id(request_state),
     )
     rewritten_text = json.dumps(rewritten_event_payload, ensure_ascii=True, separators=(",", ":"))
     rewritten_event_block = format_sse_event(rewritten_event_payload)
@@ -12363,7 +12391,7 @@ def _build_stream_incomplete_terminal_event_for_request(
     request_state: _WebSocketRequestState,
 ) -> tuple[str, str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None]:
     event_block, event, payload, event_type = _build_rewritten_stream_response_failed_event(
-        response_id=request_state.response_id or request_state.request_id,
+        response_id=_websocket_downstream_response_id(request_state),
         error_code="stream_incomplete",
         error_message="Upstream websocket closed before response.completed",
     )
@@ -12374,7 +12402,7 @@ def _build_stream_incomplete_terminal_event_for_request(
                 "stream_incomplete",
                 "Upstream websocket closed before response.completed",
                 error_type="server_error",
-                response_id=request_state.response_id or request_state.request_id,
+                response_id=_websocket_downstream_response_id(request_state),
             ),
         ),
         ensure_ascii=True,

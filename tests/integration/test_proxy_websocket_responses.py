@@ -5556,14 +5556,11 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
             created_event = json.loads(websocket.receive_text())
-            retry_created_event = json.loads(websocket.receive_text())
             failed_event = json.loads(websocket.receive_text())
 
     assert created_event["type"] == "response.created"
-    assert retry_created_event["type"] == "response.created"
-    assert retry_created_event["response"]["id"] == "resp_ws_eof_retry"
     assert failed_event["type"] == "response.failed"
-    assert failed_event["response"]["id"] == "resp_ws_eof_retry"
+    assert failed_event["response"]["id"] == "resp_ws_eof"
     assert failed_event["response"]["error"]["code"] == "stream_incomplete"
     assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1

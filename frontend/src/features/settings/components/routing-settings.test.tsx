@@ -142,6 +142,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
@@ -180,6 +181,7 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

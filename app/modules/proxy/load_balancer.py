@@ -470,6 +470,7 @@ class LoadBalancer:
                     accounts,
                     model=model,
                     limit_name=effective_limit_name,
+                    explicit_limit=additional_limit_name is not None,
                     repos=repos,
                 )
                 if not accounts:
@@ -522,6 +523,7 @@ class LoadBalancer:
         *,
         model: str | None,
         limit_name: str,
+        explicit_limit: bool = False,
         repos: ProxyRepositories,
     ) -> tuple[list[Account], str | None, str | None]:
         if not accounts:
@@ -565,6 +567,7 @@ class LoadBalancer:
                 account_id=account.id,
                 account_plan_type=account.plan_type,
                 quota_key=limit_name,
+                explicit_limit=explicit_limit,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
@@ -1394,6 +1397,7 @@ def _additional_quota_eligibility(
     account_id: str,
     account_plan_type: str | None,
     quota_key: str | None,
+    explicit_limit: bool = False,
     latest_primary: dict[str, AdditionalUsageHistory],
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
@@ -1404,7 +1408,7 @@ def _additional_quota_eligibility(
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
 
-    if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+    if not explicit_limit and not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
         return "eligible"
 
     if latest_primary_entry is None and latest_secondary_entry is None:

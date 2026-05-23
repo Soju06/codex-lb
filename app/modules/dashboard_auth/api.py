@@ -316,6 +316,12 @@ async def login_guest(
     settings = await get_settings_cache().get()
     if not settings.guest_access_enabled:
         raise DashboardBadRequestError("Guest access is disabled", code="guest_access_disabled")
+    if (
+        get_settings().dashboard_auth_mode == DashboardAuthMode.TRUSTED_HEADER
+        and get_dashboard_request_auth(request) is None
+        and settings.password_hash is None
+    ):
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
 
     limiter = get_guest_password_rate_limiter()
     rate_key = _session_client_key(request, prefix="guest_login")

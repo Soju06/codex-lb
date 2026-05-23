@@ -38,7 +38,10 @@ export function AuthGate({ children }: PropsWithChildren) {
     return <BootstrapSetupScreen />;
   }
 
-  if ((passwordRequired || (guestAccessEnabled && guestPasswordRequired)) && (!authenticated || adminLoginRequested)) {
+  if (
+    (passwordRequired || (authMode === "standard" && guestAccessEnabled && guestPasswordRequired)) &&
+    (!authenticated || adminLoginRequested)
+  ) {
     if (totpRequiredOnLogin) {
       return <TotpDialog open />;
     }

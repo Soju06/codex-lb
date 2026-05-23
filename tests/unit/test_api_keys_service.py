@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -430,7 +431,7 @@ class _FakeUsageRepository(UsageRepository):
         self,
         window: str | None = None,
         *,
-        account_ids: list[str] | None = None,
+        account_ids: Collection[str] | None = None,
     ) -> dict[str, UsageHistory]:
         self.calls.append((window, None if account_ids is None else list(account_ids)))
         source = self._secondary if window == "secondary" else self._primary

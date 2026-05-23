@@ -341,18 +341,15 @@ def _compute_pooled_credits(
     account_map = {a.id: a for a in all_accounts if a.id in account_ids}
 
     primary_rows_raw = [
-        usage_history_to_window_row(entry)
-        for entry in primary_usage.values()
-        if entry.account_id in account_ids
+        usage_history_to_window_row(entry) for entry in primary_usage.values() if entry.account_id in account_ids
     ]
     secondary_rows_raw = [
-        usage_history_to_window_row(entry)
-        for entry in secondary_usage.values()
-        if entry.account_id in account_ids
+        usage_history_to_window_row(entry) for entry in secondary_usage.values() if entry.account_id in account_ids
     ]
 
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
-        primary_rows_raw, secondary_rows_raw,
+        primary_rows_raw,
+        secondary_rows_raw,
     )
     primary_rows = _seed_missing_usage_rows(primary_rows, account_ids)
     secondary_rows = _seed_missing_usage_rows(secondary_rows, account_ids)
@@ -382,8 +379,7 @@ def _seed_missing_usage_rows(
     if not missing_account_ids:
         return rows
     return rows + [
-        UsageWindowRow(account_id=account_id, used_percent=0.0)
-        for account_id in sorted(missing_account_ids)
+        UsageWindowRow(account_id=account_id, used_percent=0.0) for account_id in sorted(missing_account_ids)
     ]
 
 
@@ -453,8 +449,7 @@ class ApiKeysService:
         pooled_by_key: dict[str, PooledCreditData] = {}
         if self._usage_repository is not None:
             assigned_ids_by_key = {
-                row.id: [a.account_id for a in getattr(row, "account_assignments", [])]
-                for row in rows
+                row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
             }
             needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
             if needs_all_accounts:

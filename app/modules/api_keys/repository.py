@@ -166,9 +166,7 @@ class ApiKeysRepository:
         if not account_ids:
             return []
         result = await self._session.execute(
-            select(Account)
-            .options(load_only(Account.id, Account.plan_type))
-            .where(Account.id.in_(account_ids))
+            select(Account).options(load_only(Account.id, Account.plan_type)).where(Account.id.in_(account_ids))
         )
         return list(result.scalars().all())
 

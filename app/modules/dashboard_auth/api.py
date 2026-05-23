@@ -330,7 +330,7 @@ async def login_guest(
             ) from exc
 
     try:
-        await context.service.verify_guest_password(
+        guest_verified = await context.service.verify_guest_password(
             None if payload is None else payload.password,
             actor_ip=request.client.host if request.client else None,
         )
@@ -340,13 +340,12 @@ async def login_guest(
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
     await limiter.clear_for_key(rate_key, context.session)
-    fresh_settings = await context.repository.get_settings()
 
     session_id, session_ttl_seconds = await _create_dashboard_session(
         password_verified=False,
         totp_verified=False,
         role=DashboardRole.GUEST,
-        guest_verified=fresh_settings.guest_password_hash is not None,
+        guest_verified=guest_verified,
     )
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),

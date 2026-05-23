@@ -42,4 +42,27 @@ describe("useAuthStore unauthorized handler", () => {
     expect(next.bootstrapRequired).toBe(true);
     expect(next.bootstrapTokenConfigured).toBe(true);
   });
+
+  it("clears write permissions for guest deployments on 401 handling", async () => {
+    const { useAuthStore } = await import("@/features/auth/hooks/use-auth");
+
+    useAuthStore.setState({
+      authenticated: true,
+      initialized: true,
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+      guestAccessEnabled: true,
+      guestPasswordRequired: true,
+    });
+
+    expect(registeredUnauthorizedHandler).not.toBeNull();
+    registeredUnauthorizedHandler?.();
+
+    const next = useAuthStore.getState();
+    expect(next.authenticated).toBe(false);
+    expect(next.role).toBe("guest");
+    expect(next.permissions).toEqual(["read"]);
+    expect(next.canWrite).toBe(false);
+  });
 });

@@ -174,9 +174,9 @@ setUnauthorizedHandler(() => {
   useAuthStore.setState((state) => ({
     ...state,
     authenticated: false,
-    role: "admin",
-    permissions: ["read", "write"],
-    canWrite: true,
+    role: state.guestAccessEnabled ? "guest" : state.role,
+    permissions: ["read"],
+    canWrite: false,
     adminLoginRequested: false,
     initialized: true,
     error: null,

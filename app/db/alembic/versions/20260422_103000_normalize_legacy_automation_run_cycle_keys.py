@@ -20,6 +20,8 @@ down_revision = "20260421_130000_merge_automation_and_request_log_heads"
 branch_labels = None
 depends_on = None
 
+_MAX_LEGACY_SCHEDULE_THRESHOLD_MINUTES = 240
+
 
 class _ObservedRunRow(TypedDict):
     id: str
@@ -118,7 +120,7 @@ def _scheduled_slot_digest(job_id: str, *, account_id: str, due_slot: datetime) 
     return sha1(seed.encode("utf-8")).hexdigest()[:20]
 
 
-def _recover_legacy_scheduled_due_slot(row: _ObservedRunRow) -> datetime | None:
+def _recover_legacy_scheduled_due_slot(row: _ObservedRunRow) -> tuple[datetime, int] | None:
     account_id = row["account_id"]
     if account_id is None:
         return None
@@ -129,12 +131,13 @@ def _recover_legacy_scheduled_due_slot(row: _ObservedRunRow) -> datetime | None:
     if digest is None:
         return None
 
-    threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
+    current_threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
+    search_window_minutes = max(current_threshold_minutes, _MAX_LEGACY_SCHEDULE_THRESHOLD_MINUTES)
     candidate_due_slot = row["scheduled_for"].replace(second=0, microsecond=0)
-    for offset_minutes in range(threshold_minutes + 1):
+    for offset_minutes in range(search_window_minutes + 1):
         due_slot = candidate_due_slot - timedelta(minutes=offset_minutes)
         if _scheduled_slot_digest(row["job_id"], account_id=account_id, due_slot=due_slot) == digest:
-            return due_slot
+            return due_slot, offset_minutes
     return None
 
 
@@ -160,11 +163,12 @@ def _normalize_run_row(row: _ObservedRunRow) -> _NormalizedRunRow:
         }
 
     cycle_window_end = row["cycle_window_end"]
-    due_slot = _recover_legacy_scheduled_due_slot(row)
-    if trigger == "scheduled" and due_slot is not None:
+    recovered_due_slot = _recover_legacy_scheduled_due_slot(row)
+    if trigger == "scheduled" and recovered_due_slot is not None:
+        due_slot, recovered_offset_minutes = recovered_due_slot
         threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
         cycle_key = _scheduled_cycle_key(row["job_id"], due_slot)
-        recovered_window_end = due_slot + timedelta(minutes=threshold_minutes)
+        recovered_window_end = due_slot + timedelta(minutes=max(threshold_minutes, recovered_offset_minutes))
         if cycle_window_end is None or recovered_window_end > cycle_window_end:
             cycle_window_end = recovered_window_end
 

@@ -676,7 +676,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
     sync_url = to_sync_database_url(url)
     created_at = datetime(2026, 4, 22, 3, 0, 0)
     scheduled_due_slot = created_at + timedelta(hours=1)
-    scheduled_window_end = scheduled_due_slot + timedelta(minutes=5)
+    scheduled_window_end = scheduled_due_slot + timedelta(minutes=60)
     scheduled_digest_a = "b32d81b774f1e6d05dfe"
     scheduled_digest_b = "53c9867d6d99b6ffc226"
     with create_engine(sync_url, future=True).begin() as connection:
@@ -810,7 +810,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "schedule_time": "05:00",
                     "schedule_timezone": "UTC",
                     "schedule_days": "mon,tue,wed,thu,fri,sat,sun",
-                    "schedule_threshold_minutes": 5,
+                    "schedule_threshold_minutes": 0,
                     "include_paused_accounts": False,
                     "model": "gpt-5.4-mini",
                     "reasoning_effort": None,
@@ -938,16 +938,16 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "slot_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "cycle_expected_accounts": 2,
-                    "cycle_window_end": scheduled_due_slot + timedelta(minutes=1),
-                    "scheduled_for": scheduled_due_slot + timedelta(minutes=1),
-                    "started_at": scheduled_due_slot + timedelta(minutes=1),
-                    "finished_at": scheduled_due_slot + timedelta(minutes=1, seconds=5),
+                    "cycle_window_end": scheduled_due_slot + timedelta(minutes=60),
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=60),
+                    "started_at": scheduled_due_slot + timedelta(minutes=60),
+                    "finished_at": scheduled_due_slot + timedelta(minutes=60, seconds=5),
                     "status": "success",
                     "account_id": "acc_cycle_scheduled_b",
                     "error_code": None,
                     "error_message": None,
                     "attempt_count": 1,
-                    "created_at": scheduled_due_slot + timedelta(minutes=1),
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
                 },
             ],
         )
@@ -986,7 +986,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "trigger": "scheduled",
                     "cycle_expected_accounts": 1,
                     "cycle_window_end": scheduled_window_end,
-                    "created_at": scheduled_due_slot + timedelta(minutes=1),
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
                 },
             ],
         )
@@ -1020,8 +1020,8 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "account_id": "acc_cycle_scheduled_b",
                     "position": 0,
-                    "scheduled_for": scheduled_due_slot + timedelta(minutes=1),
-                    "created_at": scheduled_due_slot + timedelta(minutes=1),
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=60),
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
                 },
             ],
         )

@@ -7,7 +7,7 @@ from enum import Enum
 
 from sqlalchemy import Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import load_only, selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -165,11 +165,15 @@ class ApiKeysRepository:
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]:
         if not account_ids:
             return []
-        result = await self._session.execute(select(Account).where(Account.id.in_(account_ids)))
+        result = await self._session.execute(
+            select(Account)
+            .options(load_only(Account.id, Account.plan_type))
+            .where(Account.id.in_(account_ids))
+        )
         return list(result.scalars().all())
 
     async def list_all_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account))
+        result = await self._session.execute(select(Account).options(load_only(Account.id, Account.plan_type)))
         return list(result.scalars().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:

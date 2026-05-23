@@ -1,6 +1,6 @@
 ## Why
 
-The APIs tab left sidebar shows each API key with a limit-usage bar, but operators could not see the pooled credit status of the accounts assigned to each key. This change adds "Pooled 5h" and "Pooled Weekly" credit bars to each API list item, computed server-side by aggregating usage across the key's assigned accounts (or all accounts if unscoped), rendered identically to the account credit bars in the Accounts tab.
+The APIs tab left sidebar shows each API key with pooled credit bars and, when limit rules exist, retains the legacy API Limit bar beneath them. This change ensures the list item continues to surface both the pooled status of the accounts assigned to each key and the key-specific limit usage, computed server-side by aggregating usage across the key's assigned accounts (or all accounts if unscoped), with pooled bars rendered identically to the account credit bars in the Accounts tab.
 
 ## What Changes
 
@@ -8,7 +8,7 @@ The APIs tab left sidebar shows each API key with a limit-usage bar, but operato
 - Extend `list_keys()` to compute pooled credits per key by filtering `summarize_usage_window()` to the key's assigned accounts (or all accounts if none assigned).
 - Add `pooled_remaining_percent_primary`, `pooled_remaining_percent_secondary`, and `pooled_capacity_credits_primary` to the `ApiKeyResponse` schema.
 - Extract `MiniQuotaBar` from `account-list-item.tsx` into a shared component.
-- Replace the limit-usage bar in `api-list-item.tsx` with pooled credit bars labeled "Pooled 5h" and "Pooled Weekly".
+- Keep the legacy limit-usage bar in `api-list-item.tsx` beneath pooled credit bars labeled "Pooled 5h" and "Pooled Weekly" when limit rules exist.
 - Hide the Pooled 5h bar when pooled primary capacity is 0.0 (e.g., all free-tier accounts).
 - No reset countdown labels on pooled bars.
 

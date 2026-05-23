@@ -160,12 +160,24 @@ class UsageRepository:
             for row in rows
         ]
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
         conditions = _window_clause(window)
+        if account_ids is not None and not account_ids:
+            return {}
+        if account_ids is not None:
+            conditions = and_(conditions, UsageHistory.account_id.in_(account_ids))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            acct_subq = select(Account.id).subquery("accts")
+            acct_stmt = select(Account.id)
+            if account_ids is not None:
+                acct_stmt = acct_stmt.where(Account.id.in_(account_ids))
+            acct_subq = acct_stmt.subquery("accts")
             lateral = (
                 select(UsageHistory.id)
                 .where(

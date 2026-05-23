@@ -8,6 +8,8 @@ When `pooledCapacityCreditsPrimary > 0` and `pooledRemainingPercentPrimary` is n
 
 When both bars are visible, they SHALL be laid out in a 2-column grid. When only one bar is visible, it SHALL use a 1-column layout.
 
+When API key limit rules exist, the sidebar SHALL also render the legacy limit progress bar below the pooled bars with an "API Limit" label and percentage value so it remains clearly distinct from the pooled-account bars.
+
 #### Scenario: Both pooled bars visible
 
 - **WHEN** an API key has both primary and secondary pooled credit data
@@ -22,3 +24,8 @@ When both bars are visible, they SHALL be laid out in a 2-column grid. When only
 
 - **WHEN** an API key has no pooled credit data
 - **THEN** no credit bars are rendered on that list item
+
+#### Scenario: API limit bar is labeled distinctly
+
+- **WHEN** an API key has configured limit rules
+- **THEN** the sidebar renders the legacy limit bar with an "API Limit" label below the pooled bars

@@ -10,7 +10,7 @@
 - [ ] 2.3 Add pooled credit fields to `ApiKeyResponse` schema and `_to_response()` mapping.
 - [ ] 2.4 Add pooled credit fields to frontend `ApiKeySchema`.
 - [ ] 2.5 Extract `MiniQuotaBar` to shared component.
-- [ ] 2.6 Replace limit-usage bar in `api-list-item.tsx` with pooled credit bars.
+- [ ] 2.6 Keep the legacy limit-usage bar in `api-list-item.tsx` beneath pooled credit bars when limit rules exist.
 
 ## 3. Verification
 

@@ -19,6 +19,7 @@ from app.core.usage.pricing import (
     calculate_cost_from_usage,
     get_pricing_for_model,
 )
+from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import sqlite_writer_section
@@ -353,6 +354,8 @@ def _compute_pooled_credits(
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
         primary_rows_raw, secondary_rows_raw,
     )
+    primary_rows = _seed_missing_usage_rows(primary_rows, account_ids)
+    secondary_rows = _seed_missing_usage_rows(secondary_rows, account_ids)
 
     primary_summary = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
     secondary_summary = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
@@ -368,6 +371,20 @@ def _compute_pooled_credits(
         remaining_percent_secondary=secondary_remaining,
         capacity_credits_primary=primary_summary.capacity_credits,
     )
+
+
+def _seed_missing_usage_rows(
+    rows: list[UsageWindowRow],
+    account_ids: set[str],
+) -> list[UsageWindowRow]:
+    present_account_ids = {row.account_id for row in rows}
+    missing_account_ids = account_ids - present_account_ids
+    if not missing_account_ids:
+        return rows
+    return rows + [
+        UsageWindowRow(account_id=account_id, used_percent=0.0)
+        for account_id in sorted(missing_account_ids)
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,18 +450,28 @@ class ApiKeysService:
         rows = await self._repository.list_all()
         usage_summary_by_key = await self._repository.list_usage_summary_by_key()
 
-        all_accounts = await self._repository.list_all_accounts()
-
         pooled_by_key: dict[str, PooledCreditData] = {}
         if self._usage_repository is not None:
-            primary_usage = await self._usage_repository.latest_by_account("primary")
-            secondary_usage = await self._usage_repository.latest_by_account("secondary")
-
+            assigned_ids_by_key = {
+                row.id: [a.account_id for a in getattr(row, "account_assignments", [])]
+                for row in rows
+            }
+            needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
+            if needs_all_accounts:
+                all_accounts = await self._repository.list_all_accounts()
+                primary_usage = await self._usage_repository.latest_by_account("primary")
+                secondary_usage = await self._usage_repository.latest_by_account("secondary")
+            else:
+                all_account_ids = sorted({account_id for ids in assigned_ids_by_key.values() for account_id in ids})
+                all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
+                primary_usage = await self._usage_repository.latest_by_account("primary", account_ids=all_account_ids)
+                secondary_usage = await self._usage_repository.latest_by_account(
+                    "secondary",
+                    account_ids=all_account_ids,
+                )
             for row in rows:
-                account_assignments = getattr(row, "account_assignments", [])
-                assigned_ids = [a.account_id for a in account_assignments]
                 pooled_by_key[row.id] = _compute_pooled_credits(
-                    assigned_account_ids=assigned_ids,
+                    assigned_account_ids=assigned_ids_by_key[row.id],
                     all_accounts=all_accounts,
                     primary_usage=primary_usage,
                     secondary_usage=secondary_usage,

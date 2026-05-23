@@ -106,7 +106,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
         </div>
       ) : null}
       {limitPct !== null ? (
-        <div className="mt-1.5">
+        <div className="mt-1.5 space-y-1">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-muted-foreground">API Limit</span>
+            <span className="tabular-nums font-medium">{formatPercentNullable(limitPct)}</span>
+          </div>
           <MiniUsageBar percent={limitPct} />
         </div>
       ) : null}

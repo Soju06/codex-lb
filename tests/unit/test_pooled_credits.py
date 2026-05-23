@@ -112,7 +112,19 @@ class TestComputePooledCredits:
         assert result.remaining_percent_primary is None
         assert result.remaining_percent_secondary is not None
 
-    def test_no_usage_data_returns_null_percents(self) -> None:
+    def test_no_accounts_returns_null_percents(self) -> None:
+        result = _compute_pooled_credits(
+            assigned_account_ids=[],
+            all_accounts=[],
+            primary_usage={},
+            secondary_usage={},
+        )
+
+        assert result.remaining_percent_primary is None
+        assert result.remaining_percent_secondary is None
+        assert result.capacity_credits_primary == 0.0
+
+    def test_assigned_accounts_without_usage_history_still_count_capacity(self) -> None:
         acc_a = _make_account("acc-a", "plus")
 
         result = _compute_pooled_credits(
@@ -122,9 +134,9 @@ class TestComputePooledCredits:
             secondary_usage={},
         )
 
-        assert result.remaining_percent_primary is None
-        assert result.remaining_percent_secondary is None
-        assert result.capacity_credits_primary == 0.0
+        assert result.remaining_percent_primary == pytest.approx(100.0)
+        assert result.remaining_percent_secondary == pytest.approx(100.0)
+        assert result.capacity_credits_primary == 225.0
 
     def test_mixed_plans_sums_capacity(self) -> None:
         acc_plus = _make_account("acc-plus", "plus")

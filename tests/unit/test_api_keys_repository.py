@@ -146,6 +146,50 @@ class TestUsage7dByAccount:
         assert result == []
 
 
+class TestAccountLookupQueries:
+    @pytest.mark.asyncio
+    async def test_list_all_accounts_only_loads_identity_and_plan_type(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+        session.execute.side_effect = _execute
+
+        result = await repo.list_all_accounts()
+
+        assert result == []
+        assert len(statements) == 1
+        assert "access_token_encrypted" not in statements[0]
+        assert "refresh_token_encrypted" not in statements[0]
+        assert "id_token_encrypted" not in statements[0]
+        assert "plan_type" in statements[0]
+
+    @pytest.mark.asyncio
+    async def test_list_accounts_by_ids_only_loads_identity_and_plan_type(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+        session.execute.side_effect = _execute
+
+        result = await repo.list_accounts_by_ids(["acc_1", "acc_2"])
+
+        assert result == []
+        assert len(statements) == 1
+        assert "access_token_encrypted" not in statements[0]
+        assert "refresh_token_encrypted" not in statements[0]
+        assert "id_token_encrypted" not in statements[0]
+        assert "plan_type" in statements[0]
+
+
 class TestUsage7d:
     @pytest.mark.asyncio
     async def test_returns_totals_and_account_costs_from_single_execute(self) -> None:

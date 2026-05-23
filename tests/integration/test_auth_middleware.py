@@ -430,6 +430,28 @@ async def test_trusted_header_mode_requires_proxy_header_for_open_dashboard(asyn
 
 
 @pytest.mark.asyncio
+async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(async_client, monkeypatch):
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.TRUSTED_HEADER,
+        trust_proxy_headers=True,
+    )
+
+    proxy_headers = {"Remote-User": "admin@example.com"}
+    read_settings = await async_client.get("/api/settings", headers=proxy_headers)
+    assert read_settings.status_code == 200
+    current = read_settings.json()
+    current["guestAccessEnabled"] = True
+    enabled_settings = await async_client.put("/api/settings", json=current, headers=proxy_headers)
+    assert enabled_settings.status_code == 200
+    assert enabled_settings.json()["guestPasswordConfigured"] is False
+
+    blocked = await async_client.post("/api/dashboard-auth/guest/login", json={})
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "proxy_auth_required"
+
+
+@pytest.mark.asyncio
 async def test_trusted_header_mode_allows_proxy_header_and_password_fallback(async_client, monkeypatch):
     _set_dashboard_auth_env(
         monkeypatch,

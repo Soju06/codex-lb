@@ -211,6 +211,10 @@ class DashboardAuthService:
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
+        elif guest_access_enabled and not guest_password_required:
+            authenticated = True
+            role = DashboardRole.GUEST
+            permissions = GUEST_PERMISSIONS
         elif not password_required:
             authenticated = True
             role = DashboardRole.ADMIN
@@ -263,18 +267,19 @@ class DashboardAuthService:
         if not settings.totp_required_on_login or settings.totp_secret_encrypted is None:
             AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "password"})
 
-    async def verify_guest_password(self, password: str | None, *, actor_ip: str | None = None) -> None:
+    async def verify_guest_password(self, password: str | None, *, actor_ip: str | None = None) -> bool:
         settings = await self._repository.get_settings()
         if not settings.guest_access_enabled:
             raise GuestAccessDisabledError("Guest access is disabled")
         current = settings.guest_password_hash
         if current is None:
             AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
-            return
+            return False
         if password is None or not _check_password(password, current):
             AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "guest"})
             raise InvalidCredentialsError("Invalid credentials")
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
+        return True
 
     async def change_password(self, current_password: str, new_password: str) -> None:
         await self.verify_password(current_password)

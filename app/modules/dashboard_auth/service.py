@@ -211,16 +211,16 @@ class DashboardAuthService:
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
+        elif state is not None and state.role == DashboardRole.ADMIN and state.password_verified:
+            authenticated = bool(not totp_required or state.totp_verified)
+            role = DashboardRole.ADMIN
+            permissions = ADMIN_PERMISSIONS
         elif guest_access_enabled and not guest_password_required:
             authenticated = True
             role = DashboardRole.GUEST
             permissions = GUEST_PERMISSIONS
         elif not password_required:
             authenticated = True
-            role = DashboardRole.ADMIN
-            permissions = ADMIN_PERMISSIONS
-        elif state is not None and state.role == DashboardRole.ADMIN and state.password_verified:
-            authenticated = bool(not totp_required or state.totp_verified)
             role = DashboardRole.ADMIN
             permissions = ADMIN_PERMISSIONS
         elif public_guest_authenticated:

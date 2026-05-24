@@ -8,6 +8,7 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
+from app.modules.limit_warmup import service as limit_warmup_service
 from app.modules.limit_warmup.service import LimitWarmupSendResult, LimitWarmupService
 
 pytestmark = pytest.mark.unit
@@ -369,6 +370,42 @@ async def test_warmup_completion_failure_finalizes_same_batch_sends() -> None:
     assert statuses_by_account == {"acc_1": "failed", "acc_2": "succeeded"}
     failed = next(row for row in repo.rows if row.account_id == "acc_1")
     assert failed.error_code == "warmup_completion_failed"
+
+
+@pytest.mark.asyncio
+async def test_warmup_completion_failure_drains_finished_pending_sends(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = FailingCompletionWarmupRepo(fail_attempt_id=1)
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2")]
+
+    async def wait_with_finished_pending(
+        tasks,
+        *,
+        return_when,
+    ):
+        await asyncio.sleep(0)
+        failed_task = {task for task in tasks if task.get_name() == "limit-warmup:1"}
+        assert failed_task
+        pending = set(tasks) - failed_task
+        assert pending
+        assert all(task.done() for task in pending)
+        return failed_task, pending
+
+    monkeypatch.setattr(limit_warmup_service.asyncio, "wait", wait_with_finished_pending)
+
+    with pytest.raises(RuntimeError, match="completion failed"):
+        await service.run_after_usage_refresh(
+            accounts=accounts,
+            settings=_settings(),
+            before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000) for account in accounts},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
+            after_secondary={},
+        )
+
+    statuses_by_account = {row.account_id: row.status for row in repo.rows}
+    assert statuses_by_account == {"acc_1": "failed", "acc_2": "succeeded"}
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import AsyncContextManager, Callable, Protocol
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
@@ -111,8 +111,14 @@ class LimitWarmupRequestLogRepository(Protocol):
 
 
 class StreamingLimitWarmupSender:
-    def __init__(self, accounts_repo: AccountsRepository) -> None:
+    def __init__(
+        self,
+        accounts_repo: AccountsRepository,
+        *,
+        accounts_repo_factory: Callable[[], AsyncContextManager[AccountsRepository]] | None = None,
+    ) -> None:
         self._accounts_repo = accounts_repo
+        self._accounts_repo_factory = accounts_repo_factory
         self._auth_manager = AuthManager(accounts_repo)
         self._encryptor = TokenEncryptor()
         self._auth_lock = asyncio.Lock()
@@ -122,7 +128,7 @@ class StreamingLimitWarmupSender:
         started = time.monotonic()
         try:
             async with self._auth_lock:
-                fresh_account = await self._auth_manager.ensure_fresh(account)
+                fresh_account = await self._ensure_fresh(account)
                 access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
                 chatgpt_account_id = fresh_account.chatgpt_account_id
         except RefreshError as exc:
@@ -204,6 +210,12 @@ class StreamingLimitWarmupSender:
             error_code="stream_incomplete",
             error_message="Warm-up stream ended without a terminal event",
         )
+
+    async def _ensure_fresh(self, account: Account) -> Account:
+        if self._accounts_repo_factory is None:
+            return await self._auth_manager.ensure_fresh(account)
+        async with self._accounts_repo_factory() as accounts_repo:
+            return await AuthManager(accounts_repo).ensure_fresh(account)
 
 
 class LimitWarmupService:
@@ -305,7 +317,8 @@ class LimitWarmupService:
                         prompt=settings.limit_warmup_prompt,
                         sender=sender,
                         semaphore=send_semaphore,
-                    )
+                    ),
+                    name=f"limit-warmup:{attempt.id}",
                 )
                 send_tasks[send_task] = attempt
 
@@ -334,6 +347,21 @@ class LimitWarmupService:
                     raise completion_error
         finally:
             if pending_send_tasks:
+                finished_send_tasks = {send_task for send_task in pending_send_tasks if send_task.done()}
+                pending_send_tasks -= finished_send_tasks
+                for send_task in finished_send_tasks:
+                    try:
+                        outcome = await send_task
+                        completed = await self._complete_warmup(outcome)
+                    except Exception:
+                        await self._mark_aborted_warmup(
+                            send_tasks[send_task],
+                            error_code="warmup_completion_failed",
+                            error_message="Limit warm-up completion failed",
+                        )
+                        continue
+                    latest_attempts[outcome.account.id] = completed or outcome.attempt
+
                 for send_task in pending_send_tasks:
                     send_task.cancel()
                 await asyncio.gather(*pending_send_tasks, return_exceptions=True)

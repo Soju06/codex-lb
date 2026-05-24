@@ -20,6 +20,7 @@ export type AccountDetailProps = {
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExport: (accountId: string) => void;
+  onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
 };
 
 export function AccountDetail({
@@ -32,6 +33,7 @@ export function AccountDetail({
   onDelete,
   onReauth,
   onExport,
+  onLimitWarmupChange,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -81,6 +83,7 @@ export function AccountDetail({
         onDelete={onDelete}
         onReauth={onReauth}
         onExport={onExport}
+        onLimitWarmupChange={onLimitWarmupChange}
       />
     </div>
   );

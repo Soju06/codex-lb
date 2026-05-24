@@ -41,6 +41,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         api_key_name=api_key_name,
         request_id=log.request_id,
         model=log.model,
+        source=log.source,
         transport=log.transport,
         service_tier=log.service_tier,
         requested_service_tier=log.requested_service_tier,

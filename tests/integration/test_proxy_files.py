@@ -155,6 +155,44 @@ async def test_backend_files_create_maps_upstream_error(async_client, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_backend_files_create_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_files_invalidated_a", "files-invalidated-a@example.com")
+    await _import_account(async_client, "acc_files_invalidated_b", "files-invalidated-b@example.com")
+    captured_account_ids: list[str | None] = []
+    invalidated_account_id: str | None = None
+
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+        del payload, headers, access_token, base_url, session
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_account_id:
+            raise FileProxyError(
+                401,
+                {"error": {"message": "token invalidated", "type": "authentication_error", "code": "invalid_api_key"}},
+            )
+        return {"file_id": "file_recovered", "upload_url": "https://blob.example/recovered"}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/files",
+        json={"file_name": "x.png", "file_size": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["file_id"] == "file_recovered"
+    assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
+    assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
 async def test_backend_files_finalize_returns_upstream_payload(async_client, monkeypatch):
     await _import_account(async_client, "acc_files_finalize", "files-finalize@example.com")
 
@@ -181,6 +219,41 @@ async def test_backend_files_finalize_returns_upstream_payload(async_client, mon
     assert body["download_url"] == "https://download.example/file_done"
     assert captured["file_id"] == "file_done"
     assert captured["account_id"] == "acc_files_finalize"
+
+
+@pytest.mark.asyncio
+async def test_backend_files_finalize_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_files_finalize_invalidated_a", "files-finalize-invalidated-a@example.com")
+    await _import_account(async_client, "acc_files_finalize_invalidated_b", "files-finalize-invalidated-b@example.com")
+    captured_account_ids: list[str | None] = []
+    invalidated_account_id: str | None = None
+
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+        del file_id, headers, access_token, base_url, session
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_account_id:
+            raise FileProxyError(
+                401,
+                {"error": {"message": "token invalidated", "type": "authentication_error", "code": "invalid_api_key"}},
+            )
+        return {"status": "success", "download_url": "https://download.example/recovered"}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_finalize_file", fake_finalize_file)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post("/backend-api/files/file_recovered/uploaded")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
+    assert captured_account_ids[2] != invalidated_account_id
 
 
 @pytest.mark.asyncio

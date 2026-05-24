@@ -82,6 +82,38 @@ def _make_api_key(
     )
 
 
+def test_websocket_top_level_error_payload_uses_error_type_not_event_type() -> None:
+    payload: dict[str, proxy_service.JsonValue] = {
+        "type": "error",
+        "status": 400,
+        "error_type": "invalid_request_error",
+        "code": "previous_response_not_found",
+        "message": "Previous response with id 'resp_missing' not found.",
+        "param": "previous_response_id",
+    }
+
+    error = proxy_service._websocket_event_error_payload("error", payload)
+
+    assert error == {
+        "type": "invalid_request_error",
+        "code": "previous_response_not_found",
+        "message": "Previous response with id 'resp_missing' not found.",
+        "param": "previous_response_id",
+    }
+    assert proxy_service._websocket_event_error_type("error", payload) == "invalid_request_error"
+    assert proxy_service._websocket_event_error_code("error", payload) == "previous_response_not_found"
+
+
+def test_http_error_status_from_payload_accepts_official_status_code_alias() -> None:
+    payload: dict[str, proxy_service.JsonValue] = {
+        "type": "error",
+        "status_code": 400,
+        "error": {"message": "bad request"},
+    }
+
+    assert proxy_service._http_error_status_from_payload(payload) == 400
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolved_request(
     monkeypatch: pytest.MonkeyPatch,

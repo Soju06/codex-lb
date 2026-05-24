@@ -1,7 +1,7 @@
 """add alias to accounts
 
 Revision ID: 20260513_000000_add_accounts_alias
-Revises: 20260520_010000_add_request_logs_api_key_account_index
+Revises: 20260522_000000_add_limit_warmup_trigger
 Create Date: 2026-05-13
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260513_000000_add_accounts_alias"
-down_revision = "20260520_010000_add_request_logs_api_key_account_index"
+down_revision = "20260522_000000_add_limit_warmup_trigger"
 branch_labels = None
 depends_on = None
 

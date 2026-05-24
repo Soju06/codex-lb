@@ -10,8 +10,12 @@ from typing import Protocol, cast
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -70,10 +74,32 @@ class UsageRefreshScheduler:
                     usage_repo = UsageRepository(session)
                     accounts_repo = AccountsRepository(session)
                     additional_usage_repo = AdditionalUsageRepository(session)
-                    latest_usage = await usage_repo.latest_by_account(window="primary")
+                    settings_repo = SettingsRepository(session)
+                    warmup_repo = LimitWarmupRepository(session)
+                    request_logs_repo = RequestLogsRepository(session)
+                    before_primary = await usage_repo.latest_by_account(window="primary")
+                    before_secondary = await usage_repo.latest_by_account(window="secondary")
                     accounts = await accounts_repo.list_accounts()
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
-                    await updater.refresh_accounts(accounts, latest_usage)
+                    usage_written = await updater.refresh_accounts(accounts, before_primary)
+                    if usage_written:
+                        after_primary = await usage_repo.latest_by_account(window="primary")
+                        after_secondary = await usage_repo.latest_by_account(window="secondary")
+                        dashboard_settings = await settings_repo.get_or_create()
+                        warmup_service = LimitWarmupService(
+                            warmup_repo,
+                            request_logs_repo,
+                            sender=StreamingLimitWarmupSender(accounts_repo),
+                        )
+                        refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
+                        await warmup_service.run_after_usage_refresh(
+                            accounts=refreshed_accounts,
+                            settings=dashboard_settings,
+                            before_primary=before_primary,
+                            before_secondary=before_secondary,
+                            after_primary=after_primary,
+                            after_secondary=after_secondary,
+                        )
                     await get_rate_limit_headers_cache().invalidate()
                     get_account_selection_cache().invalidate()
             except Exception:

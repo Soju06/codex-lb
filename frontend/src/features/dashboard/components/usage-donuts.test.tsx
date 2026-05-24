@@ -19,7 +19,7 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("Hourly Credits")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
     expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
     expect(screen.getByText("primary@example.com")).toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
@@ -35,7 +35,7 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("Hourly Credits")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
     expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
     // Center label switched from "Remaining" -> "Credits" with the
     // credits layout; assert that both donuts render the new label.
@@ -85,11 +85,12 @@ describe("UsageDonuts", () => {
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
 
-  it("shows remaining credits as raw remaining/total fraction in the center", () => {
-    // Regression for #371: dashboard donuts previously showed
-    // compact-formatted numbers like "7.33k" / "7.56k". Operators
+  it("shows remaining credits and capacity as stacked values with a divider in the center", () => {
+    // Regression for #371 + redesigned display: dashboard donuts previously
+    // showed compact-formatted numbers like "7.33k" / "7.56k". Operators
     // asked for the raw remaining/total credit counts instead so the
-    // exact distance to the cap is visible at a glance.
+    // exact distance to the cap is visible at a glance. Now split into
+    // stacked rows: remaining on top, capacity below a divider.
     render(
       <UsageDonuts
         primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
@@ -101,12 +102,9 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    const fractions = screen.getAllByTestId("donut-center-fraction").map((node) => node.textContent);
-    expect(fractions).toEqual([
-      // Primary: 120 / 225 (well under 4-digit thresholds; no separators).
-      "120/225",
-      // Secondary: 7,331 / 7,560 — locale-formatted, NOT "7.33k/7.56k".
-      "7,331/7,560",
-    ]);
+    const remaining = screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent);
+    const capacity = screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent);
+    expect(remaining).toEqual(["120", "7,331"]);
+    expect(capacity).toEqual(["225", "7,560"]);
   });
 });

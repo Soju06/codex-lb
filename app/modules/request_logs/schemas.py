@@ -22,6 +22,7 @@ class RequestLogEntry(DashboardModel):
     api_key_name: str | None = None
     request_id: str
     model: str
+    source: str | None = None
     transport: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None

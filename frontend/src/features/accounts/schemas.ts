@@ -34,6 +34,17 @@ export const AccountAuthSchema = z.object({
   idToken: AccountTokenStatusSchema.nullable().optional(),
 });
 
+export const AccountLimitWarmupStatusSchema = z.object({
+  window: z.enum(["primary", "secondary"]).or(z.string()),
+  resetAt: z.number().int(),
+  status: z.string(),
+  model: z.string(),
+  attemptedAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+});
+
 export const AccountAdditionalWindowSchema = z.object({
   usedPercent: z.number(),
   resetAt: z.number().nullable().optional(),
@@ -66,6 +77,8 @@ export const AccountSummarySchema = z.object({
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
+  limitWarmupEnabled: z.boolean().default(false),
+  limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -99,6 +112,15 @@ export const AccountAliasResponseSchema = z.object({
   alias: z.string().nullable(),
 });
 
+export const AccountLimitWarmupUpdateRequestSchema = z.object({
+  enabled: z.boolean(),
+});
+
+export const AccountLimitWarmupUpdateResponseSchema = z.object({
+  status: z.string(),
+  enabled: z.boolean(),
+});
+
 export const AccountExportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
@@ -112,6 +134,7 @@ export const OauthStartRequestSchema = z.object({
 });
 
 export const OauthStartResponseSchema = z.object({
+  flowId: z.string().nullable().optional(),
   method: z.string(),
   authorizationUrl: z.string().nullable(),
   callbackUrl: z.string().nullable(),
@@ -128,6 +151,7 @@ export const OauthStatusResponseSchema = z.object({
 });
 
 export const OauthCompleteRequestSchema = z.object({
+  flowId: z.string().optional(),
   deviceAuthId: z.string().optional(),
   userCode: z.string().optional(),
 });
@@ -138,6 +162,7 @@ export const OauthCompleteResponseSchema = z.object({
 
 export const ManualOauthCallbackRequestSchema = z.object({
   callbackUrl: z.string(),
+  flowId: z.string().optional(),
 });
 
 export const ManualOauthCallbackResponseSchema = z.object({
@@ -150,6 +175,7 @@ export const RuntimeConnectAddressResponseSchema = z.object({
 });
 
 export const OAuthStateSchema = z.object({
+  flowId: z.string().nullable().optional(),
   status: z.enum(["idle", "starting", "pending", "success", "error"]),
   method: z.enum(["browser", "device"]).nullable(),
   authorizationUrl: z.string().nullable(),
@@ -171,6 +197,7 @@ export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
+export type AccountLimitWarmupStatus = z.infer<typeof AccountLimitWarmupStatusSchema>;
 export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;

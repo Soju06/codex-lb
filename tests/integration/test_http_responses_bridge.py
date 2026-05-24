@@ -6779,6 +6779,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
 
     events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
     assert [event["type"] for event in events] == ["response.created", "response.failed"]
+    assert events[0]["response"]["id"] == events[-1]["response"]["id"]
     assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
 
 

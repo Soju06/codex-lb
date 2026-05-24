@@ -13,6 +13,8 @@ from app.modules.accounts.schemas import (
     AccountDeleteResponse,
     AccountExportResponse,
     AccountImportResponse,
+    AccountLimitWarmupUpdateRequest,
+    AccountLimitWarmupUpdateResponse,
     AccountPauseResponse,
     AccountReactivateResponse,
     AccountsResponse,
@@ -123,6 +125,21 @@ async def set_account_alias(
     if normalized == "":
         normalized = None
     return AccountAliasResponse(account_id=account_id, alias=normalized)
+
+
+@router.put("/{account_id}/limit-warmup", response_model=AccountLimitWarmupUpdateResponse)
+async def update_account_limit_warmup(
+    account_id: str,
+    payload: AccountLimitWarmupUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountLimitWarmupUpdateResponse:
+    success = await context.service.set_limit_warmup_enabled(account_id, payload.enabled)
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountLimitWarmupUpdateResponse(
+        status="enabled" if payload.enabled else "disabled",
+        enabled=payload.enabled,
+    )
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

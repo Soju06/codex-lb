@@ -2241,6 +2241,18 @@ async def _stream_responses_with_session(
                 ),
             )
             return
+        total_elapsed_seconds = max(0.0, now - pre_request_started_at)
+        if request_total_timeout is None or total_elapsed_seconds < request_total_timeout:
+            error_code = "upstream_unavailable"
+            error_message = str(exc) or "Request to upstream timed out"
+            yield format_sse_event(
+                response_failed_event(
+                    "upstream_unavailable",
+                    error_message,
+                    response_id=get_request_id(),
+                ),
+            )
+            return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
         yield format_sse_event(
@@ -2389,7 +2401,7 @@ async def compact_responses(
 
 
 def _is_retryable_compact_status(status_code: int) -> bool:
-    return status_code in {401, 500, 502, 503, 504}
+    return status_code in {500, 502, 503, 504}
 
 
 @dataclass(slots=True)

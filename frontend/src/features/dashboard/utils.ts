@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame, type LucideIcon } from "lucide-react";
 
 import type {
   AccountSummary,
@@ -87,6 +87,24 @@ export type DashboardView = {
   safeLineSecondary: SafeLineView | null;
   weeklyCreditPace: WeeklyCreditPace | null;
 };
+
+type DashboardViewOptions = {
+  isDark?: boolean;
+  showAccountBurnrate?: boolean;
+};
+
+function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boolean): Required<DashboardViewOptions> {
+  if (typeof optionsOrIsDark === "boolean") {
+    return {
+      isDark: optionsOrIsDark,
+      showAccountBurnrate: true,
+    };
+  }
+  return {
+    isDark: optionsOrIsDark.isDark ?? false,
+    showAccountBurnrate: optionsOrIsDark.showAccountBurnrate ?? true,
+  };
+}
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
@@ -193,7 +211,160 @@ function avgPerUnit(total: number, units: number): number {
   return total / units;
 }
 
-const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function windowUsedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let usedEquivalent = 0;
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    let accountEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      accountEquivalent = Math.max(accountEquivalent, 1);
+    }
+
+    usedEquivalent += accountEquivalent;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? usedEquivalent : null;
+}
+
+function windowProjectedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let projectedEquivalent = 0;
+  let includedAccounts = 0;
+  const nowMs = Date.now();
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+    const resetAt = windowKey === "primary" ? account.resetAtPrimary : account.resetAtSecondary;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent) || windowMinutes <= 0) {
+      continue;
+    }
+
+    const usedEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    let projected = usedEquivalent;
+
+    if (resetAt) {
+      const resetAtMs = Date.parse(resetAt);
+      if (Number.isFinite(resetAtMs)) {
+        const windowMs = windowMinutes * 60_000;
+        const secondsUntilReset = Math.max(0, (resetAtMs - nowMs) / 1000);
+        const elapsedSeconds = Math.max(0, windowMs / 1000 - secondsUntilReset);
+        if (elapsedSeconds > 0) {
+          projected = usedEquivalent * ((windowMs / 1000) / elapsedSeconds);
+        }
+      }
+    }
+
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      projected = Math.max(projected, 1);
+    }
+
+    projectedEquivalent += projected;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? projectedEquivalent : null;
+}
+
+function windowIncludedAccountCount(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number {
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    includedAccounts += 1;
+  }
+
+  return includedAccounts;
+}
+
+function clampBurnEquivalent(value: number | null, maxEquivalent: number): number | null {
+  if (!isFiniteNumber(value)) {
+    return null;
+  }
+
+  const clamped = Math.max(0, value);
+  if (maxEquivalent <= 0) {
+    return clamped;
+  }
+  return Math.min(clamped, maxEquivalent);
+}
+
+function plusAccountsBurnEquivalent(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
+  const projectedEquivalent = clampBurnEquivalent(windowProjectedAccountEquivalents(overview, windowKey), maxEquivalent);
+  const usedEquivalent = clampBurnEquivalent(windowUsedAccountEquivalents(overview, windowKey), maxEquivalent);
+
+  return projectedEquivalent ?? usedEquivalent;
+}
+
+function formatBurnEquivalent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(1);
+}
+
+function buildBurnTrend(points: TrendPoint[], currentValue: number | null): { value: number }[] {
+  if (currentValue === null || !Number.isFinite(currentValue) || currentValue <= 0 || points.length === 0) {
+    return [];
+  }
+
+  const lastPoint = points[points.length - 1]?.v ?? 0;
+  if (!Number.isFinite(lastPoint) || lastPoint <= 0) {
+    return points.map(() => ({ value: currentValue }));
+  }
+
+  const scale = currentValue / lastPoint;
+  return points.map((point) => ({ value: Math.max(0, point.v * scale) }));
+}
+
+function formatBurnWindowLabel(windowKey: "primary" | "secondary", windowMinutes: number | null | undefined): string {
+  const formatted = formatWindowMinutes(windowMinutes ?? null);
+  if (formatted !== "--") {
+    return formatted;
+  }
+  return windowKey === "primary" ? "5h" : "7d";
+}
+
+const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#ef4444", "#f59e0b"];
 const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
@@ -526,8 +697,9 @@ export function buildWeeklyCreditPace(
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
-  isDark = false,
+  optionsOrIsDark: DashboardViewOptions | boolean = false,
 ): DashboardView {
+  const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
   const metrics = overview.summary.metrics;
@@ -551,6 +723,14 @@ export function buildDashboardView(
       ? `${costAverage} · API estimate, ${formatCompactNumber(metrics.cachedInputTokens)} cached`
       : `${costAverage} · API estimate`;
   const trends = overview.trends;
+  const primaryBurnLabel = formatBurnWindowLabel("primary", overview.summary.primaryWindow.windowMinutes);
+  const secondaryBurnLabel = formatBurnWindowLabel("secondary", overview.summary.secondaryWindow?.windowMinutes);
+  const primaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "primary");
+  const secondaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "secondary");
+  const combinedBurnEquivalent =
+    (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0) > 0
+      ? (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0)
+      : null;
 
   const stats: DashboardStat[] = [
     {
@@ -577,17 +757,29 @@ export function buildDashboardView(
       trend: trendPointsToValues(trends.cost),
       trendColor: TREND_COLORS[2],
     },
-    {
-      label: `Error rate (${timeframeLabel})`,
-      value: formatRate(metrics?.errorRate ?? null),
-      meta: metrics?.topError
-        ? `Top: ${metrics.topError}`
-        : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
-      icon: AlertTriangle,
-      trend: trendPointsToValues(trends.errorRate),
-      trendColor: TREND_COLORS[3],
-    },
   ];
+
+  if (showAccountBurnrate) {
+    stats.push({
+      label: `Account burn projection (${primaryBurnLabel}/${secondaryBurnLabel})`,
+      value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
+      meta: `Projected account-equivalents: ${formatBurnEquivalent(primaryBurnEquivalent)}/${primaryBurnLabel} · ${formatBurnEquivalent(secondaryBurnEquivalent)}/${secondaryBurnLabel}`,
+      icon: Flame,
+      trend: buildBurnTrend(trends.tokens, combinedBurnEquivalent),
+      trendColor: TREND_COLORS[3],
+    });
+  }
+
+  stats.push({
+    label: `Error rate (${timeframeLabel})`,
+    value: formatRate(metrics?.errorRate ?? null),
+    meta: metrics?.topError
+      ? `Top: ${metrics.topError}`
+      : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
+    icon: AlertTriangle,
+    trend: trendPointsToValues(trends.errorRate),
+    trendColor: TREND_COLORS[4],
+  });
 
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);

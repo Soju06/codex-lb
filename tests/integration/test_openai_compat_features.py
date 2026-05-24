@@ -379,6 +379,29 @@ async def test_v1_responses_allows_web_search(async_client, monkeypatch, tool_ty
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_preserves_image_generation_builtin_tool(async_client, monkeypatch):
+    await _import_account(async_client, "acc_v1_image_gen", "v1-image-gen@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_v1_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Draw?"}]}],
+        "tools": [image_tool],
+    }
+    resp = await async_client.post("/v1/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
 async def test_backend_responses_allows_web_search(async_client, monkeypatch, tool_type):
     await _import_account(async_client, "acc_backend_web_search", "backend-web-search@example.com")
@@ -400,6 +423,88 @@ async def test_backend_responses_allows_web_search(async_client, monkeypatch, to
     resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
     assert resp.status_code == 200
     assert seen["payload"].tools == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_strip_image_generation_tool_advertisement(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_image_gen", "backend-image-gen@example.com")
+
+    seen = {}
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]}],
+        "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [function_tool]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserve_explicit_image_generation_tool_choice(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_explicit_image_gen", "backend-explicit-image-gen@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_explicit_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Draw?"}]}],
+        "tools": [image_tool],
+        "tool_choice": {"type": "image_generation"},
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+    assert seen["payload"].tool_choice == {"type": "image_generation"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserve_required_image_generation_tool_choice(async_client, monkeypatch):
+    await _import_account(async_client, "acc_backend_required_image_gen", "backend-required-image-gen@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_backend_required_image_generation")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Draw?"}]}],
+        "tools": [image_tool],
+        "tool_choice": "required",
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=request_payload)
+
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+    assert seen["payload"].tool_choice == "required"
 
 
 @pytest.mark.asyncio
@@ -668,6 +773,35 @@ async def test_v1_responses_rejects_strict_function_tool_violation(async_client)
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["param"] == "tools[0].parameters"
     assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_rejects_strict_schema_violation_with_specific_error(async_client):
+    """Backend /responses must preserve strict-validator error code and message."""
+    payload = {
+        "model": "gpt-5.2",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Return JSON."}]}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "result_schema",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            }
+        },
+    }
+    resp = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_json_schema"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "text.format.schema"
+    assert "additionalProperties" in body["error"]["message"]
 
 
 @pytest.mark.asyncio

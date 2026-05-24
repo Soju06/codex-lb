@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, QuotaWindowObservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
@@ -335,3 +335,42 @@ async def test_quota_planner_warm_now_ignores_failed_effect_after_prior_observed
 
     assert response.status_code == 200
     assert response.json()["status"] == "executed"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_effect_without_usage_row_is_not_observed(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-no-usage-row",
+            email="warm-no-usage-row@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+
+        async def refresh_without_usage_row(self, accounts, latest_before_by_account):
+            del self, accounts, latest_before_by_account
+
+        monkeypatch.setattr("app.modules.quota_planner.warmup.UsageUpdater.refresh_accounts", refresh_without_usage_row)
+
+        await QuotaWarmupService(session)._record_warmup_effect(
+            account,
+            "gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+
+        result = await session.execute(
+            select(QuotaWindowObservation).where(QuotaWindowObservation.account_id == account.id)
+        )
+        observation = result.scalar_one()
+
+    assert observation.confidence == "unknown"
+    assert observation.primary_remaining_percent is None
+    assert observation.primary_reset_at is None

@@ -326,11 +326,12 @@ class QuotaWarmupService:
         latest_before_by_account = {account.id: latest_before} if latest_before else {}
         await UsageUpdater(self._usage, self._accounts).refresh_accounts([account], latest_before_by_account)
         latest_after = (await self._usage.latest_by_account()).get(account.id)
+        effective_confidence = confidence if latest_after is not None else "unknown"
         await self._planner.add_window_observation(
             account_id=account.id,
             model=model,
             source=source,
             primary_remaining_percent=(100.0 - latest_after.used_percent) if latest_after else None,
             primary_reset_at=latest_after.reset_at if latest_after else None,
-            confidence=confidence,
+            confidence=effective_confidence,
         )

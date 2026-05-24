@@ -176,7 +176,7 @@ class ApiKeysRepository:
     async def list_all_accounts(self) -> list[Account]:
         result = await self._session.execute(
             select(Account)
-            .options(load_only(Account.id, Account.plan_type))
+            .options(load_only(Account.id, Account.plan_type, Account.status))
             .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
         )
         return list(result.scalars().all())

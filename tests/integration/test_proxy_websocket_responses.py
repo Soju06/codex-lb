@@ -1489,6 +1489,7 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset,
+        prefer_earlier_reset_window,
         routing_strategy,
         model,
         request_state,
@@ -1502,6 +1503,7 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
         seen["reallocate_sticky"] = reallocate_sticky
         seen["sticky_max_age_seconds"] = sticky_max_age_seconds
         seen["prefer_earlier_reset"] = prefer_earlier_reset
+        seen["prefer_earlier_reset_window"] = prefer_earlier_reset_window
         seen["routing_strategy"] = routing_strategy
         seen["model"] = model
         return SimpleNamespace(id="acct_ws_proxy_v1"), fake_upstream
@@ -1541,6 +1543,7 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["reallocate_sticky"] is False
     assert seen["sticky_max_age_seconds"] is None
+    assert seen["prefer_earlier_reset_window"] == "secondary"
     assert seen["model"] == "gpt-5.4"
     assert [json.loads(message) for message in fake_upstream.sent_text] == [
         {

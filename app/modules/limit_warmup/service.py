@@ -106,7 +106,7 @@ class LimitWarmupRequestLogRepository(Protocol):
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
-        source: str | None = None,
+        request_kind: str = "normal",
     ) -> object: ...
 
 
@@ -516,7 +516,7 @@ class LimitWarmupService:
             error_message=_truncate(result.error_message),
             transport="http",
             plan_type=account.plan_type,
-            source=LIMIT_WARMUP_SOURCE,
+            request_kind=LIMIT_WARMUP_SOURCE,
         )
 
 

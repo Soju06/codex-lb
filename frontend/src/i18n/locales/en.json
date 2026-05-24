@@ -111,6 +111,20 @@
         "label": "Prefer earlier reset",
         "description": "Bias traffic to accounts with earlier quota reset."
       },
+      "limitWarmup": {
+        "label": "Limit warm-up",
+        "description": "Send one reset-confirmed warm-up for opted-in accounts.",
+        "enableAriaLabel": "Enable limit warm-up",
+        "windows": {
+          "both": "5h + weekly",
+          "primary": "5h only",
+          "secondary": "Weekly only"
+        },
+        "modelAriaLabel": "Warm-up model",
+        "cooldownAriaLabel": "Warm-up cooldown",
+        "promptAriaLabel": "Warm-up prompt",
+        "save": "Save"
+      },
       "promptCacheTtl": {
         "label": "Prompt-cache affinity TTL",
         "description": "Keep OpenAI-style prompt-cache mappings warm for a bounded number of seconds.",

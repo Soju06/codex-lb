@@ -111,6 +111,20 @@
         "label": "优先重置较早的账户",
         "description": "倾向于将流量分配给配额更早重置的账户。"
       },
+      "limitWarmup": {
+        "label": "额度预热",
+        "description": "为已启用的账户发送一次已确认重置的预热请求。",
+        "enableAriaLabel": "启用额度预热",
+        "windows": {
+          "both": "5 小时 + 每周",
+          "primary": "仅 5 小时",
+          "secondary": "仅每周"
+        },
+        "modelAriaLabel": "预热模型",
+        "cooldownAriaLabel": "预热冷却时间",
+        "promptAriaLabel": "预热提示词",
+        "save": "保存"
+      },
       "promptCacheTtl": {
         "label": "Prompt 缓存亲和 TTL",
         "description": "在指定秒数内保留 OpenAI 风格的 prompt 缓存映射。",

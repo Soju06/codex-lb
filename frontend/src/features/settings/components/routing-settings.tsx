@@ -145,12 +145,14 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <div className="flex min-w-0 items-center gap-2.5">
                 <Zap className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
                 <div>
-                  <p className="text-sm font-medium">Limit warm-up</p>
-                  <p className="text-xs text-muted-foreground">Send one reset-confirmed warm-up for opted-in accounts.</p>
+                  <p className="text-sm font-medium">{t("settings.routing.limitWarmup.label")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.routing.limitWarmup.description")}
+                  </p>
                 </div>
               </div>
               <Switch
-                aria-label="Enable limit warm-up"
+                aria-label={t("settings.routing.limitWarmup.enableAriaLabel")}
                 checked={settings.limitWarmupEnabled}
                 disabled={busy}
                 onCheckedChange={(checked) => save({ limitWarmupEnabled: checked })}
@@ -166,9 +168,9 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent align="start">
-                  <SelectItem value="both">5h + weekly</SelectItem>
-                  <SelectItem value="primary">5h only</SelectItem>
-                  <SelectItem value="secondary">Weekly only</SelectItem>
+                  <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
+                  <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
+                  <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
                 </SelectContent>
               </Select>
               <Input
@@ -177,7 +179,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
                 onChange={(event) => setLimitWarmupModel(event.target.value)}
                 className="h-8 text-xs"
-                aria-label="Warm-up model"
+                aria-label={t("settings.routing.limitWarmup.modelAriaLabel")}
               />
               <Input
                 type="number"
@@ -188,7 +190,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 disabled={busy}
                 onChange={(event) => setLimitWarmupCooldown(event.target.value)}
                 className="h-8 text-xs"
-                aria-label="Warm-up cooldown"
+                aria-label={t("settings.routing.limitWarmup.cooldownAriaLabel")}
               />
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -198,7 +200,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
                 onChange={(event) => setLimitWarmupPrompt(event.target.value)}
                 className="h-8 text-xs"
-                aria-label="Warm-up prompt"
+                aria-label={t("settings.routing.limitWarmup.promptAriaLabel")}
               />
               <Button
                 type="button"
@@ -214,7 +216,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                   })
                 }
               >
-                Save
+                {t("settings.routing.limitWarmup.save")}
               </Button>
             </div>
           </div>

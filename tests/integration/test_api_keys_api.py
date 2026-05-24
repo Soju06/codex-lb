@@ -214,9 +214,7 @@ async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigne
 
     async with SessionLocal() as session:
         await session.execute(
-            update(Account)
-            .where(Account.id == paused_account_id)
-            .values(status=AccountStatus.PAUSED)
+            update(Account).where(Account.id == paused_account_id).values(status=AccountStatus.PAUSED)
         )
         session.add_all(
             [

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { PropsWithChildren } from "react";
+import { useTranslation } from "react-i18next";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { SpinnerBlock } from "@/components/ui/spinner";
@@ -9,6 +10,7 @@ import { TotpDialog } from "@/features/auth/components/totp-dialog";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 
 export function AuthGate({ children }: PropsWithChildren) {
+  const { t } = useTranslation();
   const refreshSessionStable = useAuthStore((state) => state.refreshSession);
   const initialized = useAuthStore((state) => state.initialized);
   const loading = useAuthStore((state) => state.loading);
@@ -54,8 +56,8 @@ export function AuthGate({ children }: PropsWithChildren) {
               <CodexLogo size={28} className="text-primary" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold tracking-tight">Codex LB</h1>
-              <p className="mt-0.5 text-sm text-muted-foreground">API Load Balancer</p>
+              <h1 className="text-xl font-semibold tracking-tight">{t("auth.appTitle")}</h1>
+              <p className="mt-0.5 text-sm text-muted-foreground">{t("auth.appSubtitle")}</p>
             </div>
           </div>
           <LoginForm />
@@ -68,10 +70,9 @@ export function AuthGate({ children }: PropsWithChildren) {
     return (
       <div className="relative flex min-h-screen items-center justify-center p-4">
         <div className="w-full max-w-lg rounded-2xl border bg-card p-6 shadow-sm">
-          <h1 className="text-lg font-semibold tracking-tight">Reverse proxy authentication required</h1>
+          <h1 className="text-lg font-semibold tracking-tight">{t("auth.trustedHeader.title")}</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            This dashboard expects a trusted auth header from your reverse proxy. Open it through Authelia
-            or configure a fallback dashboard password first.
+            {t("auth.trustedHeader.body")}
           </p>
         </div>
       </div>

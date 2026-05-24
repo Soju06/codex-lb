@@ -455,7 +455,7 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
     ) -> _RequestLogFilters:
-        conditions = [self._exclude_warmup_clause()]
+        conditions = []
         if exclude_soft_deleted:
             conditions.append(RequestLog.deleted_at.is_(None))
         if since is not None:

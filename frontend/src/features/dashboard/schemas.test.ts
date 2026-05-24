@@ -173,6 +173,38 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });
 
+  it("accepts legacy limit warmup request kind rows", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: null,
+          apiKeyId: null,
+          requestId: "req-legacy-limit-warmup",
+          requestKind: "limit_warmup",
+          model: "gpt-5.1-codex-mini",
+          transport: "http",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
+  });
+
   it("defaults omitted cost fields to null for backward compatibility", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [

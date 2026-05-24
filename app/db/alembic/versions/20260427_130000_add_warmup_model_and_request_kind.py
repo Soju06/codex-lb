@@ -36,6 +36,16 @@ def upgrade() -> None:
                     """
                 )
             )
+            if "source" in request_log_columns:
+                op.execute(
+                    sa.text(
+                        """
+                        UPDATE request_logs
+                        SET request_kind = 'warmup'
+                        WHERE source = 'limit_warmup'
+                        """
+                    )
+                )
             with op.batch_alter_table("request_logs") as batch_op:
                 batch_op.alter_column("request_kind", existing_type=sa.String(), nullable=False)
 

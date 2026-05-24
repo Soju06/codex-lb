@@ -1,9 +1,11 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
   AccountExportResponseSchema,
   AccountImportResponseSchema,
+  AccountLimitWarmupUpdateRequestSchema,
+  AccountLimitWarmupUpdateResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -42,6 +44,15 @@ export function reactivateAccount(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/reactivate`,
     AccountActionResponseSchema,
+  );
+}
+
+export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
+  const payload = AccountLimitWarmupUpdateRequestSchema.parse({ enabled });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
+    AccountLimitWarmupUpdateResponseSchema,
+    { body: payload },
   );
 }
 

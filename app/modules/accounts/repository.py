@@ -14,6 +14,7 @@ from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog,
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 _UNSET = object()
+_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +41,11 @@ class AccountsRepository:
     async def get_by_id(self, account_id: str) -> Account | None:
         return await self._session.get(Account, account_id)
 
-    async def list_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account).order_by(Account.email))
+    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+        stmt = select(Account).order_by(Account.email)
+        if refresh_existing:
+            stmt = stmt.execution_options(populate_existing=True)
+        result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
     async def list_request_usage_summary_by_account(
@@ -50,14 +54,18 @@ class AccountsRepository:
     ) -> dict[str, AccountRequestUsageSummary]:
         summaries: dict[str, AccountRequestUsageSummary] = {}
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        stmt = select(
-            RequestLog.account_id,
-            func.count(RequestLog.id).label("request_count"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-        ).group_by(RequestLog.account_id)
+        stmt = (
+            select(
+                RequestLog.account_id,
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where((RequestLog.source.is_(None)) | (RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE))
+            .group_by(RequestLog.account_id)
+        )
         if account_ids:
             stmt = stmt.where(RequestLog.account_id.in_(account_ids))
 
@@ -199,6 +207,13 @@ class AccountsRepository:
             else:
                 stmt = stmt.where(Account.blocked_at == expected_blocked_at)
         result = await self._session.execute(stmt)
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def update_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(limit_warmup_enabled=enabled).returning(Account.id)
+        )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 

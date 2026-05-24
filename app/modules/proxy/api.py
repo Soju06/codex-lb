@@ -103,6 +103,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
+    normalize_responses_request_payload,
     openai_client_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -203,7 +204,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
-_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 0.5
+_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,
@@ -241,7 +242,15 @@ def _accepts_event_stream(request: Request) -> bool:
     return False
 
 
-def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
+def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonValue]) -> bool:
+    if isinstance(payload, Mapping):
+        payload_dict = cast("Mapping[str, JsonValue]", payload)
+        return (
+            ("input" in payload_dict and payload_dict.get("instructions") is None)
+            or payload_dict.get("messages") is not None
+            or "truncation" in payload_dict
+        )
+
     explicit_fields = payload.model_fields_set
     return (
         ("input" in explicit_fields and payload.instructions is None)
@@ -250,7 +259,10 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
     )
 
 
-def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None = None) -> bool:
+def _is_openai_sdk_request(
+    request: Request,
+    payload: V1ResponsesRequest | Mapping[str, JsonValue] | None = None,
+) -> bool:
     for header_name in request.headers:
         normalized_header = header_name.lower()
         if normalized_header.startswith("x-stainless-"):
@@ -260,6 +272,9 @@ def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None 
         return True
     if payload is None or not _has_openai_responses_shape(payload):
         return False
+    if isinstance(payload, Mapping):
+        payload_dict = cast("Mapping[str, JsonValue]", payload)
+        return _accepts_event_stream(request) or payload_dict.get("messages") is not None
     return _accepts_event_stream(request) or payload.messages is not None
 
 
@@ -436,20 +451,25 @@ async def wham_agent_identities_jwks(
 )
 async def responses(
     request: Request,
-    payload: V1ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    openai_sdk_request = _is_openai_sdk_request(request, payload)
+    openai_compat_payload = _has_openai_responses_shape(payload)
     try:
-        responses_payload = payload.to_responses_request()
-        enforce_strict_text_format(responses_payload)
-        enforce_strict_function_tools_format(responses_payload.tools)
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_compat_payload,
+            codex_tool_compat=True,
+        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
+
     return await _stream_responses(
         request,
         responses_payload,
@@ -461,7 +481,7 @@ async def responses(
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
-        enforce_openai_sdk_contract=_is_openai_sdk_request(request, payload),
+        enforce_openai_sdk_contract=openai_sdk_request,
     )
 
 

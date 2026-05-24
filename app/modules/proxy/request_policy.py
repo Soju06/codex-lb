@@ -15,6 +15,7 @@ from app.core.openai.strict_schema import (
 )
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.modules.api_keys.service import ApiKeyData
 
@@ -212,14 +213,45 @@ def normalize_responses_request_payload(
     payload: dict[str, JsonValue],
     *,
     openai_compat: bool,
+    codex_tool_compat: bool = False,
 ) -> ResponsesRequest:
+    effective_payload = _sanitize_backend_codex_tool_advertisements(payload) if codex_tool_compat else payload
     if openai_compat:
-        responses = V1ResponsesRequest.model_validate(payload).to_responses_request()
+        responses = V1ResponsesRequest.model_validate(effective_payload).to_responses_request()
     else:
-        responses = ResponsesRequest.model_validate(payload)
+        responses = ResponsesRequest.model_validate(effective_payload)
     enforce_strict_text_format(responses)
     enforce_strict_function_tools_format(responses.tools)
     return responses
+
+
+def _sanitize_backend_codex_tool_advertisements(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    tools_value = payload.get("tools")
+    if not is_json_list(tools_value):
+        return payload
+    if _explicitly_requests_image_generation(payload.get("tool_choice"), tools_value):
+        return payload
+
+    sanitized_tools: list[JsonValue] = []
+    removed_any = False
+    for tool in tools_value:
+        if is_json_mapping(tool) and tool.get("type") == "image_generation":
+            removed_any = True
+            continue
+        sanitized_tools.append(tool)
+
+    if not removed_any:
+        return payload
+
+    sanitized_payload = dict(payload)
+    sanitized_payload["tools"] = sanitized_tools
+    return sanitized_payload
+
+
+def _explicitly_requests_image_generation(tool_choice: JsonValue | None, tools: list[JsonValue]) -> bool:
+    if tool_choice == "required":
+        return all(is_json_mapping(tool) and tool.get("type") == "image_generation" for tool in tools)
+    return is_json_mapping(tool_choice) and tool_choice.get("type") == "image_generation"
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:

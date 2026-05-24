@@ -1561,6 +1561,8 @@ class ProxyService:
                                 )
                             )
                             break
+                        if propagate_http_errors and request_state.response_id is None:
+                            continue
                         keepalive_sent = True
                         yielded_any = True
                         if request_state.response_id or request_state.replay_downstream_response_id:
@@ -3777,7 +3779,11 @@ class ProxyService:
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_cache_affinity,
+            codex_tool_compat=codex_session_affinity,
+        )
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         client_full_resend_payload: ResponsesRequest | None = None

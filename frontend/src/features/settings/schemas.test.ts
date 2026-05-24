@@ -18,6 +18,12 @@ describe("DashboardSettingsSchema", () => {
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
+      limitWarmupEnabled: false,
+      limitWarmupWindows: "both",
+      limitWarmupModel: "auto",
+      limitWarmupPrompt: "Say OK.",
+      limitWarmupCooldownSeconds: 3600,
+      limitWarmupMinAvailablePercent: 100,
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -27,6 +33,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
+    expect(parsed.limitWarmupEnabled).toBe(false);
+    expect(parsed.limitWarmupWindows).toBe("both");
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
@@ -42,6 +50,12 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.limitWarmupEnabled).toBe(false);
+    expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupModel).toBe("auto");
+    expect(parsed.limitWarmupPrompt).toBe("Say OK.");
+    expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
   });
 });
 
@@ -57,6 +71,12 @@ describe("SettingsUpdateRequestSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
+      limitWarmupEnabled: true,
+      limitWarmupWindows: "primary",
+      limitWarmupModel: "gpt-5.1-codex-mini",
+      limitWarmupPrompt: "Say OK.",
+      limitWarmupCooldownSeconds: 7200,
+      limitWarmupMinAvailablePercent: 99,
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
@@ -66,6 +86,8 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
+    expect(parsed.limitWarmupEnabled).toBe(true);
+    expect(parsed.limitWarmupWindows).toBe("primary");
   });
 
   it("accepts long session lifetimes above 30 days", () => {
@@ -99,5 +121,22 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("matches backend limit warm-up model and prompt length bounds", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupModel: "m".repeat(129),
+      }).success,
+    ).toBe(false);
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupPrompt: "p".repeat(513),
+      }).success,
+    ).toBe(false);
   });
 });

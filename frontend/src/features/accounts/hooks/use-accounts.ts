@@ -9,6 +9,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  updateAccountLimitWarmup,
 } from "@/features/accounts/api";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
@@ -87,7 +88,19 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation };
+  const limitWarmupMutation = useMutation({
+    mutationFn: ({ accountId, enabled }: { accountId: string; enabled: boolean }) =>
+      updateAccountLimitWarmup(accountId, enabled),
+    onSuccess: (data) => {
+      toast.success(data.enabled ? "Limit warm-up enabled" : "Limit warm-up disabled");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Limit warm-up update failed");
+    },
+  });
+
+  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation, limitWarmupMutation };
 }
 
 export function useAccountTrends(accountId: string | null) {

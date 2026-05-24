@@ -49,14 +49,17 @@ class DashboardService:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
         accounts = await self._repo.list_accounts()
+        account_ids = [account.id for account in accounts]
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        limit_warmups_by_account = await self._repo.latest_limit_warmups_by_account(account_ids)
 
         account_summaries = sorted(
             build_account_summaries(
                 accounts=accounts,
                 primary_usage=primary_usage,
                 secondary_usage=secondary_usage,
+                limit_warmups_by_account=limit_warmups_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
             ),

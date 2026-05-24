@@ -89,6 +89,12 @@ async def get_settings(
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        limit_warmup_enabled=settings.limit_warmup_enabled,
+        limit_warmup_windows=settings.limit_warmup_windows,
+        limit_warmup_model=settings.limit_warmup_model,
+        limit_warmup_prompt=settings.limit_warmup_prompt,
+        limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
+        limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
     )
 
 
@@ -151,6 +157,24 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                limit_warmup_enabled=(
+                    payload.limit_warmup_enabled
+                    if payload.limit_warmup_enabled is not None
+                    else current.limit_warmup_enabled
+                ),
+                limit_warmup_windows=payload.limit_warmup_windows or current.limit_warmup_windows,
+                limit_warmup_model=payload.limit_warmup_model or current.limit_warmup_model,
+                limit_warmup_prompt=payload.limit_warmup_prompt or current.limit_warmup_prompt,
+                limit_warmup_cooldown_seconds=(
+                    payload.limit_warmup_cooldown_seconds
+                    if payload.limit_warmup_cooldown_seconds is not None
+                    else current.limit_warmup_cooldown_seconds
+                ),
+                limit_warmup_min_available_percent=(
+                    payload.limit_warmup_min_available_percent
+                    if payload.limit_warmup_min_available_percent is not None
+                    else current.limit_warmup_min_available_percent
+                ),
             )
         )
     except ValueError as exc:
@@ -172,6 +196,12 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "limit_warmup_enabled",
+            "limit_warmup_windows",
+            "limit_warmup_model",
+            "limit_warmup_prompt",
+            "limit_warmup_cooldown_seconds",
+            "limit_warmup_min_available_percent",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -194,4 +224,10 @@ async def update_settings(
         totp_required_on_login=updated.totp_required_on_login,
         totp_configured=updated.totp_configured,
         api_key_auth_enabled=updated.api_key_auth_enabled,
+        limit_warmup_enabled=updated.limit_warmup_enabled,
+        limit_warmup_windows=updated.limit_warmup_windows,
+        limit_warmup_model=updated.limit_warmup_model,
+        limit_warmup_prompt=updated.limit_warmup_prompt,
+        limit_warmup_cooldown_seconds=updated.limit_warmup_cooldown_seconds,
+        limit_warmup_min_available_percent=updated.limit_warmup_min_available_percent,
     )

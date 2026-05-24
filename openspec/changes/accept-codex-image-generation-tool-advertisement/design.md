@@ -1,12 +1,12 @@
 ## Context
 
 Current Codex Desktop/CLI builds advertise a top-level `image_generation` tool
-on backend Codex Responses requests. codex-lb routes those payloads through the
-same shared Responses tool validator used by public `/v1/*` compatibility
-surfaces, and that validator intentionally rejects `image_generation`. The
-result is a backend Codex compatibility failure before the request reaches
-upstream, even though codex-lb does not need to interpret that tool locally to
-proxy the turn.
+on backend Codex Responses requests even when the turn is not explicitly asking
+for image generation. codex-lb does not need that ambient advertisement to proxy
+the turn, and preserving it on the backend Codex path can couple normal Codex
+turns to upstream image-tool acceptance. Public `/v1/*` Responses compatibility
+already has a separate built-in-tool forwarding contract; this change keeps that
+contract unchanged.
 
 The relevant request paths are split across HTTP and websocket entry points, but
 both converge on shared request normalization before upstream forwarding.
@@ -18,15 +18,14 @@ both converge on shared request normalization before upstream forwarding.
 - Restore compatibility with current Codex clients on
   `/backend-api/codex/responses`.
 - Keep the change narrow to backend Codex routes.
-- Preserve the existing unsupported built-in tool policy for public `/v1/*`
+- Preserve the existing built-in tool forwarding policy for public `/v1/*`
   compatibility routes.
 - Add regression coverage for both backend Codex HTTP and websocket request
   handling.
 
 **Non-Goals:**
 
-- Broadly enabling `image_generation` as a supported built-in tool for all
-  OpenAI-compatible routes.
+- Changing public `/v1/*` built-in tool validation or forwarding behavior.
 - Implementing local image-generation semantics inside codex-lb.
 - Changing chat-completions tool validation behavior.
 
@@ -41,15 +40,14 @@ through shared `ResponsesRequest` / `V1ResponsesRequest` validation.
 Rationale:
 
 - This is the smallest fix that unblocks current Codex clients.
-- It avoids changing the shared unsupported-tool policy that public `/v1/*`
-  routes depend on.
+- It avoids changing the public `/v1/*` built-in tool forwarding policy.
 - It preserves other tool entries exactly as they are today.
 
 Alternative considered:
 
-- Remove `image_generation` from the global unsupported-tool list. Rejected
-  because it would silently broaden `/v1/*` behavior and change the public
-  compatibility contract.
+- Handle ambient Codex `image_generation` advertisements in shared request
+  validation. Rejected because the validator does not know whether a payload
+  came from the backend Codex route or a public OpenAI-compatible route.
 
 ### Keep sanitization scoped to backend Codex routes
 
@@ -59,7 +57,8 @@ handling, including websocket `response.create` payload preparation.
 Rationale:
 
 - The compatibility issue is specific to Codex clients.
-- Public OpenAI-style routes should keep their existing validation behavior.
+- Public OpenAI-style routes should keep their existing validation and
+  forwarding behavior.
 
 Alternative considered:
 

@@ -6,7 +6,7 @@ request-create payloads that include top-level `tools` entries with
 `type: "image_generation"`. Before shared Responses validation and upstream
 forwarding, the service MUST remove only those advertised top-level
 `image_generation` tool entries while preserving all other tool entries and the
-existing unsupported built-in tool policy for public `/v1/*` routes.
+existing built-in tool forwarding policy for public `/v1/*` routes.
 
 #### Scenario: Backend Codex HTTP request strips advertised image_generation tool
 - **WHEN** a client sends `POST /backend-api/codex/responses` with
@@ -24,8 +24,9 @@ existing unsupported built-in tool policy for public `/v1/*` routes.
 - **AND** the forwarded upstream `response.create` payload omits that
   `image_generation` tool entry
 
-#### Scenario: Public v1 Responses still reject image_generation
+#### Scenario: Public v1 Responses built-in forwarding policy remains unchanged
 - **WHEN** a client sends `/v1/responses` with
   `tools=[{"type":"image_generation"}]`
-- **THEN** the service returns a 4xx `invalid_request_error`
-- **AND** the error identifies `tools` as the invalid parameter
+- **THEN** the service does not locally reject the built-in tool as an
+  `invalid_request_error`
+- **AND** the upstream Responses payload preserves the `image_generation` tool

@@ -2396,7 +2396,7 @@ class ProxyService:
                                 if selection.account is not None:
                                     account = selection.account
                                     account_id_value = account.id
-                                    account = await self._ensure_fresh_with_budget(
+                                    account = await self._ensure_fresh_with_budget_or_auth_error(
                                         account,
                                         timeout_seconds=_remaining_budget_seconds(deadline),
                                     )
@@ -2607,7 +2607,7 @@ class ProxyService:
                                 if selection.account is not None:
                                     account = selection.account
                                     account_id_value = account.id
-                                    account = await self._ensure_fresh_with_budget(
+                                    account = await self._ensure_fresh_with_budget_or_auth_error(
                                         account,
                                         timeout_seconds=_remaining_budget_seconds(deadline),
                                     )
@@ -2810,7 +2810,7 @@ class ProxyService:
                         if selection.account is not None:
                             account = selection.account
                             account_id_value = account.id
-                            account = await self._ensure_fresh_with_budget(
+                            account = await self._ensure_fresh_with_budget_or_auth_error(
                                 account,
                                 timeout_seconds=_remaining_budget_seconds(deadline),
                             )
@@ -3261,7 +3261,7 @@ class ProxyService:
                         if selection.account is not None:
                             account = selection.account
                             account_id_value = account.id
-                            account = await self._ensure_fresh_with_budget(
+                            account = await self._ensure_fresh_with_budget_or_auth_error(
                                 account,
                                 timeout_seconds=_remaining_budget_seconds(deadline),
                             )
@@ -10941,6 +10941,29 @@ class ProxyService:
         if "timeout_seconds" in parameters:
             return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
         return await self._ensure_fresh(account, force=force)
+
+    async def _ensure_fresh_with_budget_or_auth_error(
+        self,
+        account: Account,
+        *,
+        timeout_seconds: float | None = None,
+        error_type: str = "invalid_request_error",
+    ) -> Account:
+        try:
+            return await self._ensure_fresh_with_budget(account, timeout_seconds=timeout_seconds)
+        except RefreshError as refresh_exc:
+            if refresh_exc.is_permanent:
+                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "invalid_api_key",
+                    refresh_exc.message,
+                    error_type=error_type,
+                ),
+            ) from refresh_exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
 
     async def _select_account_with_budget(
         self,

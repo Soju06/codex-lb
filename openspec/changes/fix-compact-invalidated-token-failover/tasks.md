@@ -10,6 +10,8 @@
 - [x] 2.1 Add integration coverage for repeated compact 401 failover to another account.
 - [x] 2.2 Verify the existing compact refresh-and-retry success path still passes.
 - [x] 2.3 Add integration coverage for repeated auth-401 failover on stream, thread-goal, Codex control, transcription, and file create/finalize paths.
+- [x] 2.4 Add unit coverage for repeated auth-401 failover on HTTP bridge session create/reconnect handshakes.
+- [x] 2.5 Add unit coverage that fallback account refresh failures surface as proxy auth errors instead of raw refresh exceptions.
 
 ## 3. Spec Delta
 

@@ -71,6 +71,10 @@ const ApiKeyUpdatePayloadSchema = z
 	})
 	.passthrough();
 
+const AccountAliasPayloadSchema = z.object({
+	alias: z.string().max(255).nullable(),
+});
+
 const SettingsPayloadSchema = z
 	.object({
 		stickyThreadsEnabled: z.boolean().optional(),
@@ -396,6 +400,28 @@ export const handlers = [
 		}
 		account.status = "active";
 		return HttpResponse.json({ status: "reactivated" });
+	}),
+
+	http.put("/api/accounts/:accountId/alias", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await parseJsonBody(request, AccountAliasPayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid alias payload" } },
+				{ status: 422 },
+			);
+		}
+		const normalized = typeof payload.alias === "string" ? payload.alias.trim() : null;
+		account.alias = normalized === "" ? null : normalized;
+		account.displayName = account.alias ?? account.email;
+		return HttpResponse.json({ accountId, alias: account.alias });
 	}),
 
 	http.get("/api/accounts/:accountId/trends", ({ params }) => {

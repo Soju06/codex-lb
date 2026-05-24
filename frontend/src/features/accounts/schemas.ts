@@ -52,6 +52,7 @@ export const AccountAdditionalQuotaSchema = z.object({
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  alias: z.string().nullable().optional(),
   displayName: z.string(),
   planType: z.string(),
   status: z.string(),
@@ -87,6 +88,15 @@ export const AccountImportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+});
+
+export const AccountAliasRequestSchema = z.object({
+  alias: z.string().max(255).nullable(),
+});
+
+export const AccountAliasResponseSchema = z.object({
+  accountId: z.string(),
+  alias: z.string().nullable(),
 });
 
 export const AccountExportResponseSchema = z.object({
@@ -160,6 +170,7 @@ export const ImportStateSchema = z.object({
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
 export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;

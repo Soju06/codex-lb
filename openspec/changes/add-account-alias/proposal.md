@@ -11,9 +11,10 @@ The existing `Account` model exposes `email` and `chatgpt_account_id`. Neither o
 - Add a new `PUT /api/accounts/{account_id}/alias` dashboard endpoint guarded by the existing dashboard-session dependency. Body: `{"alias": "..."}` with `max_length=255`. The handler trims whitespace and treats empty/whitespace-only input as a clear (alias → NULL).
 - Add a `set_account_alias` method on `AccountsService` and an `update_alias` method on the repository to keep the layering identical to the existing pause/reactivate/delete pattern.
 - Add integration regression coverage in `tests/integration/test_accounts_api.py`: 404 on missing account, set-then-list, whitespace trim, and clear via empty body restoring the email fallback.
+- Add dashboard UI support to edit/clear aliases from the account detail panel, parse the `alias` field in the frontend schema, and include alias/display name in account search.
 
 ## Impact
 
-- New API surface only. Existing endpoints, response shapes, and the dashboard SPA continue to work unchanged; `alias` simply becomes available on every account summary and `display_name` becomes alias-aware on the server side.
+- Existing endpoints and response shapes continue to work unchanged; `alias` simply becomes available on every account summary and `display_name` becomes alias-aware on the server side.
+- The dashboard can set and clear aliases immediately, and account search can find the alias/display name after it is set.
 - Migration is additive and idempotent (early-return when the column already exists, drop on downgrade); safe to run on both SQLite and PostgreSQL backends.
-- Frontend UI to set the alias is intentionally out of scope here; that can be added in a follow-up that consumes this endpoint. The server contract is complete on its own.

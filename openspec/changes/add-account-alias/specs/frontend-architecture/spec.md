@@ -32,3 +32,10 @@ The dashboard accounts API SHALL expose an operator-controlled, human-readable `
 
 - **WHEN** `PUT /api/accounts/{account_id}/alias` is called with an `account_id` that does not exist
 - **THEN** the response is 404 with error code `account_not_found`
+
+#### Scenario: Dashboard UI edits and searches aliases
+
+- **WHEN** an operator opens the dashboard accounts page and selects an account
+- **THEN** the account detail panel provides an `Account alias` control that can save a non-empty alias through `PUT /api/accounts/{account_id}/alias`
+- **AND** clearing the control stores `alias: null` and restores the email fallback
+- **AND** account search matches the stored alias or alias-backed display name so operators can filter duplicate-email accounts by their chosen label

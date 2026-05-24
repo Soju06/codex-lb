@@ -4,4 +4,6 @@
 - [x] Wire `PUT /api/accounts/{account_id}/alias` in `app/modules/accounts/api.py`, guarded by the existing dashboard-session dependency; return 404 with `account_not_found` for unknown ids.
 - [x] Add `AccountAliasRequest` / `AccountAliasResponse` pydantic schemas with `max_length=255` on the alias field.
 - [x] Add integration regressions in `tests/integration/test_accounts_api.py`: missing account 404, set-and-list, whitespace trim, clear-via-empty restores the email fallback on `display_name`.
+- [x] Add frontend alias UI support: parse `AccountSummary.alias`, call `PUT /api/accounts/{account_id}/alias`, edit/clear aliases from account detail, and search by alias/display name.
+- [x] Add dashboard regression coverage for setting, searching, and clearing an account alias.
 - [x] Document the new contract under the `frontend-architecture` capability spec so dashboard consumers know the field is available.

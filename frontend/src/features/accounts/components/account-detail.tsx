@@ -2,6 +2,7 @@ import { User } from "lucide-react";
 
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { AccountAliasForm } from "@/features/accounts/components/account-alias-form";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
@@ -15,6 +16,7 @@ export type AccountDetailProps = {
   busy: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
+  onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExport: (accountId: string) => void;
@@ -26,6 +28,7 @@ export function AccountDetail({
   busy,
   onPause,
   onResume,
+  onSetAlias,
   onDelete,
   onReauth,
   onExport,
@@ -67,6 +70,7 @@ export function AccountDetail({
         ) : null}
       </div>
 
+      <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
       <AccountActions

@@ -76,6 +76,7 @@ export function createAccountSummary(
 	return AccountSummarySchema.parse({
 		accountId: "acc_primary",
 		email: "primary@example.com",
+		alias: null,
 		displayName: "primary@example.com",
 		planType: "plus",
 		status: "active",

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Route, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -36,18 +36,6 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
   const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
   const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
-
-  useEffect(() => {
-    setCacheAffinityTtl(String(settings.openaiCacheAffinityMaxAgeSeconds));
-  }, [settings.openaiCacheAffinityMaxAgeSeconds]);
-
-  useEffect(() => {
-    setRelativeAvailabilityPower(String(settings.relativeAvailabilityPower));
-  }, [settings.relativeAvailabilityPower]);
-
-  useEffect(() => {
-    setRelativeAvailabilityTopK(String(settings.relativeAvailabilityTopK));
-  }, [settings.relativeAvailabilityTopK]);
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -354,7 +342,6 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 value={cacheAffinityTtl}
                 disabled={busy}
                 onChange={(event) => setCacheAffinityTtl(event.target.value)}
-                aria-label="Prompt-cache affinity TTL"
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && cacheAffinityTtlChanged) {
                     void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });

@@ -29,11 +29,11 @@ def _encode_jwt(payload: dict) -> str:
     return f"header.{body}.sig"
 
 
-def _make_auth_json(account_id: str, email: str) -> dict:
+def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> dict:
     payload = {
         "email": email,
         "chatgpt_account_id": account_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
     }
     return {
         "tokens": {
@@ -143,7 +143,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(async_client):
     email = "compact-gated@example.com"
     raw_account_id = "acc_compact_gated"
-    auth_json = _make_auth_json(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email, plan_type="pro")
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200

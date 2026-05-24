@@ -1,0 +1,19 @@
+name: PR labeler
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] labels fork PRs without checking out PR code
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Apply path-based labels
+        uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: false

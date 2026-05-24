@@ -102,6 +102,7 @@ export const OauthStartRequestSchema = z.object({
 });
 
 export const OauthStartResponseSchema = z.object({
+  flowId: z.string().nullable().optional(),
   method: z.string(),
   authorizationUrl: z.string().nullable(),
   callbackUrl: z.string().nullable(),
@@ -118,6 +119,7 @@ export const OauthStatusResponseSchema = z.object({
 });
 
 export const OauthCompleteRequestSchema = z.object({
+  flowId: z.string().optional(),
   deviceAuthId: z.string().optional(),
   userCode: z.string().optional(),
 });
@@ -128,6 +130,7 @@ export const OauthCompleteResponseSchema = z.object({
 
 export const ManualOauthCallbackRequestSchema = z.object({
   callbackUrl: z.string(),
+  flowId: z.string().optional(),
 });
 
 export const ManualOauthCallbackResponseSchema = z.object({
@@ -140,6 +143,7 @@ export const RuntimeConnectAddressResponseSchema = z.object({
 });
 
 export const OAuthStateSchema = z.object({
+  flowId: z.string().nullable().optional(),
   status: z.enum(["idle", "starting", "pending", "success", "error"]),
   method: z.enum(["browser", "device"]).nullable(),
   authorizationUrl: z.string().nullable(),

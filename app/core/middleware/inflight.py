@@ -9,6 +9,7 @@ _DRAIN_ALLOWED_HTTP_PATHS = frozenset(
     {
         "/health/live",
         "/internal/drain/start",
+        "/internal/drain/stop",
         "/internal/drain/status",
         "/internal/bridge/responses",
     }
@@ -20,6 +21,7 @@ _IN_FLIGHT_EXCLUDED_HTTP_PATHS = frozenset(
         "/health/ready",
         "/health/startup",
         "/internal/drain/start",
+        "/internal/drain/stop",
         "/internal/drain/status",
     }
 )

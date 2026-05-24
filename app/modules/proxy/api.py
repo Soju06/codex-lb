@@ -71,7 +71,13 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.sse import format_sse_event, inject_sse_keepalives, parse_sse_data_json
+from app.core.utils.sse import (
+    CODEX_KEEPALIVE_FRAME,
+    SSE_KEEPALIVE_FRAME,
+    format_sse_event,
+    inject_sse_keepalives,
+    parse_sse_data_json,
+)
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -225,6 +231,36 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+
+
+def _accepts_event_stream(request: Request) -> bool:
+    for value in request.headers.getlist("accept"):
+        media_ranges = (part.split(";", 1)[0].strip().lower() for part in value.split(","))
+        if "text/event-stream" in media_ranges:
+            return True
+    return False
+
+
+def _has_openai_responses_shape(payload: V1ResponsesRequest) -> bool:
+    explicit_fields = payload.model_fields_set
+    return (
+        ("input" in explicit_fields and payload.instructions is None)
+        or payload.messages is not None
+        or "truncation" in explicit_fields
+    )
+
+
+def _is_openai_sdk_request(request: Request, payload: V1ResponsesRequest | None = None) -> bool:
+    for header_name in request.headers:
+        normalized_header = header_name.lower()
+        if normalized_header.startswith("x-stainless-"):
+            return True
+    user_agent = request.headers.get("user-agent", "").lower()
+    if "openai" in user_agent:
+        return True
+    if payload is None or not _has_openai_responses_shape(payload):
+        return False
+    return _accepts_event_stream(request) or payload.messages is not None
 
 
 async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
@@ -400,23 +436,32 @@ async def wham_agent_identities_jwks(
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    try:
+        responses_payload = payload.to_responses_request()
+        enforce_strict_text_format(responses_payload)
+        enforce_strict_function_tools_format(responses_payload.tools)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
         # The Codex CLI consumes codex.* vendor events and the upstream's
-        # native event ordering (it does not use the OpenAI Python SDK parser);
-        # forward the stream verbatim instead of enforcing the OpenAI SDK
-        # contract that /v1/responses applies.
-        enforce_openai_sdk_contract=False,
+        # native event ordering, while OpenAI SDK clients pointed at this
+        # compatibility route need the same SSE contract enforcement as /v1.
+        enforce_openai_sdk_contract=_is_openai_sdk_request(request, payload),
     )
 
 
@@ -1892,6 +1937,7 @@ async def _stream_responses(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
+            keepalive_frame=CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},

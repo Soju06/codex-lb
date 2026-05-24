@@ -17,10 +17,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-keep-alive",
         type=int,
-        default=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300")),
+        default=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200")),
         help=(
             "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
-            "connections for compact POSTs; uvicorn's 5s default can leave the "
+            "connections for large compact POSTs; short keepalive windows can leave the "
             "client writing to a stale socket before the request reaches the app."
         ),
     )

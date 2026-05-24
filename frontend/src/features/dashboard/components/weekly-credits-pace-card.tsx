@@ -123,7 +123,7 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
 
   return (
     <section className="rounded-xl border bg-card p-5" aria-label="Weekly credits pace">
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-4 flex justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold">Weekly credits pace</h3>
         </div>

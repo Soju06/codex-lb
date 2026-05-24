@@ -744,17 +744,27 @@ def write_warning(action: str, exc: BaseException) -> str:
     return f"{action}: skipped because the GitHub token cannot write this resource ({exc})"
 
 
+def is_missing_issue_label(exc: BaseException) -> bool:
+    """Return True when GitHub reports that an issue label is already absent."""
+
+    text = str(exc)
+    return "HTTP 404" in text and "Label does not exist" in text
+
+
 def gh_api_write(
     path: str,
     *,
     method: str = "GET",
     input_json: Any | None = None,
     tolerate_permission_errors: bool,
+    tolerate_missing: bool = False,
     action: str,
 ) -> str | None:
     try:
         gh_api(path, method=method, input_json=input_json)
     except GhError as exc:
+        if tolerate_missing and is_missing_issue_label(exc):
+            return None
         if tolerate_permission_errors and is_github_app_write_denial(exc):
             return write_warning(action, exc)
         raise
@@ -951,6 +961,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_OK_LABEL, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove {CODEX_OK_LABEL} from {decision.repo}#{decision.number}",
             )
         )
@@ -970,6 +981,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(CODEX_NEEDS_WORK_LABEL, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove {CODEX_NEEDS_WORK_LABEL} from {decision.repo}#{decision.number}",
             )
         )
@@ -979,6 +991,7 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(label, safe='')}",
                 method="DELETE",
                 tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
                 action=f"remove legacy {label} from {decision.repo}#{decision.number}",
             )
         )
@@ -1065,6 +1078,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tolerate-read-errors",
+        action="store_true",
+        help=(
+            "Log and continue when a selected PR cannot be classified because of a GitHub "
+            "read/API error. Intended for broad --all-open best-effort maintenance runs."
+        ),
+    )
+    parser.add_argument(
         "--reviewer-login",
         action="append",
         default=[],
@@ -1109,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
             had_error = True
             continue
 
+        classified_count = 0
         for number in sorted(set(numbers)):
             try:
                 decision = decide_pr(
@@ -1117,6 +1139,18 @@ def main(argv: list[str] | None = None) -> int:
                     allowed_authors=allowed_authors,
                     ignore_checks=args.ignore_checks,
                 )
+            except GhError as exc:
+                if not args.tolerate_read_errors:
+                    had_error = True
+                print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                had_error = True
+                print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+                continue
+
+            classified_count += 1
+            try:
                 write_warnings: tuple[str, ...] = ()
                 if args.apply:
                     accumulated_warnings: list[str] = []
@@ -1163,6 +1197,14 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 had_error = True
                 print(f"{repo}#{number}: {exc}", file=sys.stderr, flush=True)
+
+        if args.tolerate_read_errors and classified_count == 0:
+            had_error = True
+            print(
+                f"{repo}: all selected PRs failed classification; refusing a false-green tolerant run",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return 1 if had_error else 0
 

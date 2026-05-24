@@ -26,7 +26,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
-from app.core.plan_types import account_plan_matches_allowed
+from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
@@ -36,7 +36,10 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.additional_quota_keys import (
+    canonicalize_additional_quota_key,
+    get_additional_quota_definition,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
@@ -59,6 +62,7 @@ _RECOVERABLE_STATUSES = frozenset(
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+_ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
 
 
 @dataclass
@@ -553,6 +557,8 @@ class LoadBalancer:
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
+                account_plan_type=account.plan_type,
+                quota_key=limit_name,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
@@ -1044,6 +1050,20 @@ def _state_from_account(
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
+    # If the usage window has reset (reset_at is in the past) but the last
+    # recorded sample still shows 100 % usage, the data is stale.  Zero it
+    # out so the account is not incorrectly blocked or deprioritised while
+    # waiting for the next usage refresh to fetch fresh numbers.
+    now_epoch = int(time.time())
+    if primary_used is not None and primary_used >= 100.0:
+        if primary_reset is not None and primary_reset <= now_epoch:
+            primary_used = 0.0
+            primary_reset = None
+    if secondary_used is not None and secondary_used >= 100.0:
+        if secondary_reset is not None and secondary_reset <= now_epoch:
+            secondary_used = 0.0
+            secondary_reset = None
+
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
     db_reset_at = float(account.reset_at) if account.reset_at else None
@@ -1352,6 +1372,8 @@ def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
 def _additional_quota_eligibility(
     *,
     account_id: str,
+    account_plan_type: str | None,
+    quota_key: str | None,
     latest_primary: dict[str, AdditionalUsageHistory],
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
@@ -1361,6 +1383,9 @@ def _additional_quota_eligibility(
     latest_secondary_entry = latest_secondary.get(account_id)
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
+
+    if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+        return "eligible"
 
     if latest_primary_entry is None and latest_secondary_entry is None:
         return "data_unavailable"
@@ -1374,6 +1399,18 @@ def _additional_quota_eligibility(
     if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry):
         return "quota_exhausted"
     return "eligible"
+
+
+def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str | None) -> bool:
+    definition = get_additional_quota_definition(quota_key)
+    if definition is None or definition.applies_to_plans is None:
+        return True
+    normalized_plan = normalize_account_plan_type(plan_type)
+    if normalized_plan is None:
+        return True
+    if normalized_plan in definition.applies_to_plans:
+        return True
+    return normalized_plan not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:

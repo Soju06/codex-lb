@@ -71,6 +71,40 @@ def test_apply_decision_still_fails_on_write_denial_without_tolerance(monkeypatc
         module.apply_decision(decision(module), tolerate_permission_errors=False)
 
 
+def test_apply_decision_treats_missing_label_delete_as_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    calls: list[tuple[str, str]] = []
+
+    def missing_label(path: str, *, method: str = "GET", **_kwargs: Any) -> None:
+        calls.append((method, path))
+        raise module.GhError("gh: Label does not exist (HTTP 404)")
+
+    monkeypatch.setattr(module, "gh_api", missing_label)
+
+    warnings = module.apply_decision(decision(module), tolerate_permission_errors=False)
+
+    assert warnings == ()
+    assert calls == [
+        (
+            "DELETE",
+            "/repos/Soju06/codex-lb/issues/714/labels/%F0%9F%A4%96%20codex%3A%20ok",
+        )
+    ]
+
+
+def test_apply_decision_does_not_swallow_unrelated_delete_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    def missing_resource(*_args: Any, **_kwargs: Any) -> None:
+        raise module.GhError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(module, "gh_api", missing_resource)
+
+    with pytest.raises(module.GhError):
+        module.apply_decision(decision(module), tolerate_permission_errors=False)
+
+
 def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 
@@ -95,3 +129,85 @@ def test_workflow_prefers_privileged_token_and_enables_tolerant_apply() -> None:
 
     assert "secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token" in workflow
     assert workflow.count("--tolerate-write-permission-errors") == 2
+    assert workflow.count("--tolerate-read-errors") == 1
+
+
+def test_main_tolerates_read_errors_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+
+    def fake_decide_pr(_repo: str, number: int, **_kwargs: Any) -> Any:
+        if number == 710:
+            raise module.GhError("gh: HTTP 502")
+        return decision(module, number=number)
+
+    monkeypatch.setattr(module, "decide_pr", fake_decide_pr)
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Soju06/codex-lb#710: gh: HTTP 502" in captured.err
+    assert "dry-run Soju06/codex-lb#714" in captured.out
+
+
+def test_main_fails_tolerant_run_when_every_pr_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710, 714])
+    monkeypatch.setattr(
+        module,
+        "decide_pr",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(module.GhError("gh: HTTP 502")),
+    )
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "all selected PRs failed classification" in captured.err
+
+
+def test_main_fails_read_errors_without_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [710])
+    monkeypatch.setattr(
+        module,
+        "decide_pr",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(module.GhError("gh: HTTP 502")),
+    )
+
+    assert module.main(["--repo", "Soju06/codex-lb", "--all-open"]) == 1
+
+
+def test_main_fails_apply_errors_even_with_read_error_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [714])
+    monkeypatch.setattr(module, "decide_pr", lambda *_args, **_kwargs: decision(module))
+
+    def fail_apply(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
+        raise module.GhError("gh: HTTP 500 while writing labels")
+
+    monkeypatch.setattr(module, "apply_decision", fail_apply)
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--apply", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "Soju06/codex-lb#714: gh: HTTP 500 while writing labels" in captured.err

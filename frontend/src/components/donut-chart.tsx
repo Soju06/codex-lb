@@ -229,10 +229,16 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                    <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Credits</p>
                    <p
                      className="text-sm font-semibold tabular-nums leading-tight"
-                     data-testid="donut-center-fraction"
+                     data-testid="donut-center-remaining"
                    >
                      {formatNumber(displayTotal)}
-                     <span className="text-muted-foreground">/{formatNumber(safeCapacity)}</span>
+                   </p>
+                   <div className="-mx-1 my-0.5 border-t border-current opacity-20" />
+                   <p
+                     className="text-xs tabular-nums text-muted-foreground leading-tight"
+                     data-testid="donut-center-capacity"
+                   >
+                     {formatNumber(safeCapacity)}
                    </p>
                  </>
                ) : (

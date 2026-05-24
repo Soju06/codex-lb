@@ -27,6 +27,7 @@ from app.modules.usage.mappers import usage_history_to_window_row
 logger = logging.getLogger(__name__)
 
 LIMIT_WARMUP_SOURCE = "limit_warmup"
+LIMIT_WARMUP_REQUEST_KIND = "warmup"
 LIMIT_WARMUP_HEADER = "x-codex-lb-limit-warmup"
 _DEFAULT_WARMUP_INSTRUCTIONS = "Reply with OK only."
 _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
@@ -516,7 +517,7 @@ class LimitWarmupService:
             error_message=_truncate(result.error_message),
             transport="http",
             plan_type=account.plan_type,
-            request_kind=LIMIT_WARMUP_SOURCE,
+            request_kind=LIMIT_WARMUP_REQUEST_KIND,
         )
 
 

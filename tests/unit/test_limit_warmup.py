@@ -301,7 +301,7 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert len(sender.calls) == 1
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "succeeded"
-    assert logs.logs[0]["request_kind"] == "limit_warmup"
+    assert logs.logs[0]["request_kind"] == "warmup"
 
 
 @pytest.mark.asyncio

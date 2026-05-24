@@ -115,7 +115,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
 
 @pytest.mark.asyncio
-async def test_request_logs_api_excludes_limit_warmup_from_normal_traffic(async_client, db_setup):
+async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
@@ -149,10 +149,12 @@ async def test_request_logs_api_excludes_limit_warmup_from_normal_traffic(async_
     assert response.status_code == 200
     body = response.json()
     request_ids = [entry["requestId"] for entry in body["requests"]]
-    assert request_ids == ["req_normal_traffic"]
-    assert body["total"] == 1
+    assert request_ids == ["req_limit_warmup", "req_normal_traffic"]
+    assert body["requests"][0]["requestKind"] == "warmup"
+    assert body["requests"][1]["requestKind"] == "normal"
+    assert body["total"] == 2
 
     options_response = await async_client.get("/api/request-logs/options")
     assert options_response.status_code == 200
     option_models = [entry["model"] for entry in options_response.json()["modelOptions"]]
-    assert "gpt-5.1-codex-mini" not in option_models
+    assert "gpt-5.1-codex-mini" in option_models

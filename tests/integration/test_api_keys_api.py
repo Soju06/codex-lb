@@ -17,7 +17,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyUsageReservation, LimitWindow, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitWindow, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
@@ -205,6 +205,44 @@ async def test_api_key_create_persists_assigned_account_ids(async_client):
     assert listed.status_code == 200
     assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
     assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
+
+
+@pytest.mark.asyncio
+async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigned_accounts(async_client):
+    active_account_id = await _import_account(async_client, "acc-pooled-active", "pooled-active@example.com")
+    paused_account_id = await _import_account(async_client, "acc-pooled-paused", "pooled-paused@example.com")
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == paused_account_id)
+            .values(status=AccountStatus.PAUSED)
+        )
+        session.add_all(
+            [
+                UsageHistory(account_id=active_account_id, window="primary", used_percent=25.0, window_minutes=300),
+                UsageHistory(account_id=active_account_id, window="secondary", used_percent=10.0, window_minutes=10080),
+                UsageHistory(account_id=paused_account_id, window="primary", used_percent=90.0, window_minutes=300),
+                UsageHistory(account_id=paused_account_id, window="secondary", used_percent=90.0, window_minutes=10080),
+            ]
+        )
+        await session.commit()
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "pooled-response-key",
+            "assignedAccountIds": [active_account_id, paused_account_id],
+        },
+    )
+    assert create.status_code == 200
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    [row] = listed.json()
+    assert row["pooledCapacityCreditsPrimary"] == 225.0
+    assert row["pooledRemainingPercentPrimary"] == 75.0
+    assert row["pooledRemainingPercentSecondary"] == 90.0
 
 
 @pytest.mark.asyncio

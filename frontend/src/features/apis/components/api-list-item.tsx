@@ -91,7 +91,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
                 <span className="text-muted-foreground">Pooled 5h</span>
                 <span className="tabular-nums font-medium">{formatPercentNullable(primary)}</span>
               </div>
-              <MiniQuotaBar percent={primary} testId="pooled-quota-track-5h" />
+              <MiniQuotaBar
+                aria-label="Pooled 5h credits remaining"
+                percent={primary}
+                testId="pooled-quota-track-5h"
+              />
             </div>
           ) : null}
           {hasSecondary ? (
@@ -100,7 +104,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
                 <span className="text-muted-foreground">Pooled Weekly</span>
                 <span className="tabular-nums font-medium">{formatPercentNullable(secondary)}</span>
               </div>
-              <MiniQuotaBar percent={secondary} testId="pooled-quota-track-weekly" />
+              <MiniQuotaBar
+                aria-label="Pooled weekly credits remaining"
+                percent={secondary}
+                testId="pooled-quota-track-weekly"
+              />
             </div>
           ) : null}
         </div>

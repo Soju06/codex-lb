@@ -12,6 +12,7 @@ from sqlalchemy.orm import load_only, selectinload
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
+    AccountStatus,
     ApiKey,
     ApiKeyAccountAssignment,
     ApiKeyLimit,
@@ -166,12 +167,18 @@ class ApiKeysRepository:
         if not account_ids:
             return []
         result = await self._session.execute(
-            select(Account).options(load_only(Account.id, Account.plan_type)).where(Account.id.in_(account_ids))
+            select(Account)
+            .options(load_only(Account.id, Account.plan_type, Account.status))
+            .where(Account.id.in_(account_ids))
         )
         return list(result.scalars().all())
 
     async def list_all_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account).options(load_only(Account.id, Account.plan_type)))
+        result = await self._session.execute(
+            select(Account)
+            .options(load_only(Account.id, Account.plan_type))
+            .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+        )
         return list(result.scalars().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:

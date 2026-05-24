@@ -21,7 +21,7 @@ from app.core.usage.pricing import (
 )
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
 from app.modules.api_keys.repository import (
@@ -334,11 +334,16 @@ def _compute_pooled_credits(
     from app.modules.usage.mappers import usage_history_to_window_row
 
     if assigned_account_ids:
-        account_ids = set(assigned_account_ids)
+        requested_account_ids = set(assigned_account_ids)
     else:
-        account_ids = {a.id for a in all_accounts}
+        requested_account_ids = {a.id for a in all_accounts}
 
-    account_map = {a.id: a for a in all_accounts if a.id in account_ids}
+    account_map = {
+        a.id: a
+        for a in all_accounts
+        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+    }
+    account_ids = set(account_map)
 
     primary_rows_raw = [
         usage_history_to_window_row(entry) for entry in primary_usage.values() if entry.account_id in account_ids

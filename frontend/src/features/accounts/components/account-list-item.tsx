@@ -80,7 +80,11 @@ function MiniQuotaRow({
         <span className="text-muted-foreground">{label}</span>
         <span className="tabular-nums font-medium">{formatPercentNullable(percent)}</span>
       </div>
-      <MiniQuotaBar percent={percent} testId={`mini-quota-track-${label.toLowerCase()}`} />
+      <MiniQuotaBar
+        aria-label={`${label} credits remaining`}
+        percent={percent}
+        testId={`mini-quota-track-${label.toLowerCase()}`}
+      />
       <div className="text-[10px] text-muted-foreground">{formatMiniQuotaResetLabel(resetAt ?? null)}</div>
     </div>
   );

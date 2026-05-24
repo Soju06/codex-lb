@@ -1,3 +1,5 @@
+## ADDED Requirements
+
 ### Requirement: API key list includes pooled credit data
 
 The `GET /api/api-keys/` list endpoint SHALL include per-key pooled credit data computed by aggregating upstream usage across the accounts assigned to each key. When a key has no assigned accounts, the system SHALL pool across all accounts.

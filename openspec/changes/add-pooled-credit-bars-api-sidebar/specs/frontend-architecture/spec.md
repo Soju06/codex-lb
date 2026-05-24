@@ -1,3 +1,5 @@
+## ADDED Requirements
+
 ### Requirement: API sidebar shows pooled credit bars
 
 The APIs page left sidebar SHALL render pooled credit bars on each API key list item. Each bar SHALL display a label, percentage, and colored progress bar using the same `MiniQuotaBar` component as the Accounts sidebar.

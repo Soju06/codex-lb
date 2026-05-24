@@ -1527,6 +1527,51 @@ async def test_thread_goal_request_passes_dashboard_reset_window_to_selection(mo
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_401_failover_preserves_dashboard_reset_window(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.prefer_earlier_reset_accounts = True
+    settings.prefer_earlier_reset_window = "primary"
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_401_a")
+    account_b = _make_account("acc_thread_goal_401_b")
+    selection_kwargs: list[dict[str, object]] = []
+    goal_account_ids: list[str | None] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        if account_a.id in excluded_account_ids:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def thread_goal_request(*args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        account_id = cast(str | None, args[4])
+        goal_account_ids.append(account_id)
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token invalidated"))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_a]))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget_or_auth_error", AsyncMock(return_value=account_b))
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", thread_goal_request)
+
+    response = await service.thread_goal_request("set", {}, {})
+
+    assert response == {"ok": True}
+    assert goal_account_ids == [
+        account_a.chatgpt_account_id,
+        account_a.chatgpt_account_id,
+        account_b.chatgpt_account_id,
+    ]
+    assert [kwargs["prefer_earlier_reset_window"] for kwargs in selection_kwargs] == ["primary", "primary"]
+
+
+@pytest.mark.asyncio
 async def test_codex_control_request_passes_dashboard_reset_window_to_selection(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.prefer_earlier_reset_accounts = True
@@ -15113,11 +15158,14 @@ async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refre
 @pytest.mark.asyncio
 async def test_transcribe_fallback_refresh_error_surfaces_proxy_error_not_raw_refresh_error(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.prefer_earlier_reset_accounts = True
+    settings.prefer_earlier_reset_window = "primary"
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_a = _make_account("acc_transcribe_invalidated_a")
     account_b = _make_account("acc_transcribe_invalidated_b")
     seen_excluded_account_ids: list[set[str]] = []
+    seen_reset_windows: list[object] = []
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -15125,6 +15173,7 @@ async def test_transcribe_fallback_refresh_error_surfaces_proxy_error_not_raw_re
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
         seen_excluded_account_ids.append(excluded_account_ids)
+        seen_reset_windows.append(kwargs.get("prefer_earlier_reset_window"))
         if not excluded_account_ids:
             return AccountSelection(account=account_a, error_message=None)
         return AccountSelection(account=account_b, error_message=None)
@@ -15157,6 +15206,7 @@ async def test_transcribe_fallback_refresh_error_surfaces_proxy_error_not_raw_re
     assert exc_info.value.payload["error"].get("code") == "invalid_api_key"
     assert exc_info.value.payload["error"].get("message") == "fallback token invalid"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert seen_reset_windows == ["primary", "primary"]
 
 
 def test_prepare_response_bridge_request_state_dedupes_replayed_previous_response_tool_calls_before_serializing():

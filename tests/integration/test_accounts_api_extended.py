@@ -655,6 +655,38 @@ async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(a
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_recovers_quota_exceeded_status_from_secondary_usage(async_client, db_setup):
+    expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
+    blocked_at = int((utcnow() - timedelta(hours=2)).timestamp())
+    account = _make_account("acc_quota_recovered_secondary", "quota-recovered@example.com")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = expired_reset
+    account.blocked_at = blocked_at
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_quota_recovered_secondary",
+            42.0,
+            window="secondary",
+            reset_at=int((utcnow() + timedelta(days=1)).timestamp()),
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_quota_recovered_secondary"]
+    assert account_payload["status"] == "active"
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(58.0)
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_stale_rate_limited_status_recovers_after_background_reconcile(
     async_client,
     db_setup,

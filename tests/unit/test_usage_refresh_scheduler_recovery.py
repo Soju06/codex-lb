@@ -19,6 +19,7 @@ def _make_account(
     status: AccountStatus,
     reset_at: int | None = None,
     blocked_at: int | None = None,
+    deactivation_reason: str | None = None,
 ) -> Account:
     return Account(
         id=account_id,
@@ -32,7 +33,7 @@ def _make_account(
         status=status,
         reset_at=reset_at,
         blocked_at=blocked_at,
-        deactivation_reason=None,
+        deactivation_reason=deactivation_reason,
     )
 
 
@@ -118,6 +119,13 @@ class StubUsageRepository:
         if window == "secondary":
             return self._secondary
         return self._primary
+
+
+class MutatingAccountsRepository(StubAccountsRepository):
+    async def update_status_if_current(self, *args: Any, **kwargs: Any) -> bool:
+        account = next(iter(self._accounts.values()))
+        account.reset_at = 42
+        return await super().update_status_if_current(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -224,6 +232,179 @@ async def test_reconcile_recoverable_account_statuses_restores_rate_limited_afte
             "blocked_at": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_keeps_legacy_rate_limited_when_primary_is_not_recent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_legacy_rate_limited_stale_usage",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=None,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 1000),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == past_reset
+    assert account.blocked_at is None
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_restores_legacy_rate_limited_from_recent_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_legacy_rate_limited_recent_usage",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=None,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_clears_deactivation_reason_on_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 300)
+    blocked_at = int(now - 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_rate_limited_stale_reason",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+        deactivation_reason="stale reason",
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_skips_concurrent_marker_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 300)
+    blocked_at = int(now - 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_rate_limited_concurrent_change",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = MutatingAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 0
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 42
 
 
 @pytest.mark.asyncio

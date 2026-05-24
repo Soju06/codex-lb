@@ -31,6 +31,8 @@ For scheduler evaluation, create a throwaway `RuntimeState` whose `blocked_at` m
 
 If a `rate_limited` row has no persisted reset deadline, the scheduler must leave it blocked. The background path has no authoritative cooldown duration in that case, so it cannot safely clear the status without risking an early reactivation.
 
+If a `rate_limited` row has a persisted reset deadline but no persisted block marker, treat it as a legacy/no-marker recovery path. The scheduler may recover it only after the reset deadline has elapsed and the latest primary usage row is recent and below `100%`; stale rows are not sufficient proof because there is no block timestamp for a post-block comparison.
+
 Alternative considered: always synthesize an expired cooldown. Rejected because it can reactivate a still-cooling `rate_limited` account as soon as any fresh primary usage row arrives, causing premature retries and repeated `429` loops.
 
 ### Persist only recovery transitions

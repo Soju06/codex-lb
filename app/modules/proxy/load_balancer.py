@@ -1193,29 +1193,43 @@ def background_recovery_state_from_account(
         secondary_entry=secondary_entry,
         runtime=runtime,
     )
-    if (
-        account.status == AccountStatus.RATE_LIMITED
-        and blocked_at is not None
-        and reset_at is not None
-        and reset_at <= time.time()
-        and not _usage_entry_recorded_after_block(primary_entry, blocked_at)
-    ):
-        return replace(
-            state,
-            status=AccountStatus.RATE_LIMITED,
-            reset_at=reset_at,
-            blocked_at=blocked_at,
-            cooldown_until=reset_at,
-        )
-    if account.status == AccountStatus.RATE_LIMITED and reset_at is None:
-        return replace(
-            state,
-            status=AccountStatus.RATE_LIMITED,
-            reset_at=None,
-            blocked_at=blocked_at,
-            cooldown_until=None,
-        )
+    if account.status == AccountStatus.RATE_LIMITED:
+        if blocked_at is not None and reset_at is not None and reset_at <= time.time():
+            if not _usage_entry_recorded_after_block(primary_entry, blocked_at):
+                return replace(
+                    state,
+                    status=AccountStatus.RATE_LIMITED,
+                    reset_at=reset_at,
+                    blocked_at=blocked_at,
+                    cooldown_until=reset_at,
+                )
+        elif blocked_at is None and reset_at is not None and reset_at <= time.time():
+            if not _usage_entry_is_recent_available(primary_entry):
+                return replace(
+                    state,
+                    status=AccountStatus.RATE_LIMITED,
+                    reset_at=reset_at,
+                    blocked_at=None,
+                    cooldown_until=None,
+                )
+        if reset_at is None:
+            return replace(
+                state,
+                status=AccountStatus.RATE_LIMITED,
+                reset_at=None,
+                blocked_at=blocked_at,
+                cooldown_until=None,
+            )
     return state
+
+
+def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:
+    return (
+        entry is not None
+        and _usage_entry_is_recent_enough(entry.recorded_at)
+        and entry.used_percent is not None
+        and float(entry.used_percent) < 100.0
+    )
 
 
 def _usage_entry_recorded_after_block(entry: UsageHistory | None, blocked_at: float) -> bool:

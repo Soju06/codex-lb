@@ -142,9 +142,10 @@ async def reconcile_recoverable_account_statuses(
             continue
         reset_at = int(state.reset_at) if state.reset_at else None
         blocked_at = int(state.blocked_at) if state.blocked_at else None
+        deactivation_reason = None
         if (
             state.status == account.status
-            and state.deactivation_reason == account.deactivation_reason
+            and deactivation_reason == account.deactivation_reason
             and reset_at == account.reset_at
             and blocked_at == account.blocked_at
         ):
@@ -152,7 +153,7 @@ async def reconcile_recoverable_account_statuses(
         updated = await accounts_repo.update_status_if_current(
             account.id,
             state.status,
-            state.deactivation_reason,
+            deactivation_reason,
             reset_at,
             blocked_at=blocked_at,
             expected_status=account.status,
@@ -163,7 +164,7 @@ async def reconcile_recoverable_account_statuses(
         if not updated:
             continue
         account.status = state.status
-        account.deactivation_reason = state.deactivation_reason
+        account.deactivation_reason = deactivation_reason
         account.reset_at = reset_at
         account.blocked_at = blocked_at
         recovered += 1

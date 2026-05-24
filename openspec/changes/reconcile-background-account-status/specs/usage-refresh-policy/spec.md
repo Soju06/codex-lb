@@ -11,6 +11,21 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **THEN** the scheduler marks the account `active`
 - **AND** it clears persisted `reset_at` and `blocked_at`
 
+#### Scenario: Scheduler recovers a legacy rate-limited account without a block marker
+- **WHEN** an account is persisted as `rate_limited`
+- **AND** the persisted rate-limit reset deadline has already elapsed
+- **AND** the account has no persisted block marker
+- **AND** a later background usage refresh writes a recent primary usage row that reports usage below `100%`
+- **THEN** the scheduler marks the account `active`
+- **AND** it clears persisted `reset_at`
+
+#### Scenario: Scheduler preserves legacy rate-limited accounts without recent primary usage
+- **WHEN** an account is persisted as `rate_limited`
+- **AND** the persisted rate-limit reset deadline has already elapsed
+- **AND** the account has no persisted block marker
+- **AND** the latest primary usage row is not recent enough to prove background refresh recovery
+- **THEN** the scheduler leaves the account `rate_limited`
+
 #### Scenario: Scheduler preserves an unexpired rate-limit cooldown
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** its persisted rate-limit reset deadline is still in the future
@@ -37,3 +52,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **WHEN** background usage refresh determines that a blocked account is recoverable
 - **AND** the persisted account status or reset markers change before the scheduler writes recovery
 - **THEN** the scheduler skips the stale recovery write
+
+#### Scenario: Scheduler clears stale deactivation reasons on recovery
+- **WHEN** background usage refresh recovers a `rate_limited` or `quota_exceeded` account to `active`
+- **THEN** the scheduler writes `deactivation_reason` as `NULL`

@@ -16,7 +16,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients import proxy as core_proxy
 from app.core.clients.proxy import ProxyResponseError
-from app.core.utils.sse import SSE_KEEPALIVE_FRAME
+from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import ProxyContext
@@ -787,6 +787,59 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     iterator = response.body_iterator.__aiter__()
     first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
     assert first_chunk == SSE_KEEPALIVE_FRAME
+    release_upstream.set()
+    chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
+    assert any("response.completed" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_codex_route_stream_responses_starts_event_keepalive_before_first_upstream_event(monkeypatch):
+    upstream_started = asyncio.Event()
+    release_upstream = asyncio.Event()
+
+    class _FakeService:
+        async def rate_limit_headers(self):
+            return {}
+
+        async def stream_responses(self, *args, **kwargs):
+            del args, kwargs
+            upstream_started.set()
+            await release_upstream.wait()
+            event = {"type": "response.completed", "response": {"id": "resp_delayed"}}
+            yield _sse_event(event)
+
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=False,
+        sse_keepalive_interval_seconds=0.01,
+    )
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [],
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        ProxyContext(service=cast(proxy_module.ProxyService, _FakeService())),
+        api_key=None,
+        enforce_openai_sdk_contract=False,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert upstream_started.is_set() is True
+    iterator = response.body_iterator.__aiter__()
+    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first_chunk == CODEX_KEEPALIVE_FRAME
     release_upstream.set()
     chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
     assert any("response.completed" in chunk for chunk in chunks)

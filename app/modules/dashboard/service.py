@@ -54,13 +54,17 @@ class DashboardService:
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
         limit_warmups_by_account = await self._repo.latest_limit_warmups_by_account(account_ids)
 
-        account_summaries = build_account_summaries(
-            accounts=accounts,
-            primary_usage=primary_usage,
-            secondary_usage=secondary_usage,
-            limit_warmups_by_account=limit_warmups_by_account,
-            encryptor=self._encryptor,
-            include_auth=False,
+        account_summaries = sorted(
+            build_account_summaries(
+                accounts=accounts,
+                primary_usage=primary_usage,
+                secondary_usage=secondary_usage,
+                limit_warmups_by_account=limit_warmups_by_account,
+                encryptor=self._encryptor,
+                include_auth=False,
+            ),
+            key=lambda a: a.capacity_credits_primary or 0,
+            reverse=True,
         )
 
         primary_rows_raw = _rows_from_latest(primary_usage)

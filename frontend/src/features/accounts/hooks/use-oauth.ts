@@ -9,6 +9,7 @@ import {
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
+  flowId: null,
   status: "idle",
   method: null,
   authorizationUrl: null,
@@ -48,7 +49,7 @@ export function useOauth() {
 
   const poll = useCallback(async () => {
     try {
-      const status = await getOauthStatus();
+      const status = await getOauthStatus(state.flowId ?? undefined);
       setState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
@@ -70,7 +71,7 @@ export function useOauth() {
         }),
       );
     }
-  }, []);
+  }, [state.flowId]);
 
   const start = useCallback(async (forceMethod?: "browser" | "device") => {
     clearPollTimer();
@@ -80,6 +81,7 @@ export function useOauth() {
     try {
       const response = await startOauth({ forceMethod });
       const nextState = OAuthStateSchema.parse({
+        flowId: response.flowId ?? null,
         status: "pending",
         method: response.method === "device" ? "device" : "browser",
         authorizationUrl: response.authorizationUrl,
@@ -99,6 +101,7 @@ export function useOauth() {
         && nextState.userCode
       ) {
         await completeOauth({
+          ...(nextState.flowId ? { flowId: nextState.flowId } : {}),
           deviceAuthId: nextState.deviceAuthId,
           userCode: nextState.userCode,
         });
@@ -121,6 +124,7 @@ export function useOauth() {
   const complete = useCallback(async () => {
     try {
       await completeOauth({
+        ...(state.flowId ? { flowId: state.flowId } : {}),
         deviceAuthId: state.deviceAuthId ?? undefined,
         userCode: state.userCode ?? undefined,
       });
@@ -140,11 +144,14 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.deviceAuthId, state.userCode]);
+  }, [state.deviceAuthId, state.flowId, state.userCode]);
 
   const manualCallback = useCallback(async (callbackUrl: string) => {
     try {
-      const response = await submitManualOauthCallback({ callbackUrl });
+      const response = await submitManualOauthCallback({
+        callbackUrl,
+        ...(state.flowId ? { flowId: state.flowId } : {}),
+      });
       setState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
@@ -163,7 +170,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, []);
+  }, [state.flowId]);
 
   useEffect(() => {
     if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {

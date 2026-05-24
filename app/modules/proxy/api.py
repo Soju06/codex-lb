@@ -71,7 +71,13 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.sse import format_sse_event, inject_sse_keepalives, parse_sse_data_json
+from app.core.utils.sse import (
+    CODEX_KEEPALIVE_FRAME,
+    SSE_KEEPALIVE_FRAME,
+    format_sse_event,
+    inject_sse_keepalives,
+    parse_sse_data_json,
+)
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -1931,6 +1937,7 @@ async def _stream_responses(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
+            keepalive_frame=CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},

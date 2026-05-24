@@ -9,6 +9,7 @@ import queue
 import stat
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -298,6 +299,32 @@ def test_archive_writer_streams_gzip_without_precompressing_record(monkeypatch, 
     assert record["payload"] == {"text": "x" * 1024}
 
 
+def test_archive_writer_batches_queued_records(monkeypatch, tmp_path):
+    archive_queue: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue()
+    first: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "one"}, 11)
+    second: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "two"}, 13)
+    archive_queue.put(first)
+    archive_queue.put(second)
+    archive_queue.put(None)
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", archive_queue)
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        setattr(conversation_archive, "_WRITE_QUEUE_BYTES", 24)
+
+    batches: list[list[tuple[Path, dict[str, object], int]]] = []
+
+    def capture_batch(items: Sequence[tuple[Path, dict[str, object], int]]) -> None:
+        batches.append(list(items))
+
+    monkeypatch.setattr(conversation_archive, "_append_records", capture_batch)
+
+    conversation_archive._writer_loop()
+
+    assert [[item[1]["payload"] for item in batch] for batch in batches] == [["one", "two"]]
+    assert archive_queue.unfinished_tasks == 0
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == 0
+
+
 def test_archive_queue_thread_start_failure_drops_record(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,
@@ -506,6 +533,29 @@ def test_archive_write_failure_forgets_prior_recovery_check(monkeypatch, tmp_pat
     conversation_archive._append_record(path, {"request_id": "req_new_2"})
 
     assert path.resolve() not in conversation_archive._RECOVERY_CHECKED_PATHS
+
+
+def test_archive_batch_write_failure_does_not_drop_other_paths(monkeypatch, tmp_path):
+    bad_path = tmp_path / "bad" / "2026-04-30T12.jsonl.gz"
+    good_path = tmp_path / "good" / "2026-04-30T12.jsonl.gz"
+
+    def write_record(path: Path, record: Mapping[str, object]) -> None:
+        if path == bad_path:
+            raise OSError("simulated archive write failure")
+        conversation_archive._write_gzip_jsonl_records(path, [record])
+
+    monkeypatch.setattr(conversation_archive, "_write_gzip_jsonl_record", write_record)
+
+    conversation_archive._append_records(
+        [
+            (bad_path, {"request_id": "req_bad"}, 0),
+            (good_path, {"request_id": "req_good"}, 0),
+        ]
+    )
+
+    assert not bad_path.exists()
+    with gzip.open(good_path, "rt", encoding="utf-8") as handle:
+        assert json.loads(handle.readline()) == {"request_id": "req_good"}
 
 
 def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp_path, caplog):

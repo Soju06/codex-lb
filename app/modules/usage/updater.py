@@ -748,10 +748,20 @@ def _latest_usage_is_fresh(
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    return latest is not None and (now - latest.recorded_at).total_seconds() < interval_seconds
+    if latest is None:
+        return False
+    if (now - latest.recorded_at).total_seconds() >= interval_seconds:
+        return False
+    if latest.reset_at is not None:
+        now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+        if now_epoch >= latest.reset_at:
+            return False
+    return True
 
 
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:
+    if _account_needs_post_reset_refresh(account, latest=latest):
+        return True
     if account.status != AccountStatus.QUOTA_EXCEEDED:
         return False
     if account.blocked_at is None:
@@ -765,6 +775,21 @@ def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHi
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=timezone.utc)
     return recorded_at.timestamp() < cooldown_expires_at
+
+
+def _account_needs_post_reset_refresh(account: Account, *, latest: UsageHistory | None) -> bool:
+    if account.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED):
+        return False
+    if account.reset_at is None:
+        return False
+    if time.time() < account.reset_at:
+        return False
+    if latest is None:
+        return True
+    recorded_at = latest.recorded_at
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_at.timestamp() < float(account.reset_at)
 
 
 def _parse_credits_balance(value: str | int | float | None) -> float | None:

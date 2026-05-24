@@ -11,7 +11,7 @@ import queue
 import threading
 import time
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -228,35 +228,64 @@ def _ensure_writer_thread() -> None:
 def _writer_loop() -> None:
     while True:
         item = _WRITE_QUEUE.get()
+        batch: list[tuple[Path, dict[str, Any], int]] = []
+        stop_after_batch = False
         try:
             if item is None:
+                _WRITE_QUEUE.task_done()
                 return
-            path, record, queued_bytes = item
-            _append_record(path, record)
+            batch.append(item)
+            while True:
+                try:
+                    next_item = _WRITE_QUEUE.get_nowait()
+                except queue.Empty:
+                    break
+                if next_item is None:
+                    stop_after_batch = True
+                    _WRITE_QUEUE.task_done()
+                    break
+                batch.append(next_item)
+            _append_records(batch)
         finally:
-            if item is not None:
-                _release_archive_queue_bytes(queued_bytes)
-            _WRITE_QUEUE.task_done()
+            for queued_item in batch:
+                _release_archive_queue_bytes(queued_item[2])
+                _WRITE_QUEUE.task_done()
+        if stop_after_batch:
+            return
 
 
 def _append_record(path: Path, record: Mapping[str, Any]) -> None:
+    _append_records([(path, record, 0)])
+
+
+def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> None:
+    if not items:
+        return
     if _archive_disk_pressure_active():
         return
 
-    try:
-        with _WRITE_LOCK:
-            if _archive_disk_pressure_active():
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.parent.chmod(_ARCHIVE_DIR_MODE)
-            _recover_corrupt_gzip_archive(path)
-            _write_gzip_jsonl_record(path, record)
-    except Exception as exc:
-        _RECOVERY_CHECKED_PATHS.discard(path.resolve())
-        if _is_disk_pressure_error(exc):
-            _pause_archive_for_disk_pressure(path, exc)
+    grouped: dict[Path, list[Mapping[str, Any]]] = {}
+    for path, record, _queued_bytes in items:
+        grouped.setdefault(path, []).append(record)
+
+    with _WRITE_LOCK:
+        if _archive_disk_pressure_active():
             return
-        logger.warning("Failed to append conversation archive record", exc_info=True)
+        for path, records in grouped.items():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.parent.chmod(_ARCHIVE_DIR_MODE)
+                _recover_corrupt_gzip_archive(path)
+                if len(records) == 1:
+                    _write_gzip_jsonl_record(path, records[0])
+                else:
+                    _write_gzip_jsonl_records(path, records)
+            except Exception as exc:
+                _RECOVERY_CHECKED_PATHS.discard(path.resolve())
+                if _is_disk_pressure_error(exc):
+                    _pause_archive_for_disk_pressure(path, exc)
+                    return
+                logger.warning("Failed to append conversation archive record", exc_info=True)
 
 
 def _serialized_record_size(record: Mapping[str, Any]) -> int:
@@ -330,14 +359,21 @@ def _archive_backpressure_warning_state() -> tuple[bool, int]:
 
 
 def _write_gzip_jsonl_record(path: Path, record: Mapping[str, Any]) -> None:
+    _write_gzip_jsonl_records(path, [record])
+
+
+def _write_gzip_jsonl_records(path: Path, records: list[Mapping[str, Any]]) -> None:
+    if not records:
+        return
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, _ARCHIVE_FILE_MODE)
     try:
         os.fchmod(fd, _ARCHIVE_FILE_MODE)
         with os.fdopen(fd, "ab") as fh:
             fd = -1
             with gzip.open(fh, "at", encoding="utf-8") as gzip_fh:
-                json.dump(record, gzip_fh, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-                gzip_fh.write("\n")
+                for record in records:
+                    json.dump(record, gzip_fh, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                    gzip_fh.write("\n")
     finally:
         if fd >= 0:
             os.close(fd)

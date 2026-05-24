@@ -84,6 +84,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
       : null;
   const idSuffix = showAccountId ? ` | ID ${compactId}` : "";
   const warmupStatus = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
+  const warmupToggleLabel = `${account.limitWarmupEnabled ? "Disable" : "Enable"} limit warm-up for ${title}`;
   const warmupDetail = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
@@ -132,9 +133,10 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
               ? "text-primary hover:bg-primary/10 hover:text-primary"
               : "text-muted-foreground hover:text-foreground",
           )}
+          aria-label={warmupToggleLabel}
           onClick={() => onAction?.(account, "warmup-toggle")}
         >
-          <Zap className="h-3 w-3" />
+          <Zap className="h-3 w-3" aria-hidden="true" />
           {account.limitWarmupEnabled ? "On" : "Off"}
         </Button>
       </div>

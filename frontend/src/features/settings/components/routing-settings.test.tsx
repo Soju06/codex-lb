@@ -92,7 +92,7 @@ describe("RoutingSettings", () => {
     await user.type(ttlInput, "0");
     expect(saveButton).toBeDisabled();
 
-    await user.click(screen.getAllByRole("switch")[0]!);
+    await user.click(screen.getByRole("switch", { name: "Enable sticky threads" }));
 
     expect(onSave).toHaveBeenCalledWith({
       stickyThreadsEnabled: true,
@@ -113,5 +113,26 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
     expect(screen.getByText("Server default")).toBeInTheDocument();
+  });
+
+  it("names limit warm-up controls for assistive technology", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
+  });
+
+  it("does not silently truncate decimal warm-up cooldown values", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByLabelText("Warm-up cooldown"));
+    await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
   });
 });

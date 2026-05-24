@@ -41,8 +41,11 @@ class AccountsRepository:
     async def get_by_id(self, account_id: str) -> Account | None:
         return await self._session.get(Account, account_id)
 
-    async def list_accounts(self) -> list[Account]:
-        result = await self._session.execute(select(Account).order_by(Account.email))
+    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+        stmt = select(Account).order_by(Account.email)
+        if refresh_existing:
+            stmt = stmt.execution_options(populate_existing=True)
+        result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
     async def list_request_usage_summary_by_account(

@@ -66,7 +66,8 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
-    async def list_accounts(self) -> list[Account]:
+    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+        del refresh_existing
         return list(self._accounts)
 
     def _find_account(self, account_id: str) -> Account | None:

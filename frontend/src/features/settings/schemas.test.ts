@@ -122,4 +122,21 @@ describe("SettingsUpdateRequestSchema", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("matches backend limit warm-up model and prompt length bounds", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupModel: "m".repeat(129),
+      }).success,
+    ).toBe(false);
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupPrompt: "p".repeat(513),
+      }).success,
+    ).toBe(false);
+  });
 });

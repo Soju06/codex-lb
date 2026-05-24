@@ -3,6 +3,8 @@ import { z } from "zod";
 export const RoutingStrategySchema = z.enum(["usage_weighted", "round_robin", "capacity_weighted"]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
 export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"]);
+const LimitWarmupModelSchema = z.string().min(1).max(128);
+const LimitWarmupPromptSchema = z.string().min(1).max(512);
 
 export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
@@ -17,8 +19,8 @@ export const DashboardSettingsSchema = z.object({
   apiKeyAuthEnabled: z.boolean(),
   limitWarmupEnabled: z.boolean().optional().default(false),
   limitWarmupWindows: LimitWarmupWindowsSchema.optional().default("both"),
-  limitWarmupModel: z.string().min(1).optional().default("auto"),
-  limitWarmupPrompt: z.string().min(1).optional().default("Say OK."),
+  limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
+  limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional().default(100),
 });
@@ -35,8 +37,8 @@ export const SettingsUpdateRequestSchema = z.object({
   apiKeyAuthEnabled: z.boolean().optional(),
   limitWarmupEnabled: z.boolean().optional(),
   limitWarmupWindows: LimitWarmupWindowsSchema.optional(),
-  limitWarmupModel: z.string().min(1).optional(),
-  limitWarmupPrompt: z.string().min(1).optional(),
+  limitWarmupModel: LimitWarmupModelSchema.optional(),
+  limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
 });

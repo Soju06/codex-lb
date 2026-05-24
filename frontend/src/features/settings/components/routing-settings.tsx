@@ -14,6 +14,9 @@ import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
+const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
+const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
+
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
   busy: boolean;
@@ -35,7 +38,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
-  const parsedLimitWarmupCooldown = Number.parseInt(limitWarmupCooldown, 10);
+  const parsedLimitWarmupCooldown = Number(limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const limitWarmupFieldsChanged =
     limitWarmupModel.trim() !== settings.limitWarmupModel ||
@@ -43,7 +46,9 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
     limitWarmupModel.trim().length > 0 &&
+    limitWarmupModel.trim().length <= LIMIT_WARMUP_MODEL_MAX_LENGTH &&
     limitWarmupPrompt.trim().length > 0 &&
+    limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
     limitWarmupCooldownValid;
 
   return (
@@ -113,6 +118,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <p className="text-xs text-muted-foreground">Keep related requests on the same account.</p>
             </div>
             <Switch
+              aria-label="Enable sticky threads"
               checked={settings.stickyThreadsEnabled}
               disabled={busy}
               onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
@@ -125,6 +131,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <p className="text-xs text-muted-foreground">Bias traffic to accounts with earlier quota reset.</p>
             </div>
             <Switch
+              aria-label="Prefer earlier reset accounts"
               checked={settings.preferEarlierResetAccounts}
               disabled={busy}
               onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
@@ -141,6 +148,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 </div>
               </div>
               <Switch
+                aria-label="Enable limit warm-up"
                 checked={settings.limitWarmupEnabled}
                 disabled={busy}
                 onCheckedChange={(checked) => save({ limitWarmupEnabled: checked })}
@@ -164,6 +172,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <Input
                 value={limitWarmupModel}
                 disabled={busy}
+                maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
                 onChange={(event) => setLimitWarmupModel(event.target.value)}
                 className="h-8 text-xs"
                 aria-label="Warm-up model"
@@ -184,6 +193,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <Input
                 value={limitWarmupPrompt}
                 disabled={busy}
+                maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
                 onChange={(event) => setLimitWarmupPrompt(event.target.value)}
                 className="h-8 text-xs"
                 aria-label="Warm-up prompt"

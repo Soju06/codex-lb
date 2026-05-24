@@ -91,7 +91,7 @@ class UsageRefreshScheduler:
                             request_logs_repo,
                             sender=StreamingLimitWarmupSender(accounts_repo),
                         )
-                        refreshed_accounts = await accounts_repo.list_accounts()
+                        refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
                         await warmup_service.run_after_usage_refresh(
                             accounts=refreshed_accounts,
                             settings=dashboard_settings,

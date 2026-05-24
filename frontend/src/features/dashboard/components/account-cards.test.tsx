@@ -38,4 +38,29 @@ describe("AccountCards", () => {
       "[&::-webkit-scrollbar]:hidden",
     );
   });
+
+  it("gives each warm-up toggle a descriptive account-specific name", () => {
+    render(
+      <AccountCards
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-1",
+            email: "one@example.com",
+            displayName: "One Account",
+            limitWarmupEnabled: false,
+          }),
+          createAccountSummary({
+            accountId: "acc-2",
+            email: "two@example.com",
+            displayName: "Two Account",
+            limitWarmupEnabled: true,
+          }),
+        ]}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Enable limit warm-up for One Account" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable limit warm-up for Two Account" })).toBeInTheDocument();
+  });
 });

@@ -11200,9 +11200,10 @@ async def _websocket_full_replay_should_wait_for_continuity(
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
     if not isinstance(payload, dict):
         return None
-    status = payload.get("status")
-    if isinstance(status, int):
-        return status
+    for status_field in ("status", "status_code"):
+        status = payload.get(status_field)
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status
     return None
 
 
@@ -11369,6 +11370,8 @@ def _normalize_http_bridge_error_event(
             explicit_error_code = True
     elif isinstance(payload, dict):
         payload_error = payload.get("error")
+        if not isinstance(payload_error, dict):
+            payload_error = _websocket_top_level_error_payload(payload)
         if isinstance(payload_error, dict):
             code_value = payload_error.get("code")
             if isinstance(code_value, str):
@@ -11394,6 +11397,8 @@ def _normalize_http_bridge_error_event(
 
     if isinstance(payload, dict):
         raw_error = payload.get("error")
+        if not isinstance(raw_error, dict):
+            raw_error = _websocket_top_level_error_payload(payload)
         if isinstance(raw_error, dict):
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
@@ -11728,6 +11733,24 @@ def _refresh_websocket_request_input_fingerprint_from_text(request_state: _WebSo
     request_state.input_full_fingerprint = _fingerprint_input_items(cast(list[JsonValue], input_items))
 
 
+def _websocket_top_level_error_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue] | None:
+    if payload.get("type") != "error":
+        return None
+    error: dict[str, JsonValue] = {}
+    for error_field in ("code", "message", "param"):
+        value = payload.get(error_field)
+        if isinstance(value, str) and value.strip():
+            error[error_field] = value.strip()
+    error_type = payload.get("error_type")
+    if isinstance(error_type, str) and error_type.strip():
+        error["type"] = error_type.strip()
+    for metadata_field in ("plan_type", "resets_at", "resets_in_seconds"):
+        value = payload.get(metadata_field)
+        if isinstance(value, str | int | float) and not isinstance(value, bool):
+            error[metadata_field] = value
+    return error or None
+
+
 def _websocket_event_error_payload(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
@@ -11740,11 +11763,10 @@ def _websocket_event_error_payload(
             return cast(dict[str, JsonValue], error)
         # The ChatGPT-backed Codex websocket can emit OpenAI-style error
         # details directly on the event frame instead of under an ``error``
-        # envelope. Treat those frames as errors so continuity masking sees
-        # ``previous_response_not_found`` instead of relaying the raw frame.
-        if any(isinstance(payload.get(field), str) for field in ("code", "message", "param")):
-            return payload
-        return None
+        # envelope. Normalize those fields into an error-detail object so the
+        # event discriminator ``type: error`` is not mistaken for the upstream
+        # error type.
+        return _websocket_top_level_error_payload(payload)
     if event_type == "response.failed":
         response = payload.get("response")
         error = response.get("error") if isinstance(response, dict) else None

@@ -2468,7 +2468,7 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
                     text=json.dumps(
                         {
                             "type": "error",
-                            "status": 400,
+                            "status_code": 400,
                             "error_type": "invalid_request_error",
                             "code": "previous_response_not_found",
                             "message": "Previous response with id 'resp_chatgpt_prev_anchor' not found.",

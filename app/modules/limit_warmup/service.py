@@ -239,7 +239,7 @@ class LimitWarmupService:
         sender = self._sender
         if sender is None:
             raise RuntimeError("LimitWarmupService requires a sender")
-        send_tasks: list[asyncio.Task[LimitWarmupSendOutcome]] = []
+        send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
         send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
 
         for account in accounts:
@@ -297,23 +297,43 @@ class LimitWarmupService:
                 if attempt is None:
                     continue
 
-                send_tasks.append(
-                    asyncio.create_task(
-                        self._send_warmup(
-                            attempt,
-                            account=account,
-                            model=model,
-                            prompt=settings.limit_warmup_prompt,
-                            sender=sender,
-                            semaphore=send_semaphore,
-                        )
+                send_task = asyncio.create_task(
+                    self._send_warmup(
+                        attempt,
+                        account=account,
+                        model=model,
+                        prompt=settings.limit_warmup_prompt,
+                        sender=sender,
+                        semaphore=send_semaphore,
                     )
                 )
+                send_tasks[send_task] = attempt
 
-        for send_task in asyncio.as_completed(send_tasks):
-            outcome = await send_task
-            completed = await self._complete_warmup(outcome)
-            latest_attempts[outcome.account.id] = completed or outcome.attempt
+        pending_send_tasks = set(send_tasks)
+        try:
+            while pending_send_tasks:
+                completed_send_tasks, pending_send_tasks = await asyncio.wait(
+                    pending_send_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for send_task in completed_send_tasks:
+                    outcome = await send_task
+                    completed = await self._complete_warmup(outcome)
+                    latest_attempts[outcome.account.id] = completed or outcome.attempt
+        finally:
+            if pending_send_tasks:
+                for send_task in pending_send_tasks:
+                    send_task.cancel()
+                await asyncio.gather(*pending_send_tasks, return_exceptions=True)
+                for send_task in pending_send_tasks:
+                    attempt = send_tasks[send_task]
+                    await self._warmup_repo.complete_attempt(
+                        attempt.id,
+                        status="failed",
+                        completed_at=utcnow(),
+                        error_code="warmup_cancelled",
+                        error_message="Limit warm-up cancelled after another warm-up completion failed",
+                    )
 
     def _resolve_model(self, configured_model: str, account: Account) -> str | None:
         normalized = configured_model.strip()

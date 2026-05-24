@@ -114,6 +114,31 @@ class FakeWarmupRepo:
         return row
 
 
+class FailingCompletionWarmupRepo(FakeWarmupRepo):
+    def __init__(self, *, fail_attempt_id: int) -> None:
+        super().__init__()
+        self.fail_attempt_id = fail_attempt_id
+
+    async def complete_attempt(
+        self,
+        attempt_id: int,
+        *,
+        status: str,
+        completed_at,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> AccountLimitWarmup | None:
+        if attempt_id == self.fail_attempt_id:
+            raise RuntimeError("completion failed")
+        return await super().complete_attempt(
+            attempt_id,
+            status=status,
+            completed_at=completed_at,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+
 class FakeRequestLogsRepo:
     def __init__(self) -> None:
         self.logs: list[dict[str, object]] = []
@@ -211,6 +236,22 @@ class TrackingSender:
         )
 
 
+class BlockingSecondSender:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.block = asyncio.Event()
+
+    async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+        self.calls.append(account.id)
+        if account.id == "acc_2":
+            await self.block.wait()
+        return LimitWarmupSendResult(
+            request_id=f"warmup-{account.id}",
+            success=True,
+            latency_ms=12,
+        )
+
+
 @pytest.mark.asyncio
 async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     repo = FakeWarmupRepo()
@@ -263,6 +304,27 @@ async def test_warmup_sends_use_bounded_concurrency() -> None:
     assert sender.max_active == 4
     assert len(logs.logs) == 6
     assert [row.status for row in repo.rows] == ["succeeded"] * 6
+
+
+@pytest.mark.asyncio
+async def test_warmup_completion_failure_cancels_pending_sends() -> None:
+    repo = FailingCompletionWarmupRepo(fail_attempt_id=1)
+    sender = BlockingSecondSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2")]
+
+    with pytest.raises(RuntimeError, match="completion failed"):
+        await service.run_after_usage_refresh(
+            accounts=accounts,
+            settings=_settings(),
+            before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000) for account in accounts},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
+            after_secondary={},
+        )
+
+    assert [row.status for row in repo.rows] == ["pending", "failed"]
+    assert repo.rows[1].error_code == "warmup_cancelled"
 
 
 @pytest.mark.asyncio

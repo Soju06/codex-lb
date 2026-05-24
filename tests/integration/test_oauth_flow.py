@@ -915,6 +915,112 @@ async def test_concurrent_browser_oauth_flows_keep_callbacks_isolated(async_clie
 
 
 @pytest.mark.asyncio
+async def test_callback_server_idle_stop_releases_store_lock_before_cleanup():
+    await oauth_module._OAUTH_STORE.reset()
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+
+        class ObservingCallbackServer:
+            async def stop(self) -> None:
+                assert not oauth_module._OAUTH_STORE.lock.locked()
+
+        async with oauth_module._OAUTH_STORE.lock:
+            flow = oauth_module.OAuthState(
+                flow_id="finished-browser-flow",
+                status="success",
+                method="browser",
+                state_token="finished-state",
+                code_verifier="finished-verifier",
+            )
+            oauth_module._OAUTH_STORE.remember_flow_locked(flow)
+            oauth_module._OAUTH_STORE.set_flow_status_locked(flow, status="success", error_message=None)
+            oauth_module._OAUTH_STORE._callback_server = cast(
+                oauth_module.OAuthCallbackServer,
+                ObservingCallbackServer(),
+            )
+
+        await service._stop_callback_server_if_idle()
+
+
+@pytest.mark.asyncio
+async def test_existing_account_cleanup_releases_store_lock_before_callback_server_stop():
+    await oauth_module._OAUTH_STORE.reset()
+
+    class ExistingAccountRepo:
+        async def list_accounts(self):
+            return [object()]
+
+    class ObservingCallbackServer:
+        async def stop(self) -> None:
+            assert not oauth_module._OAUTH_STORE.lock.locked()
+
+    service = oauth_module.OauthService(cast(AccountsRepository, ExistingAccountRepo()))
+    async with oauth_module._OAUTH_STORE.lock:
+        flow = oauth_module.OAuthState(
+            flow_id="pending-browser-flow",
+            status="pending",
+            method="browser",
+            state_token="pending-state",
+            code_verifier="pending-verifier",
+        )
+        oauth_module._OAUTH_STORE.remember_flow_locked(flow)
+        oauth_module._OAUTH_STORE._callback_server = cast(
+            oauth_module.OAuthCallbackServer,
+            ObservingCallbackServer(),
+        )
+
+    response = await service.start_oauth(oauth_module.OauthStartRequest())
+
+    assert response.method == "browser"
+
+
+@pytest.mark.asyncio
+async def test_new_browser_flow_waits_for_stopping_callback_server_before_reusing_slot(monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    started_servers: list[object] = []
+
+    class StoppingCallbackServer:
+        async def stop(self) -> None:
+            stop_started.set()
+            await release_stop.wait()
+
+    class ReplacementCallbackServer:
+        def __init__(self, *_, **__) -> None:
+            self.started = False
+
+        async def start(self) -> None:
+            self.started = True
+            started_servers.append(self)
+
+        async def stop(self) -> None:
+            return None
+
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+        stopping_server = StoppingCallbackServer()
+        async with oauth_module._OAUTH_STORE.lock:
+            oauth_module._OAUTH_STORE._callback_server = cast(oauth_module.OAuthCallbackServer, stopping_server)
+
+        monkeypatch.setattr(oauth_module, "OAuthCallbackServer", ReplacementCallbackServer)
+        stop_task = asyncio.create_task(service._stop_callback_server_if_idle())
+        await stop_started.wait()
+
+        start_task = asyncio.create_task(service._start_browser_flow())
+        await asyncio.sleep(0)
+        release_stop.set()
+
+        response = await asyncio.wait_for(start_task, timeout=1)
+        await stop_task
+
+        assert response.method == "browser"
+        assert len(started_servers) == 1
+        async with oauth_module._OAUTH_STORE.lock:
+            assert oauth_module._OAUTH_STORE._callback_server is started_servers[0]
+
+
+@pytest.mark.asyncio
 async def test_manual_callback_idempotent_success_requires_requested_flow(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 

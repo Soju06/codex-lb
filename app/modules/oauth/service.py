@@ -72,6 +72,7 @@ class OAuthStateStore:
         self._flows: dict[str, OAuthState] = {}
         self._state_token_index: dict[str, str] = {}
         self._callback_server: OAuthCallbackServer | None = None
+        self._callback_server_stop_task: asyncio.Task[None] | None = None
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -257,13 +258,14 @@ class OauthService:
             accounts = await self._accounts_repo.list_accounts()
             if accounts:
                 server: OAuthCallbackServer | None = None
+                stop_task: asyncio.Task[None] | None = None
                 async with self._store.lock:
                     server = self._store._cleanup_locked(clear_callback_server=False)
                     self._store._state = OAuthState(status="success")
                     if server is not None:
-                        await server.stop()
-                        if self._store._callback_server is server:
-                            self._store._callback_server = None
+                        stop_task = self._start_callback_server_stop_locked(server)
+                if server is not None and stop_task is not None:
+                    await self._finish_callback_server_stop(server, stop_task)
                 return OauthStartResponse(method="browser")
 
         if force_method == "device":
@@ -313,6 +315,8 @@ class OauthService:
             return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self) -> OauthStartResponse:
+        await self._wait_for_callback_server_stop()
+
         flow_id = secrets.token_urlsafe(12)
         code_verifier, code_challenge = generate_pkce_pair()
         state_token = secrets.token_urlsafe(16)
@@ -572,15 +576,47 @@ class OauthService:
                 return
             self._store.set_flow_status_locked(flow, status="error", error_message=message)
 
+    def _start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
+        stop_task = self._store._callback_server_stop_task
+        if stop_task is not None and not stop_task.done():
+            return stop_task
+        stop_task = asyncio.create_task(server.stop())
+        self._store._callback_server_stop_task = stop_task
+        return stop_task
+
+    async def _finish_callback_server_stop(
+        self,
+        server: OAuthCallbackServer,
+        stop_task: asyncio.Task[None],
+    ) -> None:
+        try:
+            await asyncio.shield(stop_task)
+        finally:
+            async with self._store.lock:
+                if self._store._callback_server is server:
+                    self._store._callback_server = None
+                if self._store._callback_server_stop_task is stop_task:
+                    self._store._callback_server_stop_task = None
+
+    async def _wait_for_callback_server_stop(self) -> None:
+        while True:
+            async with self._store.lock:
+                stop_task = self._store._callback_server_stop_task
+            if stop_task is None:
+                return
+            await asyncio.shield(stop_task)
+
     async def _stop_callback_server_if_idle(self) -> None:
+        server: OAuthCallbackServer | None = None
+        stop_task: asyncio.Task[None] | None = None
         async with self._store.lock:
             if self._store.has_pending_browser_flows_locked():
                 return
             server = self._store._callback_server
             if server:
-                await server.stop()
-                if self._store._callback_server is server:
-                    self._store._callback_server = None
+                stop_task = self._start_callback_server_stop_locked(server)
+        if server and stop_task:
+            await self._finish_callback_server_stop(server, stop_task)
 
     @staticmethod
     def _html_response(html: str) -> web.Response:

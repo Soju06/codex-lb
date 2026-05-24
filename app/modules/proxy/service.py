@@ -4404,7 +4404,7 @@ class ProxyService:
         sticky_key: str | None,
         sticky_kind: StickySessionKind | None,
         prefer_earlier_reset: bool,
-        prefer_earlier_reset_window: ResetPreferenceWindow,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy,
         model: str | None,
         request_state: _WebSocketRequestState,
@@ -11224,7 +11224,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        prefer_earlier_reset_window: ResetPreferenceWindow,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
@@ -13727,7 +13727,9 @@ def _relative_availability_top_k(settings: DashboardSettings) -> int:
 
 def _prefer_earlier_reset_window(settings: DashboardSettings) -> ResetPreferenceWindow:
     value = getattr(settings, "prefer_earlier_reset_window", "secondary")
-    return "secondary" if value == "secondary" else "primary"
+    if value == "primary":
+        return "primary"
+    return "secondary"
 
 
 

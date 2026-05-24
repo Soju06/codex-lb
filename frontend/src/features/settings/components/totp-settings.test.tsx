@@ -19,6 +19,10 @@ vi.mock("@/features/auth/api", () => ({
 }));
 
 const baseSettings = createDashboardSettings({ totpConfigured: false });
+const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...baseUpdatePayload } =
+  baseSettings;
+void _guestPasswordConfigured;
+void _totpConfigured;
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -103,17 +107,12 @@ describe("TotpSettings", () => {
   it("toggles require-on-login via switch", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    const saveSettings: Record<string, unknown> = { ...baseSettings };
-    delete saveSettings.additionalQuotaPolicies;
-    delete saveSettings.totpConfigured;
-    delete saveSettings.upstreamProxyRoutingEnabled;
-    delete saveSettings.upstreamProxyDefaultPoolId;
 
     renderWithClient(<TotpSettings settings={baseSettings} onSave={onSave} />);
 
     await user.click(screen.getByRole("switch"));
     expect(onSave).toHaveBeenCalledWith({
-      ...saveSettings,
+      ...baseUpdatePayload,
       totpRequiredOnLogin: true,
     });
   });

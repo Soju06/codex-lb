@@ -32,6 +32,10 @@ const BASE_SETTINGS = createDashboardSettings({
   preferEarlierResetAccounts: true,
   totpConfigured: false,
 });
+const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...BASE_UPDATE_PAYLOAD } =
+  BASE_SETTINGS;
+void _guestPasswordConfigured;
+void _totpConfigured;
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
@@ -47,7 +51,7 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      ...BASE_SETTINGS,
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: false,
       openaiCacheAffinityMaxAgeSeconds: 180,
       guestAccessEnabled: false,
@@ -65,7 +69,7 @@ describe("RoutingSettings", () => {
     await user.type(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }), "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
-      ...BASE_SETTINGS,
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: false,
       openaiCacheAffinityMaxAgeSeconds: 240,
       guestAccessEnabled: false,
@@ -88,7 +92,7 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("switch", { name: "Enable sticky threads" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      ...BASE_SETTINGS,
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: true,
       openaiCacheAffinityMaxAgeSeconds: 300,
       guestAccessEnabled: false,

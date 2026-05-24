@@ -6,6 +6,10 @@ import { SessionSettings } from "@/features/settings/components/session-settings
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 const baseSettings = createDashboardSettings();
+const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...baseUpdatePayload } =
+  baseSettings;
+void _guestPasswordConfigured;
+void _totpConfigured;
 
 describe("SessionSettings", () => {
   it("shows the current dashboard session lifetime in hours", () => {
@@ -25,7 +29,7 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      ...baseSettings,
+      ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 86400,
       guestAccessEnabled: false,
     });
@@ -77,7 +81,7 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      ...baseSettings,
+      ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 31536000,
       guestAccessEnabled: false,
     });

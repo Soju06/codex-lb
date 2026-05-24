@@ -169,7 +169,7 @@ class FakeRequestLogsRepo:
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
-        source: str | None = None,
+        request_kind: str = "normal",
     ) -> None:
         self.logs.append(
             {
@@ -194,7 +194,7 @@ class FakeRequestLogsRepo:
                 "api_key_id": api_key_id,
                 "session_id": session_id,
                 "plan_type": plan_type,
-                "source": source,
+                "request_kind": request_kind,
             }
         )
 
@@ -301,7 +301,7 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert len(sender.calls) == 1
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "succeeded"
-    assert logs.logs[0]["source"] == "limit_warmup"
+    assert logs.logs[0]["request_kind"] == "limit_warmup"
 
 
 @pytest.mark.asyncio

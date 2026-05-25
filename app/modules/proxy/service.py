@@ -7388,6 +7388,13 @@ class ProxyService:
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
+            grouped_error_reason = (
+                "previous_response_not_found"
+                if is_previous_response_not_found_event
+                else "missing_tool_output"
+                if is_missing_tool_output_event
+                else "stream_incomplete"
+            )
             for grouped_request_state in grouped_previous_response_request_states:
                 grouped_request_state.error_http_status_override = 502
                 (
@@ -7398,7 +7405,7 @@ class ProxyService:
                     grouped_event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(
                     grouped_request_state,
-                    reason="previous_response_not_found",
+                    reason=grouped_error_reason,
                 )
                 if grouped_request_state.event_queue is not None:
                     await grouped_request_state.event_queue.put(grouped_event_block)
@@ -8299,6 +8306,13 @@ class ProxyService:
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True
             downstream_texts: list[str] = []
+            grouped_error_reason = (
+                "previous_response_not_found"
+                if is_previous_response_not_found_event
+                else "missing_tool_output"
+                if is_missing_tool_output_event
+                else "stream_incomplete"
+            )
             for grouped_request_state in grouped_previous_response_request_states:
                 (
                     grouped_downstream_text,
@@ -8308,7 +8322,7 @@ class ProxyService:
                     grouped_event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(
                     grouped_request_state,
-                    reason="previous_response_not_found",
+                    reason=grouped_error_reason,
                 )
                 downstream_texts.append(grouped_downstream_text)
                 await self._finalize_websocket_request_state(

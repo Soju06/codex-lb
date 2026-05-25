@@ -15,7 +15,7 @@ When serving or consuming the Codex-native `/backend-api/codex/responses` WebSoc
 - **WHEN** upstream emits a direct WebSocket stale-anchor error
 - **THEN** codex-lb MUST NOT forward raw `previous_response_not_found`
 - **AND** codex-lb MUST NOT expose the missing upstream response id downstream
-- **AND** codex-lb SHOULD preserve a stable sanitized classifier that lets a compatible Codex client distinguish stale-anchor continuity loss from quota, policy, auth, and generic invalid-request failures
+- **AND** codex-lb MUST preserve a stable sanitized classifier that lets a compatible Codex client distinguish stale-anchor continuity loss from quota, policy, auth, and generic invalid-request failures
 
 #### Scenario: Non-stale-anchor failures do not trigger full-context retry
 - **WHEN** the upstream failure is quota, policy, auth, context-window, or another non-continuity error

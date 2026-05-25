@@ -13,6 +13,7 @@ import {
 	createApiKeyUsage7Day,
 	createDashboardAuthSession,
 	createDashboardOverview,
+	createDashboardProjections,
 	createDashboardSettings,
 	createDefaultAccounts,
 	createDefaultApiKeys,
@@ -321,6 +322,10 @@ export const handlers = [
 				accounts: state.accounts,
 			}),
 		);
+	}),
+
+	http.get("/api/dashboard/projections", () => {
+		return HttpResponse.json(createDashboardProjections());
 	}),
 
 	http.get("/api/request-logs", ({ request }) => {

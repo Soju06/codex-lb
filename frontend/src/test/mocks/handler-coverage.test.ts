@@ -24,6 +24,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /health",
 	// dashboard
 	"GET /api/dashboard/overview",
+	"GET /api/dashboard/projections",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
 	// accounts

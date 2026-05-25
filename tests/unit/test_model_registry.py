@@ -9,6 +9,23 @@ from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, Upstre
 
 pytestmark = pytest.mark.unit
 
+EXPECTED_CORE_MODEL_PLANS = {
+    "plus",
+    "pro",
+    "prolite",
+    "team",
+    "business",
+    "enterprise",
+    "edu",
+    "education",
+    "go",
+    "hc",
+    "finserv",
+    "quorum",
+    "self_serve_business_usage_based",
+    "enterprise_cbp_usage_based",
+}
+
 
 def _model(slug: str) -> UpstreamModel:
     return UpstreamModel(
@@ -94,6 +111,11 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     registry = ModelRegistry(ttl_seconds=60.0)
     models = registry.get_models_with_fallback()
 
+    gpt54 = models["gpt-5.4"]
+    assert gpt54.minimal_client_version == "0.98.0"
+    assert gpt54.raw["max_context_window"] == 1_000_000
+    assert gpt54.available_in_plans == EXPECTED_CORE_MODEL_PLANS
+
     mini = models["gpt-5.4-mini"]
     assert mini.prefer_websockets is True
     assert mini.default_verbosity == "medium"
@@ -112,8 +134,8 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert auto_review.raw["shell_type"] == "shell_command"
     assert auto_review.raw["max_context_window"] == 1_000_000
     assert auto_review.minimal_client_version == "0.98.0"
-    assert len(auto_review.available_in_plans) == 14
-    assert len(models["gpt-5.3-codex"].available_in_plans) == 14
+    assert auto_review.available_in_plans == EXPECTED_CORE_MODEL_PLANS
+    assert models["gpt-5.3-codex"].available_in_plans == EXPECTED_CORE_MODEL_PLANS
 
 
 @pytest.mark.asyncio

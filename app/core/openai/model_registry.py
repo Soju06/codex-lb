@@ -86,7 +86,7 @@ _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
 )
 
 _BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
-    plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "quorum"}
+    plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "k12"}
 )
 
 
@@ -143,7 +143,14 @@ def _bootstrap_model(
 # upstream, and the live upstream data always takes precedence once available.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     _bootstrap_model("gpt-5.5", "GPT-5.5", prefer_websockets=True),
-    _bootstrap_model("gpt-5.4", "GPT-5.4", prefer_websockets=True),
+    _bootstrap_model(
+        "gpt-5.4",
+        "GPT-5.4",
+        prefer_websockets=True,
+        minimal_client_version="0.98.0",
+        available_in_plans=_BOOTSTRAP_CORE_AVAILABLE_IN_PLANS,
+        raw={"max_context_window": 1_000_000},
+    ),
     _bootstrap_model(
         "gpt-5.4-mini",
         "GPT-5.4 Mini",

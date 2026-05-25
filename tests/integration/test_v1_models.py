@@ -17,6 +17,23 @@ BOOTSTRAP_MODEL_SLUGS = {
     "codex-auto-review",
 }
 
+EXPECTED_CORE_MODEL_PLANS = {
+    "plus",
+    "pro",
+    "prolite",
+    "team",
+    "business",
+    "enterprise",
+    "edu",
+    "education",
+    "go",
+    "hc",
+    "finserv",
+    "quorum",
+    "self_serve_business_usage_based",
+    "enterprise_cbp_usage_based",
+}
+
 
 def _make_upstream_model(
     slug: str,
@@ -101,6 +118,11 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert resp.status_code == 200
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
 
+    gpt54 = entries["gpt-5.4"]
+    assert gpt54["minimal_client_version"] == "0.98.0"
+    assert gpt54["max_context_window"] == 1_000_000
+    assert set(gpt54["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+
     mini = entries["gpt-5.4-mini"]
     assert mini["prefer_websockets"] is True
     assert mini["default_verbosity"] == "medium"
@@ -119,8 +141,8 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert auto_review["shell_type"] == "shell_command"
     assert auto_review["max_context_window"] == 1_000_000
     assert auto_review["minimal_client_version"] == "0.98.0"
-    assert len(auto_review["available_in_plans"]) == 14
-    assert len(entries["gpt-5.3-codex"]["available_in_plans"]) == 14
+    assert set(auto_review["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+    assert set(entries["gpt-5.3-codex"]["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
 
 
 @pytest.mark.asyncio

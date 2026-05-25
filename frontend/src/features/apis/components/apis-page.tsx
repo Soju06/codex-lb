@@ -9,6 +9,7 @@ import type {
 	ApiKeyCreateRequest,
 	ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
+import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-created-dialog";
 import { ApiDetail } from "@/features/apis/components/api-detail";
 import { ApiList } from "@/features/apis/components/api-list";
 import { ApisSkeleton } from "@/features/apis/components/apis-skeleton";
@@ -28,11 +29,6 @@ const ApiKeyCreateDialog = lazy(() =>
 const ApiKeyEditDialog = lazy(() =>
 	import("@/features/api-keys/components/api-key-edit-dialog").then((m) => ({
 		default: m.ApiKeyEditDialog,
-	})),
-);
-const ApiKeyCreatedDialog = lazy(() =>
-	import("@/features/api-keys/components/api-key-created-dialog").then((m) => ({
-		default: m.ApiKeyCreatedDialog,
 	})),
 );
 
@@ -193,13 +189,13 @@ export function ApisPage() {
 					onOpenChange={editDialog.onOpenChange}
 					onSubmit={handleUpdate}
 				/>
-
-				<ApiKeyCreatedDialog
-					open={createdDialog.open}
-					apiKey={createdDialog.data}
-					onOpenChange={createdDialog.onOpenChange}
-				/>
 			</Suspense>
+
+			<ApiKeyCreatedDialog
+				open={createdDialog.open}
+				apiKey={createdDialog.data}
+				onOpenChange={createdDialog.onOpenChange}
+			/>
 
 			<ConfirmDialog
 				open={deleteDialog.open}

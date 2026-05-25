@@ -71,6 +71,8 @@ from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
+    PREVIOUS_RESPONSE_STALE_CODE,
+    PREVIOUS_RESPONSE_STALE_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
@@ -3551,6 +3553,7 @@ class ProxyService:
                                     error_code="upstream_error",
                                     error_message="Upstream error",
                                     surface="websocket_connect",
+                                    expose_stale_previous_response_classifier=codex_session_affinity,
                                 )
                                 async with client_send_lock:
                                     await websocket.send_text(
@@ -4018,6 +4021,7 @@ class ProxyService:
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
             raise
+        request_state.expose_stale_previous_response_classifier = codex_session_affinity
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
@@ -7392,7 +7396,10 @@ class ProxyService:
                     grouped_event,
                     grouped_payload,
                     grouped_event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                ) = _build_stream_incomplete_terminal_event_for_request(
+                    grouped_request_state,
+                    reason="previous_response_not_found",
+                )
                 if grouped_request_state.event_queue is not None:
                     await grouped_request_state.event_queue.put(grouped_event_block)
                     await grouped_request_state.event_queue.put(None)
@@ -7934,6 +7941,7 @@ class ProxyService:
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
                         continuity_state=continuity_state,
+                        codex_session_affinity=codex_session_affinity,
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
@@ -8122,6 +8130,7 @@ class ProxyService:
         upstream_control: _WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
         continuity_state: "_WebSocketContinuityState | None" = None,
+        codex_session_affinity: bool = False,
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -8297,7 +8306,10 @@ class ProxyService:
                     grouped_event,
                     grouped_payload,
                     grouped_event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                ) = _build_stream_incomplete_terminal_event_for_request(
+                    grouped_request_state,
+                    reason="previous_response_not_found",
+                )
                 downstream_texts.append(grouped_downstream_text)
                 await self._finalize_websocket_request_state(
                     grouped_request_state,
@@ -8322,12 +8334,16 @@ class ProxyService:
         if request_state is None:
             if is_previous_response_not_found_event:
                 upstream_control.reconnect_requested = True
+                fallback_error_code, fallback_error_message = _websocket_continuity_error_fields(
+                    reason="previous_response_not_found",
+                    expose_stale_previous_response_classifier=codex_session_affinity,
+                )
                 downstream_text = json.dumps(
                     cast(
                         dict[str, JsonValue],
                         response_failed_event(
-                            "stream_incomplete",
-                            "Upstream websocket closed before response.completed",
+                            fallback_error_code,
+                            fallback_error_message,
                             error_type="server_error",
                             response_id=get_request_id(),
                         ),
@@ -11441,6 +11457,7 @@ class _WebSocketRequestState:
     previous_response_id: str | None = None
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
+    expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
     # injection form of this request that can be replayed as a fresh turn.
@@ -12347,6 +12364,16 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     )
 
 
+def _websocket_continuity_error_fields(
+    *,
+    reason: str,
+    expose_stale_previous_response_classifier: bool,
+) -> tuple[str, str]:
+    if reason == "previous_response_not_found" and expose_stale_previous_response_classifier:
+        return PREVIOUS_RESPONSE_STALE_CODE, PREVIOUS_RESPONSE_STALE_MESSAGE
+    return "stream_incomplete", PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
+
+
 def _rewrite_websocket_continuity_corruption_event(
     *,
     request_state: _WebSocketRequestState,
@@ -12364,9 +12391,13 @@ def _rewrite_websocket_continuity_corruption_event(
         previous_response_id=request_state.previous_response_id,
         session_id=request_state.session_id,
     )
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     rewritten_event_payload = response_failed_event(
-        "stream_incomplete",
-        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        rewritten_code,
+        rewritten_message,
         error_type="server_error",
         response_id=_websocket_downstream_response_id(request_state),
     )
@@ -12436,6 +12467,7 @@ def _sanitize_websocket_connect_failure(
         error_code=error_code,
         error_message=error_message,
         surface="websocket_connect",
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
     )
 
 
@@ -12448,6 +12480,7 @@ def _sanitize_websocket_previous_response_error(
     error_code: str,
     error_message: str,
     surface: str,
+    expose_stale_previous_response_classifier: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelope, str, str]:
     if previous_response_id is None:
         return status_code, payload, error_code, error_message
@@ -12473,7 +12506,10 @@ def _sanitize_websocket_previous_response_error(
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
-    rewritten_message = PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=expose_stale_previous_response_classifier,
+    )
     _record_continuity_fail_closed(
         surface=surface,
         reason=reason,
@@ -12484,11 +12520,11 @@ def _sanitize_websocket_previous_response_error(
     return (
         502,
         openai_error(
-            "stream_incomplete",
+            rewritten_code,
             rewritten_message,
             error_type="server_error",
         ),
-        "stream_incomplete",
+        rewritten_code,
         rewritten_message,
     )
 
@@ -12515,9 +12551,13 @@ def _sanitize_websocket_terminal_error_fields(
         session_id=request_state.session_id,
         upstream_error_code=normalized_code,
     )
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason="previous_response_not_found",
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     return (
-        "stream_incomplete",
-        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        rewritten_code,
+        rewritten_message,
         "server_error",
         None,
     )
@@ -12872,18 +12912,24 @@ def _pop_matching_websocket_request_states(
 
 def _build_stream_incomplete_terminal_event_for_request(
     request_state: _WebSocketRequestState,
+    *,
+    reason: str = "stream_incomplete",
 ) -> tuple[str, str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None]:
+    error_code, error_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     event_block, event, payload, event_type = _build_rewritten_stream_response_failed_event(
         response_id=_websocket_downstream_response_id(request_state),
-        error_code="stream_incomplete",
-        error_message="Upstream websocket closed before response.completed",
+        error_code=error_code,
+        error_message=error_message,
     )
     downstream_text = json.dumps(
         cast(
             dict[str, JsonValue],
             response_failed_event(
-                "stream_incomplete",
-                "Upstream websocket closed before response.completed",
+                error_code,
+                error_message,
                 error_type="server_error",
                 response_id=_websocket_downstream_response_id(request_state),
             ),

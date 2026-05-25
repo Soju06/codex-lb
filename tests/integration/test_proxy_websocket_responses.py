@@ -16,6 +16,11 @@ import app.modules.proxy.service as proxy_module
 pytestmark = pytest.mark.integration
 
 
+def _assert_codex_previous_response_stale_error(error: dict[str, object]) -> None:
+    assert error["code"] == proxy_module.PREVIOUS_RESPONSE_STALE_CODE
+    assert error["message"] == proxy_module.PREVIOUS_RESPONSE_STALE_MESSAGE
+
+
 @pytest.fixture(autouse=True)
 def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_request_log(self, **kwargs):
@@ -2216,8 +2221,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
 
     assert event["type"] == "error"
     assert event["status"] == 502
-    assert event["error"]["code"] == "stream_incomplete"
-    assert event["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(event["error"])
 
 
 def test_backend_responses_websocket_masks_short_previous_response_not_found_without_retry(
@@ -2399,8 +2403,7 @@ def test_backend_responses_websocket_masks_short_previous_response_not_found_wit
             failed_2 = json.loads(websocket.receive_text())
 
     assert failed_2["type"] == "response.failed"
-    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1
@@ -2562,12 +2565,14 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert created_event["type"] == "response.created"
     assert created_event["response"]["id"] == "resp_ws_inflight"
     assert failed_event["type"] == "response.failed"
-    assert failed_event["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_event["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_event)
     assert completed_event["type"] == "response.completed"
     assert completed_event["response"]["id"] == "resp_ws_inflight"
-    assert any(call["status"] == "error" and call["error_code"] == "stream_incomplete" for call in log_calls)
+    assert any(
+        call["status"] == "error" and call["error_code"] == proxy_module.PREVIOUS_RESPONSE_STALE_CODE
+        for call in log_calls
+    )
     assert any(call["status"] == "success" and call["request_id"] == "resp_ws_inflight" for call in log_calls)
     assert fake_upstream.closed is True
 
@@ -2682,8 +2687,7 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
             failed_event = json.loads(websocket.receive_text())
 
     assert failed_event["type"] == "response.failed"
-    assert failed_event["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_event["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
     serialized = json.dumps(failed_event)
     assert "previous_response_not_found" not in serialized
     assert "resp_chatgpt_prev_anchor" not in serialized
@@ -2858,8 +2862,7 @@ def test_backend_responses_websocket_masks_previous_response_not_found_when_mess
             failed_2 = json.loads(websocket.receive_text())
 
     assert failed_2["type"] == "response.failed"
-    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1
@@ -3073,8 +3076,7 @@ def test_backend_responses_websocket_keeps_session_alive_after_foreign_previous_
     assert created_2["response"]["id"] == "resp_ws_followup_created"
     assert failed_2["type"] == "response.failed"
     assert failed_2["response"]["id"] == "resp_ws_followup_created"
-    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert created_3["type"] == "response.created"
     assert completed_3["type"] == "response.completed"
@@ -3326,7 +3328,7 @@ def test_backend_responses_websocket_keeps_session_alive_after_anonymous_prev_nf
     assert created_3["response"]["id"] == "resp_ws_followup_created"
     assert failed_3["type"] == "response.failed"
     assert failed_3["response"]["id"] == "resp_ws_followup_created"
-    assert failed_3["response"]["error"]["code"] == "stream_incomplete"
+    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_3)
     assert completed_2["type"] == "response.completed"
     assert completed_2["response"]["id"] == "resp_ws_inflight"
@@ -3589,7 +3591,7 @@ def test_backend_responses_websocket_matches_previous_response_error_to_anchor_w
     assert created_4["response"]["id"] == "resp_ws_followup_b"
     assert failed_3["type"] == "response.failed"
     assert failed_3["response"]["id"] == "resp_ws_followup_a"
-    assert failed_3["response"]["error"]["code"] == "stream_incomplete"
+    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_3)
     assert completed_4["type"] == "response.completed"
     assert completed_4["response"]["id"] == "resp_ws_followup_b"
@@ -3814,8 +3816,8 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert failed_3["type"] == "response.failed"
     assert failed_2["response"]["id"] == "resp_ws_followup_same_anchor_a"
     assert failed_3["response"]["id"] == "resp_ws_followup_same_anchor_b"
-    assert failed_2["response"]["error"]["code"] == "stream_incomplete"
-    assert failed_3["response"]["error"]["code"] == "stream_incomplete"
+    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
+    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert "previous_response_not_found" not in json.dumps(failed_3)
     assert created_4["response"]["id"] == "resp_ws_after_same_anchor_error"

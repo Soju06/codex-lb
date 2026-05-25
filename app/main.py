@@ -25,6 +25,7 @@ from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
+    add_app_version_middleware,
     add_api_firewall_middleware,
     add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
@@ -348,6 +349,7 @@ def create_app() -> FastAPI:
         ),
     )
     add_backend_api_codex_v1_alias_middleware(app)
+    add_app_version_middleware(app)
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)

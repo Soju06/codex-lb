@@ -546,11 +546,16 @@ class OauthService:
             status=AccountStatus.ACTIVE,
             deactivation_reason=None,
         )
+        # merge_by_chatgpt_identity reuses the existing local row for this
+        # upstream ChatGPT identity on reauth — including rows that were
+        # deactivated because the previous refresh token was revoked. This
+        # prevents a second account row from being created with an
+        # `__copyN` id suffix (issue #788).
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert(account)
+                await repo.upsert(account, merge_by_chatgpt_identity=True)
         else:
-            await self._accounts_repo.upsert(account)
+            await self._accounts_repo.upsert(account, merge_by_chatgpt_identity=True)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

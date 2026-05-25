@@ -103,7 +103,13 @@ class AccountsRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
+    async def upsert(
+        self,
+        account: Account,
+        *,
+        merge_by_email: bool | None = None,
+        merge_by_chatgpt_identity: bool = False,
+    ) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
         if merge_by_email is None:
@@ -121,7 +127,31 @@ class AccountsRepository:
             if dialect_name == "sqlite" and not sqlite_lock_acquired:
                 await self._acquire_sqlite_merge_lock()
             elif dialect_name == "postgresql":
-                await self._acquire_postgresql_identity_lock(account.id)
+                if merge_by_chatgpt_identity and account.chatgpt_account_id:
+                    await self._acquire_postgresql_identity_lock(
+                        f"chatgpt:{account.chatgpt_account_id}"
+                    )
+                else:
+                    await self._acquire_postgresql_identity_lock(account.id)
+
+        # Identity-aware reconciliation runs before the deterministic-id
+        # check so that a deactivated row whose refresh token was revoked
+        # is reused on reauth instead of being shadowed by an __copy row
+        # under the same upstream ChatGPT identity (issue #788).
+        #
+        # This path is intentionally independent of merge_by_email: the
+        # OAuth reauth caller passes merge_by_chatgpt_identity=True even
+        # when the operator has opted into "import without overwrite",
+        # because that setting governs the dashboard import path (side-
+        # by-side rows for the same email) rather than the reauth path
+        # (one local row per upstream identity).
+        if merge_by_chatgpt_identity and account.chatgpt_account_id:
+            canonical = await self._account_by_chatgpt_identity(account.chatgpt_account_id)
+            if canonical is not None:
+                _apply_account_updates(canonical, account)
+                await self._session.commit()
+                await self._session.refresh(canonical)
+                return canonical
 
         existing = await self._session.get(Account, account.id)
         if existing:
@@ -144,6 +174,25 @@ class AccountsRepository:
         await self._session.commit()
         await self._session.refresh(account)
         return account
+
+    async def _account_by_chatgpt_identity(self, chatgpt_account_id: str) -> Account | None:
+        """Return the canonical local account row for a ChatGPT identity.
+
+        Order of preference, so that reauth reuses the row that already
+        carries the historical usage and audit trail:
+
+        1. The oldest row by ``created_at`` (deterministic tie-break on
+           ``id``) — this is almost always the original row, before any
+           ``__copyN`` rows were created.
+        """
+
+        result = await self._session.execute(
+            select(Account)
+            .where(Account.chatgpt_account_id == chatgpt_account_id)
+            .order_by(Account.created_at.asc(), Account.id.asc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def update_status(
         self,

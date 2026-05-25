@@ -141,6 +141,111 @@ async def test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgre
         assert acquired_identity_locks == ["acc_non_merge_lock"]
 
 
+def _make_account_with_chatgpt_id(account_id: str, email: str, chatgpt_id: str) -> Account:
+    account = _make_account(account_id, email)
+    account.chatgpt_account_id = chatgpt_id
+    return account
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_deactivated_row(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        original = _make_account_with_chatgpt_id("acc_canonical", "reauth@example.com", "chatgpt_xyz")
+        await repo.upsert(original, merge_by_email=False)
+
+        await repo.update_status(
+            "acc_canonical",
+            AccountStatus.DEACTIVATED,
+            "Refresh token was revoked - re-login required",
+        )
+
+        reauth = _make_account_with_chatgpt_id("acc_canonical", "reauth@example.com", "chatgpt_xyz")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        # Reauth must return the original deterministic id, with the new
+        # plan and re-activated status, instead of an `__copyN` row.
+        # merge_by_email=False simulates an operator with
+        # `importWithoutOverwrite` enabled; identity-merge runs anyway
+        # because reauth is governed by upstream identity, not by the
+        # dashboard import setting.
+        assert saved.id == "acc_canonical"
+        assert saved.plan_type == "team"
+        assert saved.status == AccountStatus.ACTIVE
+        assert saved.deactivation_reason is None
+
+        rows = list(
+            (
+                await session.execute(
+                    select(Account).where(Account.chatgpt_account_id == "chatgpt_xyz")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id == "acc_canonical"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_picks_oldest_canonical(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        canonical = _make_account_with_chatgpt_id("acc_first", "shared@example.com", "chatgpt_dup")
+        canonical.created_at = utcnow() - timedelta(days=30)
+        await repo.upsert(canonical, merge_by_email=False)
+
+        copy_row = _make_account_with_chatgpt_id("acc_first__copy2", "shared@example.com", "chatgpt_dup")
+        copy_row.created_at = utcnow()
+        await repo.upsert(copy_row, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_first", "shared@example.com", "chatgpt_dup")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        # Reauth must land on the older canonical row, not the `__copy2`
+        # row, so the long-term usage history stays attached.
+        assert saved.id == "acc_first"
+        assert saved.plan_type == "team"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_creates_when_missing(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        incoming = _make_account_with_chatgpt_id("acc_new", "new@example.com", "chatgpt_fresh")
+        saved = await repo.upsert(incoming, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_new"
+        assert saved.chatgpt_account_id == "chatgpt_fresh"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_skips_without_upstream_id(db_setup):
+    """Falls back to deterministic-id behavior when the incoming row has
+    no ``chatgpt_account_id`` — e.g. legacy local accounts that were
+    seeded before the field was populated.
+    """
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        first = _make_account("acc_no_id", "noid@example.com")
+        await repo.upsert(first, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        again = _make_account("acc_no_id", "noid@example.com")
+        again.plan_type = "team"
+        saved = await repo.upsert(again, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        # No upstream id means identity-merge has nothing to key on, so
+        # the standard side-by-side path runs and creates `__copy2`.
+        assert saved.id.startswith("acc_no_id__copy")
+
+
 @pytest.mark.asyncio
 async def test_usage_repository_aggregate(db_setup):
     async with SessionLocal() as session:

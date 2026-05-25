@@ -129,7 +129,9 @@ async def test_app_version_middleware_adds_header_to_short_circuited_4xx_respons
         return {"ok": True}
 
     work_route = app.router.routes.pop()
-    fallback_index = next(index for index, route in enumerate(app.router.routes) if getattr(route, "path", None) == "/{path:path}")
+    fallback_index = next(
+        index for index, route in enumerate(app.router.routes) if getattr(route, "path", None) == "/{path:path}"
+    )
     app.router.routes.insert(fallback_index, work_route)
 
     transport = ASGITransport(app=app)

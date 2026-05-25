@@ -25,8 +25,8 @@ from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
-    add_app_version_middleware,
     add_api_firewall_middleware,
+    add_app_version_middleware,
     add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
     add_request_decompression_middleware,

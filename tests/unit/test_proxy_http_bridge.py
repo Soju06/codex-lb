@@ -11654,7 +11654,7 @@ async def test_create_http_bridge_session_fails_over_on_upstream_websocket_open_
             ),
         ),
     )
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
@@ -11767,7 +11767,7 @@ async def test_reconnect_http_bridge_session_fails_over_on_upstream_websocket_op
             ),
         ),
     )
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)

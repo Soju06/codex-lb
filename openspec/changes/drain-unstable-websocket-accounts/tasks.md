@@ -1,0 +1,3 @@
+- [x] Add retryable websocket open-timeout failover before 401 refresh handling in HTTP bridge create and reconnect paths.
+- [x] Add focused regression coverage for bridge create/reconnect account exclusion after retryable websocket open timeouts.
+- [x] Run targeted proxy websocket and OpenSpec validation.

@@ -218,6 +218,10 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _is_retryable_websocket_open_timeout(exc: ProxyResponseError) -> bool:
+    return exc.failure_phase == "websocket_open_timeout" and exc.retryable_same_contract
+
+
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeAccountSessionsMixin,
@@ -1974,6 +1978,14 @@ class _HTTPBridgeMixin(
                 )
                 break
             except ProxyResponseError as exc:
+                if _is_retryable_websocket_open_timeout(exc) and _remaining_budget_seconds(deadline) > 0:
+                    await self._handle_websocket_connect_error(account, exc)
+                    if selected_is_preferred and retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
@@ -1999,6 +2011,14 @@ class _HTTPBridgeMixin(
                     )
                     break
                 except ProxyResponseError as retry_exc:
+                    if _is_retryable_websocket_open_timeout(retry_exc) and _remaining_budget_seconds(deadline) > 0:
+                        await self._handle_websocket_connect_error(account, retry_exc)
+                        if selected_is_preferred and retry_same_account_once:
+                            retry_same_account_once = False
+                            continue
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        continue
                     if retry_exc.status_code != 401:
                         await self._load_balancer.release_account_lease(selected_account_lease)
                         selected_account_lease = None
@@ -2310,6 +2330,14 @@ class _HTTPBridgeMixin(
                 )
                 break
             except ProxyResponseError as exc:
+                if _is_retryable_websocket_open_timeout(exc) and _remaining_budget_seconds(deadline) > 0:
+                    await self._handle_websocket_connect_error(account, exc)
+                    if selected_is_preferred and retry_same_account_once:
+                        retry_same_account_once = False
+                        continue
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await release_selected_account_lease()
                     raise
@@ -2335,6 +2363,14 @@ class _HTTPBridgeMixin(
                     )
                     break
                 except ProxyResponseError as retry_exc:
+                    if _is_retryable_websocket_open_timeout(retry_exc) and _remaining_budget_seconds(deadline) > 0:
+                        await self._handle_websocket_connect_error(account, retry_exc)
+                        if selected_is_preferred and retry_same_account_once:
+                            retry_same_account_once = False
+                            continue
+                        excluded_account_ids.add(account.id)
+                        preferred_candidate_id = None
+                        continue
                     if retry_exc.status_code != 401:
                         await release_selected_account_lease()
                         raise

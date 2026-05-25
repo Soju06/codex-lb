@@ -10659,6 +10659,66 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
 
 
 @pytest.mark.asyncio
+async def test_create_http_bridge_session_fails_over_after_401_refresh_open_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_bridge_create_refresh_timeout_a")
+    account_b = _make_account("acc_bridge_create_refresh_timeout_b")
+    first_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    open_timeout = proxy_module.ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "Request to upstream timed out"),
+        failure_phase="websocket_open_timeout",
+        retryable_same_contract=True,
+    )
+    upstream = SimpleNamespace(response_header=lambda _name: None)
+    seen_excluded_account_ids: list[set[str]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if not excluded_account_ids:
+            return AccountSelection(account=account_a, error_message=None)
+        return AccountSelection(account=account_b, error_message=None)
+
+    async def relay_noop(_session: proxy_service._HTTPBridgeSession) -> None:
+        return None
+
+    record_error = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_a, account_b]))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=[first_401, open_timeout, upstream]),
+    )
+    monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", relay_noop)
+
+    session = await service._create_http_bridge_session(
+        proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-create-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-create-key"),
+        api_key=None,
+        request_model="gpt-5.5",
+        idle_ttl_seconds=30.0,
+    )
+
+    upstream_reader = session.upstream_reader
+    assert upstream_reader is not None
+    await upstream_reader
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert session.account == account_b
+    assert session.upstream is upstream
+    record_error.assert_awaited_once_with(account_a)
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -22487,6 +22547,81 @@ async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refre
     assert session.account == account_b
     assert session.upstream is new_upstream
     record_error.assert_awaited_once_with(account_a)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_fails_over_after_401_refresh_open_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_bridge_reconnect_refresh_timeout_a")
+    account_b = _make_account("acc_bridge_reconnect_refresh_timeout_b")
+    old_upstream = AsyncMock()
+    new_upstream = SimpleNamespace(response_header=lambda _name: None)
+    first_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    open_timeout = proxy_module.ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "Request to upstream timed out"),
+        failure_phase="websocket_open_timeout",
+        retryable_same_contract=True,
+    )
+    seen_excluded_account_ids: list[set[str]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if not excluded_account_ids:
+            return AccountSelection(account=account_a, error_message=None)
+        return AccountSelection(account=account_b, error_message=None)
+
+    record_error = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=[account_a, account_a, account_a, account_b]),
+    )
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=[first_401, open_timeout, open_timeout, new_upstream]),
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_refresh_open_timeout",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.5",
+        account=account_a,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert seen_excluded_account_ids == [set(), set(), {account_a.id}]
+    assert session.account == account_b
+    assert session.upstream is new_upstream
+    assert record_error.await_args_list == [((account_a,),), ((account_a,),)]
 
 
 @pytest.mark.asyncio

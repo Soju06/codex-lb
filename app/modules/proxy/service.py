@@ -9585,7 +9585,7 @@ class ProxyService:
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
-                    if error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted":
+                    if _is_proxy_budget_exhausted_error(exc):
                         await self._write_stream_preflight_error(
                             account_id=None,
                             api_key=api_key,
@@ -13774,7 +13774,7 @@ def _should_retry_stream_error(code: str) -> bool:
 def _raise_proxy_budget_exhausted() -> NoReturn:
     raise ProxyResponseError(
         502,
-        openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+        openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
     )
 
 
@@ -13789,7 +13789,9 @@ def _is_proxy_budget_exhausted_error(exc: ProxyResponseError) -> bool:
     error = _parse_openai_error(exc.payload)
     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
     error_message = error.message if error else None
-    return error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted"
+    return error_code in {"upstream_request_timeout", "upstream_unavailable"} and (
+        error_message == "Proxy request budget exhausted"
+    )
 
 
 def _should_suppress_text_done_event(

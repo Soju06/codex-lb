@@ -5618,7 +5618,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         AsyncMock(
             side_effect=proxy_module.ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
             )
         ),
     )
@@ -12658,7 +12658,7 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
         AsyncMock(
             side_effect=proxy_module.ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
             )
         ),
     )
@@ -13395,7 +13395,7 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_compact_responses_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13421,8 +13421,8 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
 
@@ -13881,7 +13881,7 @@ async def test_response_create_admission_waits_on_session_gate_before_shared_cap
 
 
 @pytest.mark.asyncio
-async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_compact_selection_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13926,13 +13926,13 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert _proxy_error_message(exc) == "Proxy request budget exhausted"
     select_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
+async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13986,14 +13986,14 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert transcribe_calls == 1
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_transcribe_selection_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

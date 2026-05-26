@@ -60,9 +60,23 @@ describe("ImportSettings", () => {
 
     expect(payload.importWithoutOverwrite).toBe(true);
 
-    const { importWithoutOverwrite: _new, ...payloadRest } = payload;
-    const { importWithoutOverwrite: _orig, totpConfigured: _ignored, ...settingsRest } = settings;
-    expect(payloadRest).toStrictEqual(settingsRest);
+    expect(payload).toStrictEqual({
+      stickyThreadsEnabled: settings.stickyThreadsEnabled,
+      upstreamStreamTransport: settings.upstreamStreamTransport,
+      preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+      routingStrategy: settings.routingStrategy,
+      openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
+      dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: settings.totpRequiredOnLogin,
+      apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+      limitWarmupEnabled: settings.limitWarmupEnabled,
+      limitWarmupWindows: settings.limitWarmupWindows,
+      limitWarmupModel: settings.limitWarmupModel,
+      limitWarmupPrompt: settings.limitWarmupPrompt,
+      limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
+      limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
+    });
   });
 
   it("disables the switch when busy is true", () => {

@@ -1,41 +1,32 @@
 from __future__ import annotations
 
-import os
 import urllib.request
 from urllib.parse import urlparse
 
 _WEBSOCKET_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
     "ws": (
-        "ws_proxy",
-        "WS_PROXY",
-        "https_proxy",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "HTTP_PROXY",
-        "socks_proxy",
-        "SOCKS_PROXY",
-        "all_proxy",
-        "ALL_PROXY",
+        "ws",
+        "https",
+        "http",
+        "socks",
+        "all",
     ),
     "wss": (
-        "wss_proxy",
-        "WSS_PROXY",
-        "https_proxy",
-        "HTTPS_PROXY",
-        "socks_proxy",
-        "SOCKS_PROXY",
-        "all_proxy",
-        "ALL_PROXY",
+        "wss",
+        "https",
+        "socks",
+        "all",
     ),
 }
 
 STANDARD_OUTBOUND_PROXY_ENV_NAMES: tuple[str, ...] = tuple(
-    dict.fromkeys(name for names in _WEBSOCKET_PROXY_ENV_PRIORITY.values() for name in names)
+    dict.fromkeys(f"{name}_proxy" for names in _WEBSOCKET_PROXY_ENV_PRIORITY.values() for name in names)
 )
 
 
 def outbound_proxy_env_configured() -> bool:
-    return any(_read_proxy_env(name) is not None for name in STANDARD_OUTBOUND_PROXY_ENV_NAMES)
+    proxies = _sanitized_proxy_env()
+    return any(name in proxies for name in STANDARD_OUTBOUND_PROXY_ENV_NAMES)
 
 
 def resolve_websocket_proxy_from_env(url: str) -> str | None:
@@ -50,16 +41,15 @@ def resolve_websocket_proxy_from_env(url: str) -> str | None:
     if hostname and urllib.request.proxy_bypass(f"{hostname}:{port}"):
         return None
 
+    proxies = _sanitized_proxy_env()
     for name in env_names:
-        proxy_url = _read_proxy_env(name)
+        proxy_url = proxies.get(f"{name}_proxy")
         if proxy_url is not None:
             return proxy_url
     return None
 
 
-def _read_proxy_env(name: str) -> str | None:
-    value = os.getenv(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
+def _sanitized_proxy_env() -> dict[str, str]:
+    return {
+        f"{name.lower()}_proxy": value.strip() for name, value in urllib.request.getproxies().items() if value.strip()
+    }

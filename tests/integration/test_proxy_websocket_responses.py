@@ -2449,8 +2449,9 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         request_state,
         client_send_lock,
         websocket,
+        force_refresh,
     ):
-        del self, account, headers, deadline, api_key, request_state, client_send_lock, websocket
+        del self, account, headers, deadline, api_key, request_state, client_send_lock, websocket, force_refresh
         payload = proxy_module.openai_error(
             "previous_response_not_found",
             "Previous response with id 'resp_ws_prev_anchor' not found.",

@@ -4448,19 +4448,15 @@ class ProxyService:
                 return None, None
 
             try:
-                try_open_kwargs: dict[str, Any] = {
-                    "deadline": deadline,
-                    "api_key": api_key,
-                    "request_state": request_state,
-                    "client_send_lock": client_send_lock,
-                    "websocket": websocket,
-                }
-                if "force_refresh" in inspect.signature(self._try_open_websocket_connect_attempt).parameters:
-                    try_open_kwargs["force_refresh"] = forced_refresh_account_id == account.id
                 connect_result = await self._try_open_websocket_connect_attempt(
                     account,
                     headers,
-                    **try_open_kwargs,
+                    deadline=deadline,
+                    api_key=api_key,
+                    request_state=request_state,
+                    client_send_lock=client_send_lock,
+                    websocket=websocket,
+                    force_refresh=forced_refresh_account_id == account.id,
                 )
             except ProxyResponseError as exc:
                 action = await self._decide_websocket_failover_action(

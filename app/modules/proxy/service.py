@@ -8480,7 +8480,8 @@ class ProxyService:
 
         if _websocket_auth_failure_requires_reauth(error_message):
             failure_code = _WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
-        elif request_state.auth_replay_count <= 1:
+        elif request_state.auth_replay_counts_by_account.get(account.id, 0) == 0:
+            request_state.auth_replay_counts_by_account[account.id] = 1
             request_state.force_refresh_account_id = account.id
             request_state.preferred_account_id = account.id
             upstream_control.reconnect_requested = True
@@ -11494,6 +11495,7 @@ class _WebSocketRequestState:
     request_text: str | None = None
     replay_count: int = 0
     auth_replay_count: int = 0
+    auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
     skip_request_log: bool = False

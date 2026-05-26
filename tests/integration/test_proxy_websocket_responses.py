@@ -2693,6 +2693,101 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
     assert "resp_chatgpt_prev_anchor" not in serialized
 
 
+def test_backend_responses_websocket_masks_pretty_previous_response_not_found_from_chatgpt_backend(
+    app_instance,
+    monkeypatch,
+):
+    upstream_socket = _SequencedUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": "Previous response with id 'resp_chatgpt_pretty_prev_anchor' not found.",
+                            "param": "previous_response_id",
+                        },
+                        "status": 400,
+                    },
+                    indent=2,
+                ),
+            )
+        ]
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_pretty_prev_mask"), upstream_socket
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "continue",
+                        "previous_response_id": "resp_chatgpt_pretty_prev_anchor",
+                        "stream": True,
+                    }
+                )
+            )
+            failed_event = json.loads(websocket.receive_text())
+
+    assert failed_event["type"] == "response.failed"
+    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
+    serialized = json.dumps(failed_event)
+    assert "previous_response_not_found" not in serialized
+    assert "resp_chatgpt_pretty_prev_anchor" not in serialized
+
+
 def test_backend_responses_websocket_masks_previous_response_not_found_when_message_omits_response_id(
     app_instance,
     monkeypatch,

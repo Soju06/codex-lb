@@ -8141,6 +8141,14 @@ class ProxyService:
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
+        if payload is None:
+            try:
+                raw_payload = json.loads(text)
+            except json.JSONDecodeError:
+                raw_payload = None
+            if isinstance(raw_payload, dict):
+                payload = cast(dict[str, JsonValue], raw_payload)
+                event_block = format_sse_event(payload)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)

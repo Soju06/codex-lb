@@ -2298,19 +2298,38 @@ class ProxyService:
                                 )
                                 raise exc
                             except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                                await self._settle_compact_api_key_usage(
-                                    api_key=api_key,
-                                    api_key_reservation=api_key_reservation,
-                                    response=None,
-                                    request_service_tier=request_service_tier,
-                                )
+                                message = str(timeout_exc) or "Request to upstream timed out"
                                 logger.warning(
                                     "Compact forced refresh/connect failed request_id=%s account_id=%s",
                                     request_id,
                                     account.id,
                                     exc_info=True,
                                 )
-                                _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                                if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                                    await self._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
+                                    )
+                                    _raise_proxy_unavailable(message)
+                                if file_preferred_account_id is not None:
+                                    await self._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
+                                    )
+                                    _raise_proxy_unavailable(message)
+                                await self._handle_stream_error(
+                                    account,
+                                    {"message": message},
+                                    "upstream_unavailable",
+                                )
+                                last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                                excluded_account_ids.add(account.id)
+                                transient_exhausted = True
+                                break
                             refresh_retry_used = True
                             continue
                         if exc.status_code == 500:
@@ -10327,6 +10346,24 @@ class ProxyService:
                             exc_info=True,
                         )
                         message = str(exc) or "Request to upstream timed out"
+                        if (
+                            not require_preferred_account
+                            and preferred_account_id is None
+                            and _should_retry_transient_stream_error("upstream_unavailable", message)
+                            and attempt + 1 < max_attempts
+                        ):
+                            await self._handle_stream_error(
+                                account,
+                                {"message": message},
+                                "upstream_unavailable",
+                            )
+                            last_retryable_stream_error = _RetryableStreamError(
+                                "upstream_unavailable",
+                                {"message": message},
+                                exclude_account=True,
+                            )
+                            excluded_account_ids.add(account.id)
+                            continue
                         await self._write_stream_preflight_error(
                             account_id=account.id,
                             api_key=api_key,
@@ -10620,6 +10657,24 @@ class ProxyService:
                                 exc_info=True,
                             )
                             message = str(exc) or "Request to upstream timed out"
+                            if (
+                                not require_preferred_account
+                                and preferred_account_id is None
+                                and _should_retry_transient_stream_error("upstream_unavailable", message)
+                                and attempt + 1 < max_attempts
+                            ):
+                                await self._handle_stream_error(
+                                    account,
+                                    {"message": message},
+                                    "upstream_unavailable",
+                                )
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    "upstream_unavailable",
+                                    {"message": message},
+                                    exclude_account=True,
+                                )
+                                excluded_account_ids.add(account.id)
+                                continue
                             await self._write_stream_preflight_error(
                                 account_id=account.id,
                                 api_key=api_key,

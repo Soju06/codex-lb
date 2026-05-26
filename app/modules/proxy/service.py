@@ -370,6 +370,17 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "quota_exceeded",
     }
 )
+_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication"})
+_WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS = (
+    "session has ended",
+    "session expired",
+    "log in again",
+    "login again",
+    "reauth",
+    "re-auth",
+)
+_WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE = "account_session_expired"
+_WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
@@ -4384,11 +4395,13 @@ class ProxyService:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         base_settings = get_settings()
         max_attempts = _WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
-        excluded_account_ids: set[str] = set()
+        excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
         last_failover_account: Account | None = None
         for attempt in range(max_attempts):
             is_retry = attempt > 0
+            forced_refresh_account_id = request_state.force_refresh_account_id
+            preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
             require_preferred_account = (
                 request_state.previous_response_id is not None and request_state.preferred_account_id is not None
             )
@@ -4405,7 +4418,7 @@ class ProxyService:
                 "reallocate_sticky": True if is_retry else reallocate_sticky,
                 "sticky_max_age_seconds": sticky_max_age_seconds,
                 "exclude_account_ids": excluded_account_ids,
-                "preferred_account_id": request_state.preferred_account_id,
+                "preferred_account_id": preferred_account_id,
                 "require_preferred_account": require_preferred_account,
             }
             if "defer_no_account_error" in inspect.signature(self._select_websocket_connect_account).parameters:
@@ -4435,14 +4448,19 @@ class ProxyService:
                 return None, None
 
             try:
+                try_open_kwargs: dict[str, Any] = {
+                    "deadline": deadline,
+                    "api_key": api_key,
+                    "request_state": request_state,
+                    "client_send_lock": client_send_lock,
+                    "websocket": websocket,
+                }
+                if "force_refresh" in inspect.signature(self._try_open_websocket_connect_attempt).parameters:
+                    try_open_kwargs["force_refresh"] = forced_refresh_account_id == account.id
                 connect_result = await self._try_open_websocket_connect_attempt(
                     account,
                     headers,
-                    deadline=deadline,
-                    api_key=api_key,
-                    request_state=request_state,
-                    client_send_lock=client_send_lock,
-                    websocket=websocket,
+                    **try_open_kwargs,
                 )
             except ProxyResponseError as exc:
                 action = await self._decide_websocket_failover_action(
@@ -4457,6 +4475,7 @@ class ProxyService:
                     last_failover_exc = exc
                     last_failover_account = account
                     excluded_account_ids.add(account.id)
+                    request_state.excluded_account_ids.add(account.id)
                     continue
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -4632,6 +4651,7 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        force_refresh: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         try:
             remaining_budget = _remaining_budget_seconds(deadline)
@@ -4644,7 +4664,13 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
-            account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+            account = await self._ensure_fresh_with_budget(
+                account,
+                force=force_refresh,
+                timeout_seconds=remaining_budget,
+            )
+            if force_refresh and request_state.force_refresh_account_id == account.id:
+                request_state.force_refresh_account_id = None
 
             remaining_budget = _remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
@@ -8384,6 +8410,21 @@ class ProxyService:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
+        auth_error_code = _websocket_precreated_auth_error_code(
+            request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
+        if auth_error_code is not None:
+            handled_auth_failure = await self._handle_precreated_websocket_auth_failure(
+                account=account,
+                request_state=request_state,
+                upstream_control=upstream_control,
+                error_message=_websocket_event_error_message(event_type, payload),
+            )
+            if handled_auth_failure:
+                return text
         event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
             request_state=request_state,
             event=event,
@@ -8469,6 +8510,38 @@ class ProxyService:
             response_create_gate=response_create_gate,
         )
         return downstream_text
+
+    async def _handle_precreated_websocket_auth_failure(
+        self,
+        *,
+        account: Account,
+        request_state: "_WebSocketRequestState",
+        upstream_control: "_WebSocketUpstreamControl",
+        error_message: str | None,
+    ) -> bool:
+        if _prepare_websocket_request_state_for_auth_replay(request_state) is None:
+            return False
+
+        if _websocket_auth_failure_requires_reauth(error_message):
+            failure_code = _WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
+        elif request_state.auth_replay_count <= 1:
+            request_state.force_refresh_account_id = account.id
+            request_state.preferred_account_id = account.id
+            upstream_control.reconnect_requested = True
+            upstream_control.suppress_downstream_event = True
+            upstream_control.replay_request_state = request_state
+            return True
+        else:
+            failure_code = _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
+
+        await self._load_balancer.mark_permanent_failure(account, failure_code)
+        request_state.force_refresh_account_id = None
+        request_state.preferred_account_id = None
+        request_state.excluded_account_ids.add(account.id)
+        upstream_control.reconnect_requested = True
+        upstream_control.suppress_downstream_event = True
+        upstream_control.replay_request_state = request_state
+        return True
 
     async def _next_websocket_receive_timeout(
         self,
@@ -11467,6 +11540,9 @@ class _WebSocketRequestState:
     api_key: ApiKeyData | None = None
     request_text: str | None = None
     replay_count: int = 0
+    auth_replay_count: int = 0
+    force_refresh_account_id: str | None = None
+    excluded_account_ids: set[str] = field(default_factory=set)
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
@@ -12159,6 +12235,84 @@ def _websocket_precreated_retry_error_code(
     if error_code not in _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code
+
+
+def _websocket_precreated_auth_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    has_other_pending_requests: bool,
+) -> str | None:
+    if request_state is None:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.response_id is not None:
+        return None
+    if request_state.response_event_count > 0:
+        return None
+    if not request_state.awaiting_response_created:
+        return None
+    if not request_state.request_text:
+        return None
+    if request_state.downstream_visible:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
+    error_type = _websocket_event_error_type(event_type, payload)
+    if error_code in _WEBSOCKET_AUTH_FAILURE_CODES or error_type == "authentication_error":
+        return "invalid_api_key"
+    return None
+
+
+def _websocket_auth_failure_requires_reauth(message: str | None) -> bool:
+    if not isinstance(message, str):
+        return False
+    lowered = message.lower()
+    return any(marker in lowered for marker in _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS)
+
+
+def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
+    if request_state.previous_response_id is None or request_state.preferred_account_id is None:
+        return True
+    return bool(
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    )
+
+
+def _prepare_websocket_request_state_for_auth_replay(
+    request_state: _WebSocketRequestState,
+) -> str | None:
+    if not _websocket_auth_request_can_switch_account(request_state):
+        return None
+    if (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        request_state.request_text = request_state.fresh_upstream_request_text
+        request_state.previous_response_id = None
+        request_state.preferred_account_id = None
+        request_state.proxy_injected_previous_response_id = False
+        request_state.fresh_upstream_request_is_retry_safe = False
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    request_text = request_state.request_text
+    if not isinstance(request_text, str):
+        return None
+    request_state.replay_count += 1
+    request_state.auth_replay_count += 1
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    return request_text
 
 
 def _websocket_owner_pinned_quota_error_code(

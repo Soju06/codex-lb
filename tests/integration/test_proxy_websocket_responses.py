@@ -127,6 +127,284 @@ def _websocket_settings(**overrides):
     return SimpleNamespace(**values)
 
 
+def test_backend_responses_websocket_session_ended_auth_failure_fails_over_before_visible_output(
+    app_instance,
+    monkeypatch,
+):
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_ws_session_expired",
+                                "status": "failed",
+                                "error": {
+                                    "type": "authentication_error",
+                                    "code": "invalid_api_key",
+                                    "message": "Your session has ended. Please log in again.",
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            ]
+        ],
+    )
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_session_recovered", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_session_recovered", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
+    connect_accounts: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        excluded = getattr(request_state, "excluded_account_ids", set())
+        if "acct_ws_expired" in excluded:
+            connect_accounts.append("acct_ws_recovered")
+            return SimpleNamespace(id="acct_ws_recovered"), recovered_upstream
+        connect_accounts.append("acct_ws_expired")
+        return SimpleNamespace(id="acct_ws_expired"), first_upstream
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                    }
+                )
+            )
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_ws_session_recovered"
+    assert connect_accounts == ["acct_ws_expired", "acct_ws_recovered"]
+    assert permanent_failures == [("acct_ws_expired", "account_session_expired")]
+
+
+def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fails_over(
+    app_instance,
+    monkeypatch,
+):
+    auth_failure_batch = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_ws_auth_failed",
+                        "status": "failed",
+                        "error": {
+                            "type": "authentication_error",
+                            "code": "invalid_api_key",
+                            "message": "token invalidated",
+                        },
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        )
+    ]
+    first_upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[auth_failure_batch])
+    refreshed_upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[auth_failure_batch])
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_auth_recovered", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_auth_recovered", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
+    connect_accounts: list[str] = []
+    forced_refresh_markers: list[str | None] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        forced_refresh_markers.append(getattr(request_state, "force_refresh_account_id", None))
+        excluded = getattr(request_state, "excluded_account_ids", set())
+        if "acct_ws_auth" in excluded:
+            connect_accounts.append("acct_ws_auth_recovered")
+            return SimpleNamespace(id="acct_ws_auth_recovered"), recovered_upstream
+        connect_accounts.append("acct_ws_auth")
+        if len(connect_accounts) == 1:
+            return SimpleNamespace(id="acct_ws_auth"), first_upstream
+        return SimpleNamespace(id="acct_ws_auth"), refreshed_upstream
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                    }
+                )
+            )
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_ws_auth_recovered"
+    assert connect_accounts == ["acct_ws_auth", "acct_ws_auth", "acct_ws_auth_recovered"]
+    assert forced_refresh_markers[1] == "acct_ws_auth"
+    assert permanent_failures == [("acct_ws_auth", "account_auth_invalidated")]
+
+
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

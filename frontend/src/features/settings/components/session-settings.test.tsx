@@ -4,6 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SessionSettings } from "@/features/settings/components/session-settings";
 
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+};
+
 const baseSettings = {
   stickyThreadsEnabled: true,
   upstreamStreamTransport: "default" as const,
@@ -15,6 +24,7 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: true,
   apiKeyAuthEnabled: true,
+  ...LIMIT_WARMUP_DEFAULTS,
 };
 
 describe("SessionSettings", () => {
@@ -44,6 +54,7 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -102,6 +113,7 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 });

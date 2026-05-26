@@ -501,6 +501,10 @@ For Helm, pass the same values through `extraEnv`.
 
 Backup this directory to preserve your data.
 
+## Troubleshooting
+
+- [Usage and quota - why does codex-lb still say `rate_limited` when Codex Desktop says reset?](openspec/specs/usage-refresh-policy/context.md)
+
 ## Kubernetes
 
 ```bash
@@ -598,6 +602,11 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="http://www.linkedin.com/in/andrewnoblescm"><img src="https://avatars.githubusercontent.com/u/211227905?v=4?s=100" width="100px;" alt="Andrew Noble"/><br /><sub><b>Andrew Noble</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=AnobleSCM" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=AnobleSCM" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://jgorostegui.github.io/"><img src="https://avatars.githubusercontent.com/u/9865435?v=4?s=100" width="100px;" alt="Josu Gorostegui"/><br /><sub><b>Josu Gorostegui</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=jgorostegui" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=jgorostegui" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/linusmixson"><img src="https://avatars.githubusercontent.com/u/7087013?v=4?s=100" width="100px;" alt="Linus Mixson"/><br /><sub><b>Linus Mixson</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=linusmixson" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=linusmixson" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Lotfree618"><img src="https://avatars.githubusercontent.com/u/91266981?v=4?s=100" width="100px;" alt="Lotfree"/><br /><sub><b>Lotfree</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Lotfree618" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3ALotfree618" title="Bug reports">🐛</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/timefox"><img src="https://avatars.githubusercontent.com/u/5635109?v=4?s=100" width="100px;" alt="timefox"/><br /><sub><b>timefox</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=timefox" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=timefox" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://datfooldive.github.io/"><img src="https://avatars.githubusercontent.com/u/110718021?v=4?s=100" width="100px;" alt="hikki"/><br /><sub><b>hikki</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=datfooldive" title="Code">💻</a> <a href="#design-datfooldive" title="Design">🎨</a></td>
     </tr>
   </tbody>
 </table>

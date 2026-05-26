@@ -1,0 +1,109 @@
+name: Publish Beta Release
+
+on:
+  pull_request:
+    branches: ["main"]
+    types: [closed]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.merge_commit_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  publish-beta-release:
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/beta-')
+    runs-on: ubuntu-24.04
+
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+    steps:
+      - name: Require release automation token
+        shell: bash
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_PLEASE_TOKEN}" ]; then
+            echo "::error::RELEASE_PLEASE_TOKEN is required so beta release events trigger artifact publishing."
+            exit 1
+          fi
+
+      - name: Checkout merged beta release commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Verify beta release version
+        id: verify
+        shell: bash
+        run: python -m scripts.verify_release_version --require-channel beta
+
+      - name: Create GitHub prerelease
+        shell: bash
+        env:
+          TAG: ${{ steps.verify.outputs.tag }}
+          VERSION: ${{ steps.verify.outputs.version }}
+          PYPI_VERSION: ${{ steps.verify.outputs.pypi_version }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/${TAG}"
+          tag_exists=false
+          if git ls-remote --exit-code --tags origin "${tag_ref}" >/dev/null 2>&1; then
+            tag_exists=true
+            existing_target="$(git ls-remote origin "${tag_ref}^{}" | awk '{print $1}')"
+            if [ -z "${existing_target}" ]; then
+              existing_target="$(git ls-remote origin "${tag_ref}" | awk '{print $1}')"
+            fi
+            if [ "${existing_target}" != "${SHA}" ]; then
+              echo "::error::${TAG} already points to ${existing_target}, not merged commit ${SHA}. Refusing to publish."
+              exit 1
+            fi
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if [ "${tag_exists}" = "false" ]; then
+            git tag -a "${TAG}" "${SHA}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+
+          notes_file="${RUNNER_TEMP}/beta-release-notes.md"
+          cat > "${notes_file}" <<EOF
+          Beta prerelease for the ${VERSION%-beta.*} stable train.
+
+          ## Install / Run
+          \`\`\`bash
+          uvx --from "codex-lb==${PYPI_VERSION}" codex-lb
+          docker pull ghcr.io/${GITHUB_REPOSITORY}:${VERSION}
+          helm install codex-lb oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/codex-lb --version ${VERSION} --devel
+          \`\`\`
+
+          Promote this train by merging the normal release-please PR for ${VERSION%-beta.*}.
+          EOF
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; ensuring it remains marked as a prerelease."
+            gh release edit "${TAG}" \
+              --title "Release ${TAG}" \
+              --notes-file "${notes_file}" \
+              --prerelease
+          else
+            gh release create "${TAG}" \
+              --target "${SHA}" \
+              --title "Release ${TAG}" \
+              --notes-file "${notes_file}" \
+              --prerelease
+          fi

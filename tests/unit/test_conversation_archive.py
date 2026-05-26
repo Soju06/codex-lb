@@ -7,6 +7,9 @@ import json
 import os
 import queue
 import stat
+import threading
+import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -26,9 +29,10 @@ def _reset_archive_disk_pressure() -> None:
 
 
 class _ArchiveSettings:
-    def __init__(self, *, enabled: bool, directory: Path) -> None:
+    def __init__(self, *, enabled: bool, directory: Path, queue_max_bytes: int = 8 * 1024 * 1024) -> None:
         self.conversation_archive_enabled = enabled
         self.conversation_archive_dir = directory
+        self.conversation_archive_queue_max_bytes = queue_max_bytes
 
 
 def _archive_records(directory: Path) -> list[dict[str, object]]:
@@ -120,7 +124,7 @@ def test_archive_bytes_disabled_does_not_encode_payload(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_path):
+def test_archive_queue_is_bounded_and_waits_without_sync_backpressure(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,
         "get_settings",
@@ -131,29 +135,34 @@ def test_archive_queue_is_bounded_and_falls_back_to_sync_write(monkeypatch, tmp_
     monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", bounded_queue)
     monkeypatch.setattr(conversation_archive, "_ensure_writer_thread", lambda: None)
 
+    def drain_existing_item() -> None:
+        time.sleep(0.01)
+        bounded_queue.get()
+        bounded_queue.task_done()
+
+    drainer = threading.Thread(target=drain_existing_item)
+    drainer.start()
     conversation_archive.archive_json(
         direction="codex_to_server",
         kind="responses",
         transport="http",
         payload={"text": "синхронный fallback"},
     )
+    drainer.join(timeout=1.0)
 
-    [line] = _archive_lines(tmp_path)
-    assert "синхронный fallback" in line
+    assert list(tmp_path.glob("*.jsonl.gz")) == []
     assert bounded_queue.qsize() == 1
+    queued_item = bounded_queue.get_nowait()
+    assert queued_item is not None
+    _path, record, _queued_bytes = queued_item
+    assert record["payload"] == {"text": "синхронный fallback"}
 
 
-def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path):
+def test_archive_queue_byte_limit_preserves_oversized_record_with_backpressure(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,
         "get_settings",
-        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
-    )
-    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE_MAX_BYTES", 64)
-    monkeypatch.setattr(
-        conversation_archive,
-        "_ensure_writer_thread",
-        lambda: (_ for _ in ()).throw(AssertionError("writer should not start for byte-budget fallback")),
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path, queue_max_bytes=64),
     )
     with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
         conversation_archive._WRITE_QUEUE_BYTES = 0
@@ -164,9 +173,154 @@ def test_archive_queue_byte_limit_falls_back_to_sync_write(monkeypatch, tmp_path
         transport="http",
         payload={"text": "x" * 256},
     )
+    conversation_archive.flush_archive_writer()
 
     [record] = _archive_records(tmp_path)
     assert record["payload"] == {"text": "x" * 256}
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == 0
+
+
+def test_archive_queue_byte_limit_waits_before_queueing_second_oversized_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path, queue_max_bytes=64),
+    )
+    queued_records: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue()
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", queued_records)
+    monkeypatch.setattr(conversation_archive, "_ensure_writer_thread", lambda: None)
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 0
+
+    conversation_archive.archive_json(
+        direction="codex_to_server",
+        kind="responses",
+        transport="http",
+        payload={"text": "x" * 256},
+    )
+
+    first_item = queued_records.get_nowait()
+    assert first_item is not None
+    assert first_item[1]["payload"] == {"text": "x" * 256}
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == first_item[2]
+
+    second_started = threading.Event()
+
+    def enqueue_second() -> None:
+        second_started.set()
+        conversation_archive.archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload={"text": "y" * 256},
+        )
+
+    second_thread = threading.Thread(target=enqueue_second)
+    second_thread.start()
+    assert second_started.wait(timeout=1.0)
+    time.sleep(0.05)
+    assert queued_records.empty()
+    assert second_thread.is_alive()
+
+    conversation_archive._release_archive_queue_bytes(first_item[2])
+    second_thread.join(timeout=1.0)
+    assert not second_thread.is_alive()
+
+    second_item = queued_records.get_nowait()
+    assert second_item is not None
+    assert second_item[1]["payload"] == {"text": "y" * 256}
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        assert conversation_archive._WRITE_QUEUE_BYTES == second_item[2]
+
+    conversation_archive._release_archive_queue_bytes(second_item[2])
+
+
+def test_archive_queue_byte_limit_warning_is_rate_limited(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path, queue_max_bytes=64),
+    )
+    monkeypatch.setattr(conversation_archive, "_archive_disk_pressure_active", lambda: False)
+    monkeypatch.setattr(conversation_archive, "_reserve_archive_queue_bytes", lambda _size: False)
+    monkeypatch.setattr(conversation_archive, "_reserve_archive_queue_bytes_blocking", lambda _size: None)
+    monotonic_values = iter([100.0, 101.0, 102.0, 161.0])
+    monkeypatch.setattr(conversation_archive.time, "monotonic", lambda: next(monotonic_values))
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        conversation_archive._WRITE_QUEUE_BYTES = 0
+    with conversation_archive._BACKPRESSURE_WARNING_LOCK:
+        conversation_archive._BACKPRESSURE_LAST_WARNING_AT = (
+            -conversation_archive._BACKPRESSURE_WARNING_INTERVAL_SECONDS
+        )
+        conversation_archive._BACKPRESSURE_SUPPRESSED_WARNINGS = 0
+
+    caplog.set_level("WARNING", logger="app.core.conversation_archive")
+    for idx in range(4):
+        conversation_archive.archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload={"text": f"{idx}-" + ("x" * 256)},
+        )
+    conversation_archive.flush_archive_writer()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Conversation archive writer queue byte budget is full" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert warnings[0].suppressed_warnings == 0
+    assert warnings[1].suppressed_warnings == 2
+
+
+def test_archive_writer_streams_gzip_without_precompressing_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings",
+        lambda: _ArchiveSettings(enabled=True, directory=tmp_path),
+    )
+
+    def fail_compress(_data: bytes) -> bytes:
+        raise AssertionError("normal archive writes should stream gzip data")
+
+    monkeypatch.setattr(conversation_archive.gzip, "compress", fail_compress)
+    conversation_archive.archive_json(
+        direction="codex_to_server",
+        kind="responses",
+        transport="http",
+        payload={"text": "x" * 1024},
+    )
+    conversation_archive.flush_archive_writer()
+
+    [record] = _archive_records(tmp_path)
+    assert record["payload"] == {"text": "x" * 1024}
+
+
+def test_archive_writer_batches_queued_records(monkeypatch, tmp_path):
+    archive_queue: queue.Queue[tuple[Path, dict[str, object], int] | None] = queue.Queue()
+    first: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "one"}, 11)
+    second: tuple[Path, dict[str, object], int] = (tmp_path / "archive.jsonl.gz", {"payload": "two"}, 13)
+    archive_queue.put(first)
+    archive_queue.put(second)
+    archive_queue.put(None)
+    monkeypatch.setattr(conversation_archive, "_WRITE_QUEUE", archive_queue)
+    with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
+        setattr(conversation_archive, "_WRITE_QUEUE_BYTES", 24)
+
+    batches: list[list[tuple[Path, dict[str, object], int]]] = []
+
+    def capture_batch(items: Sequence[tuple[Path, dict[str, object], int]]) -> None:
+        batches.append(list(items))
+
+    monkeypatch.setattr(conversation_archive, "_append_records", capture_batch)
+
+    conversation_archive._writer_loop()
+
+    assert [[item[1]["payload"] for item in batch] for batch in batches] == [["one", "two"]]
+    assert archive_queue.unfinished_tasks == 0
     with conversation_archive._WRITE_QUEUE_BYTES_LOCK:
         assert conversation_archive._WRITE_QUEUE_BYTES == 0
 
@@ -372,23 +526,46 @@ def test_archive_write_failure_forgets_prior_recovery_check(monkeypatch, tmp_pat
     conversation_archive._append_record(path, {"request_id": "req_new_1"})
     assert path.resolve() in conversation_archive._RECOVERY_CHECKED_PATHS
 
-    def fail_write(_path: Path, _data: bytes) -> None:
+    def fail_write(_path: Path, _record: object) -> None:
         raise OSError("simulated partial archive write")
 
-    monkeypatch.setattr(conversation_archive, "_write_gzip_member", fail_write)
+    monkeypatch.setattr(conversation_archive, "_write_gzip_jsonl_record", fail_write)
     conversation_archive._append_record(path, {"request_id": "req_new_2"})
 
     assert path.resolve() not in conversation_archive._RECOVERY_CHECKED_PATHS
+
+
+def test_archive_batch_write_failure_does_not_drop_other_paths(monkeypatch, tmp_path):
+    bad_path = tmp_path / "bad" / "2026-04-30T12.jsonl.gz"
+    good_path = tmp_path / "good" / "2026-04-30T12.jsonl.gz"
+
+    def write_record(path: Path, record: Mapping[str, object]) -> None:
+        if path == bad_path:
+            raise OSError("simulated archive write failure")
+        conversation_archive._write_gzip_jsonl_records(path, [record])
+
+    monkeypatch.setattr(conversation_archive, "_write_gzip_jsonl_record", write_record)
+
+    conversation_archive._append_records(
+        [
+            (bad_path, {"request_id": "req_bad"}, 0),
+            (good_path, {"request_id": "req_good"}, 0),
+        ]
+    )
+
+    assert not bad_path.exists()
+    with gzip.open(good_path, "rt", encoding="utf-8") as handle:
+        assert json.loads(handle.readline()) == {"request_id": "req_good"}
 
 
 def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp_path, caplog):
     _reset_archive_disk_pressure()
     path = tmp_path / "2026-04-30T12.jsonl.gz"
 
-    def fail_write(_path: Path, _data: bytes) -> None:
+    def fail_write(_path: Path, _record: object) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(conversation_archive, "_write_gzip_member", fail_write)
+    monkeypatch.setattr(conversation_archive, "_write_gzip_jsonl_record", fail_write)
     caplog.set_level("WARNING", logger="app.core.conversation_archive")
 
     conversation_archive._append_record(path, {"request_id": "req_full", "payload": "old"})
@@ -400,11 +577,11 @@ def test_archive_disk_full_pauses_writes_without_traceback_spam(monkeypatch, tmp
 
     calls = 0
 
-    def record_write(_path: Path, _data: bytes) -> None:
+    def record_write(_path: Path, _record: object) -> None:
         nonlocal calls
         calls += 1
 
-    monkeypatch.setattr(conversation_archive, "_write_gzip_member", record_write)
+    monkeypatch.setattr(conversation_archive, "_write_gzip_jsonl_record", record_write)
     conversation_archive._append_record(path, {"request_id": "req_dropped", "payload": "new"})
     assert calls == 0
 

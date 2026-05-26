@@ -203,6 +203,55 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_backend_transcribe_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_transcribe_invalidated_a", "transcribe-invalidated-a@example.com")
+    await _import_account(async_client, "acc_transcribe_invalidated_b", "transcribe-invalidated-b@example.com")
+    captured_account_ids: list[str | None] = []
+    invalidated_account_id: str | None = None
+
+    async def fake_transcribe(
+        audio_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        access_token: str,
+        account_id: str | None,
+        base_url=None,
+        session=None,
+    ):
+        del audio_bytes, filename, content_type, prompt, headers, access_token, base_url, session
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_account_id:
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "token invalidated"),
+            )
+        return {"text": "recovered"}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/transcribe",
+        files={"file": ("sample.wav", b"\x03\x04", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "recovered"
+    assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
+    assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
 async def test_backend_transcribe_initial_refresh_failure_returns_handled_error(async_client, monkeypatch):
     await _import_account(async_client, "acc_transcribe_refresh_fail", "refresh-fail-transcribe@example.com")
     transcribe_calls = 0

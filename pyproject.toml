@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.18.1"
+version = "1.19.0"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -78,8 +78,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    # ty 0.0.37 reports 91 diagnostics from stricter JsonValue/aiohttp typing; uncap after a type-cleanup PR.
-    "ty==0.0.16",
+    "ty==0.0.37",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
@@ -120,7 +119,7 @@ codex-lb = "app.cli:main"
 codex-lb-db = "app.db.migrate:main"
 
 [build-system]
-requires = ["hatchling>=1.27.0"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]

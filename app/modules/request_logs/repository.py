@@ -17,6 +17,8 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestLog
 from app.db.session import sqlite_writer_section
 
+_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
+
 
 @dataclass(frozen=True, slots=True)
 class _RequestLogFilters:
@@ -29,7 +31,9 @@ class RequestLogsRepository:
         self._session = session
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
-        result = await self._session.execute(select(RequestLog).where(RequestLog.requested_at >= since))
+        result = await self._session.execute(
+            select(RequestLog).where(RequestLog.requested_at >= since, _normal_traffic_clause())
+        )
         return list(result.scalars().all())
 
     async def find_latest_account_id_for_response_id(
@@ -101,7 +105,7 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(RequestLog.requested_at >= since)
+            .where(RequestLog.requested_at >= since, _normal_traffic_clause())
             .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
@@ -133,7 +137,7 @@ class RequestLogsRepository:
             func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-        ).where(RequestLog.requested_at >= since)
+        ).where(RequestLog.requested_at >= since, _normal_traffic_clause())
         result = await self._session.execute(stmt)
         row = result.one()
         return RequestActivityAggregate(
@@ -150,6 +154,7 @@ class RequestLogsRepository:
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
                 RequestLog.requested_at >= since,
+                _normal_traffic_clause(),
                 RequestLog.status != "success",
                 RequestLog.error_code.is_not(None),
             )
@@ -184,6 +189,7 @@ class RequestLogsRepository:
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
+        source: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
@@ -197,6 +203,7 @@ class RequestLogsRepository:
                 request_id=resolved_request_id,
                 model=model,
                 plan_type=resolved_plan_type,
+                source=source,
                 transport=transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
@@ -426,7 +433,7 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
     ) -> _RequestLogFilters:
-        conditions = []
+        conditions = [_normal_traffic_clause()]
         if exclude_soft_deleted:
             conditions.append(RequestLog.deleted_at.is_(None))
         if since is not None:
@@ -482,6 +489,7 @@ class RequestLogsRepository:
                     RequestLog.request_id.ilike(search_pattern),
                     RequestLog.model.ilike(search_pattern),
                     RequestLog.reasoning_effort.ilike(search_pattern),
+                    RequestLog.source.ilike(search_pattern),
                     RequestLog.status.ilike(search_pattern),
                     RequestLog.error_code.ilike(search_pattern),
                     RequestLog.error_message.ilike(search_pattern),
@@ -515,3 +523,7 @@ async def _safe_rollback(session: AsyncSession) -> None:
             await session.rollback()
     except BaseException:
         return
+
+
+def _normal_traffic_clause():
+    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)

@@ -127,6 +127,13 @@ export const DashboardOverviewSchema = z.object({
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
+export const RequestLogCostBreakdownSchema = z.object({
+  inputUsd: z.number().nullable().optional().default(null),
+  cachedInputUsd: z.number().nullable().optional().default(null),
+  outputUsd: z.number().nullable().optional().default(null),
+  totalUsd: z.number().nullable().optional().default(null),
+});
+
 export const RequestLogSchema = z.object({
   requestedAt: z.string().datetime({ offset: true }),
   accountId: z.string().nullable(),
@@ -135,6 +142,7 @@ export const RequestLogSchema = z.object({
   apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   model: z.string(),
+  source: z.string().nullable().optional().default(null),
   transport: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),
   requestedServiceTier: z.string().nullable().optional().default(null),
@@ -143,9 +151,12 @@ export const RequestLogSchema = z.object({
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
   tokens: z.number().nullable(),
+  inputTokens: z.number().nullable().optional().default(null),
+  outputTokens: z.number().nullable().optional().default(null),
   cachedInputTokens: z.number().nullable(),
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),
+  costBreakdown: RequestLogCostBreakdownSchema.nullable().optional().default(null),
   latencyMs: z.number().nullable(),
 });
 

@@ -27,6 +27,7 @@ class LimitRuleResponse(DashboardModel):
 class ApiKeyCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
+    apply_to_codex_model: bool = False
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
@@ -39,6 +40,7 @@ class ApiKeyCreateRequest(DashboardModel):
 class ApiKeyUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_models: list[str] | None = None
+    apply_to_codex_model: bool | None = None
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
@@ -62,6 +64,7 @@ class ApiKeyResponse(DashboardModel):
     name: str
     key_prefix: str
     allowed_models: list[str] | None
+    apply_to_codex_model: bool = False
     enforced_model: str | None
     enforced_reasoning_effort: str | None
     enforced_service_tier: str | None
@@ -73,6 +76,9 @@ class ApiKeyResponse(DashboardModel):
     last_used_at: datetime | None
     limits: list[LimitRuleResponse] = Field(default_factory=list)
     usage_summary: ApiKeyUsageSummaryResponse | None = None
+    pooled_remaining_percent_primary: float | None = None
+    pooled_remaining_percent_secondary: float | None = None
+    pooled_capacity_credits_primary: float = 0.0
 
 
 class ApiKeyCreateResponse(ApiKeyResponse):
@@ -90,9 +96,17 @@ class ApiKeyTrendsResponse(DashboardModel):
     tokens: list[ApiKeyTrendPoint] = Field(default_factory=list)
 
 
+class ApiKeyAccountCostResponse(DashboardModel):
+    account_id: str | None = None
+    email: str | None = None
+    cost_usd: float = 0
+    is_deleted: bool = False
+
+
 class ApiKeyUsage7DayResponse(DashboardModel):
     key_id: str
     total_tokens: int = 0
     total_cost_usd: float = 0
     total_requests: int = 0
     cached_input_tokens: int = 0
+    account_costs: list[ApiKeyAccountCostResponse] = Field(default_factory=list)

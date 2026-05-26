@@ -1,8 +1,13 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
+  AccountAliasRequestSchema,
+  AccountAliasResponseSchema,
+  AccountExportResponseSchema,
   AccountImportResponseSchema,
+  AccountLimitWarmupUpdateRequestSchema,
+  AccountLimitWarmupUpdateResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -44,6 +49,24 @@ export function reactivateAccount(accountId: string) {
   );
 }
 
+export function setAccountAlias(accountId: string, alias: string | null) {
+  const validated = AccountAliasRequestSchema.parse({ alias });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
+    AccountAliasResponseSchema,
+    { body: validated },
+  );
+}
+
+export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
+  const payload = AccountLimitWarmupUpdateRequestSchema.parse({ enabled });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
+    AccountLimitWarmupUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
 export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
@@ -58,6 +81,14 @@ export function deleteAccount(accountId: string) {
   );
 }
 
+export function exportAccount(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export`,
+    AccountExportResponseSchema,
+    { cache: "no-store" },
+  );
+}
+
 export function startOauth(payload: unknown) {
   const validated = OauthStartRequestSchema.parse(payload);
   return post(`${OAUTH_BASE_PATH}/start`, OauthStartResponseSchema, {
@@ -65,8 +96,9 @@ export function startOauth(payload: unknown) {
   });
 }
 
-export function getOauthStatus() {
-  return get(`${OAUTH_BASE_PATH}/status`, OauthStatusResponseSchema);
+export function getOauthStatus(flowId?: string) {
+  const query = flowId ? `?flowId=${encodeURIComponent(flowId)}` : "";
+  return get(`${OAUTH_BASE_PATH}/status${query}`, OauthStatusResponseSchema);
 }
 
 export function completeOauth(payload?: unknown) {

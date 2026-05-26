@@ -34,6 +34,12 @@ class SettingsRepository:
             api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
+            limit_warmup_enabled=False,
+            limit_warmup_windows="both",
+            limit_warmup_model="auto",
+            limit_warmup_prompt="Say OK.",
+            limit_warmup_cooldown_seconds=3600,
+            limit_warmup_min_available_percent=100.0,
         )
         self._session.add(row)
         try:
@@ -62,6 +68,12 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        limit_warmup_enabled: bool | None = None,
+        limit_warmup_windows: str | None = None,
+        limit_warmup_model: str | None = None,
+        limit_warmup_prompt: str | None = None,
+        limit_warmup_cooldown_seconds: int | None = None,
+        limit_warmup_min_available_percent: float | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -90,6 +102,18 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if limit_warmup_enabled is not None:
+            settings.limit_warmup_enabled = limit_warmup_enabled
+        if limit_warmup_windows is not None:
+            settings.limit_warmup_windows = limit_warmup_windows
+        if limit_warmup_model is not None:
+            settings.limit_warmup_model = limit_warmup_model
+        if limit_warmup_prompt is not None:
+            settings.limit_warmup_prompt = limit_warmup_prompt
+        if limit_warmup_cooldown_seconds is not None:
+            settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
+        if limit_warmup_min_available_percent is not None:
+            settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         await self.commit_refresh(settings)
         return settings
 

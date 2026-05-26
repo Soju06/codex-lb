@@ -1,0 +1,4 @@
+- [x] Treat usage rows whose reset window has elapsed as stale for refresh freshness checks.
+- [x] Force one post-reset usage refresh for rate-limited and quota-exceeded accounts.
+- [x] Clear stale exhausted usage percentages during selection after an elapsed reset.
+- [x] Add regression coverage for rate-limit reset, quota reset with a fresh primary row, and selection from stale exhausted rows.

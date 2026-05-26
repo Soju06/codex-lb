@@ -78,13 +78,15 @@ async def test_admission_lease_del_releases_and_warns(caplog: pytest.LogCaptureF
     await sem.acquire()
     assert sem.locked()
 
-    lease = AdmissionLease(sem)
+    lease = AdmissionLease(sem, stage="unit_stage", request_id="req_unit")
     with caplog.at_level(logging.WARNING, logger="app.modules.proxy.work_admission"):
         del lease
         gc.collect()
 
     assert not sem.locked()
     assert "garbage-collected without release()" in caplog.text
+    assert "stage=unit_stage" in caplog.text
+    assert "request_id=req_unit" in caplog.text
 
 
 @pytest.mark.asyncio

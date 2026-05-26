@@ -119,7 +119,10 @@ def _extract_events(lines: list[str]) -> list[dict]:
     events = []
     for line in lines:
         if line.startswith("data: "):
-            events.append(json.loads(line[6:]))
+            data = line[6:]
+            if data == "[DONE]":
+                continue
+            events.append(json.loads(data))
     return events
 
 

@@ -70,7 +70,12 @@ export function SettingsPage() {
           <div className="space-y-4">
             <AppearanceSettings />
             <RoutingSettings
-              key={settings.openaiCacheAffinityMaxAgeSeconds}
+              key={[
+                settings.openaiCacheAffinityMaxAgeSeconds,
+                settings.limitWarmupModel,
+                settings.limitWarmupPrompt,
+                settings.limitWarmupCooldownSeconds,
+              ].join(":")}
               settings={settings}
               busy={busy}
               onSave={handleSave}

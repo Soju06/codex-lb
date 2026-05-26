@@ -9,10 +9,11 @@ from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
+    AccountLimitWarmupStatus,
     AccountRequestUsage,
     AccountSummary,
     AccountTokenStatus,
@@ -20,6 +21,7 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 
 
 def build_account_summaries(
@@ -29,6 +31,7 @@ def build_account_summaries(
     secondary_usage: dict[str, UsageHistory],
     request_usage_by_account: dict[str, AccountRequestUsage] | None = None,
     additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] | None = None,
+    limit_warmups_by_account: dict[str, AccountLimitWarmup] | None = None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> list[AccountSummary]:
@@ -39,6 +42,7 @@ def build_account_summaries(
             secondary_usage.get(account.id),
             request_usage_by_account.get(account.id) if request_usage_by_account else None,
             additional_quotas_by_account.get(account.id) if additional_quotas_by_account else None,
+            limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
             encryptor,
             include_auth=include_auth,
         )
@@ -52,6 +56,7 @@ def _account_to_summary(
     secondary_usage: UsageHistory | None,
     request_usage: AccountRequestUsage | None,
     additional_quotas: list[AccountAdditionalQuota] | None,
+    limit_warmup: AccountLimitWarmup | None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> AccountSummary:
@@ -61,6 +66,7 @@ def _account_to_summary(
         primary_usage,
         secondary_usage,
     )
+
     weekly_only_usage = (
         effective_primary_usage is None
         and primary_usage is not None
@@ -75,6 +81,17 @@ def _account_to_summary(
 
     if primary_remaining_percent is None and not weekly_only_usage:
         primary_remaining_percent = 100.0
+
+    status_primary_usage = effective_primary_usage
+    status_primary_used_percent = primary_used_percent
+    if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
+        if account.status != AccountStatus.RATE_LIMITED:
+            status_primary_usage = None
+            status_primary_used_percent = None
+        effective_primary_usage = None
+        primary_used_percent = None
+        primary_remaining_percent = None
+
     reset_at_primary = (
         from_epoch_seconds(effective_primary_usage.reset_at) if effective_primary_usage is not None else None
     )
@@ -97,15 +114,16 @@ def _account_to_summary(
     )
     effective_status = _effective_status_from_usage(
         account,
-        effective_primary_usage,
-        primary_used_percent,
+        status_primary_usage,
+        status_primary_used_percent,
         effective_secondary_usage,
         secondary_used_percent,
     )
     return AccountSummary(
         account_id=account.id,
         email=account.email,
-        display_name=account.email,
+        alias=account.alias,
+        display_name=account.alias or account.email,
         plan_type=plan_type,
         status=effective_status.value,
         usage=AccountUsage(
@@ -125,6 +143,23 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+        limit_warmup_enabled=account.limit_warmup_enabled,
+        limit_warmup=_limit_warmup_to_status(limit_warmup),
+    )
+
+
+def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:
+    if entry is None:
+        return None
+    return AccountLimitWarmupStatus(
+        window=entry.window,
+        reset_at=entry.reset_at,
+        status=entry.status,
+        model=entry.model,
+        attempted_at=entry.attempted_at,
+        completed_at=entry.completed_at,
+        error_code=entry.error_code,
+        error_message=entry.error_message,
     )
 
 
@@ -144,6 +179,14 @@ def _effective_status_from_usage(
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
     )
+    if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
+        if (
+            account.blocked_at is None
+            and account.reset_at is not None
+            and account.reset_at <= datetime.now(timezone.utc).timestamp()
+        ):
+            return status
+        return account.status
     return status
 
 
@@ -157,19 +200,11 @@ def _effective_usage_windows(
         return primary_usage, secondary_usage
     if secondary_usage is None:
         return None, primary_usage
-    if usage_core.should_use_weekly_primary(_to_window_row(primary_usage), _to_window_row(secondary_usage)):
+    if usage_core.should_use_weekly_primary(
+        usage_history_to_window_row(primary_usage), usage_history_to_window_row(secondary_usage)
+    ):
         return None, primary_usage
     return None, secondary_usage
-
-
-def _to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:

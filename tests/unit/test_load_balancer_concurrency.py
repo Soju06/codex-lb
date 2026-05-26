@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -57,7 +57,13 @@ class _StubUsageRepository:
         self._primary = primary
         self._secondary = secondary
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        del account_ids
         if window == "secondary":
             return self._secondary
         return self._primary

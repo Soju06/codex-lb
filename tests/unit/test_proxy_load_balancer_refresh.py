@@ -66,7 +66,8 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
-    async def list_accounts(self) -> list[Account]:
+    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+        del refresh_existing
         return list(self._accounts)
 
     def _find_account(self, account_id: str) -> Account | None:
@@ -136,7 +137,13 @@ class StubUsageRepository(UsageRepository):
         self.primary_calls = 0
         self.secondary_calls = 0
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        del account_ids
         if window == "secondary":
             self.secondary_calls += 1
             return self._secondary
@@ -2339,6 +2346,7 @@ async def test_select_account_retries_no_accounts_after_runtime_recovery(monkeyp
 @pytest.mark.asyncio
 async def test_select_account_returns_data_unavailable_error_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-stale", "gated-stale@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2367,7 +2375,85 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_code == ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_select_account_allows_plus_plan_without_additional_quota_rows(monkeypatch) -> None:
+    account = _make_account("acc-plus-no-gated-rows", "plus-no-gated-rows@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
         lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_fails_closed_for_unmapped_plan_without_additional_quota_rows(monkeypatch) -> None:
+    account = _make_account("acc-unmapped-no-gated-rows", "unmapped-no-gated-rows@example.com")
+    account.plan_type = "edu"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"edu"})),
     )
 
     balancer = LoadBalancer(
@@ -2387,6 +2473,7 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 @pytest.mark.asyncio
 async def test_select_account_returns_data_unavailable_when_secondary_window_is_stale(monkeypatch) -> None:
     account = _make_account("acc-gated-stale-secondary", "gated-stale-secondary@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2426,7 +2513,7 @@ async def test_select_account_returns_data_unavailable_when_secondary_window_is_
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
     )
 
     balancer = LoadBalancer(
@@ -2449,6 +2536,8 @@ async def test_select_account_allows_primary_only_account_when_other_account_has
 ) -> None:
     primary_only_account = _make_account("acc-primary-only", "primary-only@example.com")
     stale_secondary_account = _make_account("acc-stale-secondary", "stale-secondary@example.com")
+    primary_only_account.plan_type = "pro"
+    stale_secondary_account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     usage_rows = {
@@ -2507,7 +2596,7 @@ async def test_select_account_allows_primary_only_account_when_other_account_has
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
     )
 
     balancer = LoadBalancer(
@@ -2528,6 +2617,7 @@ async def test_select_account_allows_primary_only_account_when_other_account_has
 @pytest.mark.asyncio
 async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-exhausted", "gated-exhausted@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2567,7 +2657,7 @@ async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeyp
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
     )
 
     balancer = LoadBalancer(
@@ -2587,6 +2677,7 @@ async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeyp
 @pytest.mark.asyncio
 async def test_select_account_additional_limit_filter_does_not_mutate_account_status(monkeypatch) -> None:
     account = _make_account("acc-gated-status-stable", "status-stable@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2616,7 +2707,7 @@ async def test_select_account_additional_limit_filter_does_not_mutate_account_st
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
     )
 
     balancer = LoadBalancer(

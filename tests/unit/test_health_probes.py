@@ -380,6 +380,36 @@ async def test_internal_drain_start_rejects_non_loopback_clients():
 
 
 @pytest.mark.asyncio
+async def test_internal_drain_stop_clears_draining_flags():
+    from app.modules.health.api import stop_internal_drain
+
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    with (
+        patch("app.core.shutdown.set_bridge_drain_active") as set_bridge_drain_active,
+        patch("app.core.shutdown.set_draining") as set_draining,
+    ):
+        response = await stop_internal_drain(cast(Any, request))
+
+    set_draining.assert_called_once_with(False)
+    set_bridge_drain_active.assert_called_once_with(False)
+    assert response.status == "ok"
+    assert response.checks == {"draining": "false"}
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_stop_rejects_non_loopback_clients():
+    from app.modules.health.api import stop_internal_drain
+
+    request = SimpleNamespace(client=SimpleNamespace(host="8.8.8.8"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await stop_internal_drain(cast(Any, request))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_internal_drain_start_rejects_private_network_clients():
     from app.modules.health.api import start_internal_drain
 

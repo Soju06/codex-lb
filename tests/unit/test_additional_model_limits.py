@@ -13,6 +13,7 @@ from app.modules.proxy.additional_model_limits import (
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     clear_additional_quota_registry_cache,
+    get_additional_quota_definition_for_model,
     reload_additional_quota_registry,
 )
 
@@ -26,6 +27,13 @@ def test_get_additional_model_limit_returns_seeded_mapping() -> None:
     assert resolved.model == "gpt-5.3-codex-spark"
     assert resolved.quota_key == "codex_spark"
     assert resolved.display_label == "GPT-5.3-Codex-Spark"
+
+
+def test_seeded_codex_spark_quota_is_plan_applicable() -> None:
+    resolved = get_additional_quota_definition_for_model("gpt-5.3-codex-spark")
+
+    assert resolved is not None
+    assert resolved.applies_to_plans == frozenset({"pro", "prolite", "team", "business", "enterprise"})
 
 
 def test_get_additional_model_limit_normalizes_case_and_whitespace() -> None:

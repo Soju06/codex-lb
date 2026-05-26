@@ -17,6 +17,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.unit
@@ -241,7 +242,10 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
     def fake_validate_model_access(_api_key, _model):
         return None
 
-    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+    async def fake_enforce_request_limits(
+        _api_key, *, request_model=None, request_service_tier=None, request_usage_budget=None
+    ):
+        del request_model, request_service_tier, request_usage_budget
         return None
 
     async def fake_release_reservation(_reservation):
@@ -424,7 +428,7 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
 
     assert violation_kind is None
     assert normalized is not None
@@ -496,7 +500,7 @@ def test_public_stream_incomplete_error_event_is_not_rewritten_when_already_publ
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
 
     assert violation_kind is None
     assert normalized == payload

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from hashlib import sha256
 from typing import Protocol, TypeAlias
@@ -138,18 +139,49 @@ class AuthManager:
         repo: AccountsRepositoryPort,
         *,
         acquire_refresh_admission: Callable[[], Awaitable[RefreshAdmissionLeasePort]] | None = None,
+        refresh_repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepositoryPort]] | None = None,
     ) -> None:
         self._repo = repo
         self._encryptor = TokenEncryptor()
         self._acquire_refresh_admission = acquire_refresh_admission
+        # Optional factory yielding a *fresh* accounts repo (own DB session) for
+        # the detached, shielded refresh task. When set, the singleflight body
+        # runs against this session instead of the request-scoped `repo`, so a
+        # caller cancelled by a client disconnect cannot close the session out
+        # from under the still-running refresh task and strand a pooled
+        # connection. See _run_refresh.
+        self._refresh_repo_factory = refresh_repo_factory
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
         if force or should_refresh(account.last_refresh):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
-                lambda: self.refresh_account(account),
+                lambda: self._run_refresh(account),
             )
         return await self._ensure_chatgpt_account_id(account)
+
+    async def _run_refresh(self, account: Account) -> Account:
+        """Singleflight body for token refresh.
+
+        Runs inside a detached task that the singleflight keeps alive with
+        ``asyncio.shield`` (so concurrent waiters share one refresh and a
+        cancelled waiter does not abort it). Because the task outlives the
+        caller, it MUST NOT use the caller's request-scoped session: when a
+        client disconnects, the caller is cancelled and its
+        ``async with get_background_session()`` closes that session, while this
+        shielded task keeps running and would then touch a closed,
+        concurrently-finalized ``AsyncSession`` (not safe for concurrent use) —
+        stranding a pooled connection that never returns. When a
+        ``refresh_repo_factory`` is provided, open a fresh session here so the
+        refresh write is fully self-contained; otherwise fall back to the bound
+        repo (callers whose session is not client-cancellable, e.g. the usage
+        refresh scheduler).
+        """
+        if self._refresh_repo_factory is None:
+            return await self.refresh_account(account)
+        async with self._refresh_repo_factory() as repo:
+            owned = AuthManager(repo, acquire_refresh_admission=self._acquire_refresh_admission)
+            return await owned.refresh_account(account)
 
     async def refresh_account(self, account: Account) -> Account:
         refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)

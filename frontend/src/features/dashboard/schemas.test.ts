@@ -145,9 +145,17 @@ describe("RequestLogsResponseSchema", () => {
           errorCode: null,
           errorMessage: null,
           tokens: 10,
+          inputTokens: 8,
+          outputTokens: 2,
           cachedInputTokens: 0,
           reasoningEffort: null,
           costUsd: 0.001,
+          costBreakdown: {
+            inputUsd: 0.0004,
+            cachedInputUsd: 0,
+            outputUsd: 0.0006,
+            totalUsd: 0.001,
+          },
           latencyMs: 42,
         },
       ],
@@ -159,6 +167,78 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.inputTokens).toBe(8);
+    expect(parsed.requests[0]?.outputTokens).toBe(2);
+    expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
+  });
+
+  it("defaults omitted cost fields to null for backward compatibility", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-legacy-cost-fields",
+          model: "gpt-5.1",
+          transport: "websocket",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.inputTokens).toBeNull();
+    expect(parsed.requests[0]?.outputTokens).toBeNull();
+    expect(parsed.requests[0]?.costBreakdown).toBeNull();
+  });
+
+  it("defaults omitted nested cost breakdown fields to null", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-partial-breakdown",
+          model: "gpt-5.1",
+          transport: "websocket",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          inputTokens: 8,
+          outputTokens: 2,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          costBreakdown: {
+            inputUsd: 0.0004,
+            totalUsd: 0.001,
+          },
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.costBreakdown?.inputUsd).toBe(0.0004);
+    expect(parsed.requests[0]?.costBreakdown?.cachedInputUsd).toBeNull();
+    expect(parsed.requests[0]?.costBreakdown?.outputUsd).toBeNull();
+    expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });
 
   it("parses request-log filter options including API keys", () => {

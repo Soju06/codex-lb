@@ -51,6 +51,29 @@ def test_claims_from_auth_prefers_token_account_id():
     assert claims.plan_type == "plus"
 
 
+def test_parse_auth_json_accepts_latest_codex_export_format():
+    auth_json = {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "id_token": "id",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "account_id": "acc_latest",
+        },
+        "last_refresh": "2024-01-02T03:04:05Z",
+    }
+
+    auth = parse_auth_json(json.dumps(auth_json).encode("utf-8"))
+
+    assert auth.tokens.id_token == "id"
+    assert auth.tokens.access_token == "access"
+    assert auth.tokens.refresh_token == "refresh"
+    assert auth.tokens.account_id == "acc_latest"
+    assert auth.last_refresh_at is not None
+    assert auth.last_refresh_at.isoformat() == "2024-01-02T03:04:05+00:00"
+
+
 def test_claims_from_auth_preserves_prolite_plan_type():
     payload = {
         "email": "user@example.com",

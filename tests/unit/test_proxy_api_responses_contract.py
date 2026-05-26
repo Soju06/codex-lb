@@ -102,6 +102,39 @@ async def test_normalize_public_responses_stream_preserves_initial_error_details
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_initial_previous_response_not_found() -> None:
+    raw_response_id = "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e"
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"error","status":400,"error":{"type":"invalid_request_error",'
+                    '"code":"previous_response_not_found",'
+                    f'"message":"Previous response with id \'{raw_response_id}\' not found.",'
+                    '"param":"previous_response_id"}}\n\n'
+                )
+            )
+        )
+    ]
+
+    joined = "".join(blocks)
+    assert "previous_response_not_found" not in joined
+    assert raw_response_id not in joined
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    response = payloads[1]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "server_error"
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_preserves_comment_keepalive() -> None:
     terminal = 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n'
 
@@ -114,7 +147,8 @@ async def test_normalize_public_responses_stream_preserves_comment_keepalive() -
     ]
 
     assert blocks[0] == ": keepalive\n\n"
-    assert "response.completed" in blocks[-1]
+    assert "response.completed" in blocks[-2]
+    assert blocks[-1] == "data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio
@@ -455,9 +489,10 @@ async def test_normalize_public_responses_stream_backfills_terminal_output_from_
     output = response_obj["output"]
     assert isinstance(output, list)
     assert len(output) == 1
-    assert output[0]["id"] == "msg_1"
-    assert output[0]["type"] == "message"
-    assert output[0]["content"] == [{"type": "output_text", "text": "backfilled"}]
+    output_item = cast(dict[str, Any], output[0])
+    assert output_item["id"] == "msg_1"
+    assert output_item["type"] == "message"
+    assert output_item["content"] == [{"type": "output_text", "text": "backfilled"}]
 
 
 @pytest.mark.asyncio
@@ -494,7 +529,8 @@ async def test_normalize_public_responses_stream_preserves_existing_terminal_out
     output = response_obj["output"]
     assert isinstance(output, list)
     assert len(output) == 1
-    assert output[0]["id"] == "msg_terminal"
+    output_item = cast(dict[str, Any], output[0])
+    assert output_item["id"] == "msg_terminal"
 
 
 @pytest.mark.asyncio
@@ -812,7 +848,7 @@ async def test_normalize_public_responses_stream_codex_route_truncated_stream_do
 async def test_normalize_public_responses_stream_codex_route_does_not_backfill_output() -> None:
     """`enforce_openai_sdk_contract=False` MUST NOT backfill terminal
     `response.completed.output` from streamed item events. The Codex CLI
-    expects upstream's exact shape."""
+    expects upstream's native item shape."""
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
@@ -838,7 +874,49 @@ async def test_normalize_public_responses_stream_codex_route_does_not_backfill_o
     payloads = [proxy_api_module._parse_sse_payload(b) for b in blocks]
     completed = next(p for p in payloads if p and p.get("type") == "response.completed")
     # Output stays empty — Codex CLI handles its own assembly.
-    assert completed["response"]["output"] == []
+    response_obj = cast(dict[str, Any], completed["response"])
+    assert response_obj["output"] == []
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_appends_done_after_terminal() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_does_not_duplicate_done() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+                ),
+                "data: [DONE]\n\n",
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks.count("data: [DONE]\n\n") == 1
 
 
 # ----------------------------------------------------------------------------

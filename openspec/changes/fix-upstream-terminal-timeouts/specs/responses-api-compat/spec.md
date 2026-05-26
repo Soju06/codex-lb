@@ -55,7 +55,7 @@ When an upstream websocket or HTTP bridge session has multiple pending Responses
 - **AND** the younger request remains pending
 
 ### Requirement: HTTP bridge streams emit downstream liveness frames while pending
-When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the liveness frame MUST be an SSE comment block. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data.
+When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the Codex CLI route MUST emit an ignored `codex.keepalive` SSE data event because comment-only frames do not reset the CLI's EventSource idle timer. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data, and MUST drop `codex.*` liveness events from the public OpenAI SDK contract surface.
 
 #### Scenario: HTTP bridge emits response in-progress keepalive after response id is known
 - **GIVEN** an HTTP bridge request has a known response id
@@ -63,10 +63,10 @@ When an HTTP bridge Responses request is waiting for upstream queue events, the 
 - **THEN** the downstream stream emits a `response.in_progress` event for that response id
 - **AND** the request remains pending
 
-#### Scenario: HTTP bridge emits comment keepalive before response id is known
+#### Scenario: HTTP bridge emits Codex keepalive before response id is known
 - **GIVEN** an HTTP bridge request does not yet have a response id
 - **WHEN** no upstream event arrives before the SSE keepalive interval elapses
-- **THEN** the downstream stream emits an SSE comment keepalive block
+- **THEN** the downstream stream emits a `codex.keepalive` SSE data event
 - **AND** the request remains pending
 
 #### Scenario: First HTTP bridge keepalive is delayed past startup probe

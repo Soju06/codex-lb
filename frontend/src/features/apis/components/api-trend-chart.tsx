@@ -99,7 +99,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
   );
 }
 
-const CHART_MARGIN = { top: 4, right: 48, bottom: 0, left: 0 } as const;
+const CHART_MARGIN = { top: 4, right: 8, bottom: 0, left: 0 } as const;
 
 export type ApiTrendChartProps = {
   cost: ApiKeyTrendPoint[];

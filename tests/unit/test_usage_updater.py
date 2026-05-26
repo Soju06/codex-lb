@@ -2255,3 +2255,197 @@ async def test_additional_rate_limits_no_credits_passed(monkeypatch) -> None:
     assert not hasattr(entry, "credits_has")
     assert not hasattr(entry, "credits_unlimited")
     assert not hasattr(entry, "credits_balance")
+
+
+def test_latest_usage_is_fresh_returns_false_when_reset_at_has_passed() -> None:
+    now = datetime(2024, 6, 1, 12, 0, 30)
+    reset_epoch = int(datetime(2024, 6, 1, 12, 0, 25, tzinfo=timezone.utc).timestamp())
+    entry = UsageHistory(
+        id=1,
+        account_id="a",
+        used_percent=100.0,
+        recorded_at=datetime(2024, 6, 1, 12, 0, 20),
+        window="primary",
+        reset_at=reset_epoch,
+        window_minutes=300,
+    )
+
+    assert usage_updater_module._latest_usage_is_fresh(entry, now=now, interval_seconds=60) is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_forces_fetch_after_rate_limit_reset_despite_fresh_usage(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now_epoch = 1_700_000_000
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 5.0,
+                        "reset_at": now_epoch + 3600,
+                        "limit_window_seconds": 3600,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_reset",
+        100.0,
+        recorded_at=utcnow(),
+        window="primary",
+        reset_at=now_epoch - 1,
+        window_minutes=60,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_reset", window="primary")
+    assert latest is not None
+
+    acc = _make_account("acc_reset", "workspace_reset", email="reset@example.com")
+    acc.status = AccountStatus.RATE_LIMITED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={"acc_reset": latest})
+
+    assert fetch_calls == 1
+    assert usage_repo.entries[-1].used_percent == 5.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_does_not_repeat_post_reset_rate_limit_probe(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        raise AssertionError("post-reset rate-limit probe should not repeat while usage is fresh")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    latest = UsageHistory(
+        id=1,
+        account_id="acc_rate_limited_post_reset",
+        used_percent=5.0,
+        recorded_at=now,
+        window="primary",
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    acc = _make_account("acc_rate_limited_post_reset", "workspace_rate_limited_post_reset")
+    acc.status = AccountStatus.RATE_LIMITED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={acc.id: latest})
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_forces_fetch_after_quota_reset_despite_fresh_primary_usage(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now_epoch = 1_700_000_000
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": now_epoch + 3600,
+                        "limit_window_seconds": 3600,
+                    },
+                    "secondary_window": {
+                        "used_percent": 15.0,
+                        "reset_at": now_epoch + 7 * 24 * 3600,
+                        "limit_window_seconds": 7 * 24 * 3600,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_quota_reset",
+        50.0,
+        recorded_at=utcnow(),
+        window="primary",
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_quota_reset", window="primary")
+    assert latest is not None
+
+    acc = _make_account("acc_quota_reset", "workspace_quota_reset", email="quota-reset@example.com")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={"acc_quota_reset": latest})
+
+    assert fetch_calls == 1
+    assert usage_repo.entries[-2].used_percent == 10.0
+    assert usage_repo.entries[-1].used_percent == 15.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        raise AssertionError("post-reset quota probe should not repeat while usage is fresh")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    latest = UsageHistory(
+        id=1,
+        account_id="acc_quota_post_reset",
+        used_percent=10.0,
+        recorded_at=now,
+        window="primary",
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    acc = _make_account("acc_quota_post_reset", "workspace_quota_post_reset")
+    acc.status = AccountStatus.QUOTA_EXCEEDED
+    acc.reset_at = now_epoch - 1
+
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={acc.id: latest})

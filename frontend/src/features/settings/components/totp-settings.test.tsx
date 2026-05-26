@@ -17,6 +17,15 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+};
+
 const baseSettings = {
   stickyThreadsEnabled: true,
   upstreamStreamTransport: "default" as const,
@@ -28,6 +37,7 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  ...LIMIT_WARMUP_DEFAULTS,
 };
 
 function renderWithClient(ui: React.ReactElement) {
@@ -113,6 +123,7 @@ describe("TotpSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

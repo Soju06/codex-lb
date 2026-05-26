@@ -132,6 +132,7 @@ class ChatCompletionsRequest(BaseModel):
         tools = _normalize_chat_tools(data.pop("tools", []))
         tool_choice = _normalize_tool_choice(data.pop("tool_choice", None))
         reasoning_effort = data.pop("reasoning_effort", None)
+        preserve_instruction_roles = _is_json_object_response_format(response_format)
         if reasoning_effort is not None and "reasoning" not in data:
             data["reasoning"] = {"effort": reasoning_effort}
         normalize_reasoning_aliases(data)
@@ -141,7 +142,11 @@ class ChatCompletionsRequest(BaseModel):
             include_obfuscation = stream_options.get("include_obfuscation")
             if include_obfuscation is not None:
                 data["stream_options"] = {"include_obfuscation": include_obfuscation}
-        instructions, input_items = coerce_messages("", cast(list[JsonValue], messages))
+        instructions, input_items = coerce_messages(
+            "",
+            cast(list[JsonValue], messages),
+            preserve_instruction_roles=preserve_instruction_roles,
+        )
         data["instructions"] = instructions
         data["input"] = input_items
         data["tools"] = tools
@@ -233,6 +238,14 @@ def _normalize_tool_choice(tool_choice: JsonValue | None) -> JsonValue | None:
         if isinstance(name, str) and name:
             return {"type": tool_type or "function", "name": name}
     return tool_choice
+
+
+def _is_json_object_response_format(response_format: JsonValue | None) -> bool:
+    if isinstance(response_format, str):
+        return response_format == "json_object"
+    if not is_json_mapping(response_format):
+        return False
+    return response_format.get("type") == "json_object"
 
 
 def _apply_response_format(data: dict[str, JsonValue], response_format: JsonValue) -> None:

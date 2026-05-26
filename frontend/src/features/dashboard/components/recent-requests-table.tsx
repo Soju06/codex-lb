@@ -71,6 +71,46 @@ export type RecentRequestsTableProps = {
   onOffsetChange: (offset: number) => void;
 };
 
+function formatRequestCostSummary(request: RequestLog | null): string | null {
+  if (!request || request.status !== "ok") {
+    return null;
+  }
+
+  const totalUsd = request.costBreakdown?.totalUsd ?? request.costUsd;
+  const segments: string[] = [];
+  const cachedInputTokens = request.cachedInputTokens ?? 0;
+  const nonCachedInputTokens =
+    request.inputTokens == null ? null : Math.max(0, request.inputTokens - cachedInputTokens);
+
+  if (nonCachedInputTokens != null && request.costBreakdown?.inputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(nonCachedInputTokens)} Input (${formatCurrency(request.costBreakdown.inputUsd)})`,
+    );
+  }
+
+  if (request.cachedInputTokens != null && request.costBreakdown?.cachedInputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(request.cachedInputTokens)} Cached (${formatCurrency(request.costBreakdown.cachedInputUsd)})`,
+    );
+  }
+
+  if (request.outputTokens != null && request.costBreakdown?.outputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(request.outputTokens)} Output (${formatCurrency(request.costBreakdown.outputUsd)})`,
+    );
+  }
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  if (totalUsd == null) {
+    return segments.join(" + ");
+  }
+
+  return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
+}
+
 export function RecentRequestsTable({
   requests,
   accounts,
@@ -83,6 +123,7 @@ export function RecentRequestsTable({
 }: RecentRequestsTableProps) {
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
+  const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest);
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -302,6 +343,17 @@ export function RecentRequestsTable({
             </div>
 
             <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />
+
+            {selectedRequestCostSummary ? (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Cost</h3>
+                <div className="rounded-md bg-muted/50 p-3">
+                  <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                    {selectedRequestCostSummary}
+                  </p>
+                </div>
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <div className="flex items-center gap-2">

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType, UsageHistory
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -20,6 +23,7 @@ from app.modules.api_keys.service import (
     ApiKeyCreateData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
     ApiKeysRepositoryProtocol,
     ApiKeysService,
     ApiKeyUpdateData,
@@ -27,6 +31,7 @@ from app.modules.api_keys.service import (
     _build_api_key_trends,
     _is_sqlite_database_locked,
 )
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.unit
 
@@ -51,6 +56,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._accounts: dict[str, Account] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
+        self.list_all_accounts_calls = 0
+        self.list_accounts_by_ids_calls: list[list[str]] = []
         self.commit_calls = 0
         self.rollback_calls = 0
         self.commit_count = 0
@@ -87,7 +94,12 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         return result
 
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]:
+        self.list_accounts_by_ids_calls.append(list(account_ids))
         return [self._accounts[account_id] for account_id in account_ids if account_id in self._accounts]
+
+    async def list_all_accounts(self) -> list[Account]:
+        self.list_all_accounts_calls += 1
+        return list(self._accounts.values())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
@@ -98,6 +110,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -115,6 +128,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         for field, value in {
             "name": name,
             "allowed_models": allowed_models,
+            "apply_to_codex_model": apply_to_codex_model,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
@@ -402,6 +416,32 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         return True
 
 
+class _FakeUsageRepository(UsageRepository):
+    def __init__(
+        self,
+        *,
+        primary: dict[str, UsageHistory],
+        secondary: dict[str, UsageHistory],
+    ) -> None:
+        self._primary = primary
+        self._secondary = secondary
+        self.calls: list[tuple[str | None, list[str] | None]] = []
+
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        self.calls.append((window, None if account_ids is None else list(account_ids)))
+        source = self._secondary if window == "secondary" else self._primary
+        rows = dict(source)
+        if account_ids is not None:
+            allowed = set(account_ids)
+            rows = {account_id: row for account_id, row in rows.items() if account_id in allowed}
+        return rows
+
+
 class _TransactionalAssignmentFailureRepo(_FakeApiKeysRepository):
     def __init__(self) -> None:
         super().__init__()
@@ -465,6 +505,23 @@ def _find_limit_by_id(
 
 async def _async_noop(*args, **kwargs) -> None:
     del args, kwargs
+
+
+def _make_usage_history(
+    account_id: str,
+    *,
+    used_percent: float,
+    reset_at: int | None = None,
+    window_minutes: int | None = None,
+    recorded_at: datetime | None = None,
+) -> UsageHistory:
+    return UsageHistory(
+        account_id=account_id,
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_minutes=window_minutes,
+        recorded_at=recorded_at or utcnow(),
+    )
 
 
 @pytest.mark.asyncio
@@ -541,6 +598,27 @@ async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
     )
 
     assert created.enforced_reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_apply_to_codex_model_flag() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="codex-visibility-policy",
+            allowed_models=["gpt-5.2"],
+            apply_to_codex_model=True,
+            expires_at=None,
+        )
+    )
+
+    assert created.apply_to_codex_model is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.apply_to_codex_model is True
 
 
 @pytest.mark.asyncio
@@ -709,6 +787,184 @@ async def test_create_key_rejects_unknown_assigned_accounts() -> None:
                 assigned_account_ids=["missing-account"],
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_list_keys_uses_only_assigned_accounts_for_pooled_credits() -> None:
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-a",
+            refresh_token_encrypted=b"refresh-a",
+            id_token_encrypted=b"id-a",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+        "acc-b": Account(
+            id="acc-b",
+            chatgpt_account_id=None,
+            email="b@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-b",
+            refresh_token_encrypted=b"refresh-b",
+            id_token_encrypted=b"id-b",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    service = ApiKeysService(
+        repo,
+        _FakeUsageRepository(
+            primary={
+                "acc-a": _make_usage_history("acc-a", used_percent=25.0),
+                "acc-b": _make_usage_history("acc-b", used_percent=75.0),
+            },
+            secondary={
+                "acc-a": _make_usage_history("acc-a", used_percent=10.0),
+                "acc-b": _make_usage_history("acc-b", used_percent=60.0),
+            },
+        ),
+    )
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assigned-only",
+            allowed_models=None,
+            expires_at=None,
+            assigned_account_ids=["acc-a"],
+        )
+    )
+
+    account_calls_before_list = len(repo.list_accounts_by_ids_calls)
+    listed = await service.list_keys()
+    account_calls_after_list = repo.list_accounts_by_ids_calls[account_calls_before_list:]
+
+    assert listed[0].id == created.id
+    assert listed[0].pooled_credits is not None
+    assert repo.list_all_accounts_calls == 0
+    assert account_calls_after_list == [["acc-a"]]
+    assert cast(_FakeUsageRepository, service._usage_repository).calls == [
+        ("primary", ["acc-a"]),
+        ("secondary", ["acc-a"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_keys_falls_back_to_all_accounts_when_key_is_unassigned() -> None:
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-a",
+            refresh_token_encrypted=b"refresh-a",
+            id_token_encrypted=b"id-a",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+        "acc-b": Account(
+            id="acc-b",
+            chatgpt_account_id=None,
+            email="b@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-b",
+            refresh_token_encrypted=b"refresh-b",
+            id_token_encrypted=b"id-b",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={
+            "acc-a": _make_usage_history("acc-a", used_percent=25.0),
+            "acc-b": _make_usage_history("acc-b", used_percent=75.0),
+        },
+        secondary={
+            "acc-a": _make_usage_history("acc-a", used_percent=10.0),
+            "acc-b": _make_usage_history("acc-b", used_percent=60.0),
+        },
+    )
+    service = ApiKeysService(repo, usage_repo)
+
+    await service.create_key(
+        ApiKeyCreateData(
+            name="unassigned",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    account_calls_before_list = len(repo.list_accounts_by_ids_calls)
+    listed = await service.list_keys()
+    account_calls_after_list = repo.list_accounts_by_ids_calls[account_calls_before_list:]
+
+    assert listed[0].pooled_credits is not None
+    assert repo.list_all_accounts_calls == 1
+    assert account_calls_after_list == []
+    assert usage_repo.calls == [("primary", None), ("secondary", None)]
+
+
+@pytest.mark.asyncio
+async def test_update_key_persists_apply_to_codex_model_flag() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="codex-visibility-update",
+            allowed_models=["gpt-5.2"],
+            expires_at=None,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            apply_to_codex_model=True,
+            apply_to_codex_model_set=True,
+        ),
+    )
+
+    assert updated.apply_to_codex_model is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.apply_to_codex_model is True
+
+
+@pytest.mark.asyncio
+async def test_update_key_ignores_null_apply_to_codex_model_patch_value() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="codex-visibility-null-update",
+            allowed_models=["gpt-5.2"],
+            apply_to_codex_model=True,
+            expires_at=None,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            apply_to_codex_model=None,
+            apply_to_codex_model_set=True,
+        ),
+    )
+
+    assert updated.apply_to_codex_model is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.apply_to_codex_model is True
 
 
 @pytest.mark.asyncio
@@ -909,6 +1165,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         priority_created.id,
         request_model="gpt-5.4",
         request_service_tier="priority",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
     assert priority_reservation.key_id == priority_created.id
 
@@ -930,12 +1187,117 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         standard_created.id,
         request_model="gpt-5.4",
         request_service_tier=None,
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
     assert standard_reservation.key_id == standard_created.id
 
     standard_limits = await repo.get_limits_by_key(standard_created.id)
     standard_cost_limit = next(lim for lim in standard_limits if lim.limit_type == LimitType.COST_USD)
     assert standard_cost_limit.current_value == 143_360
+
+
+def test_api_key_request_usage_budget_rejects_non_integer_tokens() -> None:
+    with pytest.raises(TypeError, match="input_tokens"):
+        ApiKeyRequestUsageBudget(input_tokens=cast(Any, "128"))
+    with pytest.raises(TypeError, match="output_tokens"):
+        ApiKeyRequestUsageBudget(output_tokens=cast(Any, True))
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_default_budget_allows_eight_priority_lanes_under_five_dollars() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="priority-lanes",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=5_000_000)],
+        )
+    )
+
+    reservations = await asyncio.gather(
+        *(
+            service.enforce_limits_for_request(
+                created.id,
+                request_model="gpt-5.5",
+                request_service_tier="priority",
+            )
+            for _ in range(8)
+        )
+    )
+
+    assert len(reservations) == 8
+    assert {reservation.key_id for reservation in reservations} == {created.id}
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert 0 < cost_limit.current_value < 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_request_budget_bounds_token_and_cost_reservations() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="bounded-request",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="input_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="output_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000),
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=1_000_000),
+            ],
+        )
+    )
+
+    await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.5",
+        request_service_tier="priority",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=123, output_tokens=456),
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    by_type = {limit.limit_type: limit.current_value for limit in limits}
+    assert by_type[LimitType.INPUT_TOKENS] == 123
+    assert by_type[LimitType.OUTPUT_TOKENS] == 456
+    assert by_type[LimitType.TOTAL_TOKENS] == 579
+    assert 0 < by_type[LimitType.COST_USD] < 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_finalize_usage_reservation_accounts_for_zero_reserved_limit_item() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="zero-output-reserve",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="output_tokens", limit_window="weekly", max_value=1_000)],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.5",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=0, output_tokens=0),
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    output_limit = next(limit for limit in limits if limit.limit_type == LimitType.OUTPUT_TOKENS)
+    assert output_limit.current_value == 0
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.5",
+        input_tokens=0,
+        output_tokens=100,
+    )
+
+    assert output_limit.current_value == 100
 
 
 @pytest.mark.asyncio

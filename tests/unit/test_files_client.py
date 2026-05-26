@@ -20,7 +20,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 import pytest
@@ -82,6 +82,10 @@ class _FakeSession:
         return next_value
 
 
+def _client_session(session: _FakeSession) -> aiohttp.ClientSession:
+    return cast(aiohttp.ClientSession, session)
+
+
 @pytest.mark.asyncio
 async def test_create_file_returns_upstream_json_on_success() -> None:
     response_body = json.dumps({"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"})
@@ -92,7 +96,7 @@ async def test_create_file_returns_upstream_json_on_success() -> None:
         headers={"User-Agent": "codex-cli/1.0", "x-codex-version": "1.2.3", "Authorization": "Bearer not-forwarded"},
         access_token="upstream-token",
         account_id="acc_1",
-        session=session,  # type: ignore[arg-type]
+        session=_client_session(session),
     )
 
     assert result == {"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"}
@@ -120,7 +124,7 @@ async def test_create_file_maps_error_status_to_proxy_error() -> None:
             headers={},
             access_token="t",
             account_id=None,
-            session=session,  # type: ignore[arg-type]
+            session=_client_session(session),
         )
     assert info.value.status_code == 413
     assert info.value.payload == {"error": {"message": "file too large", "type": "invalid_request_error"}}
@@ -136,7 +140,7 @@ async def test_create_file_non_json_body_yields_502() -> None:
             headers={},
             access_token="t",
             account_id=None,
-            session=session,  # type: ignore[arg-type]
+            session=_client_session(session),
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_error"
@@ -152,7 +156,7 @@ async def test_create_file_transport_failure_yields_502() -> None:
             headers={},
             access_token="t",
             account_id=None,
-            session=session,  # type: ignore[arg-type]
+            session=_client_session(session),
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_unavailable"
@@ -210,7 +214,7 @@ async def test_finalize_file_returns_immediately_on_success(monkeypatch: pytest.
         headers={},
         access_token="t",
         account_id="acc_1",
-        session=session,  # type: ignore[arg-type]
+        session=_client_session(session),
     )
 
     assert result["status"] == "success"
@@ -244,7 +248,7 @@ async def test_finalize_file_retries_then_succeeds(monkeypatch: pytest.MonkeyPat
         headers={},
         access_token="t",
         account_id=None,
-        session=session,  # type: ignore[arg-type]
+        session=_client_session(session),
     )
 
     assert result["status"] == "success"
@@ -318,7 +322,7 @@ async def test_finalize_file_returns_last_retry_after_budget_exhaustion(monkeypa
         headers={},
         access_token="t",
         account_id=None,
-        session=session,  # type: ignore[arg-type]
+        session=_client_session(session),
     )
 
     assert result == {"status": "retry"}
@@ -346,7 +350,7 @@ async def test_finalize_file_maps_error_status_to_proxy_error(monkeypatch: pytes
             headers={},
             access_token="t",
             account_id=None,
-            session=session,  # type: ignore[arg-type]
+            session=_client_session(session),
         )
     assert info.value.status_code == 404
     assert info.value.payload == {"error": {"message": "not found", "type": "invalid_request_error"}}
@@ -367,7 +371,7 @@ async def test_finalize_file_transport_timeout_yields_502(monkeypatch: pytest.Mo
             headers={},
             access_token="t",
             account_id=None,
-            session=session,  # type: ignore[arg-type]
+            session=_client_session(session),
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_unavailable"

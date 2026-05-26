@@ -322,6 +322,29 @@ def test_chat_response_format_json_object_maps_to_text_format():
     assert text.get("format") == {"type": "json_object"}
 
 
+def test_chat_response_format_json_object_preserves_instruction_roles_in_input():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": "Return JSON."},
+            {"role": "developer", "content": "Keep it short."},
+            {"role": "user", "content": "Say hello."},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert dumped["instructions"] == ""
+    assert dumped["input"] == [
+        {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "Keep it short."}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
+    ]
+    assert dumped["text"] == {"format": {"type": "json_object"}}
+
+
 def test_chat_response_format_json_schema_maps_schema_fields():
     payload = {
         "model": "gpt-5.2",
@@ -346,6 +369,29 @@ def test_chat_response_format_json_schema_maps_schema_fields():
     assert fmt.get("name") == "output"
     assert fmt.get("schema") == {"type": "object", "properties": {"ok": {"type": "boolean"}}}
     assert fmt.get("strict") is True
+
+
+def test_chat_response_format_json_schema_keeps_system_in_instructions():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": "Return JSON."},
+            {"role": "user", "content": "hi"},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "output",
+                "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                "strict": True,
+            },
+        },
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.instructions == "Return JSON."
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
 def test_chat_stream_options_include_obfuscation_passthrough():

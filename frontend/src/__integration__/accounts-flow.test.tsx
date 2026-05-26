@@ -32,4 +32,30 @@ describe("accounts flow integration", () => {
       });
     }
   });
+
+  it("lets operators set, search, and clear an account alias", async () => {
+    const user = userEvent.setup({ delay: null });
+
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    const aliasInput = await screen.findByLabelText("Account alias");
+    await user.clear(aliasInput);
+    await user.type(aliasInput, "Personal Plus");
+    await user.click(screen.getByRole("button", { name: "Save alias" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Personal Plus" })).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "personal");
+    expect(screen.getAllByText("Personal Plus").length).toBeGreaterThan(0);
+    expect(screen.queryByText("secondary@example.com")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Clear alias" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "primary@example.com" })).toBeInTheDocument();
+    });
+  });
 });

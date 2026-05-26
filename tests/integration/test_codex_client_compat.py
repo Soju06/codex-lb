@@ -9,7 +9,7 @@ pytestmark = pytest.mark.integration
 
 def _extract_first_event(lines: list[str]) -> dict:
     for line in lines:
-        if line.startswith("data: "):
+        if line.startswith("data: ") and not line.startswith("data: [DONE]"):
             return json.loads(line[6:])
     raise AssertionError("No SSE data event found")
 

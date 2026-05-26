@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from math import ceil
 from typing import Protocol
 
 from sqlalchemy.exc import OperationalError
@@ -18,8 +19,9 @@ from app.core.usage.pricing import (
     calculate_cost_from_usage,
     get_pricing_for_model,
 )
+from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, ApiKey, ApiKeyLimit, LimitType, LimitWindow
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
 from app.modules.api_keys.repository import (
@@ -32,11 +34,17 @@ from app.modules.api_keys.repository import (
     UsageReservationItemData,
     _Unset,
 )
+from app.modules.usage.repository import UsageRepository
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.1
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600
+API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET = 8_192
+API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS = 2_048
+_API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_MICRODOLLARS = 2_000_000
+_API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_BASE_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET * 2
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -50,6 +58,7 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
+    async def list_all_accounts(self) -> list[Account]: ...
 
     async def update(
         self,
@@ -57,6 +66,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
+        apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
@@ -179,10 +189,40 @@ class ApiKeyInvalidError(ValueError):
     pass
 
 
+class ApiKeyValidationError(ValueError):
+    """Raised when api_keys service input fails domain validation.
+
+    Subclasses ValueError so existing transitive callers that catch
+    ``ValueError`` continue to work, but lets API routes catch the
+    typed exception explicitly so unrelated programming errors that
+    happen to surface as ``ValueError`` are no longer silently
+    converted into 4xx client responses (#619).
+    """
+
+    pass
+
+
 class ApiKeyRateLimitExceededError(ValueError):
     def __init__(self, *, message: str, reset_at: datetime) -> None:
         super().__init__(message)
         self.reset_at = reset_at
+
+
+def _ensure_optional_int_token_budget(field_name: str, value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an int or None")
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyRequestUsageBudget:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        _ensure_optional_int_token_budget("input_tokens", self.input_tokens)
+        _ensure_optional_int_token_budget("output_tokens", self.output_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +248,7 @@ class LimitRuleInput:
 class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
+    apply_to_codex_model: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
@@ -222,6 +263,8 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
+    apply_to_codex_model: bool | None = None
+    apply_to_codex_model_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -252,10 +295,12 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    apply_to_codex_model: bool = False
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    pooled_credits: "PooledCreditData | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +317,78 @@ class ApiKeyUsageSummaryData:
 
 
 @dataclass(frozen=True, slots=True)
+class PooledCreditData:
+    remaining_percent_primary: float | None = None
+    remaining_percent_secondary: float | None = None
+    capacity_credits_primary: float = 0.0
+
+
+def _compute_pooled_credits(
+    *,
+    assigned_account_ids: list[str],
+    all_accounts: list[Account],
+    primary_usage: dict[str, UsageHistory],
+    secondary_usage: dict[str, UsageHistory],
+) -> PooledCreditData:
+    import app.core.usage as usage_core
+    from app.modules.usage.mappers import usage_history_to_window_row
+
+    if assigned_account_ids:
+        requested_account_ids = set(assigned_account_ids)
+    else:
+        requested_account_ids = {a.id for a in all_accounts}
+
+    account_map = {
+        a.id: a
+        for a in all_accounts
+        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+    }
+    account_ids = set(account_map)
+
+    primary_rows_raw = [
+        usage_history_to_window_row(entry) for entry in primary_usage.values() if entry.account_id in account_ids
+    ]
+    secondary_rows_raw = [
+        usage_history_to_window_row(entry) for entry in secondary_usage.values() if entry.account_id in account_ids
+    ]
+
+    primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
+        primary_rows_raw,
+        secondary_rows_raw,
+    )
+    primary_rows = _seed_missing_usage_rows(primary_rows, account_ids)
+    secondary_rows = _seed_missing_usage_rows(secondary_rows, account_ids)
+
+    primary_summary = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
+    secondary_summary = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
+
+    primary_remaining = usage_core.remaining_percent_from_used(primary_summary.used_percent)
+    secondary_remaining = usage_core.remaining_percent_from_used(secondary_summary.used_percent)
+
+    if primary_summary.capacity_credits == 0.0:
+        primary_remaining = None
+
+    return PooledCreditData(
+        remaining_percent_primary=primary_remaining,
+        remaining_percent_secondary=secondary_remaining,
+        capacity_credits_primary=primary_summary.capacity_credits,
+    )
+
+
+def _seed_missing_usage_rows(
+    rows: list[UsageWindowRow],
+    account_ids: set[str],
+) -> list[UsageWindowRow]:
+    present_account_ids = {row.account_id for row in rows}
+    missing_account_ids = account_ids - present_account_ids
+    if not missing_account_ids:
+        return rows
+    return rows + [
+        UsageWindowRow(account_id=account_id, used_percent=0.0) for account_id in sorted(missing_account_ids)
+    ]
+
+
+@dataclass(frozen=True, slots=True)
 class ApiKeyUsageReservationData:
     reservation_id: str
     key_id: str
@@ -279,8 +396,9 @@ class ApiKeyUsageReservationData:
 
 
 class ApiKeysService:
-    def __init__(self, repository: ApiKeysRepositoryProtocol) -> None:
+    def __init__(self, repository: ApiKeysRepositoryProtocol, usage_repository: UsageRepository | None = None) -> None:
         self._repository = repository
+        self._usage_repository = usage_repository
 
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         now = utcnow()
@@ -298,6 +416,7 @@ class ApiKeysService:
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
+            apply_to_codex_model=bool(payload.apply_to_codex_model),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
@@ -331,8 +450,39 @@ class ApiKeysService:
     async def list_keys(self) -> list[ApiKeyData]:
         rows = await self._repository.list_all()
         usage_summary_by_key = await self._repository.list_usage_summary_by_key()
+
+        pooled_by_key: dict[str, PooledCreditData] = {}
+        if self._usage_repository is not None:
+            assigned_ids_by_key = {
+                row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
+            }
+            needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
+            if needs_all_accounts:
+                all_accounts = await self._repository.list_all_accounts()
+                primary_usage = await self._usage_repository.latest_by_account("primary")
+                secondary_usage = await self._usage_repository.latest_by_account("secondary")
+            else:
+                all_account_ids = sorted({account_id for ids in assigned_ids_by_key.values() for account_id in ids})
+                all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
+                primary_usage = await self._usage_repository.latest_by_account("primary", account_ids=all_account_ids)
+                secondary_usage = await self._usage_repository.latest_by_account(
+                    "secondary",
+                    account_ids=all_account_ids,
+                )
+            for row in rows:
+                pooled_by_key[row.id] = _compute_pooled_credits(
+                    assigned_account_ids=assigned_ids_by_key[row.id],
+                    all_accounts=all_accounts,
+                    primary_usage=primary_usage,
+                    secondary_usage=secondary_usage,
+                )
+
         return [
-            _to_api_key_data(row, usage_summary=_to_usage_summary_data(usage_summary_by_key.get(row.id)))
+            _to_api_key_data(
+                row,
+                usage_summary=_to_usage_summary_data(usage_summary_by_key.get(row.id)),
+                pooled_credits=pooled_by_key.get(row.id),
+            )
             for row in rows
         ]
 
@@ -357,6 +507,15 @@ class ApiKeysService:
             enforced_model = _normalize_model_slug(payload.enforced_model)
         else:
             enforced_model = None
+
+        apply_to_codex_model: bool | _Unset
+        if payload.apply_to_codex_model_set:
+            if payload.apply_to_codex_model is None:
+                apply_to_codex_model = _UNSET
+            else:
+                apply_to_codex_model = payload.apply_to_codex_model
+        else:
+            apply_to_codex_model = _UNSET
 
         if payload.enforced_reasoning_effort_set:
             enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
@@ -402,6 +561,7 @@ class ApiKeysService:
                 key_id,
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+                apply_to_codex_model=apply_to_codex_model,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -432,6 +592,7 @@ class ApiKeysService:
             or limit_rows is not None
             or payload.name_set
             or payload.allowed_models_set
+            or payload.apply_to_codex_model_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
@@ -457,7 +618,7 @@ class ApiKeysService:
         ]
         if missing_account_ids:
             missing = ", ".join(missing_account_ids)
-            raise ValueError(f"Unknown account ids: {missing}")
+            raise ApiKeyValidationError(f"Unknown account ids: {missing}")
         return normalized_account_ids
 
     async def delete_key(self, key_id: str) -> None:
@@ -519,6 +680,7 @@ class ApiKeysService:
         *,
         request_model: str | None,
         request_service_tier: str | None = None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> ApiKeyUsageReservationData:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -526,6 +688,7 @@ class ApiKeysService:
                     key_id,
                     request_model=request_model,
                     request_service_tier=request_service_tier,
+                    request_usage_budget=request_usage_budget,
                 )
             except OperationalError as exc:
                 await self._repository.rollback()
@@ -541,6 +704,7 @@ class ApiKeysService:
         *,
         request_model: str | None,
         request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
     ) -> ApiKeyUsageReservationData:
         now = utcnow()
         async with sqlite_writer_section():
@@ -553,6 +717,7 @@ class ApiKeysService:
                 raise ApiKeyInvalidError("API key has expired")
 
             reservation_items: list[UsageReservationItemData] = []
+            normalized_usage_budget = _normalize_request_usage_budget(request_usage_budget)
             try:
                 for limit in refreshed.limits:
                     if not _limit_applies_for_request(limit, request_model=request_model):
@@ -563,16 +728,16 @@ class ApiKeysService:
                         limit,
                         request_model=request_model,
                         request_service_tier=request_service_tier,
+                        request_usage_budget=normalized_usage_budget,
                     )
-                    if reserve_delta <= 0:
-                        continue
-                    result = await self._repository.try_reserve_usage(
-                        limit.id,
-                        delta=reserve_delta,
-                        expected_reset_at=limit.reset_at,
-                    )
-                    if not result.success:
-                        raise _rate_limit_exceeded_error(limit)
+                    if reserve_delta > 0:
+                        result = await self._repository.try_reserve_usage(
+                            limit.id,
+                            delta=reserve_delta,
+                            expected_reset_at=limit.reset_at,
+                        )
+                        if not result.success:
+                            raise _rate_limit_exceeded_error(limit)
                     reservation_items.append(
                         UsageReservationItemData(
                             limit_id=limit.id,
@@ -886,6 +1051,15 @@ class ApiKeysService:
             total_cost_usd=data.total_cost_usd,
             total_requests=data.total_requests,
             cached_input_tokens=data.cached_input_tokens,
+            account_costs=[
+                ApiKeyAccountCostData(
+                    account_id=ac.account_id,
+                    email=ac.email,
+                    cost_usd=ac.cost_usd,
+                    is_deleted=ac.is_deleted,
+                )
+                for ac in data.account_costs
+            ],
         )
 
 
@@ -903,12 +1077,21 @@ class ApiKeyTrendsData:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiKeyAccountCostData:
+    account_id: str | None
+    email: str | None
+    cost_usd: float
+    is_deleted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ApiKeyUsage7DayData:
     key_id: str
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     total_requests: int = 0
     cached_input_tokens: int = 0
+    account_costs: list[ApiKeyAccountCostData] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -935,7 +1118,7 @@ class ApiKeySelfUsageData:
 def _normalize_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
-        raise ValueError("API key name is required")
+        raise ApiKeyValidationError("API key name is required")
     return normalized
 
 
@@ -1010,7 +1193,7 @@ def _normalize_reasoning_effort(value: str | None) -> str | None:
         return None
     if normalized not in _SUPPORTED_REASONING_EFFORTS:
         options = ", ".join(sorted(_SUPPORTED_REASONING_EFFORTS))
-        raise ValueError(f"Unsupported enforced reasoning effort '{normalized}'. Expected one of: {options}")
+        raise ApiKeyValidationError(f"Unsupported enforced reasoning effort '{normalized}'. Expected one of: {options}")
     return normalized
 
 
@@ -1035,7 +1218,7 @@ def _normalize_service_tier(value: str | None) -> str | None:
         normalized = "priority"
     if normalized not in _SUPPORTED_SERVICE_TIERS:
         options = ", ".join(sorted(_SUPPORTED_SERVICE_TIERS | {"fast"}))
-        raise ValueError(f"Unsupported enforced service tier '{normalized}'. Expected one of: {options}")
+        raise ApiKeyValidationError(f"Unsupported enforced service tier '{normalized}'. Expected one of: {options}")
     return normalized
 
 
@@ -1056,7 +1239,9 @@ def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: l
     if enforced_model is None or not allowed_models:
         return
     if enforced_model not in allowed_models:
-        raise ValueError("enforced_model must be present in allowed_models when allowed_models is configured")
+        raise ApiKeyValidationError(
+            "enforced_model must be present in allowed_models when allowed_models is configured"
+        )
 
 
 def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
@@ -1118,6 +1303,7 @@ def _reserve_delta_for_limit(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget,
 ) -> int:
     remaining = limit.max_value - limit.current_value
     if remaining <= 0:
@@ -1126,8 +1312,33 @@ def _reserve_delta_for_limit(
         limit.limit_type,
         request_model=request_model,
         request_service_tier=request_service_tier,
+        request_usage_budget=request_usage_budget,
     )
     return min(remaining, budget)
+
+
+def _normalize_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> ApiKeyRequestUsageBudget:
+    if budget is None:
+        return ApiKeyRequestUsageBudget(
+            input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+            output_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+        )
+    return ApiKeyRequestUsageBudget(
+        input_tokens=_normalize_reservation_token_budget(
+            budget.input_tokens,
+            default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+        ),
+        output_tokens=_normalize_reservation_token_budget(
+            budget.output_tokens,
+            default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+        ),
+    )
+
+
+def _normalize_reservation_token_budget(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 def _reserve_budget_for_limit_type(
@@ -1135,31 +1346,60 @@ def _reserve_budget_for_limit_type(
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    request_usage_budget: ApiKeyRequestUsageBudget,
 ) -> int:
+    input_tokens = request_usage_budget.input_tokens or 0
+    output_tokens = request_usage_budget.output_tokens or 0
     if limit_type == LimitType.TOTAL_TOKENS:
-        return 8_192
+        return input_tokens + output_tokens
     if limit_type == LimitType.INPUT_TOKENS:
-        return 8_192
+        return input_tokens
     if limit_type == LimitType.OUTPUT_TOKENS:
-        return 8_192
+        return output_tokens
     if limit_type == LimitType.COST_USD:
-        return _reserve_cost_budget_microdollars(request_model, request_service_tier)
+        return _reserve_cost_budget_microdollars(
+            request_model,
+            request_service_tier,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
     if limit_type == LimitType.CREDITS:
         return 0
     return 1
 
 
-def _reserve_cost_budget_microdollars(model: str | None, service_tier: str | None) -> int:
+def _reserve_cost_budget_microdollars(
+    model: str | None,
+    service_tier: str | None,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> int:
     if not model:
-        return 2_000_000
+        return _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
     cost_microdollars = _calculate_cost_microdollars(
         model,
-        8_192,
-        8_192,
+        input_tokens,
+        output_tokens,
         0,
         service_tier,
     )
-    return cost_microdollars if cost_microdollars > 0 else 2_000_000
+    return (
+        cost_microdollars
+        if cost_microdollars > 0
+        else _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
+    )
+
+
+def _unknown_model_reserve_cost_budget_microdollars(*, input_tokens: int, output_tokens: int) -> int:
+    token_budget = max(0, input_tokens) + max(0, output_tokens)
+    if token_budget <= 0:
+        return 0
+    return ceil(
+        _API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_MICRODOLLARS
+        * token_budget
+        / _API_KEY_USAGE_RESERVATION_UNKNOWN_MODEL_BASE_TOKENS
+    )
 
 
 def _compute_increment_for_limit_type(
@@ -1192,6 +1432,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
+        apply_to_codex_model=data.apply_to_codex_model,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
@@ -1207,7 +1448,12 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     )
 
 
-def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | None = None) -> ApiKeyData:
+def _to_api_key_data(
+    row: ApiKey,
+    *,
+    usage_summary: ApiKeyUsageSummaryData | None = None,
+    pooled_credits: PooledCreditData | None = None,
+) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     account_assignments = getattr(row, "account_assignments", [])
     return ApiKeyData(
@@ -1215,6 +1461,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
+        apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
@@ -1226,6 +1473,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         usage_summary=usage_summary,
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
+        pooled_credits=pooled_credits,
     )
 
 
@@ -1250,7 +1498,7 @@ def _limit_input_to_row(
 ) -> ApiKeyLimit:
     window = LimitWindow(li.limit_window)
     if li.limit_type == LimitType.CREDITS.value and li.model_filter is not None:
-        raise ValueError("credits limits do not support model_filter")
+        raise ApiKeyValidationError("credits limits do not support model_filter")
     return ApiKeyLimit(
         api_key_id=key_id,
         limit_type=LimitType(li.limit_type),
@@ -1273,7 +1521,7 @@ def _build_limit_rows_for_update(
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
     if len(submitted_by_key) != len(submitted_limits):
-        raise ValueError("Duplicate limit rules are not allowed")
+        raise ApiKeyValidationError("Duplicate limit rules are not allowed")
 
     rows: list[ApiKeyLimit] = []
     for submitted in submitted_limits:

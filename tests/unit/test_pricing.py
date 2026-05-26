@@ -9,6 +9,7 @@ from app.core.usage.pricing import (
     CostItem,
     ModelPrice,
     UsageTokens,
+    calculate_cost_breakdown_from_usage,
     calculate_cost_from_usage,
     calculate_costs,
     get_pricing_for_model,
@@ -107,6 +108,87 @@ def test_calculate_cost_from_usage_cached_tokens():
     cost = calculate_cost_from_usage(usage, price)
     expected = (800 / 1_000_000) * 2.0 + (200 / 1_000_000) * 0.5 + (500 / 1_000_000) * 4.0
     assert cost == pytest.approx(expected)
+
+
+def test_calculate_cost_breakdown_from_usage_cached_tokens():
+    usage = UsageTokens(
+        input_tokens=1_000.0,
+        output_tokens=500.0,
+        cached_input_tokens=200.0,
+    )
+    price = ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.5, output_per_1m=4.0)
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx((800 / 1_000_000) * 2.0)
+    assert breakdown.cached_input_usd == pytest.approx((200 / 1_000_000) * 0.5)
+    assert breakdown.output_usd == pytest.approx((500 / 1_000_000) * 4.0)
+    assert breakdown.total_usd == pytest.approx(
+        ((800 / 1_000_000) * 2.0) + ((200 / 1_000_000) * 0.5) + ((500 / 1_000_000) * 4.0)
+    )
+
+
+def test_calculate_cost_breakdown_from_usage_clamps_cached_tokens():
+    usage = UsageTokens(
+        input_tokens=100.0,
+        output_tokens=500.0,
+        cached_input_tokens=200.0,
+    )
+    price = ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.5, output_per_1m=4.0)
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(0.0)
+    assert breakdown.cached_input_usd == pytest.approx((100 / 1_000_000) * 0.5)
+    assert breakdown.output_usd == pytest.approx((500 / 1_000_000) * 4.0)
+    assert breakdown.total_usd == pytest.approx(((100 / 1_000_000) * 0.5) + ((500 / 1_000_000) * 4.0))
+
+
+def test_calculate_cost_breakdown_from_usage_priority_service_tier():
+    usage = UsageTokens(
+        input_tokens=1_000_000.0,
+        output_tokens=1_000_000.0,
+        cached_input_tokens=100_000.0,
+    )
+    price = ModelPrice(
+        input_per_1m=2.5,
+        cached_input_per_1m=0.25,
+        output_per_1m=15.0,
+        priority_input_per_1m=5.0,
+        priority_cached_input_per_1m=0.5,
+        priority_output_per_1m=30.0,
+    )
+
+    breakdown = calculate_cost_breakdown_from_usage(
+        usage,
+        price,
+        service_tier="priority",
+    )
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(4.5)
+    assert breakdown.cached_input_usd == pytest.approx(0.05)
+    assert breakdown.output_usd == pytest.approx(30.0)
+    assert breakdown.total_usd == pytest.approx(34.55)
+
+
+def test_calculate_cost_breakdown_from_usage_precision_rounds_components_first():
+    usage = UsageTokens(
+        input_tokens=200_000.0,
+        output_tokens=100_000.0,
+        cached_input_tokens=100_000.0,
+    )
+    price = ModelPrice(input_per_1m=0.144, cached_input_per_1m=0.144, output_per_1m=0.144)
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, price, precision=2)
+
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(0.01)
+    assert breakdown.cached_input_usd == pytest.approx(0.01)
+    assert breakdown.output_usd == pytest.approx(0.01)
+    assert breakdown.total_usd == pytest.approx(0.03)
 
 
 def test_calculate_cost_from_usage_priority_service_tier():

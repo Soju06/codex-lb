@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from app.core.utils.sse import SSE_KEEPALIVE_FRAME, format_sse_event, inject_sse_keepalives
+from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME, format_sse_event, inject_sse_keepalives
 
 pytestmark = pytest.mark.unit
 
@@ -45,6 +45,21 @@ async def test_inject_sse_keepalives_emits_pings_on_idle_gap():
     assert out[-1] == "a\n\n"
     assert SSE_KEEPALIVE_FRAME in out
     assert out.count(SSE_KEEPALIVE_FRAME) >= 2
+
+
+@pytest.mark.asyncio
+async def test_inject_sse_keepalives_can_emit_codex_event_frame():
+    out = [
+        chunk
+        async for chunk in inject_sse_keepalives(
+            _slow_agen(["a\n\n"], delay=0.25),
+            0.05,
+            keepalive_frame=CODEX_KEEPALIVE_FRAME,
+        )
+    ]
+    assert out[-1] == "a\n\n"
+    assert CODEX_KEEPALIVE_FRAME in out
+    assert out.count(CODEX_KEEPALIVE_FRAME) >= 2
 
 
 @pytest.mark.asyncio

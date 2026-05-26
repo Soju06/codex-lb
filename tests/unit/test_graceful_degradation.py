@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Iterator, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -125,7 +125,11 @@ async def test_health_ready_succeeds_when_degraded() -> None:
 
     set_degraded("all upstream accounts are unavailable")
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock()
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = []
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+    mock_session.execute = AsyncMock(return_value=mock_result)
 
     with patch("app.core.draining._draining", False), patch("app.modules.health.api.get_session") as mock_get_session:
 

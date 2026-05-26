@@ -29,6 +29,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="When used with `init`, overwrite an existing .env.local file.",
     )
+    parser.add_argument(
+        "--timeout-keep-alive",
+        type=int,
+        default=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200")),
+        help=(
+            "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
+            "connections for large compact POSTs; short keepalive windows can leave the "
+            "client writing to a stale socket before the request reaches the app."
+        ),
+    )
 
     return parser.parse_args(args=argv)
 
@@ -71,6 +81,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         port=args.port,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
+        timeout_keep_alive=args.timeout_keep_alive,
         log_config=build_log_config(),
     )
 

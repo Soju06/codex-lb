@@ -30,7 +30,12 @@ def _content_parts(content: JsonValue) -> list[JsonValue]:
     return [content]
 
 
-def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -> tuple[str, list[JsonValue]]:
+def coerce_messages(
+    existing_instructions: str,
+    messages: Sequence[JsonValue],
+    *,
+    preserve_instruction_roles: bool = False,
+) -> tuple[str, list[JsonValue]]:
     instruction_parts: list[str] = []
     input_messages: list[JsonValue] = []
     for message in messages:
@@ -45,6 +50,9 @@ def coerce_messages(existing_instructions: str, messages: Sequence[JsonValue]) -
             raise ClientPayloadError(f"Unsupported message role: {role}", param="messages")
         if role in ("system", "developer"):
             _ensure_text_only_content(message_dict.get("content"), role)
+            if preserve_instruction_roles:
+                input_messages.append(cast(JsonValue, _normalize_message_content(cast(OpenAIMessage, message_dict))))
+                continue
             content_text = _content_to_text(message_dict.get("content"))
             if content_text:
                 instruction_parts.append(content_text)
@@ -139,7 +147,7 @@ def _decompose_assistant_tool_calls(message: OpenAIMessage) -> list[JsonValue]:
     if content is not None or refusal is not None:
         parts = _to_content_list(_normalize_content_parts(content, "assistant")) if content is not None else []
         if refusal is not None:
-            parts.append(RefusalContentPart(type="refusal", refusal=refusal))
+            parts.append(cast(JsonValue, RefusalContentPart(type="refusal", refusal=refusal)))
         msg_item: OpenAIMessage = {"role": "assistant", "content": parts}
         items.append(cast(JsonValue, msg_item))
     tool_calls = message.get("tool_calls")

@@ -4467,7 +4467,6 @@ class ProxyService:
                     last_failover_exc = exc
                     last_failover_account = account
                     excluded_account_ids.add(account.id)
-                    request_state.excluded_account_ids.add(account.id)
                     continue
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)

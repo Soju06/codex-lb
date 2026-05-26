@@ -2391,7 +2391,7 @@ async def _validate_proxy_api_key_authorization_for_connection(
 
 def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
     message = str(exc)
-    return "request" in message and "unexpected keyword argument" in message
+    return "unexpected keyword argument 'request'" in message
 
 
 async def _validate_proxy_websocket_request(

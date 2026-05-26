@@ -141,6 +141,30 @@ async def test_validate_proxy_websocket_request_supports_legacy_auth_override(mo
 
 
 @pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_reraises_unrelated_type_error(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    calls = 0
+
+    async def broken_auth_override(authorization: str | None, *, request: object | None = None):
+        nonlocal calls
+        del authorization, request
+        calls += 1
+        raise TypeError("unexpected keyword argument 'request_id'")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", broken_auth_override)
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'request_id'"):
+        await proxy_api_module._validate_proxy_websocket_request(
+            cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer broken-key"})),
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_validate_proxy_websocket_request_allows_explicit_socket_peer_when_auth_disabled(monkeypatch):
     async def fake_denial(_websocket):
         return None

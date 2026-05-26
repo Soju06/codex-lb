@@ -22,6 +22,8 @@ function extractHandlerPaths(): string[] {
 const EXPECTED_ENDPOINTS = [
 	// health
 	"GET /health",
+	// runtime
+	"GET /api/runtime/version",
 	// dashboard
 	"GET /api/dashboard/overview",
 	"GET /api/request-logs",

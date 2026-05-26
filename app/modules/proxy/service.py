@@ -2567,26 +2567,31 @@ class ProxyService:
                     timeout_seconds=remaining_budget,
                 )
 
+            async def _select_goal_failover(excluded_account_ids: set[str]) -> AccountSelection:
+                return await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_id,
+                    kind=request_kind,
+                    api_key=api_key,
+                    sticky_key=affinity.key,
+                    sticky_kind=affinity.kind,
+                    reallocate_sticky=affinity.reallocate_sticky,
+                    sticky_max_age_seconds=affinity.max_age_seconds,
+                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                    model=selection_model,
+                    exclude_account_ids=excluded_account_ids,
+                )
+
             try:
-                remaining_budget = _remaining_budget_seconds(deadline)
-                if remaining_budget <= 0:
-                    logger.warning(
-                        "Thread goal request budget exhausted before freshness check request_id=%s operation=%s",
-                        request_id,
-                        operation,
-                    )
-                    _raise_proxy_budget_exhausted()
-                try:
-                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "Thread goal refresh/connect failed request_id=%s operation=%s account_id=%s",
-                        request_id,
-                        operation,
-                        account.id,
-                        exc_info=True,
-                    )
-                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                account = await self._ensure_previsible_unary_fresh_with_failover(
+                    account,
+                    deadline=deadline,
+                    request_id=request_id,
+                    kind=request_kind,
+                    select_next_account=_select_goal_failover,
+                )
+                account_id_value = account.id
                 response = await _call_goal(account)
                 await self._load_balancer.record_success(account)
                 log_status = "success"
@@ -2615,11 +2620,15 @@ class ProxyService:
                                 account.id,
                             )
                             _raise_proxy_budget_exhausted()
-                        account = await self._ensure_fresh_with_budget(
+                        account = await self._ensure_previsible_unary_fresh_with_failover(
                             account,
+                            deadline=deadline,
+                            request_id=request_id,
+                            kind=request_kind,
+                            select_next_account=_select_goal_failover,
                             force=True,
-                            timeout_seconds=remaining_budget,
                         )
+                        account_id_value = account.id
                         try:
                             response = await _call_goal(account)
                             await self._load_balancer.record_success(account)
@@ -2674,7 +2683,9 @@ class ProxyService:
                 if operation == "get" and _is_missing_thread_goal_protocol_error(exc):
                     log_status = "success"
                     return {"goal": None}
-                await self._handle_proxy_error(account, exc)
+                failed_account = _proxy_response_failed_account(exc, account)
+                account_id_value = failed_account.id
+                await self._handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
             failure_metadata = _request_log_failure_metadata(exc)
@@ -2787,25 +2798,31 @@ class ProxyService:
                     timeout_seconds=remaining_budget,
                 )
 
+            async def _select_control_failover(excluded_account_ids: set[str]) -> AccountSelection:
+                return await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_id,
+                    kind=request_kind,
+                    api_key=api_key,
+                    sticky_key=affinity.key,
+                    sticky_kind=affinity.kind,
+                    reallocate_sticky=affinity.reallocate_sticky,
+                    sticky_max_age_seconds=affinity.max_age_seconds,
+                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                    routing_strategy=routing_strategy,
+                    model=selection_model,
+                    exclude_account_ids=excluded_account_ids,
+                )
+
             try:
-                remaining_budget = _remaining_budget_seconds(deadline)
-                if remaining_budget <= 0:
-                    logger.warning(
-                        "Codex control request budget exhausted before freshness check request_id=%s",
-                        request_id,
-                    )
-                    _raise_proxy_budget_exhausted()
-                try:
-                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "Codex control refresh/connect failed request_id=%s path=%s account_id=%s",
-                        request_id,
-                        path,
-                        account.id,
-                        exc_info=True,
-                    )
-                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                account = await self._ensure_previsible_unary_fresh_with_failover(
+                    account,
+                    deadline=deadline,
+                    request_id=request_id,
+                    kind=request_kind,
+                    select_next_account=_select_control_failover,
+                )
+                account_id_value = account.id
                 response = await _call_control(account)
                 await self._load_balancer.record_success(account)
                 log_status = "success"
@@ -2834,11 +2851,15 @@ class ProxyService:
                                 account.id,
                             )
                             _raise_proxy_budget_exhausted()
-                        account = await self._ensure_fresh_with_budget(
+                        account = await self._ensure_previsible_unary_fresh_with_failover(
                             account,
+                            deadline=deadline,
+                            request_id=request_id,
+                            kind=request_kind,
+                            select_next_account=_select_control_failover,
                             force=True,
-                            timeout_seconds=remaining_budget,
                         )
+                        account_id_value = account.id
                         try:
                             response = await _call_control(account)
                             await self._load_balancer.record_success(account)
@@ -2890,7 +2911,9 @@ class ProxyService:
                             exc_info=True,
                         )
                         _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
-                await self._handle_proxy_error(account, exc)
+                failed_account = _proxy_response_failed_account(exc, account)
+                account_id_value = failed_account.id
+                await self._handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
             failure_metadata = _request_log_failure_metadata(exc)
@@ -2993,23 +3016,27 @@ class ProxyService:
                 finally:
                     pop_transcribe_timeout_overrides(timeout_tokens)
 
+            async def _select_transcribe_failover(excluded_account_ids: set[str]) -> AccountSelection:
+                return await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_id,
+                    kind="transcribe",
+                    api_key=api_key,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=None,
+                    exclude_account_ids=excluded_account_ids,
+                )
+
             try:
-                remaining_budget = _remaining_budget_seconds(deadline)
-                if remaining_budget <= 0:
-                    logger.warning(
-                        "Transcription request budget exhausted before freshness check request_id=%s", request_id
-                    )
-                    _raise_proxy_budget_exhausted()
-                try:
-                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "Transcription refresh/connect failed request_id=%s account_id=%s",
-                        request_id,
-                        account.id,
-                        exc_info=True,
-                    )
-                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                account = await self._ensure_previsible_unary_fresh_with_failover(
+                    account,
+                    deadline=deadline,
+                    request_id=request_id,
+                    kind="transcribe",
+                    select_next_account=_select_transcribe_failover,
+                )
+                account_id_value = account.id
                 result = await _call_transcribe(account)
                 await self._load_balancer.record_success(account)
                 log_status = "success"
@@ -3027,7 +3054,9 @@ class ProxyService:
                 ) from refresh_exc
             except ProxyResponseError as exc:
                 if exc.status_code != 401:
-                    await self._handle_proxy_error(account, exc)
+                    failed_account = _proxy_response_failed_account(exc, account)
+                    account_id_value = failed_account.id
+                    await self._handle_proxy_error(failed_account, exc)
                     raise
                 try:
                     remaining_budget = _remaining_budget_seconds(deadline)
@@ -3039,9 +3068,15 @@ class ProxyService:
                             account.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    account = await self._ensure_fresh_with_budget(
-                        account, force=True, timeout_seconds=remaining_budget
+                    account = await self._ensure_previsible_unary_fresh_with_failover(
+                        account,
+                        deadline=deadline,
+                        request_id=request_id,
+                        kind="transcribe",
+                        select_next_account=_select_transcribe_failover,
+                        force=True,
                     )
+                    account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
                         await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
@@ -3443,26 +3478,29 @@ class ProxyService:
                 finally:
                     pop_files_timeout_overrides(timeout_tokens)
 
+            async def _select_files_failover(excluded_account_ids: set[str]) -> AccountSelection:
+                return await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_id,
+                    kind=kind,
+                    api_key=api_key,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=None,
+                    preferred_account_id=preferred_account_id,
+                    exclude_account_ids=excluded_account_ids,
+                )
+
             try:
-                remaining_budget = _remaining_budget_seconds(deadline)
-                if remaining_budget <= 0:
-                    logger.warning(
-                        "%s request budget exhausted before freshness check request_id=%s",
-                        kind,
-                        request_id,
-                    )
-                    _raise_proxy_budget_exhausted()
-                try:
-                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "%s refresh/connect failed request_id=%s account_id=%s",
-                        kind,
-                        request_id,
-                        account.id,
-                        exc_info=True,
-                    )
-                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                account = await self._ensure_previsible_unary_fresh_with_failover(
+                    account,
+                    deadline=deadline,
+                    request_id=request_id,
+                    kind=kind,
+                    select_next_account=_select_files_failover,
+                    strict_account_id=preferred_account_id,
+                )
+                account_id_value = account.id
                 result = await _call(account)
                 await self._load_balancer.record_success(account)
                 log_status = "success"
@@ -3480,7 +3518,9 @@ class ProxyService:
                 ) from refresh_exc
             except ProxyResponseError as exc:
                 if exc.status_code != 401:
-                    await self._handle_proxy_error(account, exc)
+                    failed_account = _proxy_response_failed_account(exc, account)
+                    account_id_value = failed_account.id
+                    await self._handle_proxy_error(failed_account, exc)
                     raise
                 try:
                     remaining_budget = _remaining_budget_seconds(deadline)
@@ -3492,9 +3532,16 @@ class ProxyService:
                             account.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    account = await self._ensure_fresh_with_budget(
-                        account, force=True, timeout_seconds=remaining_budget
+                    account = await self._ensure_previsible_unary_fresh_with_failover(
+                        account,
+                        deadline=deadline,
+                        request_id=request_id,
+                        kind=kind,
+                        select_next_account=_select_files_failover,
+                        strict_account_id=preferred_account_id,
+                        force=True,
                     )
+                    account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
                         await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
@@ -11826,6 +11873,66 @@ class ProxyService:
     ) -> Account:
         return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
 
+    async def _ensure_previsible_unary_fresh_with_failover(
+        self,
+        account: Account,
+        *,
+        deadline: float,
+        request_id: str,
+        kind: str,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        strict_account_id: str | None = None,
+        force: bool = False,
+        max_account_attempts: int = 2,
+    ) -> Account:
+        current = account
+        excluded_account_ids: set[str] = set()
+        attempt = 0
+        force_current = force
+        while True:
+            attempt += 1
+            remaining_budget = _remaining_budget_seconds(deadline)
+            if remaining_budget <= 0:
+                logger.warning(
+                    "%s request budget exhausted before freshness check request_id=%s account_id=%s",
+                    kind,
+                    request_id,
+                    current.id,
+                )
+                _raise_proxy_budget_exhausted()
+            try:
+                return await self._ensure_fresh_with_budget(
+                    current,
+                    force=force_current,
+                    timeout_seconds=remaining_budget,
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                message = str(exc) or "Request to upstream timed out"
+                logger.warning(
+                    "%s refresh/connect failed request_id=%s account_id=%s",
+                    kind,
+                    request_id,
+                    current.id,
+                    exc_info=True,
+                )
+                if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                    _raise_proxy_unavailable_for_account(message, current)
+                if (
+                    strict_account_id is not None and current.id == strict_account_id
+                ) or attempt >= max_account_attempts:
+                    _raise_proxy_unavailable_for_account(message, current)
+                excluded_account_ids.add(current.id)
+                selection = await select_next_account(excluded_account_ids)
+                if selection.account is None:
+                    _raise_proxy_unavailable_for_account(message, current)
+                await self._handle_stream_error(
+                    current,
+                    {"message": message},
+                    "upstream_unavailable",
+                )
+                current = selection.account
+                force_current = False
+
     async def _ensure_fresh_with_budget_or_auth_error(
         self,
         account: Account,
@@ -14633,6 +14740,23 @@ def _raise_proxy_unavailable(message: str) -> NoReturn:
         502,
         openai_error("upstream_unavailable", message),
     )
+
+
+_FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
+
+
+def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoReturn:
+    exc = ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", message),
+    )
+    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
+    raise exc
+
+
+def _proxy_response_failed_account(exc: ProxyResponseError, fallback: Account) -> Account:
+    account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+    return account if isinstance(account, Account) else fallback
 
 
 def _is_proxy_budget_exhausted_error(exc: ProxyResponseError) -> bool:

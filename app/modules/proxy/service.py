@@ -9479,7 +9479,10 @@ class ProxyService:
         start = time.monotonic()
         base_settings = get_settings()
         settings = await get_settings_cache().get()
-        deadline = start + base_settings.proxy_request_budget_seconds
+        deadline = start + _stream_request_budget_seconds(
+            base_settings,
+            request_transport=request_transport,
+        )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
@@ -13742,6 +13745,14 @@ def _websocket_input_item_type(item: JsonValue) -> str | None:
 
 def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
+
+
+def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
+    if request_transport == _REQUEST_TRANSPORT_HTTP:
+        budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
+        if budget is not None:
+            return float(budget)
+    return float(getattr(settings, "proxy_request_budget_seconds"))
 
 
 def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:

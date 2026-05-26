@@ -994,6 +994,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 180.0
     settings.max_sse_event_bytes = 16 * 1024 * 1024
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -1019,7 +1020,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
     resolve_file_account = AsyncMock(return_value="acc_pinned")
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_file_account)
 
-    calls: list[tuple[str, object, str | None]] = []
+    calls: list[tuple[str, object, str | None, float | None]] = []
 
     async def fake_stream_with_retry(
         payload,
@@ -1028,8 +1029,12 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
         rewritten_file_account_id: str | None = None,
         **kwargs,
     ):
-        del headers, kwargs
-        calls.append(("retry", payload, rewritten_file_account_id))
+        del headers
+        budget = proxy_service._stream_request_budget_seconds(
+            settings,
+            request_transport=kwargs["request_transport"],
+        )
+        calls.append(("retry", payload, rewritten_file_account_id, budget))
         yield "data: retry\n\n"
 
     async def fake_stream_via_http_bridge(
@@ -1040,7 +1045,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
         **kwargs,
     ):
         del payload, headers, rewritten_file_account_id, kwargs
-        calls.append(("bridge", None, None))
+        calls.append(("bridge", None, None, None))
         yield "data: bridge\n\n"
 
     monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
@@ -1062,7 +1067,17 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
 
     assert output == ["data: retry\n\n"]
     resolve_file_account.assert_awaited_once_with(oversized_payload, {})
-    assert calls == [("retry", oversized_payload, "acc_pinned")]
+    assert calls == [("retry", oversized_payload, "acc_pinned", 180.0)]
+
+
+def test_stream_request_budget_uses_http_responses_budget_for_http_transport() -> None:
+    settings = SimpleNamespace(
+        proxy_request_budget_seconds=5.0,
+        http_responses_stream_request_budget_seconds=180.0,
+    )
+
+    assert proxy_service._stream_request_budget_seconds(settings, request_transport="http") == 180.0
+    assert proxy_service._stream_request_budget_seconds(settings, request_transport="websocket") == 5.0
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():

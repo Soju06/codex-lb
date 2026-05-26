@@ -128,9 +128,7 @@ class AccountsRepository:
                 await self._acquire_sqlite_merge_lock()
             elif dialect_name == "postgresql":
                 if merge_by_chatgpt_identity and account.chatgpt_account_id:
-                    await self._acquire_postgresql_identity_lock(
-                        f"chatgpt:{account.chatgpt_account_id}"
-                    )
+                    await self._acquire_postgresql_identity_lock(f"chatgpt:{account.chatgpt_account_id}")
                 else:
                     await self._acquire_postgresql_identity_lock(account.id)
 

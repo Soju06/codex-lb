@@ -1407,6 +1407,69 @@ async def test_write_request_log_continues_after_caller_cancellation() -> None:
     assert request_logs.calls[0]["request_id"] == "resp_request_log_cancel"
 
 
+@pytest.mark.asyncio
+async def test_write_request_log_persists_failure_metadata() -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    await service._write_request_log(
+        account_id="acc_request_log_metadata",
+        api_key=None,
+        request_id="resp_request_log_metadata",
+        model="gpt-5.4",
+        latency_ms=600_000,
+        status="error",
+        error_code="upstream_request_timeout",
+        error_message="Proxy request budget exhausted",
+        failure_phase="owner_forward",
+        failure_detail="relay_timeout",
+        failure_exception_type="OwnerForwardRelayFailure",
+        upstream_status_code=503,
+        upstream_error_code="bridge_owner_unreachable",
+        bridge_stage="owner_forward",
+    )
+
+    call = request_logs.calls[0]
+    assert call["failure_phase"] == "owner_forward"
+    assert call["failure_detail"] == "relay_timeout"
+    assert call["failure_exception_type"] == "OwnerForwardRelayFailure"
+    assert call["upstream_status_code"] == 503
+    assert call["upstream_error_code"] == "bridge_owner_unreachable"
+    assert call["bridge_stage"] == "owner_forward"
+
+
+def test_request_log_failure_metadata_does_not_tag_direct_http_errors_as_owner_forward() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", "direct upstream failed"),
+            failure_phase="status",
+            upstream_status_code=502,
+        )
+    )
+
+    assert metadata.failure_phase == "status"
+    assert metadata.upstream_status_code == 502
+    assert metadata.upstream_error_code == "upstream_unavailable"
+    assert metadata.bridge_stage is None
+
+
+def test_request_log_failure_metadata_tags_owner_forward_failures() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            503,
+            openai_error("bridge_owner_unreachable", "HTTP bridge owner request failed"),
+            failure_phase="owner_forward",
+            failure_detail="relay_timeout",
+        )
+    )
+
+    assert metadata.failure_phase == "owner_forward"
+    assert metadata.failure_detail == "relay_timeout"
+    assert metadata.upstream_error_code == "bridge_owner_unreachable"
+    assert metadata.bridge_stage == "owner_forward"
+
+
 def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespace:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,

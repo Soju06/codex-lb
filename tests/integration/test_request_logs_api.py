@@ -68,6 +68,12 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             status="error",
             error_code="rate_limit_exceeded",
             error_message="Rate limit reached",
+            failure_phase="owner_forward_status",
+            failure_detail="owner_forward_non_200",
+            failure_exception_type="ProxyResponseError",
+            upstream_status_code=503,
+            upstream_error_code="bridge_owner_forward_failed",
+            bridge_stage="owner_forward",
             requested_at=now,
             api_key_id="key_logs_1",
             transport="websocket",
@@ -87,6 +93,12 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
     assert latest["errorMessage"] == "Rate limit reached"
+    assert latest["failurePhase"] == "owner_forward_status"
+    assert latest["failureDetail"] == "owner_forward_non_200"
+    assert latest["failureExceptionType"] == "ProxyResponseError"
+    assert latest["upstreamStatusCode"] == 503
+    assert latest["upstreamErrorCode"] == "bridge_owner_forward_failed"
+    assert latest["bridgeStage"] == "owner_forward"
     assert latest["costBreakdown"] == {
         "inputUsd": None,
         "cachedInputUsd": None,

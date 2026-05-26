@@ -4442,6 +4442,10 @@ class ProxyService:
                 if last_failover_exc is not None and not require_preferred_account:
                     break
                 return None, None
+            if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
+                request_state.force_refresh_account_id = None
+                if request_state.preferred_account_id == forced_refresh_account_id:
+                    request_state.preferred_account_id = None
 
             try:
                 connect_result = await self._try_open_websocket_connect_attempt(

@@ -5888,6 +5888,72 @@ async def test_connect_proxy_websocket_scopes_transient_exclusions_to_connect_lo
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_clears_stale_forced_refresh_when_fallback_account_selected(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    force_refresh_account = _make_account("acc_ws_stale_force_refresh")
+    fallback_account = _make_account("acc_ws_stale_force_fallback")
+    upstream = SimpleNamespace()
+    ensure_calls: list[tuple[str, bool]] = []
+    seen_account_id_filters: list[set[str] | None] = []
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        account_ids = cast(set[str] | None, kwargs.get("account_ids"))
+        seen_account_id_filters.append(set(account_ids) if account_ids is not None else None)
+        if account_ids == {force_refresh_account.id}:
+            return AccountSelection(account=None, error_message="preferred unavailable", error_code="no_accounts")
+        return AccountSelection(account=fallback_account, error_message=None)
+
+    async def ensure_fresh_with_budget(
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> Account:
+        del timeout_seconds
+        ensure_calls.append((account.id, force))
+        return account
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh_with_budget)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_forced_refresh",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        force_refresh_account_id=force_refresh_account.id,
+        preferred_account_id=force_refresh_account.id,
+    )
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == fallback_account
+    assert selected_upstream is upstream
+    assert seen_account_id_filters == [{force_refresh_account.id}, None]
+    assert ensure_calls == [(fallback_account.id, False)]
+    assert request_state.force_refresh_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_fails_over_after_repeated_401_refresh_retry(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

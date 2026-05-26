@@ -15969,7 +15969,7 @@ async def test_relay_upstream_websocket_persists_unmatched_previous_response_mis
     assert pending_requests == deque()
     assert len(downstream.sent_text) == 1
     downstream_payload = json.loads(downstream.sent_text[0])
-    assert downstream_payload["response"]["error"]["code"] == "stream_incomplete"
+    assert downstream_payload["response"]["error"]["code"] == "codex_previous_response_stale"
     assert "previous_response_not_found" not in downstream.sent_text[0]
     assert "resp_unknown_send_fail" not in downstream.sent_text[0]
     assert [call["request_id"] for call in request_logs.calls] == [
@@ -15977,9 +15977,9 @@ async def test_relay_upstream_websocket_persists_unmatched_previous_response_mis
         "ws_req_prev_send_fail_b",
     ]
     assert {call["status"] for call in request_logs.calls} == {"error"}
-    assert {call["error_code"] for call in request_logs.calls} == {"stream_incomplete"}
+    assert {call["error_code"] for call in request_logs.calls} == {"codex_previous_response_stale"}
     assert {call["error_message"] for call in request_logs.calls} == {
-        "Upstream websocket closed before response.completed"
+        "Upstream previous response anchor expired; retry without previous_response_id."
     }
     assert "client_disconnected" not in {call["error_code"] for call in request_logs.calls}
     assert "continuity_fail_closed surface=websocket_stream reason=previous_response_not_found_unmatched" in caplog.text

@@ -74,9 +74,10 @@ export function getAccountTrends(accountId: string) {
   );
 }
 
-export function deleteAccount(accountId: string) {
+export function deleteAccount(accountId: string, deleteHistory = false) {
+  const qs = deleteHistory ? "?delete_history=true" : "";
   return del(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
     AccountActionResponseSchema,
   );
 }

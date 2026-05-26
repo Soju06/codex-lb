@@ -146,14 +146,15 @@ async def update_account_limit_warmup(
 async def delete_account(
     request: Request,
     account_id: str,
+    delete_history: bool = False,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
-    success = await context.service.delete_account(account_id)
+    success = await context.service.delete_account(account_id, delete_history=delete_history)
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(
         "account_deleted",
         actor_ip=request.client.host if request.client else None,
-        details={"account_id": account_id},
+        details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")

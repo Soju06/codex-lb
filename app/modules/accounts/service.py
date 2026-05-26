@@ -204,8 +204,8 @@ class AccountsService:
     async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
         return await self._repo.update_limit_warmup_enabled(account_id, enabled)
 
-    async def delete_account(self, account_id: str) -> bool:
-        result = await self._repo.delete(account_id)
+    async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
+        result = await self._repo.delete(account_id, delete_history=delete_history)
         if result:
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()

@@ -72,7 +72,8 @@ export function useAccountMutations() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteAccount,
+    mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
+      deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
       invalidateAccountRelatedQueries(queryClient);

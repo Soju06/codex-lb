@@ -1,9 +1,10 @@
-import { Suspense, lazy, useCallback, useMemo } from "react";
+import { Suspense, lazy, useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
@@ -37,6 +38,7 @@ export function AccountsPage() {
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
+  const [deleteHistory, setDeleteHistory] = useState(false);
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
@@ -164,16 +166,33 @@ export function AccountsPage() {
         description="This action removes the account from the load balancer configuration."
         confirmLabel="Delete"
         cancelLabel="Cancel"
-        onOpenChange={deleteDialog.onOpenChange}
+        onOpenChange={(open) => {
+          deleteDialog.onOpenChange(open);
+          if (!open) setDeleteHistory(false);
+        }}
         onConfirm={() => {
           if (!deleteDialog.data) {
             return;
           }
-          void deleteMutation.mutateAsync(deleteDialog.data).finally(() => {
-            deleteDialog.hide();
-          });
+          void deleteMutation
+            .mutateAsync({ accountId: deleteDialog.data, deleteHistory })
+            .finally(() => {
+              deleteDialog.hide();
+              setDeleteHistory(false);
+            });
         }}
-      />
+      >
+        <div className="flex items-center gap-2 px-6">
+          <Checkbox
+            id="delete-history"
+            checked={deleteHistory}
+            onCheckedChange={(checked) => setDeleteHistory(checked === true)}
+          />
+          <label htmlFor="delete-history" className="text-sm text-muted-foreground cursor-pointer">
+            Delete all history for this account
+          </label>
+        </div>
+      </ConfirmDialog>
 
       <LoadingOverlay visible={!!accountsQuery.data && mutationBusy} label="Updating accounts..." />
     </div>

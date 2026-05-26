@@ -4747,8 +4747,18 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
         idle_ttl_seconds: float,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
-        del headers, affinity, api_key, request_model, idle_ttl_seconds, request_stage, preferred_account_id
+        del (
+            headers,
+            affinity,
+            api_key,
+            request_model,
+            idle_ttl_seconds,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+        )
         captured["key"] = create_key
         return created_session
 
@@ -4820,8 +4830,18 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
         idle_ttl_seconds: float,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
-        del headers, affinity, api_key, request_model, idle_ttl_seconds, request_stage, preferred_account_id
+        del (
+            headers,
+            affinity,
+            api_key,
+            request_model,
+            idle_ttl_seconds,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+        )
         captured["key"] = create_key
         return created_session
 
@@ -4893,8 +4913,18 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
         idle_ttl_seconds: float,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
-        del headers, affinity, api_key, request_model, idle_ttl_seconds, request_stage, preferred_account_id
+        del (
+            headers,
+            affinity,
+            api_key,
+            request_model,
+            idle_ttl_seconds,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+        )
         captured["key"] = create_key
         return created_session
 
@@ -5928,7 +5958,7 @@ async def test_close_all_http_bridge_sessions_fails_capacity_waiters_instead_of_
         AsyncMock(return_value=("instance-a", ("instance-a",))),
     )
     create_http_bridge_session = AsyncMock()
-    monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_http_bridge_session)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
 
@@ -6002,7 +6032,7 @@ async def test_get_or_create_http_bridge_session_capacity_wait_times_out(
         AsyncMock(return_value=("instance-a", ("instance-a",))),
     )
     create_http_bridge_session = AsyncMock()
-    monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_http_bridge_session)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
 
@@ -6079,7 +6109,7 @@ async def test_get_or_create_http_bridge_session_cancel_during_stale_close_clean
         AsyncMock(return_value=("instance-a", ("instance-a",))),
     )
     create_http_bridge_session = AsyncMock()
-    monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_http_bridge_session)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
 
     task = asyncio.create_task(
@@ -6126,7 +6156,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
         return created
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
-    monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_session)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     close_http_bridge_session = AsyncMock()
     monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
@@ -7997,7 +8027,7 @@ async def test_create_http_bridge_session_fails_closed_when_previous_response_ow
             ),
         ),
     )
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
     monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", fake_relay)

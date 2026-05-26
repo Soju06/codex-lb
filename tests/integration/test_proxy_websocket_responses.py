@@ -193,7 +193,7 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -329,7 +329,7 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -445,7 +445,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(authorization: str | None):
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer external-token"
         return None
 
@@ -625,7 +625,7 @@ def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -735,7 +735,7 @@ def test_backend_responses_websocket_strips_image_generation_tool_advertisement(
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(authorization: str | None):
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer external-token"
         return None
 
@@ -849,7 +849,7 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(authorization: str | None):
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer external-token"
         return None
 
@@ -954,7 +954,7 @@ def test_backend_responses_websocket_echoes_existing_turn_state_header(app_insta
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(authorization: str | None):
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer external-token"
         return None
 
@@ -1086,7 +1086,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1219,7 +1219,7 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1318,7 +1318,7 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1408,7 +1408,7 @@ def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_insta
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fail_connect_proxy_websocket(*args, **kwargs):
@@ -1466,7 +1466,7 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1567,7 +1567,7 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1673,7 +1673,7 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1816,7 +1816,7 @@ def test_v1_responses_websocket_masks_short_previous_response_not_found_without_
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -1960,7 +1960,7 @@ def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -2131,7 +2131,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -2303,7 +2303,7 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -2397,7 +2397,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_select_websocket_connect_account(
@@ -2418,6 +2418,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         exclude_account_ids,
         preferred_account_id,
         require_preferred_account,
+        defer_no_account_error,
     ):
         del (
             self,
@@ -2435,6 +2436,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
             exclude_account_ids,
             preferred_account_id,
             require_preferred_account,
+            defer_no_account_error,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor"
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
@@ -2589,7 +2591,7 @@ def test_backend_responses_websocket_masks_short_previous_response_not_found_wit
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -2751,7 +2753,7 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -2889,7 +2891,7 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -3057,7 +3059,7 @@ def test_backend_responses_websocket_masks_previous_response_not_found_when_mess
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -3245,7 +3247,7 @@ def test_backend_responses_websocket_keeps_session_alive_after_foreign_previous_
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -3482,7 +3484,7 @@ def test_backend_responses_websocket_keeps_session_alive_after_anonymous_prev_nf
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -3758,7 +3760,7 @@ def test_backend_responses_websocket_matches_previous_response_error_to_anchor_w
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -3987,7 +3989,7 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4116,7 +4118,7 @@ def test_backend_responses_websocket_rejects_malformed_first_frame_as_invalid_pa
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fail_connect_proxy_websocket(*args, **kwargs):
@@ -4169,7 +4171,7 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4297,7 +4299,7 @@ def test_backend_responses_websocket_treats_typeless_upstream_error_as_terminal(
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4369,7 +4371,7 @@ def test_backend_responses_websocket_emits_terminal_failure_when_upstream_send_b
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4448,7 +4450,7 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fail_connect_proxy_websocket(
@@ -4561,7 +4563,7 @@ def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succe
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4697,7 +4699,7 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4807,7 +4809,7 @@ def test_backend_responses_websocket_reclaims_idle_downstream_session_and_upstre
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -4925,7 +4927,7 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5057,7 +5059,7 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5217,7 +5219,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5350,7 +5352,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5458,7 +5460,7 @@ def test_backend_responses_websocket_previous_response_usage_limit_returns_upstr
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_resolve_previous_response_owner(
@@ -5579,7 +5581,7 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5669,7 +5671,7 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(authorization: str | None):
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
         assert authorization is None
         return None
 
@@ -5786,7 +5788,7 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(
@@ -5896,7 +5898,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
     async def fake_connect_proxy_websocket(

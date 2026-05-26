@@ -33,7 +33,7 @@ async def test_validate_proxy_websocket_request_returns_firewall_denial(monkeypa
     async def fake_denial(_websocket):
         return denial
 
-    async def fail_auth(_authorization):
+    async def fail_auth(_authorization, *, request: object | None = None):
         raise AssertionError("authorization validation must not run when firewall already denied the websocket")
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
@@ -52,7 +52,7 @@ async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
     async def fake_denial(_websocket):
         return None
 
-    async def fail_auth(_authorization):
+    async def fail_auth(_authorization, *, request: object | None = None):
         raise ProxyAuthError("Missing API key in Authorization header")
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
@@ -89,7 +89,7 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
         last_used_at=None,
     )
 
-    async def pass_auth(authorization: str | None):
+    async def pass_auth(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer valid-key"
         return api_key
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -2385,13 +2384,10 @@ async def _validate_proxy_websocket_request(
     if denial is not None:
         return None, denial
     try:
-        if "request" in inspect.signature(validate_proxy_api_key_authorization).parameters:
-            api_key = await validate_proxy_api_key_authorization(
-                websocket.headers.get("authorization"),
-                request=websocket,
-            )
-        else:
-            api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
+        api_key = await validate_proxy_api_key_authorization(
+            websocket.headers.get("authorization"),
+            request=websocket,
+        )
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,

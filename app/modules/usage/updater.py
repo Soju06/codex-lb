@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import logging
 import math
 import time
@@ -681,24 +680,11 @@ async def _add_additional_usage_entry(
     reset_at: int | None,
     window_minutes: int | None,
 ) -> None:
-    add_entry = repo.add_entry
-    if "quota_key" in inspect.signature(add_entry).parameters:
-        await add_entry(
-            account_id=account_id,
-            limit_name=limit_name,
-            metered_feature=metered_feature,
-            quota_key=quota_key,
-            window=window,
-            used_percent=used_percent,
-            reset_at=reset_at,
-            window_minutes=window_minutes,
-        )
-        return
-
-    await add_entry(
+    await repo.add_entry(
         account_id=account_id,
         limit_name=limit_name,
         metered_feature=metered_feature,
+        quota_key=quota_key,
         window=window,
         used_percent=used_percent,
         reset_at=reset_at,
@@ -711,10 +697,7 @@ async def _list_additional_usage_quota_keys(
     *,
     account_ids: Collection[str] | None = None,
 ) -> list[str]:
-    list_quota_keys = getattr(repo, "list_quota_keys", None)
-    if callable(list_quota_keys):
-        return await list_quota_keys(account_ids=account_ids)
-    return await repo.list_limit_names(account_ids=account_ids)
+    return await repo.list_quota_keys(account_ids=account_ids)
 
 
 async def _delete_additional_usage_quota_key(
@@ -722,11 +705,7 @@ async def _delete_additional_usage_quota_key(
     account_id: str,
     quota_key: str,
 ) -> None:
-    delete_by_quota_key = getattr(repo, "delete_for_account_and_quota_key", None)
-    if callable(delete_by_quota_key):
-        await delete_by_quota_key(account_id, quota_key)
-        return
-    await repo.delete_for_account_and_limit(account_id, quota_key)
+    await repo.delete_for_account_and_quota_key(account_id, quota_key)
 
 
 async def _delete_additional_usage_quota_key_window(
@@ -735,11 +714,7 @@ async def _delete_additional_usage_quota_key_window(
     quota_key: str,
     window: str,
 ) -> None:
-    delete_by_quota_key_window = getattr(repo, "delete_for_account_quota_key_window", None)
-    if callable(delete_by_quota_key_window):
-        await delete_by_quota_key_window(account_id, quota_key, window)
-        return
-    await repo.delete_for_account_limit_window(account_id, quota_key, window)
+    await repo.delete_for_account_quota_key_window(account_id, quota_key, window)
 
 
 def _latest_usage_is_fresh(

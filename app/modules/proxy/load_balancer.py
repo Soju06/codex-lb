@@ -1346,14 +1346,7 @@ async def _latest_additional_by_key(
     )
     if resolved_quota_key is None:
         return {}
-    if hasattr(additional_usage_repo, "latest_by_quota_key"):
-        return await additional_usage_repo.latest_by_quota_key(
-            resolved_quota_key,
-            window,
-            account_ids=account_ids,
-            since=since,
-        )
-    return await additional_usage_repo.latest_by_account(
+    return await additional_usage_repo.latest_by_quota_key(
         resolved_quota_key,
         window,
         account_ids=account_ids,

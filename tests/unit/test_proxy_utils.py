@@ -5916,7 +5916,7 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
         openai_error("usage_limit_reached", "usage limit reached"),
     )
 
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error]))
@@ -6228,7 +6228,7 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
 
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
     )
     monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
@@ -6285,7 +6285,7 @@ async def test_select_websocket_connect_account_records_fail_closed_for_preferre
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
     )
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -6350,7 +6350,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(
             return_value=AccountSelection(
                 account=None,
@@ -11041,7 +11041,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     owner_lookup = AsyncMock(side_effect=owner_lookup_error)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", owner_lookup)
     select_account = AsyncMock(side_effect=AssertionError("owner lookup failure must happen before account selection"))
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         async for _ in service._stream_with_retry(

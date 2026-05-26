@@ -272,13 +272,7 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_deactivated_row(
         assert saved.deactivation_reason is None
 
         rows = list(
-            (
-                await session.execute(
-                    select(Account).where(Account.chatgpt_account_id == "chatgpt_xyz")
-                )
-            )
-            .scalars()
-            .all()
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_xyz"))).scalars().all()
         )
         assert len(rows) == 1
         assert rows[0].id == "acc_canonical"

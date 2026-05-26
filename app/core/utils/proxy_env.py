@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 _WEBSOCKET_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
     "ws": (
@@ -25,8 +26,9 @@ STANDARD_OUTBOUND_PROXY_ENV_NAMES: tuple[str, ...] = tuple(
 
 
 def outbound_proxy_env_configured() -> bool:
-    proxies = _sanitized_proxy_env()
-    return any(name in proxies for name in STANDARD_OUTBOUND_PROXY_ENV_NAMES)
+    return any(
+        name.lower() in STANDARD_OUTBOUND_PROXY_ENV_NAMES and value.strip() for name, value in os.environ.items()
+    )
 
 
 def resolve_websocket_proxy_from_env(url: str) -> str | None:
@@ -51,5 +53,16 @@ def resolve_websocket_proxy_from_env(url: str) -> str | None:
 
 def _sanitized_proxy_env() -> dict[str, str]:
     return {
-        f"{name.lower()}_proxy": value.strip() for name, value in urllib.request.getproxies().items() if value.strip()
+        f"{name.lower()}_proxy": _normalize_proxy_url(name.lower(), value.strip())
+        for name, value in urllib.request.getproxies().items()
+        if value.strip()
     }
+
+
+def _normalize_proxy_url(proxy_name: str, proxy_url: str) -> str:
+    if proxy_name != "socks":
+        return proxy_url
+    parsed = urlparse(proxy_url)
+    if parsed.scheme not in {"http", "https"}:
+        return proxy_url
+    return urlunparse(parsed._replace(scheme="socks5h"))

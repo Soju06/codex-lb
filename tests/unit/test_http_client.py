@@ -96,16 +96,18 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     await http_module.close_http_client()
 
 
-def test_build_ssl_context_uses_certifi_bundle() -> None:
+def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> None:
     with (
         patch("app.core.clients.http.certifi.where", return_value="/tmp/cacert.pem") as certifi_where,
         patch("app.core.clients.http.ssl.create_default_context") as create_default_context,
     ):
         context = http_module._build_ssl_context()
 
+    ssl_context = create_default_context.return_value
     certifi_where.assert_called_once_with()
-    create_default_context.assert_called_once_with(cafile="/tmp/cacert.pem")
-    assert context is create_default_context.return_value
+    create_default_context.assert_called_once_with()
+    ssl_context.load_verify_locations.assert_called_once_with(cafile="/tmp/cacert.pem")
+    assert context is ssl_context
 
 
 @pytest.mark.asyncio

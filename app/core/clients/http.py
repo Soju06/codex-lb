@@ -40,7 +40,9 @@ _closing_http_clients: list[_ManagedHttpClient] = []
 
 
 def _build_ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=certifi.where())
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
 
 
 class HttpClientLease:

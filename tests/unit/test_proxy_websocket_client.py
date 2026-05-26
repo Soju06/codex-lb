@@ -329,6 +329,45 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_all_proxy(mon
 
 
 @pytest.mark.asyncio
+async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=True,
+        ),
+    )
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("wss_proxy", raising=False)
+    monkeypatch.delenv("WSS_PROXY", raising=False)
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7891")
+    monkeypatch.delenv("SOCKS_PROXY", raising=False)
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7892")
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+
+    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] == "socks5://127.0.0.1:7891"
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}

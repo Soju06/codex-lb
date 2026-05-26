@@ -6,15 +6,15 @@ from urllib.parse import urlparse
 _WEBSOCKET_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
     "ws": (
         "ws",
+        "socks",
         "https",
         "http",
-        "socks",
         "all",
     ),
     "wss": (
         "wss",
-        "https",
         "socks",
+        "https",
         "all",
     ),
 }

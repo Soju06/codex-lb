@@ -1,5 +1,5 @@
 import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -12,15 +12,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import type { OAuthState } from "@/features/accounts/schemas";
+import {
+  DEFAULT_PROXY_FORM_VALUES,
+  validateProxyForm,
+  type ProxyFormValues,
+} from "@/features/accounts/components/proxy-form-state";
+import { ProxyFormSection } from "@/features/accounts/components/proxy-form-section";
+import { formatProbeError } from "@/features/accounts/proxy-errors";
+import type { AccountProxyInput, OAuthState } from "@/features/accounts/schemas";
 import { formatCountdown } from "@/utils/formatters";
 import { copyToClipboard } from "@/utils/clipboard";
 
-type Stage = "intro" | "browser" | "device" | "success" | "error";
+type Stage = "intro" | "browser" | "device" | "tokens_ready" | "success" | "error";
 
 function getStage(state: OAuthState): Stage {
   if (state.status === "success") return "success";
   if (state.status === "error") return "error";
+  if (state.status === "tokens_ready") return "tokens_ready";
   if (state.method === "browser" && (state.status === "pending" || state.status === "starting")) return "browser";
   if (state.method === "device" && (state.status === "pending" || state.status === "starting")) return "device";
   return "intro";
@@ -139,8 +147,11 @@ export type OauthDialogProps = {
   open: boolean;
   state: OAuthState;
   onOpenChange: (open: boolean) => void;
-  onStart: (method?: "browser" | "device") => Promise<void>;
-  onComplete: () => Promise<void>;
+  onStart: (
+    method: "browser" | "device" | undefined,
+    options?: { expectProxy?: boolean; proxy?: AccountProxyInput },
+  ) => Promise<void>;
+  onComplete: (proxy?: AccountProxyInput) => Promise<void>;
   onManualCallback: (callbackUrl: string) => Promise<void>;
   onReset: () => void;
 };
@@ -155,11 +166,35 @@ export function OauthDialog({
   onReset,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
+  const [showProxy, setShowProxy] = useState(false);
+  const [attemptExpectsProxy, setAttemptExpectsProxy] = useState(false);
+  const [proxyValues, setProxyValues] = useState<ProxyFormValues>(DEFAULT_PROXY_FORM_VALUES);
+  const [finishing, setFinishing] = useState(false);
+  const [localFinishError, setLocalFinishError] = useState<string | null>(null);
   const stage = getStage(state);
   const completedRef = useRef(false);
   const browserRefreshInProgress = stage === "browser" && state.status === "starting";
 
+  // Locked at start-time: the expect_proxy flag passed to /api/oauth/start
+  // governs whether token-arrival sites defer persistence. After start,
+  // toggling ``showProxy`` mid-attempt doesn't change the contract on
+  // this attempt — it only affects whether the proxy form is editable.
+  const expectingProxy = stage === "tokens_ready" || (stage !== "intro" && attemptExpectsProxy);
+
+  const proxyValidation = useMemo(() => validateProxyForm(proxyValues), [proxyValues]);
+  const proxyValidationError = proxyValidation.ok ? null : proxyValidation.error;
+  const finishError =
+    localFinishError ?? (state.status === "tokens_ready" ? state.errorMessage : null);
+
   useEffect(() => {
+    // Auto-finalize for the no-proxy path: when the user did NOT
+    // configure a proxy, status transitions straight to "success" from
+    // the polling/manual-callback path (the backend persists at token
+    // arrival when expect_proxy=false). Triggering ``onComplete`` here
+    // refreshes the parent account list — symmetric with pre-change
+    // behavior. With deferred persistence the explicit "Finish setup"
+    // button handles the proxy case, so this effect intentionally
+    // skips ``tokens_ready``.
     if (stage === "success" && !completedRef.current) {
       completedRef.current = true;
       void onComplete();
@@ -174,23 +209,61 @@ export function OauthDialog({
     if (!next) {
       onReset();
       setSelectedMethod("browser");
+      setShowProxy(false);
+      setAttemptExpectsProxy(false);
+      setProxyValues(DEFAULT_PROXY_FORM_VALUES);
+      setFinishing(false);
+      setLocalFinishError(null);
     }
   };
 
+  const handleOpenChange = (next: boolean) => {
+    if (!next && finishing) return;
+    close(next);
+  };
+
   const handleStart = () => {
-    void onStart(selectedMethod);
+    const nextExpectProxy = showProxy;
+    if (nextExpectProxy && !proxyValidation.ok) return;
+    setAttemptExpectsProxy(nextExpectProxy);
+    setLocalFinishError(null);
+    void onStart(selectedMethod, {
+      expectProxy: nextExpectProxy,
+      proxy: nextExpectProxy && proxyValidation.ok ? proxyValidation.payload : undefined,
+    });
   };
 
   const handleRefreshBrowserLink = () => {
-    void onStart("browser");
+    if (attemptExpectsProxy && !proxyValidation.ok) return;
+    setLocalFinishError(null);
+    void onStart("browser", {
+      expectProxy: attemptExpectsProxy,
+      proxy: attemptExpectsProxy && proxyValidation.ok ? proxyValidation.payload : undefined,
+    });
   };
 
   const handleChangeMethod = () => {
+    setLocalFinishError(null);
+    setAttemptExpectsProxy(false);
     onReset();
   };
 
+  const handleFinishSetup = async () => {
+    if (expectingProxy && !proxyValidation.ok) return;
+    setFinishing(true);
+    setLocalFinishError(null);
+    completedRef.current = true;
+    try {
+      await onComplete(expectingProxy && proxyValidation.ok ? proxyValidation.payload : undefined);
+    } catch (error) {
+      setLocalFinishError(formatProbeError(error));
+    } finally {
+      setFinishing(false);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={close}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -203,41 +276,65 @@ export function OauthDialog({
 
         {/* Intro stage */}
         {stage === "intro" ? (
-          <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => setSelectedMethod("browser")}
-              className={cn(
-                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
-                selectedMethod === "browser"
-                  ? "border-primary bg-primary/5"
-                  : "hover:bg-muted/50",
-              )}
-            >
-              <p className="text-sm font-medium">Browser (PKCE)</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                Opens a browser window for sign-in. Recommended for most users.
-              </p>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSelectedMethod("device")}
-              className={cn(
-                "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
-                selectedMethod === "device"
-                  ? "border-primary bg-primary/5"
-                  : "hover:bg-muted/50",
-              )}
-            >
-              <p className="text-sm font-medium">Device code</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                Use a code on another device. Useful for headless environments.
-              </p>
-            </button>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setSelectedMethod("browser")}
+                className={cn(
+                  "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
+                  selectedMethod === "browser"
+                    ? "border-primary bg-primary/5"
+                    : "hover:bg-muted/50",
+                )}
+              >
+                <p className="text-sm font-medium">Browser (PKCE)</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Opens a browser window for sign-in. Recommended for most users.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedMethod("device")}
+                className={cn(
+                  "w-full cursor-pointer rounded-lg border p-3 text-left transition-colors",
+                  selectedMethod === "device"
+                    ? "border-primary bg-primary/5"
+                    : "hover:bg-muted/50",
+                )}
+              >
+                <p className="text-sm font-medium">Device code</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Use a code on another device. Useful for headless environments.
+                </p>
+              </button>
+            </div>
+            <ProxyFormSection
+              idPrefix="oauth"
+              values={proxyValues}
+              onChange={setProxyValues}
+              showProxy={showProxy}
+              onToggleShowProxy={setShowProxy}
+              errorMessage={showProxy ? proxyValidationError : null}
+            />
           </div>
         ) : null}
 
         {/* Browser stage */}
+        {stage === "browser" && expectingProxy ? (
+          <div className="space-y-2">
+            <ProxyFormSection
+              idPrefix="oauth"
+              values={proxyValues}
+              onChange={setProxyValues}
+              showProxy
+              onToggleShowProxy={() => undefined}
+              toggleDisabled
+              disabled={browserRefreshInProgress}
+              errorMessage={proxyValidationError}
+            />
+          </div>
+        ) : null}
         {stage === "browser" ? (
           <div className="min-w-0 space-y-3 text-sm">
             <div className="space-y-1.5">
@@ -248,7 +345,7 @@ export function OauthDialog({
                   size="sm"
                   variant="ghost"
                   className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
-                  disabled={browserRefreshInProgress}
+                  disabled={browserRefreshInProgress || (expectingProxy && !proxyValidation.ok)}
                   onClick={handleRefreshBrowserLink}
                 >
                   {browserRefreshInProgress ? (
@@ -288,6 +385,19 @@ export function OauthDialog({
         ) : null}
 
         {/* Device stage */}
+        {stage === "device" && expectingProxy ? (
+          <div className="space-y-2">
+            <ProxyFormSection
+              idPrefix="oauth"
+              values={proxyValues}
+              onChange={setProxyValues}
+              showProxy
+              onToggleShowProxy={() => undefined}
+              toggleDisabled
+              errorMessage={proxyValidationError}
+            />
+          </div>
+        ) : null}
         {stage === "device" ? (
           <div className="space-y-3 text-sm">
             <ol className="list-inside list-decimal space-y-1 text-xs text-muted-foreground">
@@ -328,6 +438,35 @@ export function OauthDialog({
           </div>
         ) : null}
 
+        {/* Tokens-ready stage: deferred-persistence finalization */}
+        {stage === "tokens_ready" ? (
+          <div className="space-y-3">
+            <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
+              <Check className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>
+                Sign-in complete. Configure the proxy below, then click Finish to validate
+                and save the account.
+              </p>
+            </div>
+            <ProxyFormSection
+              idPrefix="oauth"
+              values={proxyValues}
+              onChange={setProxyValues}
+              showProxy
+              onToggleShowProxy={() => undefined}
+              toggleDisabled
+              disabled={finishing}
+              errorMessage={proxyValidationError}
+            />
+            {finishError ? (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>{finishError}</p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {/* Success stage */}
         {stage === "success" ? (
           <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-700 dark:text-emerald-400">
@@ -358,6 +497,7 @@ export function OauthDialog({
               <Button
                 type="button"
                 className="cursor-pointer disabled:cursor-not-allowed"
+                disabled={showProxy && !proxyValidation.ok}
                 onClick={handleStart}
               >
                 Start sign-in
@@ -413,6 +553,34 @@ export function OauthDialog({
                   </a>
                 </Button>
               ) : null}
+            </>
+          ) : null}
+
+          {stage === "tokens_ready" ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                disabled={finishing}
+                onClick={() => close(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                className="cursor-pointer disabled:cursor-not-allowed"
+                disabled={finishing || (expectingProxy && !proxyValidation.ok)}
+                onClick={() => void handleFinishSetup()}
+              >
+                {finishing
+                  ? expectingProxy
+                    ? "Validating proxy & saving…"
+                    : "Saving…"
+                  : expectingProxy
+                    ? "Finish setup & validate proxy"
+                    : "Finish setup"}
+              </Button>
             </>
           ) : null}
 

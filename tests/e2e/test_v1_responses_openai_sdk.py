@@ -342,7 +342,7 @@ def _patch_upstream_stream(monkeypatch, blocks: list[str]) -> None:
     """Replace ``proxy_module.core_stream_responses`` with a stub that yields
     the given pre-built SSE blocks."""
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         for block in blocks:
             yield block
 

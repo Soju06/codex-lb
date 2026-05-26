@@ -63,6 +63,7 @@ class UsageContext:
 @dataclass(slots=True)
 class OauthContext:
     service: OauthService
+    accounts_service: AccountsService
 
 
 @dataclass(slots=True)
@@ -184,7 +185,13 @@ def get_oauth_context(
     session: AsyncSession = Depends(get_session),
 ) -> OauthContext:
     accounts_repository = AccountsRepository(session)
-    return OauthContext(service=OauthService(accounts_repository, repo_factory=_accounts_repo_context))
+    usage_repository = UsageRepository(session)
+    additional_usage_repository = AdditionalUsageRepository(session)
+    accounts_service = AccountsService(accounts_repository, usage_repository, additional_usage_repository)
+    return OauthContext(
+        service=OauthService(accounts_repository, repo_factory=_accounts_repo_context),
+        accounts_service=accounts_service,
+    )
 
 
 def get_dashboard_auth_context(

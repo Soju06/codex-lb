@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 from pydantic import ValidationError
@@ -64,10 +65,21 @@ def classify_upstream_failure(
     )
 
 
+_logger = logging.getLogger(__name__)
+_warned_header_account_ids: set[str] = set()
+
+
 def _header_account_id(account_id: str | None) -> str | None:
     if not account_id:
         return None
     if account_id.startswith(("email_", "local_")):
+        if account_id not in _warned_header_account_ids:
+            _warned_header_account_ids.add(account_id)
+            _logger.warning(
+                "_header_account_id filtered email/local-prefixed value=%s — "
+                "chatgpt_account_id should be the raw upstream ID, not the codex-lb ID",
+                account_id,
+            )
         return None
     return account_id
 

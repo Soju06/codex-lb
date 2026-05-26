@@ -139,7 +139,7 @@ async def test_stream_server_error_succeeds_on_second_try_same_account(async_cli
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -172,7 +172,7 @@ async def test_stream_timeout_succeeds_on_second_try_same_account(async_client, 
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -203,11 +203,14 @@ async def test_stream_server_error_exhausts_inner_retries_then_failover(async_cl
     await _import_account(async_client, "acc_trans_fo_a", "fo_a@example.com")
     await _import_account(async_client, "acc_trans_fo_b", "fo_b@example.com")
 
+    expected_a = generate_unique_account_id("acc_trans_fo_a", "fo_a@example.com")
+    expected_b = generate_unique_account_id("acc_trans_fo_b", "fo_b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_trans_fo_a":
+        if account_id == expected_a:
             yield _server_error_sse_event()
             return
         yield _success_sse_event()
@@ -224,8 +227,8 @@ async def test_stream_server_error_exhausts_inner_retries_then_failover(async_cl
     assert len(completed) == 1
 
     # 3 retries on account A + 1 success on account B
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_trans_fo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_trans_fo_b"]
+    a_calls = [aid for aid in seen_account_ids if aid == expected_a]
+    b_calls = [aid for aid in seen_account_ids if aid == expected_b]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
 
@@ -235,7 +238,7 @@ async def test_stream_server_error_all_accounts_exhausted(async_client, monkeypa
     """server_error on all accounts → eventually returns error to client."""
     await _import_account(async_client, "acc_trans_all_a", "all_a@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield _server_error_sse_event()
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -259,7 +262,7 @@ async def test_stream_server_error_succeeds_on_third_try(async_client, monkeypat
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -297,7 +300,7 @@ async def test_stream_http_500_retries_same_account_then_succeeds(async_client, 
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -330,11 +333,14 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
     await _import_account(async_client, "acc_h5fo_a", "h5fo_a@example.com")
     await _import_account(async_client, "acc_h5fo_b", "h5fo_b@example.com")
 
+    expected_a = generate_unique_account_id("acc_h5fo_a", "h5fo_a@example.com")
+    expected_b = generate_unique_account_id("acc_h5fo_b", "h5fo_b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_h5fo_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 500,
                 openai_error("server_error", "Internal server error"),
@@ -353,8 +359,8 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
     completed = [e for e in events if e.get("type") == "response.completed"]
     assert len(completed) == 1
 
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_b"]
+    a_calls = [aid for aid in seen_account_ids if aid == expected_a]
+    b_calls = [aid for aid in seen_account_ids if aid == expected_b]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
 
@@ -365,11 +371,14 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
+    expected_a = generate_unique_account_id("acc_stream_429_a", "stream429a@example.com")
+    expected_b = generate_unique_account_id("acc_stream_429_b", "stream429b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_stream_429_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 429,
                 openai_error("usage_limit_reached", "usage limit reached"),
@@ -389,7 +398,7 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     failed = [e for e in events if e.get("type") == "response.failed"]
     assert len(completed) == 1
     assert len(failed) == 0
-    assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+    assert seen_account_ids[:2] == [expected_a, expected_b]
 
 
 @pytest.mark.asyncio
@@ -397,11 +406,14 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
     await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
     await _import_account(async_client, "acc_h502_b", "h502_b@example.com")
 
+    expected_a = generate_unique_account_id("acc_h502_a", "h502_a@example.com")
+    expected_b = generate_unique_account_id("acc_h502_b", "h502_b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_h502_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 502,
                 openai_error("bad_gateway", "Bad gateway"),
@@ -419,7 +431,7 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
     events = _extract_events(lines)
     completed = [e for e in events if e.get("type") == "response.completed"]
     assert len(completed) == 1
-    assert seen_account_ids[:2] == ["acc_h502_a", "acc_h502_b"]
+    assert seen_account_ids[:2] == [expected_a, expected_b]
 
 
 # ===========================================================================
@@ -434,7 +446,7 @@ async def test_stream_non_server_error_not_retried_as_transient(async_client, mo
 
     call_count = 0
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         yield _sse_event(
@@ -479,7 +491,7 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
     await _import_account(async_client, "acc_rl_b", "rlb@example.com")
     await _import_account(async_client, "acc_rl_c", "rlc@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield _sse_event(
             {
                 "type": "response.failed",
@@ -512,11 +524,13 @@ async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client
     await _import_account(async_client, "acc_midstream_a", "midstreama@example.com")
     await _import_account(async_client, "acc_midstream_b", "midstreamb@example.com")
 
+    expected_a = generate_unique_account_id("acc_midstream_a", "midstreama@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_midstream_a":
+        if account_id == expected_a:
             yield _sse_event({"type": "response.in_progress", "response": {"id": "resp_midstream"}})
             yield _sse_event(
                 {
@@ -540,7 +554,7 @@ async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client
     assert len(failed) == 1
     assert failed[0].get("response", {}).get("error", {}).get("code") == "rate_limit_exceeded"
     assert len(completed) == 0
-    assert seen_account_ids == ["acc_midstream_a"]
+    assert seen_account_ids == [expected_a]
 
 
 @pytest.mark.asyncio
@@ -550,7 +564,7 @@ async def test_stream_http_500_after_text_is_surfaced_without_same_account_repla
 
     call_count = 0
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         yield _sse_event({"type": "response.output_text.delta", "delta": "partial answer"})
@@ -584,11 +598,13 @@ async def test_stream_http_429_after_text_is_surfaced_without_account_failover(a
     await _import_account(async_client, "acc_midtext_429_a", "midtext429a@example.com")
     await _import_account(async_client, "acc_midtext_429_b", "midtext429b@example.com")
 
+    expected_a = generate_unique_account_id("acc_midtext_429_a", "midtext429a@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_midtext_429_a":
+        if account_id == expected_a:
             yield _sse_event({"type": "response.output_text.delta", "delta": "visible"})
             raise ProxyResponseError(
                 429,
@@ -612,7 +628,7 @@ async def test_stream_http_429_after_text_is_surfaced_without_account_failover(a
     assert len(failed) == 1
     assert failed[0].get("response", {}).get("error", {}).get("code") == "usage_limit_reached"
     assert completed == []
-    assert seen_account_ids == ["acc_midtext_429_a"]
+    assert seen_account_ids == [expected_a]
 
 
 @pytest.mark.asyncio
@@ -624,7 +640,7 @@ async def test_v1_responses_non_streaming_500_preserves_http_status(async_client
 
     call_count = 0
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         nonlocal call_count
         call_count += 1
         raise ProxyResponseError(
@@ -658,7 +674,7 @@ async def test_compact_500_succeeds_on_second_try_same_account(async_client, mon
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -690,7 +706,7 @@ async def test_compact_500_succeeds_on_third_try(async_client, monkeypatch):
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -719,11 +735,14 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
     await _import_account(async_client, "acc_cfo_a", "cfo_a@example.com")
     await _import_account(async_client, "acc_cfo_b", "cfo_b@example.com")
 
+    expected_a = generate_unique_account_id("acc_cfo_a", "cfo_a@example.com")
+    expected_b = generate_unique_account_id("acc_cfo_b", "cfo_b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_cfo_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 500,
                 openai_error("server_error", "server error"),
@@ -738,8 +757,8 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
 
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_b"]
+    a_calls = [aid for aid in seen_account_ids if aid == expected_a]
+    b_calls = [aid for aid in seen_account_ids if aid == expected_b]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
 
@@ -750,11 +769,14 @@ async def test_compact_quota_exceeded_transparent_failover(async_client, monkeyp
     await _import_account(async_client, "acc_compact_quota_a", "compactquotaa@example.com")
     await _import_account(async_client, "acc_compact_quota_b", "compactquotab@example.com")
 
+    expected_a = generate_unique_account_id("acc_compact_quota_a", "compactquotaa@example.com")
+    expected_b = generate_unique_account_id("acc_compact_quota_b", "compactquotab@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_compact_quota_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 429,
                 openai_error("quota_exceeded", "quota exceeded"),
@@ -768,7 +790,7 @@ async def test_compact_quota_exceeded_transparent_failover(async_client, monkeyp
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
-    assert seen_account_ids[:2] == ["acc_compact_quota_a", "acc_compact_quota_b"]
+    assert seen_account_ids[:2] == [expected_a, expected_b]
 
     async with SessionLocal() as session:
         account_id = generate_unique_account_id("acc_compact_quota_a", "compactquotaa@example.com")
@@ -783,7 +805,7 @@ async def test_compact_500_all_accounts_exhausted(async_client, monkeypatch):
     """500 on all accounts → error returned to client."""
     await _import_account(async_client, "acc_call_a", "call_a@example.com")
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         raise ProxyResponseError(
             500,
             openai_error("server_error", "persistent error"),
@@ -806,7 +828,7 @@ async def test_compact_non_500_error_not_retried_as_transient(async_client, monk
 
     call_count = 0
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         nonlocal call_count
         call_count += 1
         raise ProxyResponseError(
@@ -833,7 +855,7 @@ async def test_compact_502_still_uses_safe_retry_budget(async_client, monkeypatc
     call_count = 0
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         nonlocal call_count
         call_count += 1
         seen_account_ids.append(account_id)
@@ -862,11 +884,14 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     await _import_account(async_client, "acc_sticky_503_a", "sticky503a@example.com")
     await _import_account(async_client, "acc_sticky_503_b", "sticky503b@example.com")
 
+    expected_a = generate_unique_account_id("acc_sticky_503_a", "sticky503a@example.com")
+    expected_b = generate_unique_account_id("acc_sticky_503_b", "sticky503b@example.com")
+
     seen_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         seen_account_ids.append(account_id)
-        if account_id == "acc_sticky_503_a":
+        if account_id == expected_a:
             raise ProxyResponseError(
                 503,
                 openai_error("bad_gateway", "Bad gateway"),
@@ -884,4 +909,4 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     )
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
-    assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]
+    assert seen_account_ids[:2] == [expected_a, expected_b]

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const DashboardApiErrorDetailSchema = z.object({
   code: z.string(),
   message: z.string(),
+  reason: z.string().optional(),
 });
 
 export const DashboardApiErrorSchema = z.object({

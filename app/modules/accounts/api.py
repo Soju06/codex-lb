@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.clients.account_proxy_probe import ProxyProbeError
+from app.core.errors import dashboard_error
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
@@ -17,11 +21,19 @@ from app.modules.accounts.schemas import (
     AccountLimitWarmupUpdateResponse,
     AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
+    AccountProxyClearResponse,
+    AccountProxyInput,
+    AccountProxySummary,
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
 )
-from app.modules.accounts.service import InvalidAuthJsonError
+from app.modules.accounts.service import (
+    AccountCredentialsUnrecoverableError,
+    AccountNotFoundError,
+    InvalidAuthJsonError,
+    ProxyPasswordUnrecoverableError,
+)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -95,21 +107,60 @@ async def export_account_opencode_auth(
 async def import_account(
     request: Request,
     auth_json: UploadFile = File(...),
+    proxy_host: str | None = Form(default=None, alias="proxyHost"),
+    proxy_port: int | None = Form(default=None, alias="proxyPort"),
+    proxy_username: str | None = Form(default=None, alias="proxyUsername"),
+    proxy_password: str | None = Form(default=None, alias="proxyPassword"),
+    proxy_remote_dns: bool = Form(default=True, alias="proxyRemoteDns"),
+    proxy_label: str | None = Form(default=None, alias="proxyLabel"),
     context: AccountsContext = Depends(get_accounts_context),
-) -> AccountImportResponse:
+) -> AccountImportResponse | JSONResponse:
     raw = await auth_json.read()
     try:
-        response = await context.service.import_account(raw)
+        proxy_payload = _proxy_payload_from_import_form(
+            host=proxy_host,
+            port=proxy_port,
+            username=proxy_username,
+            password=proxy_password,
+            remote_dns=proxy_remote_dns,
+            label=proxy_label,
+        )
+        response = await context.service.import_account(raw, proxy_payload=proxy_payload)
         AuditService.log_async(
             "account_created",
             actor_ip=request.client.host if request.client else None,
-            details={"account_id": response.account_id},
+            details={
+                "account_id": response.account_id,
+                "proxy_configured": proxy_payload is not None,
+            },
         )
+        if proxy_payload is not None:
+            AuditService.log_async(
+                "account_proxy_set",
+                actor_ip=request.client.host if request.client else None,
+                details={
+                    "account_id": response.account_id,
+                    "host": proxy_payload.host,
+                    "port": proxy_payload.port,
+                    "label": proxy_payload.label,
+                    "remote_dns": proxy_payload.remote_dns,
+                    "has_password": proxy_payload.password is not None,
+                },
+            )
         return response
+    except ValidationError:
+        return JSONResponse(
+            status_code=422,
+            content=dashboard_error("validation_error", "Invalid proxy configuration"),
+        )
     except InvalidAuthJsonError as exc:
         raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
     except AccountIdentityConflictError as exc:
         raise DashboardConflictError(str(exc), code="duplicate_identity_conflict") from exc
+    except ProxyProbeError as exc:
+        envelope = dashboard_error("proxy_probe_failed", _proxy_probe_error_message(exc))
+        envelope["error"]["reason"] = exc.reason.value  # type: ignore[typeddict-unknown-key]
+        return JSONResponse(status_code=422, content=envelope)
 
 
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)
@@ -180,3 +231,106 @@ async def delete_account(
         details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")
+
+
+@router.post("/{account_id}/proxy", response_model=AccountProxySummary)
+async def set_account_proxy(
+    request: Request,
+    account_id: str,
+    payload: AccountProxyInput,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountProxySummary | JSONResponse:
+    try:
+        summary = await context.service.set_account_proxy(account_id, payload)
+    except AccountNotFoundError as exc:
+        raise DashboardNotFoundError("Account not found", code="account_not_found") from exc
+    except ProxyPasswordUnrecoverableError:
+        # Fernet key has been rotated since the password was stored.
+        # Surface a typed envelope so the dashboard can prompt the
+        # operator to re-enter the password instead of erroring opaquely.
+        envelope = dashboard_error(
+            "proxy_password_unrecoverable",
+            "Stored proxy password could not be decrypted. Please re-enter the password.",
+        )
+        return JSONResponse(status_code=422, content=envelope)
+    except AccountCredentialsUnrecoverableError:
+        # Same Fernet-rotation scenario as the password decrypt above
+        # but for the OAuth refresh token. The recovery path is
+        # "re-import the account from auth.json", not "re-enter the
+        # password" — surface a distinct error code so the dashboard
+        # can prompt for the right action. Without this branch the
+        # InvalidToken would propagate as an unhandled 500.
+        envelope = dashboard_error(
+            "account_credentials_unrecoverable",
+            "Account credentials could not be decrypted (encryption key changed?). "
+            "Please re-import the account from auth.json.",
+        )
+        return JSONResponse(status_code=422, content=envelope)
+    except ProxyProbeError as exc:
+        # Surface a typed `reason` alongside the standard dashboard error
+        # envelope so the dashboard can render a precise message
+        # (`proxy_connect`, `proxy_auth`, `tls`, `upstream_status`,
+        # `timeout`) without parsing free-form text. Do not echo
+        # low-level transport details: some libraries include proxy URLs
+        # or credentials in exception text.
+        envelope = dashboard_error("proxy_probe_failed", _proxy_probe_error_message(exc))
+        envelope["error"]["reason"] = exc.reason.value  # type: ignore[typeddict-unknown-key]
+        return JSONResponse(status_code=422, content=envelope)
+
+    AuditService.log_async(
+        "account_proxy_set",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": account_id,
+            "host": payload.host,
+            "port": payload.port,
+            "label": payload.label,
+            "remote_dns": payload.remote_dns,
+            "has_password": summary.has_password,
+        },
+    )
+    return summary
+
+
+def _proxy_payload_from_import_form(
+    *,
+    host: str | None,
+    port: int | None,
+    username: str | None,
+    password: str | None,
+    remote_dns: bool,
+    label: str | None,
+) -> AccountProxyInput | None:
+    if all(value is None for value in (host, port, username, password, label)) and remote_dns is True:
+        return None
+    return AccountProxyInput.model_validate(
+        {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "remote_dns": remote_dns,
+            "label": label,
+        }
+    )
+
+
+def _proxy_probe_error_message(exc: ProxyProbeError) -> str:
+    return f"Proxy validation failed: {exc.reason.value}"
+
+
+@router.delete("/{account_id}/proxy", response_model=AccountProxyClearResponse)
+async def clear_account_proxy(
+    request: Request,
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountProxyClearResponse:
+    cleared = await context.service.clear_account_proxy(account_id)
+    if not cleared:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_proxy_cleared",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
+    )
+    return AccountProxyClearResponse(status="cleared")

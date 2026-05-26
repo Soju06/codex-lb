@@ -177,7 +177,7 @@ async def test_thread_goal_get_forwards_upstream_goal(async_client, monkeypatch,
             "operation": "get",
             "payload": {"threadId": thread_id},
             "access_token": "access-token",
-            "account_id": "acc_goal_get",
+            "account_id": generate_unique_account_id("acc_goal_get", "goal-get@example.com"),
             "method": method,
             "timeout_seconds": calls[0]["timeout_seconds"],
             "session_id": "goal-session",
@@ -240,7 +240,16 @@ async def test_thread_goal_mutations_forward_upstream(
 
     assert response.status_code == 200
     assert response.json() == expected
-    assert calls[0][:5] == (operation, payload, "access-token", f"acc_goal_{operation}", "POST")
+    assert calls[0][:5] == (
+        operation,
+        payload,
+        "access-token",
+        generate_unique_account_id(
+            f"acc_goal_{operation}",
+            f"goal-{operation}@example.com",
+        ),
+        "POST",
+    )
     assert isinstance(calls[0][5], float)
     assert calls[0][5] > 0
 
@@ -500,7 +509,13 @@ async def test_thread_goal_set_uses_active_account_when_budget_selection_is_empt
 
     assert response.status_code == 200
     assert response.json() == {"cleared": True}
-    assert calls[0][:5] == ("clear", payload, "access-token", "acc_goal_control", "POST")
+    assert calls[0][:5] == (
+        "clear",
+        payload,
+        "access-token",
+        generate_unique_account_id("acc_goal_control", "goal-control@example.com"),
+        "POST",
+    )
     assert isinstance(calls[0][5], float)
     assert calls[0][5] > 0
 
@@ -577,7 +592,7 @@ async def test_codex_control_json_endpoints_forward_upstream(
             "query_params": {},
             "session_id": "control-session",
             "access_token": "access-token",
-            "account_id": "acc_codex_control",
+            "account_id": generate_unique_account_id("acc_codex_control", "codex-control@example.com"),
             "timeout_seconds": calls[0]["timeout_seconds"],
         }
     ]
@@ -627,7 +642,7 @@ async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, m
             b"v=offer\r\n",
             "application/sdp",
             "access-token",
-            "acc_codex_realtime",
+            generate_unique_account_id("acc_codex_realtime", "codex-realtime@example.com"),
             calls[0][6],
         )
     ]
@@ -757,7 +772,7 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
         None,
         [("kid", "test"), ("kid", "next")],
         "access-token",
-        "acc_codex_jwks",
+        generate_unique_account_id("acc_codex_jwks", "codex-jwks@example.com"),
     )
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0
@@ -767,7 +782,7 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
 async def test_proxy_stream_records_cached_and_reasoning_tokens(async_client, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_usage", "usage@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         usage = {
             "input_tokens": 10,
             "output_tokens": 5,
@@ -919,8 +934,8 @@ async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkey
     expected_account_id_1 = await _import_account(async_client, "acc_1", "one@example.com")
     expected_account_id_2 = await _import_account(async_client, "acc_2", "two@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        if account_id == "acc_1":
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        if account_id == expected_account_id_1:
             event = {
                 "type": "response.failed",
                 "response": {"error": {"code": "rate_limit_exceeded", "message": "slow down"}},
@@ -971,8 +986,8 @@ async def test_proxy_stream_fails_over_after_first_event_stream_idle_timeout(asy
     expected_account_id_1 = await _import_account(async_client, "acc_idle_1", "idle-one@example.com")
     expected_account_id_2 = await _import_account(async_client, "acc_idle_2", "idle-two@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        if account_id == "acc_idle_1":
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        if account_id == expected_account_id_1:
             event = {
                 "type": "response.failed",
                 "response": {"error": {"code": "stream_idle_timeout", "message": "idle"}},
@@ -1011,7 +1026,7 @@ async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):
     await _import_account(async_client, "acc_headers", "headers@example.com")
     captured_headers: dict[str, str] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         captured_headers.update(headers)
         event = {
             "type": "response.completed",
@@ -1057,8 +1072,8 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
     raw_account_id = "acc_stream_usage_limit"
     expected_account_id = await _import_account(async_client, raw_account_id, "stream-usage-limit@example.com")
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        assert account_id == raw_account_id
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        assert account_id == expected_account_id
         raise ProxyResponseError(
             429,
             {

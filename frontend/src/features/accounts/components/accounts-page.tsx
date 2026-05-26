@@ -12,6 +12,7 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { OpenCodeAuthExportDialog } from "@/features/accounts/components/opencode-auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import { formatProbeError } from "@/features/accounts/proxy-errors";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -136,7 +137,10 @@ export function AccountsPage() {
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
               onSelect={handleSelectAccount}
-              onOpenImport={() => importDialog.show()}
+              onOpenImport={() => {
+                importMutation.reset();
+                importDialog.show();
+              }}
               onOpenOauth={() => oauthDialog.show()}
             />
           </div>
@@ -173,10 +177,10 @@ export function AccountsPage() {
       <ImportDialog
         open={importDialog.open}
         busy={importMutation.isPending}
-        error={getErrorMessageOrNull(importMutation.error)}
+        error={importMutation.error ? formatProbeError(importMutation.error) : null}
         onOpenChange={importDialog.onOpenChange}
-        onImport={async (file) => {
-          await importMutation.mutateAsync(file);
+        onImport={async (file, proxy) => {
+          return await importMutation.mutateAsync(proxy ? { file, proxy } : { file });
         }}
       />
 
@@ -185,11 +189,11 @@ export function AccountsPage() {
           open={oauthDialog.open}
           state={oauth.state}
           onOpenChange={oauthDialog.onOpenChange}
-          onStart={async (method) => {
-            await oauth.start(method);
+          onStart={async (method, options) => {
+            await oauth.start(method, options);
           }}
-          onComplete={async () => {
-            await oauth.complete();
+          onComplete={async (proxy) => {
+            await oauth.complete(proxy);
             await accountsQuery.refetch();
           }}
           onManualCallback={async (callbackUrl) => {

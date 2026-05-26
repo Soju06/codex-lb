@@ -64,6 +64,17 @@ export const accounts: AccountSummary[] = [
     usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 5 },
     resetAtPrimary: offsetIso(55),
     resetAtSecondary: offsetIso(3 * 24 * 60),
+    // Demonstrates the per-account SOCKS5 egress proxy section in the
+    // accounts screenshot capture.
+    proxy: {
+      host: "house-proxy-1.internal",
+      port: 1080,
+      username: "house",
+      hasPassword: true,
+      remoteDns: true,
+      label: "house-1",
+      lastValidatedAt: offsetIso(-5),
+    },
   }),
   createAccountSummary({
     accountId: "acc_04",

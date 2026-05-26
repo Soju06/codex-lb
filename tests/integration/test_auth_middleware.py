@@ -567,9 +567,16 @@ async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(asyn
             )
         )
 
-    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+    async def stub_fetch_usage(
+        *,
+        access_token: str,
+        account_id: str | None,
+        lease_account_id: str | None = None,
+        **_: object,
+    ) -> UsagePayload:
         assert access_token == "chatgpt-token"
         assert account_id == raw_chatgpt_account_id
+        assert lease_account_id == "workspace_shared_a1b2c3d4"
         return UsagePayload.model_validate({"plan_type": "team"})
 
     monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)

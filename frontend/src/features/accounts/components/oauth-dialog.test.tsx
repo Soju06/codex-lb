@@ -262,7 +262,7 @@ describe("OauthDialog", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Start sign-in" }));
-    expect(onStart).toHaveBeenCalledWith("browser");
+    expect(onStart).toHaveBeenCalledWith("browser", { expectProxy: false });
   });
 
   it("renders device stage with user code and verification URL", () => {
@@ -282,6 +282,48 @@ describe("OauthDialog", () => {
     expect(screen.getByText("https://auth.example.com/device")).toBeInTheDocument();
     expect(screen.getByText(/Waiting for authorization/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change method" })).toBeInTheDocument();
+  });
+
+  it("copies with the legacy fallback when the Clipboard API is unavailable", async () => {
+    const user = userEvent.setup();
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const originalExecCommand = document.execCommand;
+    const execCommand = vi.fn(() => true);
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true });
+
+    try {
+      render(
+        <OauthDialog
+          open
+          state={devicePendingState}
+          onOpenChange={vi.fn()}
+          onStart={vi.fn().mockResolvedValue(undefined)}
+          onComplete={vi.fn().mockResolvedValue(undefined)}
+          onManualCallback={vi.fn().mockResolvedValue(undefined)}
+          onReset={vi.fn()}
+        />,
+      );
+
+      await user.click(screen.getAllByRole("button", { name: "Copy" })[0]);
+
+      await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+      expect(screen.getByRole("button", { name: "Copied!" })).toBeInTheDocument();
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, "clipboard", originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator, "clipboard");
+      }
+      if (originalExecCommand) {
+        Object.defineProperty(document, "execCommand", {
+          value: originalExecCommand,
+          configurable: true,
+        });
+      } else {
+        Reflect.deleteProperty(document, "execCommand");
+      }
+    }
   });
 
   it("renders success stage", () => {
@@ -366,7 +408,7 @@ describe("OauthDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Refresh link" }));
 
-    expect(onStart).toHaveBeenCalledWith("browser");
+    expect(onStart).toHaveBeenCalledWith("browser", { expectProxy: false });
   });
 
   it("renders a disabled loading refresh state while generating a fresh browser link", () => {
@@ -428,5 +470,222 @@ describe("OauthDialog", () => {
     expect(disabledCallbackInput).toHaveValue("");
     expect(disabledCallbackInput).toBeDisabled();
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+  });
+
+  it("forwards expectProxy=true when the proxy section is expanded at intro", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={idleState}
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Configure egress proxy/i }));
+    expect(screen.getByRole("button", { name: "Start sign-in" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Host"), "proxy.example.com");
+    await user.click(screen.getByRole("button", { name: "Start sign-in" }));
+
+    expect(onStart).toHaveBeenCalledWith("browser", {
+      expectProxy: true,
+      proxy: expect.objectContaining({
+        host: "proxy.example.com",
+        port: 1080,
+      }),
+    });
+  });
+
+  it("renders the tokens_ready stage with a Finish setup button", async () => {
+    const tokensReadyState = {
+      ...idleState,
+      status: "tokens_ready" as const,
+      method: "device" as const,
+      deviceAuthId: "dev_ready",
+      userCode: "READY-CODE",
+    };
+
+    render(
+      <OauthDialog
+        open
+        state={tokensReadyState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Sign-in complete\. Configure the proxy/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Finish setup & validate proxy" }),
+    ).toBeDisabled();
+  });
+
+  it("forwards filled proxy fields when Finish setup is clicked", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    const tokensReadyState = {
+      ...idleState,
+      status: "tokens_ready" as const,
+      method: "device" as const,
+      deviceAuthId: "dev_ready",
+      userCode: "READY-CODE",
+    };
+
+    const { rerender } = render(
+      <OauthDialog
+        open
+        state={idleState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    // Open proxy section + fill fields on intro stage. The dialog
+    // keeps these field values across stage transitions.
+    await user.click(screen.getByRole("button", { name: /Configure egress proxy/i }));
+    await user.type(screen.getByLabelText("Host"), "proxy.example.com");
+    await user.clear(screen.getByLabelText("Port"));
+    await user.type(screen.getByLabelText("Port"), "1080");
+
+    // Re-render with tokens_ready state (simulating poll transition).
+    rerender(
+      <OauthDialog
+        open
+        state={tokensReadyState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Finish setup/ }));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const payload = onComplete.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      host: "proxy.example.com",
+      port: 1080,
+    });
+
+    rerender(
+      <OauthDialog
+        open
+        state={successState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not auto-complete a second time while Finish setup is still resolving", async () => {
+    const user = userEvent.setup();
+    let resolveComplete: (() => void) | undefined;
+    const onComplete = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveComplete = resolve;
+        }),
+    );
+    const tokensReadyState = {
+      ...idleState,
+      status: "tokens_ready" as const,
+      method: "device" as const,
+      deviceAuthId: "dev_ready",
+      userCode: "READY-CODE",
+    };
+
+    const { rerender } = render(
+      <OauthDialog
+        open
+        state={idleState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Configure egress proxy/i }));
+    await user.type(screen.getByLabelText("Host"), "proxy.example.com");
+
+    rerender(
+      <OauthDialog
+        open
+        state={tokensReadyState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Finish setup/ }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <OauthDialog
+        open
+        state={successState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={onComplete}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+    resolveComplete?.();
+  });
+
+  it("surfaces the backend probe-failure message on tokens_ready", () => {
+    const probeFailureState = {
+      ...idleState,
+      status: "tokens_ready" as const,
+      method: "device" as const,
+      deviceAuthId: "dev_ready",
+      userCode: "READY-CODE",
+      errorMessage: "The proxy rejected the username or password",
+    };
+
+    render(
+      <OauthDialog
+        open
+        state={probeFailureState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("The proxy rejected the username or password"),
+    ).toBeInTheDocument();
   });
 });

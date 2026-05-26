@@ -32,11 +32,16 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import hdrs
-from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
+from aiohttp._websocket.reader import WebSocketDataQueue
+from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
-from app.core.clients.http import acquire_http_client, lease_http_session
+from app.core.clients.account_http import (
+    acquire_account_http_client,
+    lease_account_http_session,
+)
+from app.core.clients.account_proxy_failures import record_proxy_errors_for_account
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -74,6 +79,28 @@ IGNORE_INBOUND_HEADERS = {
     "x-real-ip",
     "true-client-ip",
 }
+
+# Stable per-installation identifiers that the Codex CLI may send. These
+# are intentionally cross-account-correlating signals: two coworkers
+# behind the same NAT naturally share an IP but never share a device or
+# installation ID. Stripping them removes the strongest cross-account
+# fingerprint we currently leak to upstream.
+#
+# The set is exhaustive on purpose — we explicitly avoid prefix rules
+# like ``startswith("oai-")`` so a future upstream API revision adding a
+# legitimate ``oai-foo`` header is not silently dropped. When upstream
+# adds a new identifier variant, append it here.
+FINGERPRINT_HEADER_DENY: frozenset[str] = frozenset(
+    {
+        "oai-device-id",
+        "oai-did",
+        "x-oai-device-id",
+        "x-openai-device-id",
+        "oai-installation-id",
+        "x-oai-installation-id",
+        "x-openai-installation-id",
+    }
+)
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",
@@ -214,6 +241,19 @@ async def _call_with_service_circuit_breaker(
     if circuit_breaker is None:
         return await request
     return await circuit_breaker.call(request)
+
+
+@asynccontextmanager
+async def _maybe_record_proxy_errors_for_account(
+    account_id: str | None,
+    *,
+    enabled: bool,
+) -> AsyncIterator[None]:
+    if enabled:
+        async with record_proxy_errors_for_account(account_id or ""):
+            yield
+        return
+    yield
 
 
 @asynccontextmanager
@@ -362,6 +402,8 @@ def _should_drop_inbound_header(name: str) -> bool:
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
         return True
+    if normalized in FINGERPRINT_HEADER_DENY:
+        return True
     if normalized.startswith("x-forwarded-"):
         return True
     if normalized.startswith("cf-"):
@@ -378,18 +420,45 @@ def _build_upstream_headers(
     access_token: str,
     account_id: str | None,
     accept: str = "text/event-stream",
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
-    headers = dict(inbound)
+    # Belt-and-suspenders against ``FINGERPRINT_HEADER_DENY``: every
+    # production caller of this helper passes inbound headers that
+    # have already been filtered by ``filter_inbound_headers``, but
+    # filtering twice is cheap and keeps the contract local. Mirrors
+    # the same pattern used by ``_build_upstream_transcribe_headers``
+    # and ``_build_files_headers``.
+    headers = {key: value for key, value in inbound.items() if key.lower() not in FINGERPRINT_HEADER_DENY}
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
     headers["Authorization"] = f"Bearer {access_token}"
-    headers["Accept"] = accept
-    headers["Content-Type"] = "application/json"
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    if "accept" not in lower_keys:
+        headers["Accept"] = accept
+    # Codex CLI sends Content-Type exactly once. Only inject when the
+    # inbound headers don't already carry it (case-insensitive check —
+    # HTTP header names are case-insensitive). Injecting a duplicate
+    # ``Content-Type`` (different case from ``content-type``) is a
+    # detectable fingerprint anomaly.
+    if "content-type" not in lower_keys:
+        headers["Content-Type"] = "application/json"
+    # The ``chatgpt-account-id`` header MUST be the upstream OpenAI
+    # account ID (e.g. ``"org-abc123"``), NOT the codex-lb-side
+    # ``Account.id`` (which carries an ``_<email_hash>`` suffix when
+    # the account has an email — see :func:`generate_unique_account_id`).
+    # The ``account_id`` parameter is used by other code paths
+    # (registry / cache / DB lookups) where it MUST be the codex-lb
+    # ID. The two values diverge for accounts with emails, so when
+    # callers know both, they pass ``chatgpt_account_id`` explicitly.
+    # Backwards-compatible fallback: when ``chatgpt_account_id`` is
+    # ``None``, we fall back to ``account_id`` to preserve the legacy
+    # behaviour for callers that haven't been updated yet.
+    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
+    if header_account_id:
+        headers["chatgpt-account-id"] = header_account_id
     return headers
 
 
@@ -400,16 +469,26 @@ def _build_upstream_transcribe_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
     # Minimal header set matching Codex CLI ``/transcribe`` fingerprint.
     # Omit Accept, x-request-id, and bulk-forwarded inbound headers to
     # avoid upstream WAF rejection.
     headers: dict[str, str] = {}
     headers["Authorization"] = f"Bearer {access_token}"
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    # See ``_build_upstream_headers`` for the
+    # account_id-vs-chatgpt_account_id rationale.
+    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
+    if header_account_id:
+        headers["chatgpt-account-id"] = header_account_id
     for key, value in inbound.items():
         lower = key.lower()
+        if lower in FINGERPRINT_HEADER_DENY:
+            # Even though ``x-openai-device-id`` matches the
+            # ``x-openai-`` allow-list prefix, the device-id deny set
+            # MUST win — see ``strip-device-id-headers`` change.
+            continue
         if lower == "user-agent":
             headers[key] = value
         elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
@@ -421,6 +500,8 @@ def _build_upstream_websocket_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
     connected_header_tokens: set[str] = set()
     for key, value in inbound.items():
@@ -430,15 +511,29 @@ def _build_upstream_websocket_headers(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
-    headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    headers = {
+        key: value
+        for key, value in inbound.items()
+        # Belt-and-suspenders ``FINGERPRINT_HEADER_DENY`` filter — every
+        # other header build site applies it locally; matching the
+        # pattern here protects us against a future caller that might
+        # bypass the service-layer ``filter_inbound_headers`` and reach
+        # this function with unfiltered inbound headers.
+        if key.lower() not in blocked_header_names and key.lower() not in FINGERPRINT_HEADER_DENY
+    }
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
     headers["Authorization"] = f"Bearer {access_token}"
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    # See ``_build_upstream_headers`` for the
+    # account_id-vs-chatgpt_account_id split rationale. The header
+    # MUST carry the upstream OpenAI account ID; the registry /
+    # cache code paths use ``account_id`` (codex-lb-side) separately.
+    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
+    if header_account_id:
+        headers["chatgpt-account-id"] = header_account_id
     return headers
 
 
@@ -1896,8 +1991,9 @@ async def stream_responses(
     raise_for_status: bool = False,
     session: aiohttp.ClientSession | None = None,
     upstream_stream_transport_override: str | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> AsyncIterator[str]:
-    async with lease_http_session(session) as client_session:
+    async with lease_account_http_session(account_id or "", session) as client_session:
         async for event_block in _stream_responses_with_session(
             payload=payload,
             headers=headers,
@@ -1907,6 +2003,7 @@ async def stream_responses(
             raise_for_status=raise_for_status,
             session=client_session,
             upstream_stream_transport_override=upstream_stream_transport_override,
+            chatgpt_account_id=chatgpt_account_id,
         ):
             yield event_block
 
@@ -1920,6 +2017,7 @@ async def _stream_responses_with_session(
     base_url: str | None = None,
     raise_for_status: bool = False,
     upstream_stream_transport_override: str | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1964,10 +2062,14 @@ async def _stream_responses_with_session(
         payload_size_estimate_bytes=payload_size_estimate_bytes,
     )
     if transport == "websocket":
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(
+            headers, access_token, account_id, chatgpt_account_id=chatgpt_account_id
+        )
         method = "GET"
     else:
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers, access_token, account_id, chatgpt_account_id=chatgpt_account_id
+        )
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -2139,7 +2241,9 @@ async def _stream_responses_with_session(
                 )
 
                 transport = "http"
-                upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+                upstream_headers = _build_upstream_headers(
+                    headers, access_token, account_id, chatgpt_account_id=chatgpt_account_id
+                )
                 method = "POST"
                 remaining_request_timeout = _remaining_total_timeout(
                     request_total_timeout,
@@ -2388,13 +2492,16 @@ async def compact_responses(
     access_token: str,
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> CompactResponsePayload:
-    async with lease_http_session(session) as client_session:
+    async with lease_account_http_session(account_id or "", session) as client_session:
         transport = _CompactCommandTransport(
             payload=payload,
             headers=headers,
             access_token=access_token,
             account_id=account_id,
+            chatgpt_account_id=chatgpt_account_id,
             session=client_session,
         )
         return await transport.execute()
@@ -2411,6 +2518,7 @@ class _CompactCommandTransport:
     access_token: str
     account_id: str | None
     session: aiohttp.ClientSession
+    chatgpt_account_id: str | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
@@ -2421,6 +2529,7 @@ class _CompactCommandTransport:
             self.access_token,
             self.account_id,
             accept="application/json",
+            chatgpt_account_id=self.chatgpt_account_id,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
@@ -2646,11 +2755,18 @@ async def thread_goal_request(
     timeout_seconds: float | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/thread/goal/{operation}"
-    upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept="application/json")
+    upstream_headers = _build_upstream_headers(
+        headers,
+        access_token,
+        account_id,
+        accept="application/json",
+        chatgpt_account_id=chatgpt_account_id,
+    )
     request_method = method.upper()
     total_timeout = (
         max(0.001, timeout_seconds)
@@ -2667,7 +2783,7 @@ async def thread_goal_request(
         sock_read=total_timeout,
     )
     if session is None:
-        lease = await acquire_http_client()
+        lease = await acquire_account_http_client(account_id or "")
         client_session = lease.client.session
     else:
         lease = None
@@ -2688,40 +2804,44 @@ async def thread_goal_request(
         else None,
     )
     try:
-        request_kwargs: dict[str, Any] = {
-            "headers": upstream_headers,
-            "timeout": timeout,
-        }
-        if request_method == "GET":
-            request_kwargs["params"] = {key: str(value) for key, value in payload_dict.items() if value is not None}
-        else:
-            request_kwargs["json"] = payload_dict
-        async with _service_circuit_breaker_context(
-            client_session.request(request_method, url, **request_kwargs),
-            settings=settings,
-            account_id=account_id,
-        ) as resp:
-            status_code = resp.status
-            if resp.status >= 400:
-                error_payload = await _error_payload_from_response(resp)
-                error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload)
-            try:
-                data = await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                message = str(exc) or "Request to upstream timed out"
-                error_code = "upstream_unavailable"
-                error_message = message
-                raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
-            except Exception as exc:
+        async with _maybe_record_proxy_errors_for_account(
+            account_id,
+            enabled=lease is None or lease.uses_account_proxy,
+        ):
+            request_kwargs: dict[str, Any] = {
+                "headers": upstream_headers,
+                "timeout": timeout,
+            }
+            if request_method == "GET":
+                request_kwargs["params"] = {key: str(value) for key, value in payload_dict.items() if value is not None}
+            else:
+                request_kwargs["json"] = payload_dict
+            async with _service_circuit_breaker_context(
+                client_session.request(request_method, url, **request_kwargs),
+                settings=settings,
+                account_id=account_id,
+            ) as resp:
+                status_code = resp.status
+                if resp.status >= 400:
+                    error_payload = await _error_payload_from_response(resp)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    raise ProxyResponseError(resp.status, error_payload)
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
+                    error_code = "upstream_unavailable"
+                    error_message = message
+                    raise ProxyResponseError(502, openai_error("upstream_unavailable", message)) from exc
+                except Exception as exc:
+                    error_code = "upstream_error"
+                    error_message = "Invalid JSON from upstream"
+                    raise ProxyResponseError(502, openai_error("upstream_error", "Invalid JSON from upstream")) from exc
+                if isinstance(data, dict):
+                    return cast(dict[str, JsonValue], data)
                 error_code = "upstream_error"
-                error_message = "Invalid JSON from upstream"
-                raise ProxyResponseError(502, openai_error("upstream_error", "Invalid JSON from upstream")) from exc
-            if isinstance(data, dict):
-                return cast(dict[str, JsonValue], data)
-            error_code = "upstream_error"
-            error_message = "Unexpected upstream payload"
-            raise ProxyResponseError(502, openai_error("upstream_error", "Unexpected upstream payload"))
+                error_message = "Unexpected upstream payload"
+                raise ProxyResponseError(502, openai_error("upstream_error", "Unexpected upstream payload"))
     except ProxyResponseError as exc:
         if error_code is None and error_message is None:
             error_code, error_message = _error_details_from_envelope(exc.payload)
@@ -2764,6 +2884,7 @@ async def codex_control_request(
     timeout_seconds: float | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> CodexControlResponse:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2771,7 +2892,13 @@ async def codex_control_request(
     upstream_path = normalized_path if normalized_path.startswith("wham/") else f"codex/{normalized_path}"
     url = f"{upstream_base}/{upstream_path}"
     request_method = method.upper()
-    upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept=headers.get("accept", "*/*"))
+    upstream_headers = _build_upstream_headers(
+        headers,
+        access_token,
+        account_id,
+        accept=headers.get("accept", "*/*"),
+        chatgpt_account_id=chatgpt_account_id,
+    )
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), None)
     if content_type:
         upstream_headers["Content-Type"] = content_type
@@ -2792,7 +2919,7 @@ async def codex_control_request(
         sock_read=total_timeout,
     )
     if session is None:
-        lease = await acquire_http_client()
+        lease = await acquire_account_http_client(account_id or "")
         client_session = lease.client.session
     else:
         lease = None
@@ -2818,29 +2945,33 @@ async def codex_control_request(
         else None,
     )
     try:
-        async with _service_circuit_breaker_context(
-            client_session.request(
-                request_method,
-                url,
-                params=query_params,
-                data=payload,
-                headers=upstream_headers,
-                timeout=timeout,
-            ),
-            settings=settings,
-            account_id=account_id,
-        ) as resp:
-            status_code = resp.status
-            body = await resp.read()
-            if resp.status >= 400:
-                error_payload = await _error_payload_from_raw_body(resp, body)
-                error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload)
-            return CodexControlResponse(
-                status_code=resp.status,
-                body=body,
-                headers={key: value for key, value in resp.headers.items()},
-            )
+        async with _maybe_record_proxy_errors_for_account(
+            account_id,
+            enabled=lease is None or lease.uses_account_proxy,
+        ):
+            async with _service_circuit_breaker_context(
+                client_session.request(
+                    request_method,
+                    url,
+                    params=query_params,
+                    data=payload,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                ),
+                settings=settings,
+                account_id=account_id,
+            ) as resp:
+                status_code = resp.status
+                body = await resp.read()
+                if resp.status >= 400:
+                    error_payload = await _error_payload_from_raw_body(resp, body)
+                    error_code, error_message = _error_details_from_envelope(error_payload)
+                    raise ProxyResponseError(resp.status, error_payload)
+                return CodexControlResponse(
+                    status_code=resp.status,
+                    body=body,
+                    headers={key: value for key, value in resp.headers.items()},
+                )
     except ProxyResponseError as exc:
         if error_code is None and error_message is None:
             error_code, error_message = _error_details_from_envelope(exc.payload)
@@ -2882,8 +3013,9 @@ async def transcribe_audio(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
-    async with lease_http_session(session) as client_session:
+    async with lease_account_http_session(account_id or "", session) as client_session:
         return await _transcribe_audio_with_session(
             audio_bytes,
             filename=filename,
@@ -2894,6 +3026,7 @@ async def transcribe_audio(
             account_id=account_id,
             base_url=base_url,
             session=client_session,
+            chatgpt_account_id=chatgpt_account_id,
         )
 
 
@@ -2908,6 +3041,7 @@ async def _transcribe_audio_with_session(
     account_id: str | None,
     session: aiohttp.ClientSession,
     base_url: str | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2916,6 +3050,7 @@ async def _transcribe_audio_with_session(
         headers,
         access_token,
         account_id,
+        chatgpt_account_id=chatgpt_account_id,
     )
 
     effective_total_timeout = _effective_transcribe_total_timeout(

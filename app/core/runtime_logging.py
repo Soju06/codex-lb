@@ -117,6 +117,14 @@ def build_log_config() -> LogConfig:
     handlers = config.setdefault("handlers", {})
     settings = get_settings()
 
+    # Apply configured log level to root logger and uvicorn loggers.
+    level_name = settings.log_level.upper()
+    config["root"] = config.get("root", {})
+    config["root"]["level"] = level_name
+    for logger_cfg in config.get("loggers", {}).values():
+        if isinstance(logger_cfg, dict):
+            logger_cfg["level"] = level_name
+
     if settings.log_format == "json":
         formatters["default"] = {
             "()": "app.core.runtime_logging.JsonFormatter",

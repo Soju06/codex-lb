@@ -153,7 +153,7 @@ class AuthManager:
         self._refresh_repo_factory = refresh_repo_factory
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        if force or should_refresh(account.last_refresh):
+        if force or should_refresh(account.last_refresh, account_id=account.id):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),
@@ -186,7 +186,7 @@ class AuthManager:
     async def refresh_account(self, account: Account) -> Account:
         refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
         try:
-            result = await self._refresh_tokens(refresh_token)
+            result = await self._refresh_tokens(refresh_token, account_id=account.id)
         except RefreshError as exc:
             if exc.is_permanent:
                 latest = await self._repo.get_by_id(account.id)
@@ -230,12 +230,17 @@ class AuthManager:
         )
         return account
 
-    async def _refresh_tokens(self, refresh_token: str) -> TokenRefreshResult:
+    async def _refresh_tokens(
+        self,
+        refresh_token: str,
+        *,
+        account_id: str | None = None,
+    ) -> TokenRefreshResult:
         refresh_lease: RefreshAdmissionLeasePort | None = None
         if self._acquire_refresh_admission is not None:
             refresh_lease = await self._acquire_refresh_admission()
         try:
-            return await refresh_access_token(refresh_token)
+            return await refresh_access_token(refresh_token, account_id=account_id)
         finally:
             if refresh_lease is not None:
                 refresh_lease.release()

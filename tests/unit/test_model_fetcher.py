@@ -45,10 +45,10 @@ async def test_fetch_models_for_plan_maps_read_timeout_to_model_fetch_error(monk
     )
 
     @contextlib.asynccontextmanager
-    async def lease_session():
+    async def lease_session(account_id: str):
         yield _Session()
 
-    monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
+    monkeypatch.setattr("app.core.clients.model_fetcher.lease_account_http_session", lease_session)
 
     with pytest.raises(ModelFetchError) as exc_info:
         await fetch_models_for_plan("access-token", "account-id")

@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse, urlunparse
@@ -19,7 +22,16 @@ from websockets.exceptions import (
 )
 from websockets.typing import Origin
 
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.account_http import (
+    get_account_websocket_proxy_uri,
+)
+from app.core.clients.account_proxy_failures import record_proxy_errors_for_account
+from app.core.clients.account_tls import cached_codex_ssl_context
+from app.core.clients.proxy import (
+    FINGERPRINT_HEADER_DENY,
+    ProxyResponseError,
+    filter_inbound_headers,
+)
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
@@ -203,16 +215,37 @@ def _build_upstream_websocket_headers(
     inbound: dict[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
-    headers = {key: value for key, value in inbound.items() if key.lower() != "cookie"}
+    # Filter both the WS hop-by-hop header (``cookie``) AND the
+    # FINGERPRINT_HEADER_DENY set in one pass. The deny set is
+    # belt-and-suspenders against the service-layer
+    # ``filter_inbound_headers`` having already removed these.
+    # Mirrors the pattern used by
+    # ``proxy._build_upstream_headers`` and the transcribe / files
+    # builders.
+    headers = {
+        key: value
+        for key, value in inbound.items()
+        if key.lower() != "cookie" and key.lower() not in FINGERPRINT_HEADER_DENY
+    }
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
     headers["Authorization"] = f"Bearer {access_token}"
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    # The ``chatgpt-account-id`` header MUST be the upstream OpenAI
+    # account ID, NOT the codex-lb-side ``Account.id`` (which carries
+    # an ``_<email_hash>`` suffix when the account has an email).
+    # See :func:`app.core.clients.proxy._build_upstream_headers` for
+    # the full rationale. ``account_id`` continues to be the codex-lb
+    # ID used for cache / lease purposes; the new
+    # ``chatgpt_account_id`` parameter is what the header carries.
+    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
+    if header_account_id:
+        headers["chatgpt-account-id"] = header_account_id
     _ensure_responses_websocket_beta_header(headers)
     return headers
 
@@ -246,27 +279,65 @@ def _responses_websocket_url(base_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
+@asynccontextmanager
+async def _maybe_record_websocket_proxy_errors(
+    account_id: str | None,
+    *,
+    enabled: bool,
+) -> AsyncIterator[None]:
+    if enabled:
+        async with record_proxy_errors_for_account(account_id or ""):
+            yield
+        return
+    yield
+
+
 async def connect_responses_websocket(
     headers: dict[str, str],
     access_token: str,
     account_id: str | None,
     *,
     base_url: str | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = _responses_websocket_url(upstream_base)
-    upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+    upstream_headers = _build_upstream_websocket_headers(
+        headers,
+        access_token,
+        account_id,
+        chatgpt_account_id=chatgpt_account_id,
+    )
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
-    proxy_env = (
-        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
-    )
-    proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
+    # An explicit per-account SOCKS5 proxy MUST take precedence over the env-
+    # based default (``upstream_websocket_trust_env``); when no per-account
+    # proxy is configured we fall back to the existing env-based behaviour.
+    account_proxy_uri = await get_account_websocket_proxy_uri(account_id) if account_id else None
+
+    if account_proxy_uri is not None:
+        proxy_arg: str | bool | None = account_proxy_uri
+    elif settings.upstream_websocket_trust_env:
+        proxy_env = (
+            settings.upstream_websocket_proxy_env()
+            if hasattr(settings, "upstream_websocket_proxy_env")
+            else os.environ
+        )
+        proxy_arg = resolve_websocket_proxy_from_env(url, proxy_env)
+    else:
+        proxy_arg = None
+    # ``codex`` is the only account TLS profile. Non-account traffic keeps the
+    # default Python SSL context.
+    if account_id:
+        ssl_ctx: object | None = cached_codex_ssl_context()
+    else:
+        ssl_ctx = ssl.create_default_context()
     connect_kwargs: dict[str, Any] = {
         "origin": origin,
         "additional_headers": upstream_headers or None,
         "user_agent_header": user_agent,
+        "proxy": proxy_arg,
         "open_timeout": settings.upstream_connect_timeout_seconds,
         # Long Codex turns can spend minutes in upstream reasoning without
         # sending application frames. Keep transport pings enabled so
@@ -276,9 +347,14 @@ async def connect_responses_websocket(
         "ping_timeout": None,
         "max_size": settings.max_sse_event_bytes,
     }
-    connect_kwargs["proxy"] = proxy_url
+    if urlparse(url).scheme.lower() == "wss":
+        connect_kwargs["ssl"] = ssl_ctx
     try:
-        response = await websocket_connect(url, **connect_kwargs)
+        async with _maybe_record_websocket_proxy_errors(
+            account_id,
+            enabled=account_proxy_uri is not None,
+        ):
+            response = await websocket_connect(url, **connect_kwargs)
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
             502,

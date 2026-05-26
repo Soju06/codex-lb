@@ -1031,6 +1031,18 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401)
 
+    # Transport-level failure in the token refresh that usage triggers on
+    # 401 — should mark a cooldown and return without deactivating.
+    from app.core.auth.refresh import RefreshError
+
+    async def stub_refresh_transport(*_: Any, **__: Any) -> object:
+        raise RefreshError("transport_error", "connect", False, transport_error=True)
+
+    monkeypatch.setattr(
+        "app.modules.accounts.auth_manager.refresh_access_token",
+        stub_refresh_transport,
+    )
+
     usage_repo = StubUsageRepository()
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)

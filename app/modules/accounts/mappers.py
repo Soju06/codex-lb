@@ -14,6 +14,7 @@ from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
     AccountLimitWarmupStatus,
+    AccountProxySummary,
     AccountRequestUsage,
     AccountSummary,
     AccountTokenStatus,
@@ -145,6 +146,7 @@ def _account_to_summary(
         auth=auth_status,
         limit_warmup_enabled=account.limit_warmup_enabled,
         limit_warmup=_limit_warmup_to_status(limit_warmup),
+        proxy=_build_proxy_summary(account),
     )
 
 
@@ -160,6 +162,28 @@ def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWar
         completed_at=entry.completed_at,
         error_code=entry.error_code,
         error_message=entry.error_message,
+    )
+
+
+def _build_proxy_summary(account: Account) -> AccountProxySummary | None:
+    """Return a non-secret summary of the account's proxy, if any.
+
+    The summary deliberately omits the encrypted password so the dashboard
+    can render "Password configured" without ever transporting the secret.
+    """
+
+    host = account.proxy_host
+    port = account.proxy_port
+    if not host or port is None:
+        return None
+    return AccountProxySummary(
+        host=host,
+        port=int(port),
+        username=account.proxy_username,
+        has_password=account.proxy_password_encrypted is not None,
+        remote_dns=bool(account.proxy_remote_dns),
+        label=account.proxy_label,
+        last_validated_at=account.proxy_last_validated_at,
     )
 
 

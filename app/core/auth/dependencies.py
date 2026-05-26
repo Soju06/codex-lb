@@ -186,12 +186,17 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
 
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
-        is_authorized = await accounts_repo.exists_active_chatgpt_account_id(account_id)
-    if not is_authorized:
+        matching_account_ids = await accounts_repo.list_active_account_ids_by_chatgpt_account_id(account_id, limit=2)
+    if not matching_account_ids:
         raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
+    lease_account_id = matching_account_ids[0] if len(matching_account_ids) == 1 else None
 
     try:
-        await fetch_usage(access_token=token, account_id=account_id)
+        await fetch_usage(
+            access_token=token,
+            account_id=account_id,
+            lease_account_id=lease_account_id,
+        )
     except UsageFetchError as exc:
         if exc.status_code == 429:
             from app.core.exceptions import ProxyRateLimitError

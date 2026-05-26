@@ -169,7 +169,8 @@ async def test_create_file_leases_shared_session_when_session_not_supplied(monke
     events: list[str] = []
 
     @asynccontextmanager
-    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+    async def _lease_session(account_id: str, session_arg: aiohttp.ClientSession | None = None) -> AsyncIterator[Any]:
+        assert account_id == "acc_1"
         assert session_arg is None
         events.append("enter")
         try:
@@ -177,7 +178,7 @@ async def test_create_file_leases_shared_session_when_session_not_supplied(monke
         finally:
             events.append(f"exit:{len(session.calls)}")
 
-    monkeypatch.setattr(files_module, "lease_http_session", _lease_session)
+    monkeypatch.setattr(files_module, "lease_account_http_session", _lease_session)
 
     result = await create_file(
         payload={"file_name": "page.pdf", "file_size": 1024, "use_case": OPENAI_FILE_USE_CASE},
@@ -274,7 +275,7 @@ async def test_finalize_file_holds_shared_session_lease_across_poll_loop(monkeyp
         return None
 
     @asynccontextmanager
-    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+    async def _lease_session(account_id: str, session_arg: aiohttp.ClientSession | None = None) -> AsyncIterator[Any]:
         assert session_arg is None
         events.append("enter")
         try:
@@ -283,7 +284,7 @@ async def test_finalize_file_holds_shared_session_lease_across_poll_loop(monkeyp
             events.append(f"exit:{len(session.calls)}")
 
     monkeypatch.setattr(files_module.asyncio, "sleep", _record_sleep)
-    monkeypatch.setattr(files_module, "lease_http_session", _lease_session)
+    monkeypatch.setattr(files_module, "lease_account_http_session", _lease_session)
 
     result = await finalize_file(
         file_id="f",

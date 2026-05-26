@@ -22,6 +22,7 @@ class OpenAIErrorEnvelope(TypedDict):
 class DashboardErrorDetail(TypedDict):
     code: str
     message: str
+    reason: NotRequired[str]
 
 
 class DashboardErrorEnvelope(TypedDict):

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
@@ -12,6 +13,7 @@ from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
+from app.core.clients.account_proxy_failures import ProxyFailureTracker, set_default_tracker_for_test
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import connect_responses_websocket
 
@@ -156,6 +158,96 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "Cookie" not in additional_headers
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
+
+
+@pytest.mark.asyncio
+async def test_account_websocket_uses_codex_ssl(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+    codex_ssl_context = object()
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    async def fake_proxy_uri(account_id: str) -> str | None:
+        assert account_id == "account-123"
+        return None
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "get_account_websocket_proxy_uri", fake_proxy_uri)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "cached_codex_ssl_context",
+        lambda: codex_ssl_context,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] is None
+    assert kwargs["ssl"] is codex_ssl_context
+
+
+@pytest.mark.asyncio
+async def test_proxied_account_websocket_uses_codex_ssl(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+    codex_ssl_context = object()
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    async def fake_proxy_uri(account_id: str) -> str | None:
+        assert account_id == "account-123"
+        return "socks5h://proxy.example.com:1080"
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "get_account_websocket_proxy_uri", fake_proxy_uri)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "cached_codex_ssl_context",
+        lambda: codex_ssl_context,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] == "socks5h://proxy.example.com:1080"
+    assert kwargs["ssl"] is codex_ssl_context
 
 
 @pytest.mark.asyncio
@@ -720,3 +812,42 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_explicit_account_websocket_proxy_errors_are_tracked(monkeypatch):
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidProxy("http://proxy.invalid", "unsupported proxy scheme")
+
+    async def fake_proxy_uri(account_id: str) -> str | None:
+        assert account_id == "account-123"
+        return "socks5h://proxy.example.com:1080"
+
+    callback = AsyncMock()
+    tracker = ProxyFailureTracker(threshold=1, window_seconds=60.0, deactivation_callback=callback)
+    set_default_tracker_for_test(tracker)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "get_account_websocket_proxy_uri", fake_proxy_uri)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    try:
+        with pytest.raises(ProxyResponseError):
+            await connect_responses_websocket(
+                {"openai-beta": "responses_websockets=2026-02-06"},
+                "access-token",
+                "account-123",
+            )
+    finally:
+        set_default_tracker_for_test(None)
+
+    callback.assert_awaited_once()

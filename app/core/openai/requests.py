@@ -666,12 +666,12 @@ def _normalize_thinking_alias(
     if isinstance(thinking, bool):
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
-        normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh"}:
-            return {"effort": normalized}
-        if normalized in {"enabled", "true", "on"}:
+        normalized_text = thinking.strip().lower()
+        if normalized_text in {"low", "medium", "high", "xhigh"}:
+            return {"effort": normalized_text}
+        if normalized_text in {"enabled", "true", "on"}:
             return {"effort": "medium"}
-        if normalized in {"disabled", "false", "off"}:
+        if normalized_text in {"disabled", "false", "off"}:
             return None
     thinking_mapping = _json_mapping_or_none(thinking)
     if thinking_mapping is not None:

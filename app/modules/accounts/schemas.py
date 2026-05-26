@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -68,6 +68,63 @@ class AccountAdditionalQuota(DashboardModel):
     secondary_window: AccountAdditionalWindow | None = None
 
 
+class AccountProxyInput(DashboardModel):
+    """Operator-supplied SOCKS5 proxy configuration.
+
+    The password is write-only; it is encrypted at rest via ``TokenEncryptor``
+    and never serialized back to clients. ``password`` MAY be omitted on edit
+    to leave the existing stored password unchanged. ``remote_dns`` defaults
+    to ``True`` (``socks5h`` semantics).
+    """
+
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    username: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=1024)
+    clear_password: bool = False
+    remote_dns: bool = True
+    label: str | None = Field(default=None, max_length=128)
+
+    @field_validator("host")
+    @classmethod
+    def _strip_host(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("host must not be empty or whitespace")
+        return stripped
+
+    @field_validator("username", "label")
+    @classmethod
+    def _empty_string_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("password")
+    @classmethod
+    def _empty_password_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value if value.strip() else None
+
+
+class AccountProxySummary(DashboardModel):
+    """Read-only proxy snapshot. Never includes the password value."""
+
+    host: str
+    port: int
+    username: str | None = None
+    has_password: bool = False
+    remote_dns: bool = True
+    label: str | None = None
+    last_validated_at: datetime | None = None
+
+
+class AccountProxyClearResponse(DashboardModel):
+    status: str
+
+
 class AccountSummary(DashboardModel):
     account_id: str
     email: str
@@ -91,6 +148,7 @@ class AccountSummary(DashboardModel):
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
+    proxy: AccountProxySummary | None = None
 
 
 class AccountsResponse(DashboardModel):

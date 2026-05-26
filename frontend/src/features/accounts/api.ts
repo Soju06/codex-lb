@@ -9,17 +9,22 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountProxyClearResponseSchema,
+  AccountProxyInputSchema,
+  AccountProxySummarySchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
   OauthCompleteResponseSchema,
+  OauthResetResponseSchema,
   OauthStartRequestSchema,
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
+import type { AccountProxyInput } from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
@@ -28,9 +33,22 @@ export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
 }
 
-export function importAccount(file: File) {
+export type ImportAccountVariables = {
+  file: File;
+  proxy?: AccountProxyInput;
+};
+
+export function importAccount({ file, proxy }: ImportAccountVariables) {
   const formData = new FormData();
   formData.append("auth_json", file);
+  if (proxy) {
+    formData.append("proxyHost", proxy.host);
+    formData.append("proxyPort", String(proxy.port));
+    if (proxy.username) formData.append("proxyUsername", proxy.username);
+    if (proxy.password) formData.append("proxyPassword", proxy.password);
+    formData.append("proxyRemoteDns", String(proxy.remoteDns));
+    if (proxy.label) formData.append("proxyLabel", proxy.label);
+  }
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
   });
@@ -98,6 +116,22 @@ export function exportAccount(accountId: string) {
   );
 }
 
+export function setAccountProxy(accountId: string, payload: unknown) {
+  const validated = AccountProxyInputSchema.parse(payload);
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/proxy`,
+    AccountProxySummarySchema,
+    { body: validated },
+  );
+}
+
+export function clearAccountProxy(accountId: string) {
+  return del(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/proxy`,
+    AccountProxyClearResponseSchema,
+  );
+}
+
 export function startOauth(payload: unknown) {
   const validated = OauthStartRequestSchema.parse(payload);
   return post(`${OAUTH_BASE_PATH}/start`, OauthStartResponseSchema, {
@@ -108,6 +142,10 @@ export function startOauth(payload: unknown) {
 export function getOauthStatus(flowId?: string) {
   const query = flowId ? `?flowId=${encodeURIComponent(flowId)}` : "";
   return get(`${OAUTH_BASE_PATH}/status${query}`, OauthStatusResponseSchema);
+}
+
+export function resetOauth() {
+  return post(`${OAUTH_BASE_PATH}/reset`, OauthResetResponseSchema);
 }
 
 export function completeOauth(payload?: unknown) {

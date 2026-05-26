@@ -441,7 +441,7 @@ export function createOauthCompleteResponse(
 	overrides: Partial<OauthCompleteResponse> = {},
 ): OauthCompleteResponse {
 	return OauthCompleteResponseSchema.parse({
-		status: "ok",
+		status: "success",
 		...overrides,
 	});
 }

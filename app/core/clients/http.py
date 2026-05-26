@@ -7,6 +7,7 @@ import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import TracebackType
+from typing import Any
 
 import aiohttp
 import certifi
@@ -19,9 +20,26 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class HttpClient:
-    session: aiohttp.ClientSession
-    websocket_session: aiohttp.ClientSession
-    retry_client: RetryClient
+    """Outbound HTTP client triple used by every account-bound call site.
+
+    Each field is an ``aiohttp.ClientSession`` or ``aiohttp_retry.RetryClient``.
+    The fields are typed loosely because tests and a few adapters use the same
+    duck-typed call shape.
+
+    - ``session.post(url, *, json=, headers=, timeout=)`` /
+      ``session.get(url, ...)`` / ``session.request(method, url, ...)``
+      returning an async-context-managed response with ``.status``,
+      ``.headers``, ``.json()``, ``.text()``, ``.read()``, and
+      ``.content.iter_chunked(N)``.
+    - ``websocket_session.ws_connect(url, ...)`` returning a websocket
+      adapter.
+    - ``retry_client.request(method, url, ...)`` returning the same
+      response shape.
+    """
+
+    session: Any
+    websocket_session: Any
+    retry_client: Any
 
 
 @dataclass(slots=True, eq=False)

@@ -37,7 +37,7 @@ def _make_auth_json(account_id: str, email: str) -> dict:
 
 @pytest.mark.asyncio
 async def test_openai_client_responses_create(app_instance, monkeypatch):
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_1","object":"response",'
             '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
@@ -114,7 +114,7 @@ async def test_openai_client_responses_stream_backend_codex_base_url(app_instanc
 
 @pytest.mark.asyncio
 async def test_openai_client_chat_completions_create(app_instance, monkeypatch):
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield 'data: {"type":"response.completed","response":{"id":"resp_2"}}\n\n'
 

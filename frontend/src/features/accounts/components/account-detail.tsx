@@ -4,6 +4,7 @@ import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountAliasForm } from "@/features/accounts/components/account-alias-form";
 import { AccountActions } from "@/features/accounts/components/account-actions";
+import { AccountProxySection } from "@/features/accounts/components/account-proxy-section";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
@@ -77,6 +78,7 @@ export function AccountDetail({
       <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
+      <AccountProxySection account={account} />
       <AccountActions
         account={account}
         busy={busy}

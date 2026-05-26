@@ -141,6 +141,8 @@ def mark_duplicate_tool_call_downstream_event(
             item_name,
         )
         return True
+    same_response_argument_key: tuple[str, str, str | None, None, str] | None = None
+    cross_response_argument_key: tuple[str, str, str | None, None, str] | None = None
     if is_side_effect_tool_call:
         same_response_argument_key = (dedupe_response_id, str(item_type), item_name, None, argument_key)
         cross_response_argument_key = ("", str(item_type), item_name, None, argument_key)
@@ -157,9 +159,9 @@ def mark_duplicate_tool_call_downstream_event(
             )
             return True
     seen_tool_call_keys[key] = None
-    if is_side_effect_tool_call:
+    if is_side_effect_tool_call and same_response_argument_key is not None:
         seen_tool_call_keys[same_response_argument_key] = None
-        if not scope_side_effects_by_response_id:
+        if not scope_side_effects_by_response_id and cross_response_argument_key is not None:
             seen_tool_call_keys[cross_response_argument_key] = None
     while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
         seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))

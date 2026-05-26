@@ -177,6 +177,54 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_codex_usage_identity_avoids_proxy_lease_for_duplicate_workspace(async_client, db_setup, monkeypatch):
+    captured: dict[str, str | None] = {}
+
+    async def stub_fetch_usage(
+        *,
+        access_token: str,
+        account_id: str | None,
+        lease_account_id: str | None = None,
+        **_: object,
+    ) -> UsagePayload:
+        captured["access_token"] = access_token
+        captured["account_id"] = account_id
+        captured["lease_account_id"] = lease_account_id
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_dup_a", "dup-a@example.com", chatgpt_account_id="workspace_dup"))
+        await accounts_repo.upsert(_make_account("acc_dup_b", "dup-b@example.com", chatgpt_account_id="workspace_dup"))
+        await usage_repo.add_entry(
+            "acc_dup_a",
+            25.0,
+            window="primary",
+            reset_at=0,
+            window_minutes=300,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_dup",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "access_token": "chatgpt-token",
+        "account_id": "workspace_dup",
+        "lease_account_id": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

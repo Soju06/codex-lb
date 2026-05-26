@@ -84,6 +84,20 @@ class Account(Base):
         nullable=False,
     )
 
+    # Per-account SOCKS5 egress proxy. NULL host = no proxy.
+    proxy_host: Mapped[str | None] = mapped_column(String, nullable=True)
+    proxy_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_username: Mapped[str | None] = mapped_column(String, nullable=True)
+    proxy_password_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    proxy_remote_dns: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
+    proxy_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    proxy_last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
         back_populates="account",

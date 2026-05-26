@@ -327,7 +327,7 @@ async def sdk_client(
 
 
 def _patch_upstream_stream(monkeypatch, blocks: list[str]) -> None:
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         for block in blocks:
             yield block
 
@@ -448,7 +448,9 @@ class TestChatCompletions:
         resp_id = "resp_chat_multi"
         seen_payload: dict[str, Any] = {}
 
-        async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        async def fake_stream(
+            payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs
+        ):
             seen_payload["payload"] = payload
             for block in [
                 _codex_rate_limits_event(),

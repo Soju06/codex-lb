@@ -728,6 +728,7 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
 ):
     owner_email = "prev-http-owner-anchor@example.com"
     owner_raw_account_id = "acc_prev_http_owner_anchor"
+    owner_account_id = generate_unique_account_id(owner_raw_account_id, owner_email)
     owner_auth_json = _make_auth_json(owner_raw_account_id, owner_email)
     owner_files = {"auth_json": ("auth.json", json.dumps(owner_auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=owner_files)
@@ -764,13 +765,13 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del headers, access_token, base_url, raise_for_status, kwargs
         if payload.previous_response_id is None:
-            assert account_id == owner_raw_account_id
+            assert account_id == owner_account_id
             yield (
                 'data: {"type":"response.completed","response":{"id":"resp_prev_http_anchor",'
                 '"object":"response","status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
             )
             return
-        if payload.previous_response_id == "resp_prev_http_anchor" and account_id == owner_raw_account_id:
+        if payload.previous_response_id == "resp_prev_http_anchor" and account_id == owner_account_id:
             yield (
                 'data: {"type":"response.completed","response":{"id":"resp_prev_http_followup",'
                 '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
@@ -897,6 +898,7 @@ async def test_v1_responses_without_http_bridge_forces_http_upstream_when_dashbo
         base_url=None,
         raise_for_status=False,
         upstream_stream_transport_override=None,
+        **kwargs,
     ):
         del headers, access_token, account_id, base_url, raise_for_status
         captured["transport"] = upstream_stream_transport_override
@@ -1004,6 +1006,7 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         base_url=None,
         raise_for_status=False,
         upstream_stream_transport_override=None,
+        **kwargs,
     ):
         del headers, access_token, account_id, base_url, raise_for_status
         captured["transport"] = upstream_stream_transport_override
@@ -1155,7 +1158,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
     assert seen["access_token"] == "access-token"
-    assert seen["account_id"] == raw_account_id
+    assert seen["account_id"] == expected_account_id
 
     async with SessionLocal() as session:
         result = await session.execute(

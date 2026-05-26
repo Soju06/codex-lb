@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import cast
 
+from cryptography.fernet import InvalidToken
 from pydantic import ValidationError
 
 from app.core.auth import (
@@ -16,12 +19,19 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.clients.account_http import invalidate_account_client
+from app.core.clients.account_proxy_probe import (
+    ProbeReason,
+    ProbeResult,
+    ProxyProbeError,
+    probe_account_proxy,
+)
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountsRepository, _RotatedTokens
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -29,6 +39,8 @@ from app.modules.accounts.schemas import (
     AccountImportResponse,
     AccountOpenCodeAuthExportAccount,
     AccountOpenCodeAuthExportResponse,
+    AccountProxyInput,
+    AccountProxySummary,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
@@ -47,6 +59,50 @@ _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
 class InvalidAuthJsonError(Exception):
     pass
+
+
+class AccountNotFoundError(Exception):
+    """Raised by ``AccountsService`` when the target account does not exist."""
+
+    def __init__(self, account_id: str) -> None:
+        self.account_id = account_id
+        super().__init__(f"Account not found: {account_id}")
+
+
+class ProxyPasswordUnrecoverableError(Exception):
+    """The stored proxy password could not be decrypted.
+
+    Raised by ``set_account_proxy`` when the operator does not provide a
+    new password and the existing encrypted password fails to decrypt
+    (most commonly because the Fernet encryption key has been rotated
+    since the password was stored). The API layer maps this to HTTP 422
+    with ``error.code=proxy_password_unrecoverable`` so the dashboard
+    can render an actionable "please re-enter the password" message
+    instead of a raw 500.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Stored proxy password cannot be decrypted; please re-enter it")
+
+
+class AccountCredentialsUnrecoverableError(Exception):
+    """The account's stored OAuth refresh token could not be decrypted.
+
+    Same Fernet-key-rotation scenario as
+    :class:`ProxyPasswordUnrecoverableError`, but for the refresh token.
+    Unlike the password case, there is NO dashboard widget to "re-enter"
+    a refresh token — the operator must re-run the OAuth flow / re-
+    import the account's auth.json. The API layer maps this to HTTP
+    422 with ``error.code=account_credentials_unrecoverable`` so the
+    dashboard can prompt the operator for the right recovery action.
+    """
+
+    def __init__(self, account_id: str) -> None:
+        self.account_id = account_id
+        super().__init__(f"Account {account_id!r} credentials cannot be decrypted; please re-import the account")
+
+
+_PASSWORD_UNSET = object()
 
 
 class AccountsService:
@@ -181,7 +237,12 @@ class AccountsService:
             ),
         )
 
-    async def import_account(self, raw: bytes) -> AccountImportResponse:
+    async def import_account(
+        self,
+        raw: bytes,
+        *,
+        proxy_payload: AccountProxyInput | None = None,
+    ) -> AccountImportResponse:
         try:
             auth = parse_auth_json(raw)
         except (json.JSONDecodeError, ValidationError, UnicodeDecodeError, TypeError) as exc:
@@ -207,11 +268,11 @@ class AccountsService:
             deactivation_reason=None,
         )
 
-        saved = await self._repo.upsert(account)
-        if self._usage_repo and self._usage_updater:
-            latest_usage = await self._usage_repo.latest_by_account(window="primary")
-            await self._usage_updater.refresh_accounts([saved], latest_usage)
-        get_account_selection_cache().invalidate()
+        saved = await self.persist_account_with_optional_proxy(
+            account,
+            proxy_payload=proxy_payload,
+            refresh_token=auth.tokens.refresh_token,
+        )
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,
@@ -219,9 +280,69 @@ class AccountsService:
             status=saved.status,
         )
 
+    async def persist_account_with_optional_proxy(
+        self,
+        account: Account,
+        *,
+        proxy_payload: AccountProxyInput | None,
+        refresh_token: str,
+        before_upsert: Callable[[], Awaitable[None]] | None = None,
+    ) -> Account:
+        """Atomically probe optional proxy, persist account, refresh caches.
+
+        Shared by the import and OAuth add-account flows so the
+        probe / upsert / invalidate / usage-refresh sequence does not
+        drift between them. The caller MUST have already populated
+        ``account`` with identity + (encrypted) token fields; the
+        plaintext ``refresh_token`` is only needed to drive the proxy
+        probe when ``proxy_payload`` is provided.
+        """
+
+        if proxy_payload is not None:
+            # Lock the final account_id before probing so proxy fields and
+            # rotated tokens are applied to the same row that will be saved.
+            account.id = await self._repo.preview_import_account_id(account.id, account.email)
+            result, rotated_tokens = await self._probe_proxy_payload(
+                refresh_token=refresh_token,
+                payload=proxy_payload,
+            )
+            account.access_token_encrypted = rotated_tokens.access_token_encrypted
+            account.refresh_token_encrypted = rotated_tokens.refresh_token_encrypted
+            account.id_token_encrypted = rotated_tokens.id_token_encrypted
+            account.last_refresh = rotated_tokens.last_refresh
+            account.proxy_host = proxy_payload.host
+            account.proxy_port = proxy_payload.port
+            account.proxy_username = proxy_payload.username
+            account.proxy_password_encrypted = (
+                self._encryptor.encrypt(proxy_payload.password)
+                if proxy_payload.password is not None and not proxy_payload.clear_password
+                else None
+            )
+            account.proxy_remote_dns = proxy_payload.remote_dns
+            account.proxy_label = proxy_payload.label
+            account.proxy_last_validated_at = result.checked_at
+
+        if before_upsert is not None:
+            await before_upsert()
+        saved = await self._repo.upsert(
+            account,
+            include_proxy_fields=proxy_payload is not None,
+        )
+        if proxy_payload is not None:
+            await invalidate_account_client(saved.id)
+        if self._usage_repo and self._usage_updater:
+            latest_usage = await self._usage_repo.latest_by_account(window="primary")
+            await self._usage_updater.refresh_accounts([saved], latest_usage)
+        get_account_selection_cache().invalidate()
+        return saved
+
     async def reactivate_account(self, account_id: str) -> bool:
         result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, None, blocked_at=None)
         if result:
+            # Drop any cached per-account client + reset the proxy-failure
+            # window so a freshly-reactivated account does not inherit the
+            # stale failure timestamps that triggered its prior deactivation.
+            await invalidate_account_client(account_id)
             get_account_selection_cache().invalidate()
         return result
 
@@ -237,6 +358,12 @@ class AccountsService:
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         result = await self._repo.delete(account_id, delete_history=delete_history)
         if result:
+            # Drop the cached per-account egress session and reset the
+            # runtime proxy-failure tracker for the deleted account so
+            # nothing leaks into the next account that happens to take
+            # this id back (rare, but generated_unique_account_id can
+            # collide on aggressive id reuse).
+            await invalidate_account_client(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
             poller = get_cache_invalidation_poller()
@@ -274,6 +401,196 @@ class AccountsService:
             plan_type=account.plan_type,
             status=account.status.value,
             auth_json=json.dumps(auth_json, indent=2),
+        )
+
+    async def get_account_proxy(self, account_id: str) -> AccountProxySummary | None:
+        """Return the public proxy summary for an account, or ``None``.
+
+        ``None`` covers both "account does not exist" and "account has no
+        proxy configured" — callers that need to distinguish them should
+        check ``get_by_id`` separately.
+        """
+
+        record = await self._repo.get_proxy_config(account_id)
+        if record is None:
+            return None
+        return AccountProxySummary(
+            host=record.host,
+            port=record.port,
+            username=record.username,
+            has_password=record.password_encrypted is not None,
+            remote_dns=record.remote_dns,
+            label=record.label,
+            last_validated_at=record.last_validated_at,
+        )
+
+    async def set_account_proxy(
+        self,
+        account_id: str,
+        payload: AccountProxyInput,
+    ) -> AccountProxySummary:
+        """Probe the proposed proxy and persist it on success.
+
+        The probe performs a real OAuth refresh through the proposed
+        ``ProxyConnector`` against the configured ``auth_base_url`` (defaults
+        to ``https://auth.openai.com``). Only an ``ok`` outcome reaches
+        the database; any other outcome raises :class:`ProxyProbeError`.
+
+        Password handling: omitted ``payload.password`` reuses the
+        existing password only when the host / port / username identity
+        is unchanged. Explicit ``password: null`` or ``clear_password``
+        clears the stored secret.
+        """
+
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            raise AccountNotFoundError(account_id)
+
+        existing = await self._repo.get_proxy_config(account_id)
+
+        password_field_was_sent = "password" in payload.model_fields_set
+        clear_password = payload.clear_password or (password_field_was_sent and payload.password is None)
+        same_proxy_identity = (
+            existing is not None
+            and existing.host == payload.host
+            and existing.port == payload.port
+            and existing.username == payload.username
+        )
+        if clear_password:
+            password_plain = None
+        elif payload.password is not None:
+            password_plain: str | None = payload.password
+        elif existing is not None and existing.password_encrypted is not None and same_proxy_identity:
+            try:
+                password_plain = self._encryptor.decrypt(existing.password_encrypted)
+            except InvalidToken as exc:
+                # The encryption key has been rotated since the password
+                # was stored. Without the original key we cannot recover
+                # the plaintext, so the only path forward is for the
+                # operator to re-enter it. Surface a typed envelope so
+                # the dashboard can render an actionable message instead
+                # of a raw 500.
+                raise ProxyPasswordUnrecoverableError() from exc
+        else:
+            password_plain = None
+
+        try:
+            refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        except InvalidToken as exc:
+            # Same Fernet-key-rotation scenario as the password decrypt
+            # above, but for the OAuth refresh token. Without the
+            # original key we cannot recover the plaintext, and there
+            # is no operator-visible way to "re-enter" a refresh
+            # token (it can only be re-obtained by re-running the
+            # OAuth flow / re-importing auth.json). Surface a typed
+            # envelope so the dashboard can render an actionable
+            # message instead of a raw 500.
+            raise AccountCredentialsUnrecoverableError(account_id) from exc
+        result, rotated_tokens = await self._probe_proxy_payload(
+            refresh_token=refresh_token,
+            payload=payload,
+            password_plain=password_plain,
+        )
+
+        # Refresh-token rotation safety. The probe just performed a real
+        # OAuth refresh through the proposed proxy; if the upstream
+        # rotated the refresh token, the response payload contains the
+        # new tokens. We MUST persist them atomically with the proxy
+        # config — otherwise the previously stored refresh token is now
+        # stale and the next real refresh will fail with ``invalid_grant``.
+        password_encrypted = self._encryptor.encrypt(password_plain) if password_plain is not None else None
+        updated = await self._repo.update_proxy(
+            account_id,
+            host=payload.host,
+            port=payload.port,
+            username=payload.username,
+            password_encrypted=password_encrypted,
+            remote_dns=payload.remote_dns,
+            label=payload.label,
+            last_validated_at=result.checked_at,
+            rotated_tokens=rotated_tokens,
+        )
+        if not updated:
+            raise AccountNotFoundError(account_id)
+        await self._reactivate_after_proxy_repair(account_id)
+        # Drop any cached per-account ClientSession so subsequent leases
+        # rebuild against the new (or revalidated) configuration.
+        await invalidate_account_client(account_id)
+        get_account_selection_cache().invalidate()
+
+        logging.getLogger(__name__).info(
+            "Proxy config updated account_id=%s host=%s port=%d",
+            account_id,
+            payload.host,
+            payload.port,
+        )
+
+        return AccountProxySummary(
+            host=payload.host,
+            port=payload.port,
+            username=payload.username,
+            has_password=password_encrypted is not None,
+            remote_dns=payload.remote_dns,
+            label=payload.label,
+            last_validated_at=result.checked_at,
+        )
+
+    async def _probe_proxy_payload(
+        self,
+        *,
+        refresh_token: str,
+        payload: AccountProxyInput,
+        password_plain: str | None | object = _PASSWORD_UNSET,
+    ) -> tuple[ProbeResult, _RotatedTokens]:
+        probe_password = payload.password if password_plain is _PASSWORD_UNSET else cast(str | None, password_plain)
+        result: ProbeResult = await probe_account_proxy(
+            host=payload.host,
+            port=payload.port,
+            username=payload.username,
+            password=probe_password,
+            remote_dns=payload.remote_dns,
+            refresh_token=refresh_token,
+        )
+        if not result.ok:
+            raise ProxyProbeError(result.reason, result.detail)
+        tokens = result.tokens
+        if not (tokens and tokens.access_token and tokens.refresh_token and tokens.id_token):
+            raise ProxyProbeError(
+                ProbeReason.INVALID_RESPONSE,
+                "OAuth refresh succeeded but token payload was incomplete",
+            )
+        return result, _RotatedTokens(
+            access_token_encrypted=self._encryptor.encrypt(tokens.access_token),
+            refresh_token_encrypted=self._encryptor.encrypt(tokens.refresh_token),
+            id_token_encrypted=self._encryptor.encrypt(tokens.id_token),
+            last_refresh=utcnow(),
+        )
+
+    async def clear_account_proxy(self, account_id: str) -> bool:
+        """Remove the proxy configuration on an account (idempotent for empty).
+
+        Returns ``True`` if the row was modified (either a proxy was
+        configured and is now cleared OR no proxy was configured — both
+        leave the row in the canonical no-proxy state). Returns ``False``
+        only when the account does not exist.
+        """
+
+        cleared = await self._repo.clear_proxy(account_id)
+        if cleared:
+            await self._reactivate_after_proxy_repair(account_id)
+            await invalidate_account_client(account_id)
+            get_account_selection_cache().invalidate()
+        return cleared
+
+    async def _reactivate_after_proxy_repair(self, account_id: str) -> None:
+        """Bring proxy-failure-deactivated accounts back after operator repair."""
+
+        await self._repo.update_status_if_current(
+            account_id,
+            AccountStatus.ACTIVE,
+            deactivation_reason=None,
+            expected_status=AccountStatus.DEACTIVATED,
+            expected_deactivation_reason="proxy_unreachable",
         )
 
 

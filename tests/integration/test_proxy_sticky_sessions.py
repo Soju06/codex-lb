@@ -119,7 +119,7 @@ def _install_proxy_settings_cache(
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_client, monkeypatch):
+async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_client, monkeypatch, **kwargs):
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     acc_a_id = await _import_account(async_client, "acc_a", "a@example.com")
     acc_b_id = await _import_account(async_client, "acc_b", "b@example.com")
@@ -183,7 +183,7 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
     response = await async_client.post("/backend-api/codex/responses", json=payload)
     assert response.status_code == 200
 
-    assert seen == ["acc_a", "acc_a"]
+    assert seen == [acc_a_id, acc_a_id]
 
 
 @pytest.mark.asyncio
@@ -300,7 +300,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -317,7 +317,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_c1"]
+    assert stream_seen == [acc_c1_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -344,11 +344,11 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     }
     response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)
     assert response.status_code == 200
-    assert compact_seen == ["acc_c1"]
+    assert compact_seen == [acc_c1_id]
 
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_c1", "acc_c1"]
+    assert stream_seen == [acc_c1_id, acc_c1_id]
 
 
 @pytest.mark.asyncio
@@ -385,7 +385,7 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -401,7 +401,7 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_sid_a"]
+    assert stream_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -431,11 +431,11 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
         headers=headers,
     )
     assert response.status_code == 200
-    assert compact_seen == ["acc_sid_a"]
+    assert compact_seen == [acc_a_id]
 
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_sid_a", "acc_sid_a"]
+    assert stream_seen == [acc_a_id, acc_a_id]
 
 
 @pytest.mark.asyncio
@@ -472,7 +472,7 @@ async def test_proxy_codex_session_id_reallocates_when_pinned_budget_exhausted(a
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -488,7 +488,7 @@ async def test_proxy_codex_session_id_reallocates_when_pinned_budget_exhausted(a
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_sid_budget_a"]
+    assert stream_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -518,11 +518,11 @@ async def test_proxy_codex_session_id_reallocates_when_pinned_budget_exhausted(a
         headers=headers,
     )
     assert response.status_code == 200
-    assert compact_seen == ["acc_sid_budget_b"]
+    assert compact_seen == [acc_b_id]
 
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_sid_budget_a", "acc_sid_budget_b"]
+    assert stream_seen == [acc_a_id, acc_b_id]
 
 
 @pytest.mark.asyncio
@@ -556,7 +556,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -581,7 +581,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
         headers=headers,
     )
     assert response.status_code == 200
-    assert compact_seen == ["acc_sid_compact_a"]
+    assert compact_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -608,7 +608,7 @@ async def test_proxy_codex_session_id_compact_first_pins_followup_stream_without
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_sid_compact_a"]
+    assert stream_seen == [acc_a_id]
 
 
 @pytest.mark.asyncio
@@ -616,8 +616,6 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
     await _set_routing_settings(async_client, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_sid_retry_a", "sid_retry_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_sid_retry_b", "sid_retry_b@example.com")
-    upstream_acc_a = "acc_sid_retry_a"
-    upstream_acc_b = "acc_sid_retry_b"
 
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -644,7 +642,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_seen.append(account_id)
-        if account_id == upstream_acc_a and fail_pinned["enabled"]:
+        if account_id == acc_a_id and fail_pinned["enabled"]:
             yield (
                 'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded",'
                 '"message":"slow down"}}}\n\n'
@@ -663,7 +661,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == [upstream_acc_a]
+    assert stream_seen == [acc_a_id]
 
     fail_pinned["enabled"] = True
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
@@ -671,7 +669,7 @@ async def test_proxy_codex_session_id_switches_when_pinned_rate_limited(async_cl
 
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == [upstream_acc_a, upstream_acc_a, upstream_acc_b, upstream_acc_b]
+    assert stream_seen == [acc_a_id, acc_a_id, acc_b_id, acc_b_id]
 
 
 @pytest.mark.asyncio
@@ -708,7 +706,7 @@ async def test_v1_session_id_does_not_create_durable_codex_session_affinity(asyn
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -723,7 +721,7 @@ async def test_v1_session_id_does_not_create_durable_codex_session_affinity(asyn
     }
     response = await async_client.post("/v1/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
-    assert stream_seen == ["acc_v1_sid_a"]
+    assert stream_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -748,7 +746,7 @@ async def test_v1_session_id_does_not_create_durable_codex_session_affinity(asyn
     }
     response = await async_client.post("/v1/responses/compact", json=compact_payload, headers=headers)
     assert response.status_code == 200
-    assert compact_seen == ["acc_v1_sid_a"]
+    assert compact_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         codex_row = (
@@ -802,7 +800,7 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
 
     compact_seen: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_seen.append(account_id)
         return OpenAIResponsePayload.model_validate({"output": []})
 
@@ -818,7 +816,7 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
     }
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_v1_cache_a"]
+    assert stream_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -844,11 +842,11 @@ async def test_v1_prompt_cache_key_reuses_recent_responses_and_compact_without_s
     }
     response = await async_client.post("/v1/responses/compact", json=compact_payload)
     assert response.status_code == 200
-    assert compact_seen == ["acc_v1_cache_a"]
+    assert compact_seen == [acc_a_id]
 
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_v1_cache_a", "acc_v1_cache_a"]
+    assert stream_seen == [acc_a_id, acc_a_id]
 
 
 @pytest.mark.asyncio
@@ -893,7 +891,7 @@ async def test_v1_responses_derives_prompt_cache_key_when_absent(async_client, m
     payload = {"model": "gpt-5.1", "input": "hello", "stream": True}
     response = await async_client.post("/v1/responses", json=payload)
     assert response.status_code == 200
-    assert seen_accounts == ["acc_v1_derived_a"]
+    assert seen_accounts == [acc_a_id]
     assert isinstance(seen_keys[0], str)
     assert seen_keys[0]
 
@@ -1076,7 +1074,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
     }
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_v1_expire_a"]
+    assert stream_seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -1109,7 +1107,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
 
     response = await async_client.post("/v1/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_v1_expire_a", "acc_v1_expire_b"]
+    assert stream_seen == [acc_a_id, acc_b_id]
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1137,7 @@ async def test_codex_endpoint_uses_prompt_cache_sticky_kind(async_client, monkey
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True, "prompt_cache_key": "pck_abc"}
     await async_client.post("/backend-api/codex/responses", json=payload)
-    assert seen == ["acc_kind_a"]
+    assert seen == [acc_id]
 
     async with SessionLocal() as session:
         row = (await session.execute(text("SELECT kind FROM sticky_sessions WHERE key = 'pck_abc'"))).fetchone()
@@ -1187,7 +1185,7 @@ async def test_v1_auto_derived_key_separates_parallel_sessions(async_client, mon
     await async_client.post("/v1/responses", json=session_b)
 
     assert len(seen) == 2
-    assert seen[0] == "acc_par_a"
+    assert seen[0] == acc_a_id
 
 
 @pytest.mark.asyncio
@@ -1239,7 +1237,7 @@ async def test_v1_auto_derived_key_stable_across_turns(async_client, monkeypatch
     }
 
     await async_client.post("/v1/responses", json=turn1)
-    assert seen == ["acc_turn_a"]
+    assert seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -1260,7 +1258,7 @@ async def test_v1_auto_derived_key_stable_across_turns(async_client, monkeypatch
 
     await async_client.post("/v1/responses", json=turn2)
 
-    assert seen == ["acc_turn_a", "acc_turn_a"]
+    assert seen == [acc_a_id, acc_a_id]
 
 
 @pytest.mark.asyncio
@@ -1298,7 +1296,7 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True, "prompt_cache_key": "realloc_key"}
     await async_client.post("/backend-api/codex/responses", json=payload)
-    assert seen == ["acc_realloc_a"]
+    assert seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -1318,7 +1316,7 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
         )
 
     await async_client.post("/backend-api/codex/responses", json=payload)
-    assert seen == ["acc_realloc_a", "acc_realloc_a"]
+    assert seen == [acc_a_id, acc_a_id]
 
     async with SessionLocal() as session:
         await session.execute(text("DELETE FROM accounts WHERE chatgpt_account_id = 'acc_realloc_a'"))
@@ -1326,4 +1324,4 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
 
     await async_client.post("/backend-api/codex/responses", json=payload)
     assert len(seen) == 3
-    assert seen[2] == "acc_realloc_b"
+    assert seen[2] == acc_b_id

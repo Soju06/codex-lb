@@ -69,7 +69,7 @@ async def test_account_creation_writes_audit_log(async_client) -> None:
 
     audit_log = await _wait_for_audit_log("account_created")
     assert audit_log.request_id == "audit-account-create"
-    assert audit_log.details == json.dumps({"account_id": expected_account_id})
+    assert audit_log.details == json.dumps({"account_id": expected_account_id, "proxy_configured": False})
 
 
 @pytest.mark.asyncio

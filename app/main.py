@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
+from app.core.clients.account_http import close_all_account_clients
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -295,19 +296,22 @@ async def lifespan(app: FastAPI):
         await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()
         try:
-            await close_http_client()
+            await close_all_account_clients()
         finally:
             try:
-                if metrics_server_task is not None:
-                    await asyncio.wait_for(metrics_server_task, timeout=5)
-            except TimeoutError:
-                logger.warning("Timed out waiting for metrics server shutdown")
-            except Exception:
-                logger.exception("Metrics server stopped with an error")
+                await close_http_client()
             finally:
-                shutdown_state.reset()
-                mark_process_dead()
-                await close_db()
+                try:
+                    if metrics_server_task is not None:
+                        await asyncio.wait_for(metrics_server_task, timeout=5)
+                except TimeoutError:
+                    logger.warning("Timed out waiting for metrics server shutdown")
+                except Exception:
+                    logger.exception("Metrics server stopped with an error")
+                finally:
+                    shutdown_state.reset()
+                    mark_process_dead()
+                    await close_db()
 
 
 def create_app() -> FastAPI:

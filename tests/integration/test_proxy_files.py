@@ -17,6 +17,7 @@ from typing import cast
 import pytest
 
 import app.modules.proxy.service as proxy_module
+from app.core.auth import generate_unique_account_id
 from app.core.clients.files import FileProxyError
 
 pytestmark = pytest.mark.integration
@@ -57,7 +58,7 @@ async def test_backend_files_create_forwards_payload_and_returns_upstream_json(a
 
     captured: dict[str, object] = {}
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         captured["payload"] = payload
         captured["access_token"] = access_token
         captured["account_id"] = account_id
@@ -75,7 +76,7 @@ async def test_backend_files_create_forwards_payload_and_returns_upstream_json(a
     assert body == {"file_id": "file_xyz", "upload_url": "https://blob.example/sas?token=abc"}
     assert captured["payload"] == {"file_name": "page.pdf", "file_size": 1024, "use_case": "codex"}
     assert captured["access_token"] == "access-token"
-    assert captured["account_id"] == "acc_files_create"
+    assert captured["account_id"] == generate_unique_account_id("acc_files_create", "files-create@example.com")
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_backend_files_create_defaults_use_case_to_codex(async_client, mon
     await _import_account(async_client, "acc_files_default_uc", "files-default-uc@example.com")
     captured: dict[str, object] = {}
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         captured["payload"] = payload
         return {"file_id": "f", "upload_url": "https://blob.example/sas"}
 
@@ -136,7 +137,7 @@ async def test_backend_files_create_rejects_missing_file_name(async_client):
 async def test_backend_files_create_maps_upstream_error(async_client, monkeypatch):
     await _import_account(async_client, "acc_files_upstream_err", "files-upstream-err@example.com")
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         raise FileProxyError(
             413,
             {"error": {"message": "file too large", "type": "invalid_request_error", "code": "file_too_large"}},
@@ -161,7 +162,7 @@ async def test_backend_files_create_repeated_401_after_refresh_fails_over(async_
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **_kwargs):
         del payload, headers, access_token, base_url, session
         nonlocal invalidated_account_id
         if invalidated_account_id is None:
@@ -198,7 +199,7 @@ async def test_backend_files_finalize_returns_upstream_payload(async_client, mon
 
     captured: dict[str, object] = {}
 
-    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         captured["file_id"] = file_id
         captured["account_id"] = account_id
         return {
@@ -218,7 +219,7 @@ async def test_backend_files_finalize_returns_upstream_payload(async_client, mon
     assert body["status"] == "success"
     assert body["download_url"] == "https://download.example/file_done"
     assert captured["file_id"] == "file_done"
-    assert captured["account_id"] == "acc_files_finalize"
+    assert captured["account_id"] == generate_unique_account_id("acc_files_finalize", "files-finalize@example.com")
 
 
 @pytest.mark.asyncio
@@ -228,7 +229,7 @@ async def test_backend_files_finalize_repeated_401_after_refresh_fails_over(asyn
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
 
-    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **_kwargs):
         del file_id, headers, access_token, base_url, session
         nonlocal invalidated_account_id
         if invalidated_account_id is None:
@@ -263,7 +264,7 @@ async def test_backend_files_finalize_propagates_retry_status(async_client, monk
     caller can decide what to do (mirrors upstream Codex CLI behaviour)."""
     await _import_account(async_client, "acc_files_finalize_retry", "files-finalize-retry@example.com")
 
-    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         return {"status": "retry"}
 
     monkeypatch.setattr(proxy_module, "core_finalize_file", fake_finalize_file)
@@ -277,7 +278,7 @@ async def test_backend_files_finalize_propagates_retry_status(async_client, monk
 async def test_backend_files_finalize_maps_upstream_404(async_client, monkeypatch):
     await _import_account(async_client, "acc_files_finalize_missing", "files-finalize-missing@example.com")
 
-    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         raise FileProxyError(
             404,
             {"error": {"message": "file not found", "type": "invalid_request_error", "code": "not_found"}},
@@ -335,11 +336,11 @@ async def test_backend_files_finalize_pins_to_create_account(async_client, monke
     create_seen: dict[str, object] = {}
     finalize_seen: dict[str, object] = {}
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         create_seen["account_id"] = account_id
         return {"file_id": "file_pinned", "upload_url": "https://blob.example/sas?token=p"}
 
-    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         finalize_seen["account_id"] = account_id
         finalize_seen["file_id"] = file_id
         return {"status": "success", "download_url": "https://blob.example/dl/p"}
@@ -353,7 +354,10 @@ async def test_backend_files_finalize_pins_to_create_account(async_client, monke
     )
     assert create_resp.status_code == 200
     creating_account = create_seen["account_id"]
-    assert creating_account in {"acc_pin_a", "acc_pin_b"}
+    assert creating_account in {
+        generate_unique_account_id("acc_pin_a", "pin-a@example.com"),
+        generate_unique_account_id("acc_pin_b", "pin-b@example.com"),
+    }
 
     finalize_resp = await async_client.post("/backend-api/files/file_pinned/uploaded")
     assert finalize_resp.status_code == 200
@@ -434,11 +438,11 @@ async def test_v1_responses_prompt_cache_key_overrides_file_id_pin(async_client,
 
     create_account_holder: dict[str, str] = {}
 
-    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None):
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         create_account_holder["account_id"] = account_id
         return {"file_id": "file_pck", "upload_url": "https://blob.example/sas?t=p"}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield (
             "event: response.completed\ndata: "
             + json.dumps(

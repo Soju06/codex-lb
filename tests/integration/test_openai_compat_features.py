@@ -51,7 +51,7 @@ async def test_v1_responses_forwards_input_file_url(async_client, monkeypatch):
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_file_url")
 
@@ -85,7 +85,7 @@ async def test_v1_responses_forwards_input_file_id(async_client, monkeypatch):
 
     seen: dict[str, object] = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_input_file_id")
 
@@ -157,7 +157,7 @@ async def test_v1_responses_forwards_builtin_tools(async_client, monkeypatch, to
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del headers, access_token, account_id, base_url, raise_for_status
         seen["payload"] = payload
         yield _completed_event("resp_builtin_tools")
@@ -186,7 +186,7 @@ async def test_v1_responses_forwards_input_string(async_client, monkeypatch):
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_input_string")
 
@@ -206,7 +206,7 @@ async def test_v1_responses_forwards_include_logprobs(async_client, monkeypatch)
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_include")
 
@@ -228,7 +228,7 @@ async def test_v1_responses_preserves_prompt_cache_controls(async_client, monkey
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload.to_payload()
         yield _completed_event("resp_prompt_cache_v1")
 
@@ -252,7 +252,7 @@ async def test_v1_responses_normalizes_prompt_cache_aliases(async_client, monkey
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload.to_payload()
         yield _completed_event("resp_prompt_cache_alias")
 
@@ -278,7 +278,7 @@ async def test_backend_responses_forwards_service_tier(async_client, monkeypatch
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_backend_service_tier")
 
@@ -301,7 +301,7 @@ async def test_backend_responses_normalizes_fast_service_tier_for_upstream(async
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload.to_payload()
         yield _completed_event("resp_backend_fast_tier")
 
@@ -362,7 +362,7 @@ async def test_v1_responses_allows_web_search(async_client, monkeypatch, tool_ty
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_web_search")
 
@@ -385,7 +385,7 @@ async def test_v1_responses_preserves_image_generation_builtin_tool(async_client
     seen = {}
     image_tool = {"type": "image_generation", "output_format": "png"}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_v1_image_generation")
 
@@ -408,7 +408,7 @@ async def test_backend_responses_allows_web_search(async_client, monkeypatch, to
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_backend_web_search")
 
@@ -436,7 +436,7 @@ async def test_backend_responses_strip_image_generation_tool_advertisement(async
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
     }
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_backend_image_generation")
 
@@ -460,7 +460,7 @@ async def test_backend_responses_preserve_explicit_image_generation_tool_choice(
     seen = {}
     image_tool = {"type": "image_generation", "output_format": "png"}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_backend_explicit_image_generation")
 
@@ -487,7 +487,7 @@ async def test_backend_responses_preserve_required_image_generation_tool_choice(
     seen = {}
     image_tool = {"type": "image_generation", "output_format": "png"}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_backend_required_image_generation")
 
@@ -546,7 +546,7 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_format")
 
@@ -821,7 +821,7 @@ async def test_v1_chat_completions_forwards_multimodal(async_client, monkeypatch
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_multi")
 
@@ -908,7 +908,7 @@ async def test_v1_chat_completions_allows_web_search(async_client, monkeypatch, 
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_web_search")
 
@@ -930,7 +930,7 @@ async def test_v1_chat_completions_normalizes_tools_and_tool_choice(async_client
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_tools")
 
@@ -971,7 +971,7 @@ async def test_v1_chat_completions_does_not_enable_codex_session_affinity(async_
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["account_id"] = account_id
         seen["prompt_cache_key"] = getattr(payload, "prompt_cache_key", None)
         yield _completed_event("resp_chat_affinity")
@@ -994,7 +994,7 @@ async def test_v1_chat_completions_maps_reasoning_effort(async_client, monkeypat
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_reason")
 
@@ -1017,7 +1017,7 @@ async def test_v1_chat_completions_normalizes_enable_thinking(async_client, monk
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload.to_payload()
         yield _completed_event("resp_chat_enable_thinking")
 
@@ -1040,7 +1040,7 @@ async def test_v1_chat_completions_forwards_service_tier(async_client, monkeypat
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload
         yield _completed_event("resp_chat_service_tier")
 
@@ -1062,7 +1062,7 @@ async def test_v1_chat_completions_preserves_prompt_cache_controls(async_client,
 
     seen = {}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen["payload"] = payload.to_payload()
         yield _completed_event("resp_chat_prompt_cache")
 

@@ -436,7 +436,7 @@ class DurableBridgeRepository:
 
 async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...]:
     dialect = session.get_bind().dialect.name
-    expected = set(REQUIRED_DURABLE_BRIDGE_TABLES)
+    expected: set[str] = set(REQUIRED_DURABLE_BRIDGE_TABLES)
     if dialect == "sqlite":
         result = await session.execute(
             text(

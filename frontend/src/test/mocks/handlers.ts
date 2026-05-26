@@ -379,7 +379,14 @@ export const handlers = [
 		return HttpResponse.json({ accounts: state.accounts });
 	}),
 
-	http.post("/api/accounts/import", async () => {
+	http.post("/api/accounts/import", async ({ request }) => {
+		const formData = await request.formData();
+		const proxyHost = formData.get("proxyHost");
+		const proxyPort = formData.get("proxyPort");
+		const proxyUsername = formData.get("proxyUsername");
+		const proxyPassword = formData.get("proxyPassword");
+		const proxyRemoteDns = formData.get("proxyRemoteDns");
+		const proxyLabel = formData.get("proxyLabel");
 		const sequence = state.accounts.length + 1;
 		const created = createAccountSummary({
 			accountId: `acc_imported_${sequence}`,
@@ -387,6 +394,17 @@ export const handlers = [
 			displayName: `imported-${sequence}@example.com`,
 			status: "active",
 		});
+		if (typeof proxyHost === "string" && typeof proxyPort === "string") {
+			created.proxy = {
+				host: proxyHost,
+				port: Number(proxyPort),
+				username: typeof proxyUsername === "string" ? proxyUsername : null,
+				hasPassword: typeof proxyPassword === "string" && proxyPassword.length > 0,
+				remoteDns: proxyRemoteDns !== "false",
+				label: typeof proxyLabel === "string" ? proxyLabel : null,
+				lastValidatedAt: new Date().toISOString(),
+			};
+		}
 		state.accounts = [...state.accounts, created];
 		return HttpResponse.json({
 			accountId: created.accountId,
@@ -520,6 +538,54 @@ export const handlers = [
 			(account) => account.accountId !== accountId,
 		);
 		return HttpResponse.json({ status: "deleted" });
+	}),
+
+	http.post("/api/accounts/:accountId/proxy", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = (await request.json()) as Record<string, unknown> | null;
+		if (!payload || typeof payload.host !== "string" || typeof payload.port !== "number") {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid payload" } },
+				{ status: 422 },
+			);
+		}
+		const hasPassword =
+			payload.clearPassword === true
+				? false
+				: typeof payload.password === "string" && payload.password.length > 0
+					? true
+					: account.proxy?.hasPassword ?? false;
+		const summary = {
+			host: payload.host,
+			port: payload.port,
+			username: typeof payload.username === "string" ? payload.username : null,
+			hasPassword,
+			remoteDns: payload.remoteDns !== false,
+			label: typeof payload.label === "string" ? payload.label : null,
+			lastValidatedAt: new Date().toISOString(),
+		};
+		account.proxy = summary;
+		return HttpResponse.json(summary);
+	}),
+
+	http.delete("/api/accounts/:accountId/proxy", ({ params }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		account.proxy = null;
+		return HttpResponse.json({ status: "cleared" });
 	}),
 
 	http.post("/api/oauth/start", async ({ request }) => {

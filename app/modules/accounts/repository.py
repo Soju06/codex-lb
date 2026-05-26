@@ -25,6 +25,29 @@ class AccountRequestUsageSummary:
     total_cost_usd: float
 
 
+@dataclass(frozen=True, slots=True)
+class _RotatedTokens:
+    """OAuth tokens rotated by a proxy probe, passed to :meth:`update_proxy`."""
+
+    access_token_encrypted: bytes
+    refresh_token_encrypted: bytes
+    id_token_encrypted: bytes
+    last_refresh: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AccountProxyRecord:
+    """Snapshot of an account's stored SOCKS5 proxy configuration."""
+
+    host: str
+    port: int
+    username: str | None
+    password_encrypted: bytes | None
+    remote_dns: bool
+    label: str | None
+    last_validated_at: datetime | None
+
+
 class AccountIdentityConflictError(Exception):
     def __init__(self, email: str) -> None:
         self.email = email
@@ -95,15 +118,34 @@ class AccountsRepository:
         return summaries
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
+        return await self.get_active_account_id_by_chatgpt_account_id(chatgpt_account_id) is not None
+
+    async def list_active_account_ids_by_chatgpt_account_id(
+        self,
+        chatgpt_account_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[str]:
         result = await self._session.execute(
             select(Account.id)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
             .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
-            .limit(1)
+            .order_by(Account.created_at.asc(), Account.id.asc())
+            .limit(limit)
         )
-        return result.scalar_one_or_none() is not None
+        return list(result.scalars().all())
 
-    async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
+    async def get_active_account_id_by_chatgpt_account_id(self, chatgpt_account_id: str) -> str | None:
+        matches = await self.list_active_account_ids_by_chatgpt_account_id(chatgpt_account_id, limit=1)
+        return matches[0] if matches else None
+
+    async def upsert(
+        self,
+        account: Account,
+        *,
+        merge_by_email: bool | None = None,
+        include_proxy_fields: bool = False,
+    ) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
         if merge_by_email is None:
@@ -126,7 +168,7 @@ class AccountsRepository:
         existing = await self._session.get(Account, account.id)
         if existing:
             if merge_by_email:
-                _apply_account_updates(existing, account)
+                _apply_account_updates(existing, account, include_proxy_fields=include_proxy_fields)
                 await self._session.commit()
                 await self._session.refresh(existing)
                 return existing
@@ -135,7 +177,11 @@ class AccountsRepository:
         if merge_by_email:
             existing_by_email = await self._single_account_by_email(account.email)
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                _apply_account_updates(
+                    existing_by_email,
+                    account,
+                    include_proxy_fields=include_proxy_fields,
+                )
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email
@@ -144,6 +190,35 @@ class AccountsRepository:
         await self._session.commit()
         await self._session.refresh(account)
         return account
+
+    async def preview_import_account_id(
+        self,
+        account_id: str,
+        email: str,
+        *,
+        merge_by_email: bool | None = None,
+    ) -> str:
+        """Return the account id ``upsert`` will normally use for an import.
+
+        Import-time proxy validation needs to know which row will receive the
+        proxy fields and rotated tokens before the account is persisted. This
+        is intentionally a preview, not a reservation: ``upsert`` still
+        enforces the final identity rules under its normal database locks.
+        """
+
+        if merge_by_email is None:
+            merge_by_email = await self._merge_by_email_enabled()
+        existing = await self._session.get(Account, account_id)
+        if existing is not None:
+            if merge_by_email:
+                return existing.id
+            return await self._next_available_account_id(account_id)
+        if merge_by_email:
+            existing_by_email = await self._single_account_by_email(email)
+            if existing_by_email is not None:
+                return existing_by_email.id
+            return account_id
+        return account_id
 
     async def update_status(
         self,
@@ -268,6 +343,125 @@ class AccountsRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def get_proxy_config(self, account_id: str) -> AccountProxyRecord | None:
+        """Return the stored proxy configuration for an account, or ``None``.
+
+        ``None`` is returned both for unknown accounts and for accounts that
+        do not have a proxy configured (``proxy_host IS NULL``). Callers that
+        need to differentiate the two should ``get_by_id`` separately.
+        """
+
+        result = await self._session.execute(
+            select(
+                Account.proxy_host,
+                Account.proxy_port,
+                Account.proxy_username,
+                Account.proxy_password_encrypted,
+                Account.proxy_remote_dns,
+                Account.proxy_label,
+                Account.proxy_last_validated_at,
+            ).where(Account.id == account_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        (
+            host,
+            port,
+            username,
+            password_encrypted,
+            remote_dns,
+            label,
+            last_validated_at,
+        ) = row
+        if host is None or port is None:
+            return None
+        return AccountProxyRecord(
+            host=host,
+            port=int(port),
+            username=username,
+            password_encrypted=bytes(password_encrypted) if password_encrypted is not None else None,
+            remote_dns=bool(remote_dns) if remote_dns is not None else True,
+            label=label,
+            last_validated_at=last_validated_at,
+        )
+
+    async def update_proxy(
+        self,
+        account_id: str,
+        *,
+        host: str,
+        port: int,
+        username: str | None,
+        password_encrypted: bytes | None,
+        remote_dns: bool,
+        label: str | None,
+        last_validated_at: datetime | None,
+        rotated_tokens: _RotatedTokens | None = None,
+    ) -> bool:
+        """Persist a complete proxy configuration on an account.
+
+        The repository layer is encryption-agnostic; callers MUST pass an
+        already-encrypted ``password_encrypted`` value (typically produced
+        via ``TokenEncryptor.encrypt``). All proxy columns are written in a
+        single statement so partial-update races cannot leave the row in a
+        torn state.
+
+        When ``rotated_tokens`` is provided the token columns are written
+        in the same statement so proxy config and credential rotation are
+        atomic.
+        """
+
+        if not host:
+            raise ValueError("proxy host must be a non-empty string")
+        if not (1 <= int(port) <= 65535):
+            raise ValueError("proxy port must be in range 1-65535")
+
+        values: dict[str, object | None] = {
+            "proxy_host": host,
+            "proxy_port": int(port),
+            "proxy_username": username,
+            "proxy_password_encrypted": password_encrypted,
+            "proxy_remote_dns": bool(remote_dns),
+            "proxy_label": label,
+            "proxy_last_validated_at": last_validated_at,
+        }
+        if rotated_tokens is not None:
+            values["access_token_encrypted"] = rotated_tokens.access_token_encrypted
+            values["refresh_token_encrypted"] = rotated_tokens.refresh_token_encrypted
+            values["id_token_encrypted"] = rotated_tokens.id_token_encrypted
+            values["last_refresh"] = rotated_tokens.last_refresh
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def clear_proxy(self, account_id: str) -> bool:
+        """Clear the SOCKS5 proxy fields on an account.
+
+        Resets every proxy column to its no-proxy default: NULL for the
+        connection fields, ``true`` for ``proxy_remote_dns``, NULL for
+        ``proxy_last_validated_at``.
+
+        Account TLS behavior is fixed to the internal Codex profile.
+        """
+
+        values: dict[str, object | None] = {
+            "proxy_host": None,
+            "proxy_port": None,
+            "proxy_username": None,
+            "proxy_password_encrypted": None,
+            "proxy_remote_dns": True,
+            "proxy_label": None,
+            "proxy_last_validated_at": None,
+        }
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def _merge_by_email_enabled(self) -> bool:
         settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)
         if settings is None:
@@ -322,7 +516,12 @@ class AccountsRepository:
         )
 
 
-def _apply_account_updates(target: Account, source: Account) -> None:
+def _apply_account_updates(
+    target: Account,
+    source: Account,
+    *,
+    include_proxy_fields: bool = False,
+) -> None:
     target.chatgpt_account_id = source.chatgpt_account_id
     target.email = source.email
     target.plan_type = source.plan_type
@@ -334,6 +533,14 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at
     target.blocked_at = source.blocked_at
+    if include_proxy_fields:
+        target.proxy_host = source.proxy_host
+        target.proxy_port = source.proxy_port
+        target.proxy_username = source.proxy_username
+        target.proxy_password_encrypted = source.proxy_password_encrypted
+        target.proxy_remote_dns = source.proxy_remote_dns
+        target.proxy_label = source.proxy_label
+        target.proxy_last_validated_at = source.proxy_last_validated_at
 
 
 def _advisory_lock_key(scope: str, value: str) -> int:

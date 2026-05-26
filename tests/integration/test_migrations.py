@@ -780,3 +780,67 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             assert row[1] in (True, 1)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_accounts_proxy_columns_upgrade_preserves_existing_rows(tmp_path):
+    """Adding proxy columns must not destroy existing account rows.
+
+    Stages an old DB at the revision before the proxy migration, inserts a
+    representative account, then upgrades to head and confirms the row is
+    still present with the new columns defaulted to NULL / remote-DNS=true.
+    """
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'accounts-proxy-upgrade.sqlite'}"
+    base_revision = "20260520_010000_add_request_logs_api_key_account_index"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, base_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, chatgpt_account_id, email, plan_type,
+                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                        last_refresh, created_at, status, deactivation_reason, reset_at, blocked_at
+                    ) VALUES (
+                        'acc_proxy_seed', 'cg-1', 'seed@example.com', 'plus',
+                        x'01', x'02', x'03',
+                        '2026-05-23 00:00:00', '2026-05-23 00:00:00', 'active', NULL, NULL, NULL
+                    )
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT id, email, proxy_host, proxy_port, proxy_username,
+                               proxy_password_encrypted, proxy_remote_dns, proxy_label,
+                               proxy_last_validated_at
+                        FROM accounts
+                        WHERE id = 'acc_proxy_seed'
+                        """
+                    )
+                )
+            ).one()
+            assert row[0] == "acc_proxy_seed"
+            assert row[1] == "seed@example.com"
+            assert row[2] is None  # proxy_host
+            assert row[3] is None  # proxy_port
+            assert row[4] is None  # proxy_username
+            assert row[5] is None  # proxy_password_encrypted
+            assert bool(row[6]) is True  # proxy_remote_dns default true
+            assert row[7] is None  # proxy_label
+            assert row[8] is None  # proxy_last_validated_at
+    finally:
+        await engine.dispose()

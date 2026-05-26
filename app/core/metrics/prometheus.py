@@ -208,7 +208,7 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
     )
 
-    def make_scrape_registry() -> CollectorRegistryLike:
+    def _make_scrape_registry_available() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
             _multiprocess = import_module("prometheus_client.multiprocess")
             registry = CollectorRegistry()
@@ -216,13 +216,16 @@ if PROMETHEUS_AVAILABLE:
             return registry
         return REGISTRY
 
-    def mark_process_dead() -> None:
+    def _mark_process_dead_available() -> None:
         if MULTIPROCESS_MODE:
             try:
                 _multiprocess = import_module("prometheus_client.multiprocess")
                 _multiprocess.mark_process_dead(os.getpid())
             except (ImportError, AttributeError):
                 pass
+
+    make_scrape_registry = _make_scrape_registry_available
+    mark_process_dead = _mark_process_dead_available
 
 else:
     REGISTRY: CollectorRegistryLike | None = None
@@ -254,11 +257,14 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_cap_rejections_total: CounterLike | None = None
 
-    def make_scrape_registry() -> None:
+    def _make_scrape_registry_unavailable() -> None:
         return None
 
-    def mark_process_dead() -> None:
+    def _mark_process_dead_unavailable() -> None:
         pass
+
+    make_scrape_registry = _make_scrape_registry_unavailable
+    mark_process_dead = _mark_process_dead_unavailable
 
 
 __all__ = [

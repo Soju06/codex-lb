@@ -35,7 +35,8 @@ from typing import Any
 
 import aiohttp
 
-from app.core.clients.http import lease_http_session
+from app.core.clients.account_http import lease_account_http_session
+from app.core.clients.proxy import FINGERPRINT_HEADER_DENY
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
@@ -131,6 +132,8 @@ def _build_files_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
     """Build the Bearer-auth + chatgpt-account-id header set for /files calls.
 
@@ -142,10 +145,18 @@ def _build_files_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = "application/json"
     headers["Content-Type"] = "application/json"
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    # See ``proxy._build_upstream_headers`` for the
+    # account_id-vs-chatgpt_account_id split.
+    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
+    if header_account_id:
+        headers["chatgpt-account-id"] = header_account_id
     for key, value in inbound.items():
         lower = key.lower()
+        if lower in FINGERPRINT_HEADER_DENY:
+            # Same rationale as in ``_build_upstream_transcribe_headers``:
+            # the device-id deny set MUST win over the ``x-openai-`` /
+            # ``x-codex-`` allow-list prefixes.
+            continue
         if lower == "user-agent":
             headers.setdefault(key, value)
         elif lower.startswith(_FILES_FORWARD_HEADER_PREFIXES):
@@ -169,6 +180,7 @@ async def create_file(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     """Register a new file. Returns the upstream `{file_id, upload_url}` JSON.
 
@@ -179,7 +191,7 @@ async def create_file(
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files"
-    upstream_headers = _build_files_headers(headers, access_token, account_id)
+    upstream_headers = _build_files_headers(headers, access_token, account_id, chatgpt_account_id=chatgpt_account_id)
     effective_total = _effective_files_total_timeout()
     effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
     timeout = aiohttp.ClientTimeout(
@@ -188,7 +200,7 @@ async def create_file(
     )
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     try:
-        async with lease_http_session(session) as client_session:
+        async with lease_account_http_session(account_id or "", session) as client_session:
             async with client_session.post(
                 url,
                 data=body,
@@ -233,6 +245,7 @@ async def finalize_file(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    chatgpt_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     """Finalize an uploaded file. Returns the upstream finalization JSON.
 
@@ -253,14 +266,14 @@ async def finalize_file(
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files/{file_id}/uploaded"
-    upstream_headers = _build_files_headers(headers, access_token, account_id)
+    upstream_headers = _build_files_headers(headers, access_token, account_id, chatgpt_account_id=chatgpt_account_id)
     # The finalize-poll loop runs up to ``_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS``
     # but each individual ``POST`` should never block longer than the
     # remaining request budget. Cap the per-poll timeout at the smaller
     # of the standard 60 s request budget and the override (if set).
     effective_per_poll_total = _effective_files_total_timeout()
     effective_connect = _effective_files_connect_timeout(settings.upstream_connect_timeout_seconds)
-    async with lease_http_session(session) as client_session:
+    async with lease_account_http_session(account_id or "", session) as client_session:
         # The finalize budget cannot exceed the caller's per-request budget;
         # otherwise we would keep polling well past the parent timeout.
         finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)

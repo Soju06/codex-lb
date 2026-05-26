@@ -30,7 +30,7 @@ async def test_proxy_chat_completions_flow(
         email="e2e-proxy@example.com",
     )
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_e2e_proxy","usage":'

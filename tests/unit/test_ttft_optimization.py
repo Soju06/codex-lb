@@ -168,7 +168,7 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         await asyncio.sleep(0.02)
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
@@ -205,7 +205,7 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         yield 'data: {"type":"response.created","response":{"id":"resp_ttft"}}\n\n'
         await asyncio.sleep(0.03)

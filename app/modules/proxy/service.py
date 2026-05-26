@@ -216,6 +216,8 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
+_warned_missing_upstream_id: set[str] = set()
+
 _UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
@@ -531,7 +533,7 @@ class ProxyService:
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
-        self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._background_cleanup_tasks: set[asyncio.Task[Any]] = set()
         # In-memory pin from upstream-issued file_id -> codex-lb account_id.
         # Used so ``finalize_file`` for a given ``file_id`` is routed to
         # the same account that handled ``create_file``. Cross-instance
@@ -1148,10 +1150,10 @@ class ProxyService:
                     else "owner_forward_bootstrap",
                     outcome="success",
                 )
+                retry_api_key_reservation = api_key_reservation
+                retry_reservation_reacquired = False
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
-                    retry_api_key_reservation = api_key_reservation
-                    retry_reservation_reacquired = False
                     if api_key is not None and api_key_reservation is not None:
                         retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                             api_key,
@@ -1358,8 +1360,8 @@ class ProxyService:
             propagate_http_errors=propagate_http_errors,
             downstream_turn_state=downstream_turn_state,
         )
+        yielded_any = False
         try:
-            yielded_any = False
             async for event_block in session_events:
                 yield event_block
                 yielded_any = True
@@ -1563,9 +1565,9 @@ class ProxyService:
             )
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
+            retry_api_key_reservation = api_key_reservation
+            retry_reservation_reacquired = False
             try:
-                retry_api_key_reservation = api_key_reservation
-                retry_reservation_reacquired = False
                 if api_key is not None and api_key_reservation is not None:
                     retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                         api_key,
@@ -2105,7 +2107,21 @@ class ProxyService:
                 account_response_create_lease: AccountLease | None = None,
             ) -> CompactResponsePayload:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                # ``account_id`` here is the codex-lb-side ID — used by
+                # the downstream session lease + cache + DB lookups.
+                # ``chatgpt_account_id`` is the upstream OpenAI account
+                # ID used for the ``chatgpt-account-id`` header. The
+                # two diverge for accounts with email
+                # (see :func:`generate_unique_account_id`) so they MUST
+                # be passed separately.
+                account_id = target.id
+                chatgpt_account_id = _header_account_id(target.chatgpt_account_id)
+                if chatgpt_account_id is None and target.email and target.id not in _warned_missing_upstream_id:
+                    _warned_missing_upstream_id.add(target.id)
+                    logger.warning(
+                        "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                        target.id,
+                    )
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -2132,7 +2148,13 @@ class ProxyService:
                             surface="compact",
                         )
                     create_lease = await self._get_work_admission().acquire_response_create(compact=True)
-                    return await core_compact_responses(payload, filtered, access_token, account_id)
+                    return await core_compact_responses(
+                        payload,
+                        filtered,
+                        access_token,
+                        account_id,
+                        chatgpt_account_id=chatgpt_account_id,
+                    )
                 finally:
                     if create_lease is not None:
                         create_lease.release()
@@ -2510,7 +2532,16 @@ class ProxyService:
 
             async def _call_goal(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                # See _call_compact for the account_id-vs-chatgpt
+                # split rationale.
+                account_id = target.id
                 upstream_account_id = _header_account_id(target.chatgpt_account_id)
+                if upstream_account_id is None and target.email and target.id not in _warned_missing_upstream_id:
+                    _warned_missing_upstream_id.add(target.id)
+                    logger.warning(
+                        "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                        target.id,
+                    )
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -2526,9 +2557,10 @@ class ProxyService:
                     payload,
                     filtered,
                     access_token,
-                    upstream_account_id,
+                    account_id,
                     method=method,
                     timeout_seconds=remaining_budget,
+                    chatgpt_account_id=upstream_account_id,
                 )
 
             try:
@@ -2721,7 +2753,15 @@ class ProxyService:
 
             async def _call_control(target: Account) -> CodexControlResponse:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
+                # See _call_compact for account_id-vs-chatgpt split.
+                account_id = target.id
                 upstream_account_id = _header_account_id(target.chatgpt_account_id)
+                if upstream_account_id is None and target.email and target.id not in _warned_missing_upstream_id:
+                    _warned_missing_upstream_id.add(target.id)
+                    logger.warning(
+                        "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                        target.id,
+                    )
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -2739,8 +2779,9 @@ class ProxyService:
                     query_params=query_params,
                     headers=filtered,
                     access_token=access_token,
-                    account_id=upstream_account_id,
+                    account_id=account_id,
                     timeout_seconds=remaining_budget,
+                    chatgpt_account_id=upstream_account_id,
                 )
 
             try:
@@ -2915,7 +2956,15 @@ class ProxyService:
 
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                # See _call_compact for account_id-vs-chatgpt split.
+                account_id = target.id
+                chatgpt_account_id = _header_account_id(target.chatgpt_account_id)
+                if chatgpt_account_id is None and target.email and target.id not in _warned_missing_upstream_id:
+                    _warned_missing_upstream_id.add(target.id)
+                    logger.warning(
+                        "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                        target.id,
+                    )
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -2937,6 +2986,7 @@ class ProxyService:
                         headers=filtered,
                         access_token=access_token,
                         account_id=account_id,
+                        chatgpt_account_id=chatgpt_account_id,
                     )
                 finally:
                     pop_transcribe_timeout_overrides(timeout_tokens)
@@ -3246,11 +3296,12 @@ class ProxyService:
             kind="files-create",
             api_key=api_key,
             headers=headers,
-            invoke=lambda access_token, upstream_account_id, filtered_headers: core_create_file(
+            invoke=lambda access_token, account_id, upstream_account_id, filtered_headers: core_create_file(
                 payload=payload,
                 headers=filtered_headers,
                 access_token=access_token,
-                account_id=upstream_account_id,
+                account_id=account_id,
+                chatgpt_account_id=upstream_account_id,
             ),
         )
         # Best-effort pin so finalize lands on the same account.
@@ -3288,11 +3339,12 @@ class ProxyService:
             api_key=api_key,
             headers=headers,
             preferred_account_id=pinned_account_id,
-            invoke=lambda access_token, upstream_account_id, filtered_headers: core_finalize_file(
+            invoke=lambda access_token, account_id, upstream_account_id, filtered_headers: core_finalize_file(
                 file_id=file_id,
                 headers=filtered_headers,
                 access_token=access_token,
-                account_id=upstream_account_id,
+                account_id=account_id,
+                chatgpt_account_id=upstream_account_id,
             ),
         )
         if isinstance(result, dict) and account_id:
@@ -3308,7 +3360,10 @@ class ProxyService:
         kind: str,
         api_key: ApiKeyData | None,
         headers: Mapping[str, str],
-        invoke: Callable[[str, str | None, Mapping[str, str]], Awaitable[dict[str, JsonValue]]],
+        invoke: Callable[
+            [str, str | None, str | None, Mapping[str, str]],
+            Awaitable[dict[str, JsonValue]],
+        ],
         preferred_account_id: str | None = None,
     ) -> tuple[dict[str, JsonValue], str | None]:
         """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
@@ -3357,7 +3412,16 @@ class ProxyService:
 
             async def _call(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                # See _call_compact above for the codex-lb-vs-OpenAI
+                # account-id split rationale.
+                account_id = target.id
+                chatgpt_account_id = _header_account_id(target.chatgpt_account_id)
+                if chatgpt_account_id is None and target.email and target.id not in _warned_missing_upstream_id:
+                    _warned_missing_upstream_id.add(target.id)
+                    logger.warning(
+                        "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                        target.id,
+                    )
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -3377,7 +3441,7 @@ class ProxyService:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
-                    return await invoke(access_token, account_id, filtered)
+                    return await invoke(access_token, account_id, chatgpt_account_id, filtered)
                 except FileProxyError as files_exc:
                     raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
                 finally:
@@ -3616,6 +3680,7 @@ class ProxyService:
                     request_state_registered = True
                 else:
                     downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
+                    message: Mapping[str, Any] | None = None
                     try:
                         message = await asyncio.wait_for(
                             websocket.receive(),
@@ -3647,6 +3712,8 @@ class ProxyService:
                                     idle_close = True
                         if idle_close:
                             break
+                        if message is None:
+                            continue
                     downstream_activity.mark()
                     message_type = message["type"]
 
@@ -5167,10 +5234,28 @@ class ProxyService:
         headers: dict[str, str],
     ) -> UpstreamResponsesWebSocket:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        # ``account_id`` is the codex-lb-side ID used by the registry
+        # for cache + DB lookups; ``chatgpt_account_id`` is the
+        # upstream OpenAI account ID used for the
+        # ``chatgpt-account-id`` header. The two diverge for
+        # accounts with email — see :func:`generate_unique_account_id`
+        # in :mod:`app.core.auth`.
+        account_id = account.id
+        chatgpt_account_id = _header_account_id(account.chatgpt_account_id)
+        if chatgpt_account_id is None and account.email and account.id not in _warned_missing_upstream_id:
+            _warned_missing_upstream_id.add(account.id)
+            logger.warning(
+                "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                account.id,
+            )
         connect_lease = await self._get_work_admission().acquire_websocket_connect()
         try:
-            return await connect_responses_websocket(headers, access_token, account_id)
+            return await connect_responses_websocket(
+                headers,
+                access_token,
+                account_id,
+                chatgpt_account_id=chatgpt_account_id,
+            )
         finally:
             connect_lease.release()
 
@@ -8100,7 +8185,7 @@ class ProxyService:
         account_id_value = account_id.strip()
         if not account_id_value:
             return
-        cache_keys = [(response_id, api_key_id, None)]
+        cache_keys: list[tuple[str, str | None, str | None]] = [(response_id, api_key_id, None)]
         normalized_session_id = _normalize_session_id(session_id)
         if normalized_session_id is not None:
             cache_keys.append((response_id, api_key_id, normalized_session_id))
@@ -9706,40 +9791,79 @@ class ProxyService:
         if api_key is None or api_key_reservation is None:
             return True
 
+        task = asyncio.create_task(
+            self._settle_stream_api_key_usage_with_release_fallback(
+                api_key,
+                api_key_reservation,
+                settlement,
+                request_id,
+            ),
+            name=f"proxy-settle_stream_api_key_reservation-{request_id}",
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_background_cleanup_task(
+                task,
+                action="settle_stream_api_key_reservation",
+                request_id=request_id,
+            )
+            return True
+
+    async def _settle_stream_api_key_usage_with_release_fallback(
+        self,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        settlement: _StreamSettlement,
+        request_id: str,
+    ) -> bool:
+        settled = await self._settle_stream_api_key_usage_once(api_key, api_key_reservation, settlement, request_id)
+        if not settled:
+            await self._release_unsettled_stream_api_key_usage_once(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
+        return settled
+
+    async def _settle_stream_api_key_usage_once(
+        self,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        settlement: _StreamSettlement,
+        request_id: str,
+    ) -> bool:
+        """Settle stream reservation inside a task detached from client cancellation."""
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
 
-        settled: bool = False
-        with anyio.CancelScope(shield=True):
-            try:
-                async with self._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
-                    if (
-                        settlement.status == "success"
-                        and settlement.input_tokens is not None
-                        and settlement.output_tokens is not None
-                    ):
-                        await api_keys_service.finalize_usage_reservation(
-                            reservation_id,
-                            model=model_name,
-                            input_tokens=settlement.input_tokens,
-                            output_tokens=settlement.output_tokens,
-                            cached_input_tokens=settlement.cached_input_tokens or 0,
-                            service_tier=settlement.service_tier,
-                        )
-                    else:
-                        await api_keys_service.release_usage_reservation(reservation_id)
-                settled = True
-            except Exception:
-                logger.warning(
-                    "Failed to settle stream API key reservation key_id=%s request_id=%s",
-                    api_key.id,
-                    request_id,
-                    exc_info=True,
-                )
-                settled = False
-
-        return settled
+        try:
+            async with self._repo_factory() as repos:
+                api_keys_service = ApiKeysService(repos.api_keys)
+                if (
+                    settlement.status == "success"
+                    and settlement.input_tokens is not None
+                    and settlement.output_tokens is not None
+                ):
+                    await api_keys_service.finalize_usage_reservation(
+                        reservation_id,
+                        model=model_name,
+                        input_tokens=settlement.input_tokens,
+                        output_tokens=settlement.output_tokens,
+                        cached_input_tokens=settlement.cached_input_tokens or 0,
+                        service_tier=settlement.service_tier,
+                    )
+                else:
+                    await api_keys_service.release_usage_reservation(reservation_id)
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to settle stream API key reservation key_id=%s request_id=%s",
+                api_key.id,
+                request_id,
+                exc_info=True,
+            )
+            return False
 
     def _schedule_cancel_safe_cleanup(
         self,
@@ -9749,9 +9873,18 @@ class ProxyService:
         request_id: str,
     ) -> None:
         task = asyncio.create_task(coro, name=f"proxy-{action}-{request_id}")
+        self._track_background_cleanup_task(task, action=action, request_id=request_id)
+
+    def _track_background_cleanup_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        action: str,
+        request_id: str,
+    ) -> None:
         self._background_cleanup_tasks.add(task)
 
-        def _cleanup_done(done_task: asyncio.Task[None]) -> None:
+        def _cleanup_done(done_task: asyncio.Task[Any]) -> None:
             self._background_cleanup_tasks.discard(done_task)
             try:
                 done_task.result()
@@ -9774,20 +9907,43 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
     ) -> None:
-        with anyio.CancelScope(shield=True):
-            try:
-                async with self._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
-                    await api_keys_service.release_usage_reservation(
-                        api_key_reservation.reservation_id,
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to release stream API key reservation key_id=%s request_id=%s",
-                    api_key.id,
-                    request_id,
-                    exc_info=True,
+        task = asyncio.create_task(
+            self._release_unsettled_stream_api_key_usage_once(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            ),
+            name=f"proxy-release_stream_api_key_reservation-{request_id}",
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_background_cleanup_task(
+                task,
+                action="release_stream_api_key_reservation",
+                request_id=request_id,
+            )
+
+    async def _release_unsettled_stream_api_key_usage_once(
+        self,
+        *,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        request_id: str,
+    ) -> None:
+        try:
+            async with self._repo_factory() as repos:
+                api_keys_service = ApiKeysService(repos.api_keys)
+                await api_keys_service.release_usage_reservation(
+                    api_key_reservation.reservation_id,
                 )
+        except Exception:
+            logger.warning(
+                "Failed to release stream API key reservation key_id=%s request_id=%s",
+                api_key.id,
+                request_id,
+                exc_info=True,
+            )
 
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
@@ -9900,7 +10056,7 @@ class ProxyService:
                 additional_rate_limits=additional_rate_limits,
             )
 
-    async def _stream_with_retry(
+    async def _stream_with_retry(  # pyright: ignore[reportGeneralTypeIssues]
         self,
         payload: ResponsesRequest,
         headers: Mapping[str, str],
@@ -10885,7 +11041,22 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        # ``account_id`` is the codex-lb-side identifier (used for the
+        # session lease + cache + DB lookups + circuit breaker key);
+        # ``chatgpt_account_id`` is the upstream OpenAI account ID
+        # used for the ``chatgpt-account-id`` header. The two
+        # diverge for accounts with email — see
+        # :func:`generate_unique_account_id` in :mod:`app.core.auth`.
+        # Using the wrong one for the registry would silently bypass
+        # the per-account proxy + TLS profile.
+        account_id = account.id
+        chatgpt_account_id = _header_account_id(account.chatgpt_account_id)
+        if chatgpt_account_id is None and account.email and account.id not in _warned_missing_upstream_id:
+            _warned_missing_upstream_id.add(account.id)
+            logger.warning(
+                "Account has email but no chatgpt_account_id; using codex-lb ID account_id=%s",
+                account.id,
+            )
         model = payload.model
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
@@ -10935,6 +11106,7 @@ class ProxyService:
                     account_id,
                     raise_for_status=True,
                     upstream_stream_transport_override=upstream_stream_transport,
+                    chatgpt_account_id=chatgpt_account_id,
                 )
             else:
                 stream = core_stream_responses(
@@ -10943,6 +11115,7 @@ class ProxyService:
                     access_token,
                     account_id,
                     raise_for_status=True,
+                    chatgpt_account_id=chatgpt_account_id,
                 )
             iterator = stream.__aiter__()
             try:
@@ -14094,7 +14267,7 @@ def _safe_dump_slug(value: str | None, *, fallback: str) -> str:
 
 
 def _summarize_response_create_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    field_sizes = sorted(
+    field_sizes: list[dict[str, JsonValue]] = sorted(
         (
             {
                 "key": key,
@@ -14102,12 +14275,12 @@ def _summarize_response_create_payload(payload: dict[str, JsonValue]) -> dict[st
             }
             for key, value in payload.items()
         ),
-        key=lambda item: int(item["size_bytes"]),
+        key=lambda item: cast(int, item["size_bytes"]),
         reverse=True,
     )
     summary: dict[str, JsonValue] = {
-        "top_level_keys": list(payload.keys()),
-        "top_level_field_sizes": field_sizes,
+        "top_level_keys": cast(JsonValue, list(payload.keys())),
+        "top_level_field_sizes": cast(JsonValue, field_sizes),
     }
     input_summary = _summarize_response_create_input(payload.get("input"))
     if input_summary is not None:
@@ -14152,7 +14325,7 @@ def _summarize_response_create_input(input_value: JsonValue) -> dict[str, JsonVa
                         content_part_type_counts[part_type] = content_part_type_counts.get(part_type, 0) + 1
         largest_items.append(item_summary)
 
-    largest_items.sort(key=lambda item: int(item["size_bytes"]), reverse=True)
+    largest_items.sort(key=lambda item: cast(int, item["size_bytes"]), reverse=True)
     summary: dict[str, JsonValue] = {
         "count": len(input_value),
         "role_counts": cast(JsonValue, role_counts),

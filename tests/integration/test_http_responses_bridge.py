@@ -1451,8 +1451,9 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -1671,8 +1672,9 @@ async def test_v1_responses_http_bridge_codex_session_prewarms_first_request(asy
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -1752,8 +1754,9 @@ async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_defaul
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -1849,8 +1852,9 @@ async def test_v1_responses_http_bridge_non_owner_instance_falls_back_to_local_s
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return _FakeBridgeUpstreamWebSocket()
 
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
@@ -2129,8 +2133,9 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del access_token, account_id_header, base_url, session
+        del access_token, account_id_header, base_url, session, chatgpt_account_id
         connect_headers_seen.append(dict(headers))
         return upstreams.pop(0)
 
@@ -2415,8 +2420,9 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -2605,8 +2611,9 @@ async def test_v1_responses_http_bridge_preserves_prior_turn_state_aliases(
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -2731,8 +2738,9 @@ async def test_v1_responses_http_bridge_close_waits_for_turn_state_index_lock(
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -2838,8 +2846,9 @@ async def test_v1_responses_http_bridge_allows_unstable_request_key_even_on_non_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -2949,8 +2958,9 @@ async def test_v1_responses_http_bridge_reconnect_uses_last_upstream_turn_state(
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del access_token, account_id_header, base_url, session
+        del access_token, account_id_header, base_url, session, chatgpt_account_id
         connect_headers_seen.append(dict(headers))
         return upstreams.pop(0)
 
@@ -3075,8 +3085,9 @@ async def test_v1_responses_http_bridge_session_id_reconnect_keeps_upstream_turn
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del access_token, account_id_header, base_url, session
+        del access_token, account_id_header, base_url, session, chatgpt_account_id
         connect_headers_seen.append(dict(headers))
         return upstreams.pop(0)
 
@@ -3206,8 +3217,9 @@ async def test_v1_responses_http_bridge_reconnect_uses_refreshed_api_key_assignm
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstreams.pop(0)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -3342,8 +3354,9 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstreams.pop(0)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -3485,8 +3498,9 @@ async def test_v1_responses_http_bridge_prefers_evicting_prompt_cache_session_be
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstreams.pop(0)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -3786,9 +3800,10 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
         del headers, access_token, base_url, session
-        connect_calls.append((account_id, account_id_header))
+        connect_calls.append((account_id_header, chatgpt_account_id))
         return fake_upstream
 
     async def fail_legacy_stream(*args, **kwargs):
@@ -3887,9 +3902,10 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
         del headers, access_token, base_url, session
-        connect_calls.append((account_id, account_id_header))
+        connect_calls.append((account_id_header, chatgpt_account_id))
         return fake_upstream
 
     async def fail_legacy_stream(*args, **kwargs):
@@ -3988,8 +4004,9 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -4095,8 +4112,9 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -4201,9 +4219,10 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
         del headers, access_token, base_url, session
-        connect_calls.append((account_id, account_id_header))
+        connect_calls.append((account_id_header, chatgpt_account_id))
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -4302,8 +4321,9 @@ async def test_v1_responses_http_bridge_recovers_previous_response_id_across_key
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return fake_upstream
@@ -4399,8 +4419,9 @@ async def test_v1_responses_http_emits_turn_state_header_and_reuses_when_replaye
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -4494,8 +4515,9 @@ async def test_v1_responses_http_bridge_streaming_path_uses_persistent_upstream_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return fake_upstream
@@ -4913,8 +4935,9 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstream
 
     async def fake_submit_http_bridge_request(
@@ -5026,8 +5049,9 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[connect_count]
         connect_count += 1
@@ -5122,8 +5146,9 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[connect_count]
         connect_count += 1
@@ -5224,8 +5249,9 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return fake_upstream
@@ -5312,8 +5338,9 @@ async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(asy
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[connect_count]
         connect_count += 1
@@ -5396,8 +5423,9 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[connect_count]
         connect_count += 1
@@ -5529,8 +5557,9 @@ async def test_v1_responses_http_bridge_slims_historical_inline_artifacts_and_su
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -5624,8 +5653,9 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return hanging_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -5789,8 +5819,9 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return hanging_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -5957,8 +5988,9 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return hanging_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -7062,8 +7094,9 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -7150,8 +7183,9 @@ async def test_v1_responses_http_bridge_surfaces_upstream_error_event_as_http_40
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -7222,6 +7256,7 @@ async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(asy
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
         return fake_upstream
 
@@ -7305,8 +7340,9 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -7429,8 +7465,9 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[connect_count]
         connect_count += 1
@@ -7675,8 +7712,9 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return fake_upstream if connect_count == 1 else failing_upstream
@@ -7785,8 +7823,9 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_upstream_u
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return fake_upstream if connect_count == 1 else precreated_close_upstream
@@ -7900,8 +7939,9 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         if connect_count == 1:
@@ -8016,8 +8056,9 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_p
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         if connect_count == 1:
@@ -8124,8 +8165,9 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8252,8 +8294,9 @@ async def test_v1_responses_http_bridge_keeps_session_alive_after_foreign_previo
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8370,8 +8413,9 @@ async def test_v1_responses_http_bridge_stream_keeps_session_alive_after_foreign
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8487,8 +8531,9 @@ async def test_v1_responses_http_bridge_stream_keeps_session_alive_after_anonymo
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8628,8 +8673,9 @@ async def test_v1_responses_http_bridge_stream_matches_previous_response_error_t
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8797,8 +8843,9 @@ async def test_v1_responses_http_bridge_stream_masks_anonymous_previous_response
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         connect_count += 1
         return upstream
@@ -8960,8 +9007,9 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         nonlocal connect_count
         upstream = upstreams[min(connect_count, len(upstreams) - 1)]
         connect_count += 1
@@ -9099,8 +9147,9 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
         *,
         base_url=None,
         session=None,
+        chatgpt_account_id=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        del headers, access_token, account_id_header, base_url, session, chatgpt_account_id
         return fake_upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TypedDict
+from typing import Required, TypedDict, cast
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
 
@@ -46,8 +46,8 @@ class AdditionalQuotaRegistryStatus:
 
 
 class AdditionalQuotaRegistryEntry(TypedDict, total=False):
-    quota_key: str
-    display_label: str
+    quota_key: Required[str]
+    display_label: Required[str]
     model_ids: list[str]
     applies_to_plans: list[str]
     quota_key_aliases: list[str]
@@ -125,7 +125,9 @@ def _definitions_for_path(path_str: str) -> tuple[AdditionalQuotaDefinition, ...
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"additional quota registry must be a list: {path}")
-    return tuple(_definition_from_json(item) for item in data if isinstance(item, dict))
+    return tuple(
+        _definition_from_json(cast(AdditionalQuotaRegistryEntry, item)) for item in data if isinstance(item, dict)
+    )
 
 
 @lru_cache(maxsize=8)

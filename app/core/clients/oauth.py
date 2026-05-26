@@ -190,6 +190,8 @@ async def request_device_code(
     user_code = payload_data.user_code
     device_auth_id = payload_data.device_auth_id
     interval = payload_data.interval if payload_data.interval is not None else 0
+    if interval < 5:
+        interval = 5
     expires_in = payload_data.expires_in or 0
     if expires_in <= 0:
         expires_in = _expires_in_seconds(payload_data.expires_at) or 900
@@ -259,6 +261,7 @@ async def exchange_device_token(
             base_url=base_url,
             client_id=settings.oauth_client_id,
             timeout_seconds=timeout_seconds,
+            session=session,
         )
 
     return _parse_tokens(payload_data)

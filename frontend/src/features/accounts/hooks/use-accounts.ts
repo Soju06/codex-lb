@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
+  clearAccountProxy,
   deleteAccount,
   exportAccount,
   exportAccountOpenCodeAuth,
@@ -11,8 +12,11 @@ import {
   pauseAccount,
   reactivateAccount,
   setAccountAlias,
+  setAccountProxy,
   updateAccountLimitWarmup,
 } from "@/features/accounts/api";
+import { formatProbeError } from "@/features/accounts/proxy-errors";
+import type { AccountProxyInput, AccountProxySummary } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -35,7 +39,7 @@ export function useAccountMutations() {
       invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Import failed");
+      toast.error(formatProbeError(error) || "Import failed");
     },
   });
 
@@ -161,4 +165,35 @@ export function useAccounts() {
   const mutations = useAccountMutations();
 
   return { accountsQuery, ...mutations };
+}
+
+
+export type SetAccountProxyVariables = {
+  accountId: string;
+  payload: AccountProxyInput;
+};
+
+export function useSetAccountProxy() {
+  const queryClient = useQueryClient();
+  return useMutation<AccountProxySummary, Error, SetAccountProxyVariables>({
+    mutationFn: ({ accountId, payload }) => setAccountProxy(accountId, payload),
+    onSuccess: () => {
+      toast.success("Proxy validated and saved");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+  });
+}
+
+export function useClearAccountProxy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: clearAccountProxy,
+    onSuccess: () => {
+      toast.success("Proxy cleared");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to clear proxy");
+    },
+  });
 }

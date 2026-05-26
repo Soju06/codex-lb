@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -2251,7 +2252,9 @@ async def _probe_stream_startup_error(
         if first_error is not None:
             aclose = getattr(stream, "aclose", None)
             if callable(aclose):
-                await aclose()
+                close_result = aclose()
+                if inspect.isawaitable(close_result):
+                    await cast(Awaitable[None], close_result)
             return _prepend_first(None, stream), first_error
     return _prepend_first(first, stream), None
 

@@ -22,6 +22,7 @@ ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
 DOCKER_CALLBACK_HOST = "0.0.0.0"
+DEFAULT_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
 
 def _in_container() -> bool:
@@ -175,10 +176,28 @@ class Settings(BaseSettings):
     oauth_originator: str = "codex_chatgpt_desktop"
     oauth_scope: str = "openid profile email"
     oauth_timeout_seconds: float = 30.0
-    oauth_redirect_uri: str = "http://localhost:1455/auth/callback"
+    oauth_redirect_uri: str = DEFAULT_OAUTH_REDIRECT_URI
     oauth_callback_host: str = _default_oauth_callback_host()
     oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 8.0
+    account_token_refresh_jitter_hours: float = Field(
+        default=18.0,
+        ge=0.0,
+        # Upper bound: half the default refresh interval expressed in
+        # hours (8 days * 24 / 2 = 96h). The jitter is signed so an
+        # offset larger than half the base interval can produce a
+        # negative effective duration, which makes ``should_refresh``
+        # always-true and triggers a refresh storm. Pinning the cap
+        # against the default interval is conservative but avoids the
+        # runaway. Operators running custom ``token_refresh_interval_days``
+        # values should adjust accordingly.
+        le=96.0,
+    )
+    account_proxy_probe_timeout_seconds: float = Field(default=10.0, gt=0)
+    account_proxy_failure_threshold: int = Field(default=3, ge=1)
+    account_proxy_failure_window_seconds: float = Field(default=60.0, gt=0)
+    http_connector_limit_per_account_direct: int = Field(default=20, ge=1)
+    http_connector_limit_per_host_per_account_direct: int = Field(default=10, ge=1)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
@@ -252,6 +271,7 @@ class Settings(BaseSettings):
 
     # Logging
     log_format: str = "text"  # "text" or "json"
+    log_level: str = "INFO"
 
     # Leader election
     leader_election_enabled: bool = False

@@ -6,8 +6,8 @@ from typing import cast
 
 import aiohttp
 
+from app.core.clients.account_http import lease_account_http_session
 from app.core.clients.codex_version import get_codex_version_cache
-from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
@@ -97,6 +97,8 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
 async def fetch_models_for_plan(
     access_token: str,
     account_id: str | None,
+    *,
+    lease_account_id: str | None = None,
 ) -> list[UpstreamModel]:
     settings = get_settings()
     upstream_base = settings.upstream_base_url.rstrip("/")
@@ -112,7 +114,7 @@ async def fetch_models_for_plan(
 
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     try:
-        async with lease_http_session() as session:
+        async with lease_account_http_session(lease_account_id or "") as session:
             async with session.get(url, headers=headers, timeout=timeout) as resp:
                 if resp.status >= 400:
                     text = await resp.text()

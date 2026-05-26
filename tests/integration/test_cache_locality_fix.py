@@ -202,7 +202,7 @@ async def test_prompt_cache_reallocates_when_usage_exceeds_configured_budget_thr
 
     first = await async_client.post("/backend-api/codex/responses", json=payload)
     assert first.status_code == 200
-    assert seen == ["acc_budget_a"]
+    assert seen == [acc_a_id]
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -223,7 +223,7 @@ async def test_prompt_cache_reallocates_when_usage_exceeds_configured_budget_thr
 
     second = await async_client.post("/backend-api/codex/responses", json=payload)
     assert second.status_code == 200
-    assert seen == ["acc_budget_a", "acc_budget_b"]
+    assert seen == [acc_a_id, acc_b_id]
 
 
 def test_owner_mismatch_raises_409_for_retry() -> None:

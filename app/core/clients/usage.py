@@ -7,7 +7,7 @@ import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.clients.http import lease_retry_client
+from app.core.clients.account_http import lease_account_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.usage.models import UsagePayload
@@ -48,6 +48,7 @@ async def fetch_usage(
     *,
     access_token: str,
     account_id: str | None,
+    lease_account_id: str | None = None,
     base_url: str | None = None,
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
@@ -60,9 +61,10 @@ async def fetch_usage(
     retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
     headers = _usage_headers(access_token, account_id)
     retry_options = _retry_options(retries + 1)
+    lease_key = lease_account_id or ""
 
     try:
-        async with lease_retry_client(client) as retry_client:
+        async with lease_account_retry_client(lease_key, client) as retry_client:
             async with retry_client.request(
                 "GET",
                 url,

@@ -113,7 +113,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
     seen_payloads: list[dict[str, object]] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del headers, access_token, account_id
         seen_payloads.append(cast(dict[str, object], payload.to_payload()))
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
@@ -194,7 +194,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     expected_account_id = generate_unique_account_id(raw_account_id, email)
     seen = {}
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         seen["access_token"] = access_token
         seen["account_id"] = account_id
         return OpenAIResponsePayload.model_validate({"output": []})
@@ -219,7 +219,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["output"] == []
     assert seen["access_token"] == "access-token"
-    assert seen["account_id"] == raw_account_id
+    assert seen["account_id"] == expected_account_id
     assert response.headers.get("x-codex-primary-used-percent") == "25.0"
     assert response.headers.get("x-codex-primary-window-minutes") == "300"
     assert response.headers.get("x-codex-primary-reset-at") == "1735689600"
@@ -250,11 +250,11 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     )
 
     @contextlib.asynccontextmanager
-    async def lease_session(session_override=None):
+    async def lease_session(account_id: str, session_override=None):
         assert session_override is None
         yield session
 
-    monkeypatch.setattr(proxy_client_module, "lease_http_session", lease_session)
+    monkeypatch.setattr(proxy_client_module, "lease_account_http_session", lease_session)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
@@ -281,7 +281,7 @@ async def test_proxy_compact_masks_previous_response_not_found(async_client, mon
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del payload, headers, access_token, account_id
         error_payload = openai_error(
             "invalid_request_error",
@@ -315,7 +315,7 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
     expected_account_id = generate_unique_account_id(raw_account_id, email)
     now = utcnow()
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         return OpenAIResponsePayload.model_validate({"output": []})
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
@@ -361,7 +361,7 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
 
     expected_account_id = generate_unique_account_id(raw_account_id, email)
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         raise ProxyResponseError(
             429,
             {
@@ -398,9 +398,11 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
     assert response.status_code == 200
 
     captured_account_ids: list[str | None] = []
+    captured_chatgpt_account_ids: list[str | None] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         captured_account_ids.append(account_id)
+        captured_chatgpt_account_ids.append(kwargs.get("chatgpt_account_id"))
         if len(captured_account_ids) == 1:
             raise ProxyResponseError(
                 401,
@@ -420,7 +422,12 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
     assert response.json()["output"] == []
-    assert captured_account_ids == ["acc_compact_retry_old", "acc_compact_retry_new"]
+    codex_lb_id = generate_unique_account_id("acc_compact_retry_old", email)
+    assert captured_account_ids == [codex_lb_id, codex_lb_id]
+    assert captured_chatgpt_account_ids == [
+        "acc_compact_retry_old",
+        "acc_compact_retry_new",
+    ]
 
 
 @pytest.mark.asyncio
@@ -458,13 +465,15 @@ async def test_proxy_compact_repeated_401_after_refresh_fails_over(async_client,
         await session.commit()
 
     captured_account_ids: list[str | None] = []
+    captured_upstream_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         nonlocal invalidated_account_id
         if invalidated_account_id is None:
             invalidated_account_id = account_id
         captured_account_ids.append(account_id)
+        captured_upstream_account_ids.append(kwargs.get("chatgpt_account_id"))
         if account_id == invalidated_account_id:
             raise ProxyResponseError(
                 401,
@@ -487,8 +496,8 @@ async def test_proxy_compact_repeated_401_after_refresh_fails_over(async_client,
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
     assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
-    assert captured_account_ids[2] in {first_upstream_account_id, second_upstream_account_id}
     assert captured_account_ids[2] != invalidated_account_id
+    assert captured_upstream_account_ids[2] in {first_upstream_account_id, second_upstream_account_id}
 
 
 @pytest.mark.asyncio
@@ -504,7 +513,7 @@ async def test_proxy_compact_repeated_401_settles_reservation_if_error_recording
 
     compact_calls = 0
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **_kwargs):
         nonlocal compact_calls
         compact_calls += 1
         raise ProxyResponseError(
@@ -548,7 +557,7 @@ async def test_proxy_compact_retryable_transport_failure_retries_same_contract_o
     compact_calls: list[str | None] = []
     stream_calls: list[str] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         compact_calls.append(account_id)
         if len(compact_calls) == 1:
             raise ProxyResponseError(
@@ -577,7 +586,8 @@ async def test_proxy_compact_retryable_transport_failure_retries_same_contract_o
 
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
-    assert compact_calls == [raw_account_id, raw_account_id]
+    expected_id = generate_unique_account_id(raw_account_id, email)
+    assert compact_calls == [expected_id, expected_id]
     assert stream_calls == []
 
 
@@ -605,10 +615,10 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     }
     seen_inputs: list[object] = []
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         return CompactResponsePayload.model_validate(compact_window)
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         seen_inputs.append(payload.input)
         yield 'data: {"type":"response.completed","response":{"id":"resp_round_trip"}}\n\n'
 

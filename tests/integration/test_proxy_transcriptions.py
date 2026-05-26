@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import update
 
 import app.modules.proxy.service as proxy_module
+from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.errors import openai_error
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
@@ -84,6 +85,7 @@ async def test_backend_transcribe_forwards_file_and_prompt(async_client, monkeyp
         account_id: str | None,
         base_url=None,
         session=None,
+        **kwargs,
     ):
         captured["audio_bytes"] = audio_bytes
         captured["filename"] = filename
@@ -107,7 +109,10 @@ async def test_backend_transcribe_forwards_file_and_prompt(async_client, monkeyp
     assert captured["content_type"] == "audio/wav"
     assert captured["prompt"] == "speaker says hello"
     assert captured["access_token"] == "access-token"
-    assert captured["account_id"] == "acc_transcribe_backend"
+    assert captured["account_id"] == generate_unique_account_id(
+        "acc_transcribe_backend",
+        "backend-transcribe@example.com",
+    )
 
 
 @pytest.mark.asyncio
@@ -140,6 +145,7 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
         account_id: str | None,
         base_url=None,
         session=None,
+        **kwargs,
     ):
         captured["audio_bytes"] = audio_bytes
         captured["prompt"] = prompt
@@ -157,7 +163,7 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
     assert response.json()["text"] == "hello from v1"
     assert captured["audio_bytes"] == b"\x0a\x0b"
     assert captured["prompt"] == "domain context"
-    assert captured["account_id"] == "acc_transcribe_v1"
+    assert captured["account_id"] == generate_unique_account_id("acc_transcribe_v1", "v1-transcribe@example.com")
 
 
 @pytest.mark.asyncio
@@ -176,6 +182,7 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
         account_id: str | None,
         base_url=None,
         session=None,
+        **kwargs,
     ):
         captured_account_ids.append(account_id)
         if len(captured_account_ids) == 1:
@@ -199,7 +206,8 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
     )
     assert response.status_code == 200
     assert response.json()["text"] == "retried"
-    assert captured_account_ids == ["acc_transcribe_retry_old", "acc_transcribe_retry_new"]
+    expected_id = generate_unique_account_id("acc_transcribe_retry_old", "retry-transcribe@example.com")
+    assert captured_account_ids == [expected_id, expected_id]
 
 
 @pytest.mark.asyncio
@@ -220,6 +228,7 @@ async def test_backend_transcribe_repeated_401_after_refresh_fails_over(async_cl
         account_id: str | None,
         base_url=None,
         session=None,
+        **_kwargs,
     ):
         del audio_bytes, filename, content_type, prompt, headers, access_token, base_url, session
         nonlocal invalidated_account_id
@@ -267,6 +276,7 @@ async def test_backend_transcribe_initial_refresh_failure_returns_handled_error(
         account_id: str | None,
         base_url=None,
         session=None,
+        **kwargs,
     ):
         nonlocal transcribe_calls
         transcribe_calls += 1
@@ -419,6 +429,7 @@ async def test_transcription_routing_ignores_model_registry_filter(async_client,
         account_id: str | None,
         base_url=None,
         session=None,
+        **kwargs,
     ):
         return {"text": "registry bypass works"}
 

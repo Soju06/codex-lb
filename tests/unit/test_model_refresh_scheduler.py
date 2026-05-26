@@ -73,10 +73,10 @@ async def test_fetch_models_for_plan_marks_transport_errors(monkeypatch: pytest.
     )
 
     @contextlib.asynccontextmanager
-    async def lease_session():
+    async def lease_session(account_id: str):
         yield session
 
-    monkeypatch.setattr(model_fetcher_module, "lease_http_session", lease_session)
+    monkeypatch.setattr(model_fetcher_module, "lease_account_http_session", lease_session)
     monkeypatch.setattr(
         model_fetcher_module,
         "get_settings",
@@ -133,16 +133,16 @@ async def test_fetch_with_failover_refreshes_http_client_after_transport_error(
             expected_models,
         ]
     )
-    refresh_http_client = AsyncMock()
+    invalidate_account_client = AsyncMock()
 
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
-    monkeypatch.setattr(scheduler_module, "refresh_http_client", refresh_http_client)
+    monkeypatch.setattr(scheduler_module, "invalidate_account_client", invalidate_account_client)
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
     assert result == expected_models
-    refresh_http_client.assert_awaited_once()
+    invalidate_account_client.assert_awaited_once_with(account.id)
     assert fetch_models_for_plan.await_count == 2
     assert encryptor.decrypt.call_count == 2
 
@@ -174,16 +174,16 @@ async def test_fetch_with_failover_refreshes_http_client_after_token_refresh_tra
             return account
 
     fetch_models_for_plan = AsyncMock(return_value=expected_models)
-    refresh_http_client = AsyncMock()
+    invalidate_account_client = AsyncMock()
 
     monkeypatch.setattr(scheduler_module, "AuthManager", TransportFailingAuthManager)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
-    monkeypatch.setattr(scheduler_module, "refresh_http_client", refresh_http_client)
+    monkeypatch.setattr(scheduler_module, "invalidate_account_client", invalidate_account_client)
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
     assert result == expected_models
-    refresh_http_client.assert_awaited_once()
+    invalidate_account_client.assert_awaited_once_with(account.id)
     assert ensure_fresh_calls == 2
     fetch_models_for_plan.assert_awaited_once()
 
@@ -203,15 +203,15 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
             scheduler_module.ModelFetchError(0, "temporary dns failure", transport_error=True),
         ]
     )
-    refresh_http_client = AsyncMock()
+    invalidate_account_client = AsyncMock()
 
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
-    monkeypatch.setattr(scheduler_module, "refresh_http_client", refresh_http_client)
+    monkeypatch.setattr(scheduler_module, "invalidate_account_client", invalidate_account_client)
 
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
     assert result is None
-    refresh_http_client.assert_awaited_once()
+    invalidate_account_client.assert_awaited_once_with("account-1")
     assert fetch_models_for_plan.await_count == 3
     assert encryptor.decrypt.call_count == 3

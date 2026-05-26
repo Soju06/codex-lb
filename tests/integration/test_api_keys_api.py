@@ -285,7 +285,7 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     called = False
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del payload, headers, access_token, account_id
         nonlocal called
         called = True
@@ -372,7 +372,14 @@ async def test_api_key_update_rolls_back_base_fields_when_assignment_write_fails
 
     original_replace = ApiKeysRepository.replace_account_assignments
 
-    async def fail_replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True):
+    async def fail_replace_account_assignments(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        commit: bool = True,
+        **kwargs,
+    ):
         del account_ids, commit
         await original_replace(self, key_id, [], commit=False)
         raise RuntimeError("simulated assignment write failure")
@@ -578,7 +585,15 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 
     seen: dict[str, str | None] = {}
 
-    async def fake_stream(payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         seen["model"] = payload.model
         seen["effort"] = payload.reasoning.effort if payload.reasoning else None
         usage = {"input_tokens": 3, "output_tokens": 2}
@@ -647,7 +662,15 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
 
     seen: dict[str, str | None] = {}
 
-    async def fake_stream(payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         seen["service_tier"] = payload.service_tier
         usage = {"input_tokens": 3, "output_tokens": 2}
         event = {"type": "response.completed", "response": {"id": "resp_enforced_service_tier", "usage": usage}}
@@ -708,7 +731,7 @@ async def test_api_key_enforces_model_and_reasoning_for_compact_responses(async_
 
     seen: dict[str, str | None] = {}
 
-    async def fake_compact(payload, _headers, _access_token, _account_id):
+    async def fake_compact(payload, _headers, _access_token, _account_id, **kwargs):
         seen["model"] = payload.model
         seen["effort"] = payload.reasoning.effort if payload.reasoning else None
         return OpenAIResponsePayload.model_validate(
@@ -774,7 +797,15 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
 
     await _import_account(async_client, "acc_usage_key", "usage-key@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         usage = {"input_tokens": 10, "output_tokens": 5}
         event = {"type": "response.completed", "response": {"id": "resp_1", "usage": usage}}
         yield f"data: {json.dumps(event)}\n\n"
@@ -852,7 +883,15 @@ async def test_api_key_usage_summary_cost_respects_service_tier(async_client, mo
 
     await _import_account(async_client, "acc_priority_usage_summary", "priority-usage-summary@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         event = {
             "type": "response.completed",
             "response": {
@@ -923,7 +962,15 @@ async def test_api_key_usage_summary_uses_persisted_request_log_cost(async_clien
 
     await _import_account(async_client, "acc_persisted_usage_summary", "persisted-usage-summary@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         event = {
             "type": "response.completed",
             "response": {
@@ -1032,7 +1079,15 @@ async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
 
     await _import_account(async_client, "acc_stream_actual_tier", "stream-actual-tier@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         event = {
             "type": "response.completed",
             "response": {
@@ -1109,7 +1164,15 @@ async def test_stream_usage_logs_actual_service_tier_when_response_created_echoe
 
     await _import_account(async_client, "acc_stream_created_tier", "stream-created-tier@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         created_event = {
             "type": "response.created",
             "response": {
@@ -1197,7 +1260,7 @@ async def test_api_key_limit_applies_to_compact_responses(async_client, monkeypa
 
     seen = {"calls": 0}
 
-    async def fake_compact(_payload, _headers, _access_token, _account_id):
+    async def fake_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         seen["calls"] += 1
         return OpenAIResponsePayload.model_validate(
             {
@@ -1275,7 +1338,15 @@ async def test_chat_completions_stream_finalizes_token_limit(async_client, monke
 
     seen = {"calls": 0}
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         seen["calls"] += 1
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
@@ -1349,7 +1420,15 @@ async def test_chat_completions_stream_finalizes_cost_limit(async_client, monkey
 
     seen = {"calls": 0}
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         seen["calls"] += 1
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
@@ -1431,7 +1510,7 @@ async def test_compact_cost_limit_uses_canonical_request_service_tier_when_respo
 
     seen = {"calls": 0}
 
-    async def fake_compact(_payload, _headers, _access_token, _account_id):
+    async def fake_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         seen["calls"] += 1
         return OpenAIResponsePayload.model_validate(
             {
@@ -1513,7 +1592,7 @@ async def test_compact_cost_limit_prefers_response_service_tier_over_request(
 
     await _import_account(async_client, "acc_compact_response_tier", "compact-response-tier@example.com")
 
-    async def fake_compact(_payload, _headers, _access_token, _account_id):
+    async def fake_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         return OpenAIResponsePayload.model_validate(
             {
                 "id": "resp_compact_response_tier",
@@ -1581,7 +1660,15 @@ async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkey
 
     seen = {"calls": 0}
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         seen["calls"] += 1
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_v1_cost_limit","model":"gpt-5.4",'
@@ -1650,7 +1737,7 @@ async def test_api_key_reservation_released_on_compact_upstream_failure(async_cl
 
     await _import_account(async_client, "acc_compact_upstream_fail", "compact-upstream-fail@example.com")
 
-    async def failing_compact(_payload, _headers, _access_token, _account_id):
+    async def failing_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         raise ProxyResponseError(
             502,
             {"error": {"message": "upstream failed", "type": "server_error", "code": "upstream_error"}},
@@ -1701,7 +1788,7 @@ async def test_api_key_limit_parallel_requests_do_not_exceed_quota(async_client,
 
     await _import_account(async_client, "acc_compact_parallel", "compact-parallel@example.com")
 
-    async def fake_compact(_payload, _headers, _access_token, _account_id):
+    async def fake_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         await asyncio.sleep(0.05)
         return OpenAIResponsePayload.model_validate(
             {
@@ -1836,7 +1923,7 @@ async def test_model_scoped_limit_allows_other_models(async_client, monkeypatch)
         limits[0].current_value = 5
         await session.commit()
 
-    async def fake_compact(_payload, _headers, _access_token, _account_id):
+    async def fake_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         return OpenAIResponsePayload.model_validate(
             {
                 "id": "resp_model_scope_other",
@@ -2356,7 +2443,15 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
 
     call_count = {"value": 0}
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         call_count["value"] += 1
         if call_count["value"] == 1:
             raise ProxyResponseError(
@@ -2470,7 +2565,7 @@ async def test_compact_unexpected_exception_releases_reservation(async_client, m
 
     await _import_account(async_client, "acc_compact_unexpected", "compact-unexpected@example.com")
 
-    async def raising_compact(_payload, _headers, _access_token, _account_id):
+    async def raising_compact(_payload, _headers, _access_token, _account_id, **kwargs):
         raise RuntimeError("unexpected internal error")
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", raising_compact)
@@ -2507,7 +2602,15 @@ async def test_stream_without_api_key_auth_skips_settlement(async_client, monkey
 
     await _import_account(async_client, "acc_no_auth", "no-auth@example.com")
 
-    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        _payload,
+        _headers,
+        _access_token,
+        _account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         usage = {"input_tokens": 10, "output_tokens": 5}
         event = {"type": "response.completed", "response": {"id": "resp_no_auth", "usage": usage}}
         yield f"data: {json.dumps(event)}\n\n"

@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import cast
 
 from app.core import usage as usage_core
-from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
+from app.core.usage.logs import RequestLogLike, cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.core.usage.types import (
     BucketModelAggregate,
     RequestActivityAggregate,
@@ -290,7 +291,8 @@ def _cost_summary_from_logs(logs: list[RequestLog]) -> UsageCostSummary:
     total = 0.0
     by_model: dict[str, float] = defaultdict(float)
     for log in logs:
-        cost = cost_from_log(log)
+        log_like = cast(RequestLogLike, log)
+        cost = cost_from_log(log_like)
         if cost is None:
             continue
         total += cost
@@ -323,14 +325,14 @@ def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:
 def _sum_tokens(logs: list[RequestLog]) -> int:
     total = 0
     for log in logs:
-        total += total_tokens_from_log(log) or 0
+        total += total_tokens_from_log(cast(RequestLogLike, log)) or 0
     return total
 
 
 def _sum_cached_input_tokens(logs: list[RequestLog]) -> int:
     total = 0
     for log in logs:
-        total += cached_input_tokens_from_log(log) or 0
+        total += cached_input_tokens_from_log(cast(RequestLogLike, log)) or 0
     return total
 
 

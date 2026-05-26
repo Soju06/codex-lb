@@ -4774,7 +4774,7 @@ async def test_service_compact_budget_does_not_override_unbounded_read_timeout(m
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **_kwargs):
         captured["connect_timeout"] = proxy_module._COMPACT_CONNECT_TIMEOUT_OVERRIDE.get()
         captured["total_timeout"] = proxy_module._COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
         return OpenAIResponsePayload.model_validate({"output": []})
@@ -4839,7 +4839,7 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         yield 'data: {"type":"response.completed","response":{"id":"resp_trace_stream","service_tier":"default"}}\n\n'
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
@@ -4900,6 +4900,7 @@ async def test_service_stream_responses_forces_http_upstream_for_http_stream_cli
         base_url=None,
         raise_for_status=False,
         upstream_stream_transport_override=None,
+        **_kwargs,
     ):
         captured["override"] = upstream_stream_transport_override
         yield 'data: {"type":"response.completed","response":{"id":"resp_transport_override"}}\n\n'
@@ -4940,7 +4941,7 @@ async def test_service_stream_responses_does_not_infer_previous_response_id_from
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         del headers, access_token, account_id, base_url, raise_for_status
         captured["previous_response_id"] = payload.previous_response_id
         yield 'data: {"type":"response.completed","response":{"id":"resp_stream_scope"}}\n\n'
@@ -4980,7 +4981,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **_kwargs):
         return OpenAIResponsePayload.model_validate({"output": [], "service_tier": "default"})
 
     monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
@@ -5033,7 +5034,7 @@ async def test_compact_responses_does_not_infer_previous_response_id_from_sessio
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **_kwargs):
         del headers, access_token, account_id
         captured["previous_response_id"] = getattr(payload, "previous_response_id", None)
         return OpenAIResponsePayload.model_validate({"output": []})
@@ -5117,7 +5118,7 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         if account_id == account_a.chatgpt_account_id:
             yield (
                 'data: {"type":"response.failed","response":{"error":'
@@ -5170,7 +5171,7 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         yield (
             'data: {"type":"response.failed","response":{"error":{"code":"stream_idle_timeout","message":"idle"}}}\n\n'
@@ -5212,7 +5213,7 @@ async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatc
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         if False:
             yield ""
         return
@@ -5256,7 +5257,7 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         if account_id == account_a.chatgpt_account_id:
             raise aiohttp.ClientConnectionError("[Errno 104] Connection reset by peer")
             yield ""
@@ -5308,7 +5309,7 @@ async def test_stream_responses_first_event_upstream_unavailable_fails_over(monk
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         if account_id == account_a.chatgpt_account_id:
             for _ in range(3):
                 yield (
@@ -13277,7 +13278,9 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
             raise asyncio.TimeoutError
         return account
 
-    async def failing_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def failing_stream(
+        payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs
+    ):
         raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
         if False:
             yield ""
@@ -13318,7 +13321,7 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
             return AccountSelection(account=account_a, error_message=None)
         return AccountSelection(account=account_b, error_message=None)
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         del payload, headers, access_token, base_url, raise_for_status
         stream_account_ids.append(account_id)
         if account_id == account_a.chatgpt_account_id:
@@ -13370,7 +13373,7 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
         captured["timeout_seconds"] = timeout_seconds
         return account
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -13411,7 +13414,7 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
         except StopIteration:
             return 3.0
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         yield 'data: {"type":"response.completed","response":{"id":"resp_budget"}}\n\n'
 
     def fake_push_stream_timeout_overrides(
@@ -13474,7 +13477,7 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
         del timeout_seconds
         return account
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         stream_call_count["count"] += 1
         if stream_call_count["count"] == 1:
             raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
@@ -13541,7 +13544,7 @@ async def test_stream_midstream_generic_failure_is_neutral_to_account_health(mon
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
             'data: {"type":"response.failed","response":{"error":{"code":"upstream_request_timeout",'
@@ -13604,7 +13607,7 @@ async def test_stream_midstream_proxy_failure_records_health_and_keeps_settled(m
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle)
     monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         yield (
             'data: {"type":"response.created","response":{"id":"resp_midstream_proxy_failure",'
@@ -13668,7 +13671,7 @@ async def test_stream_incomplete_records_success_without_account_error(monkeypat
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         yield (
             'data: {"type":"response.incomplete","response":{"status":"incomplete","usage":'
             '{"input_tokens":1,"output_tokens":1},"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
@@ -14113,7 +14116,7 @@ async def test_compact_responses_refresh_connection_reset_fails_over(monkeypatch
     )
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, **_kwargs):
         del payload, headers, access_token
         assert account_id == account_b.chatgpt_account_id
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
@@ -14188,7 +14191,7 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
 
-    async def failing_compact(payload, headers, access_token, account_id):
+    async def failing_compact(payload, headers, access_token, account_id, **_kwargs):
         raise proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))
 
     monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
@@ -14228,7 +14231,7 @@ async def test_compact_previous_response_not_found_is_masked_without_account_pen
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
 
-    async def failing_compact(payload, headers, access_token, account_id):
+    async def failing_compact(payload, headers, access_token, account_id, **_kwargs):
         del payload, headers, access_token, account_id
         error_payload = openai_error(
             "invalid_request_error",
@@ -14508,7 +14511,7 @@ async def test_ensure_fresh_same_stale_account_joins_singleflight_before_refresh
     release = asyncio.Event()
     refresh_calls = 0
 
-    async def fake_refresh_access_token(_: str):
+    async def fake_refresh_access_token(_: str, **_kwargs):
         nonlocal refresh_calls
         refresh_calls += 1
         started.set()
@@ -14891,6 +14894,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
         account_id: str | None,
         base_url=None,
         session=None,
+        **_kwargs,
     ):
         nonlocal transcribe_calls
         transcribe_calls += 1
@@ -14984,6 +14988,7 @@ async def test_transcribe_records_transient_error_for_generic_upstream_failure(m
         account_id: str | None,
         base_url=None,
         session=None,
+        **_kwargs,
     ):
         raise proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "late"))
 

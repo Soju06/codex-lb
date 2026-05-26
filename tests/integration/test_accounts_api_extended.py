@@ -356,9 +356,7 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
     assert delete.json()["status"] == "deleted"
 
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1")
-        )
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1"))
         assert result.scalar_one_or_none() is None
 
     request_logs = await async_client.get("/api/request-logs?limit=10")

@@ -80,7 +80,7 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
       }
       await refreshSession();
       toast.success("Password session established");
-      onOpenChange(false);
+      handleOpenChange(false);
     } catch (caught) {
       setError(getErrorMessage(caught));
     }
@@ -92,7 +92,7 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
       await verifyTotp(values);
       await refreshSession();
       toast.success("Password session established");
-      onOpenChange(false);
+      handleOpenChange(false);
     } catch (caught) {
       setError(getErrorMessage(caught));
     }

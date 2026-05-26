@@ -14430,6 +14430,52 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
 
 
 @pytest.mark.asyncio
+async def test_try_open_websocket_connect_attempt_does_not_refresh_twice_after_forced_refresh(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_forced_refresh_401")
+    handshake_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still invalid"))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    ensure_fresh = AsyncMock(return_value=account)
+    open_upstream = AsyncMock(side_effect=handshake_error)
+    retry_after_401 = AsyncMock(side_effect=AssertionError("forced refresh must not refresh same account twice"))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(service, "_retry_websocket_connect_after_401", retry_after_401)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_forced_refresh_401",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        force_refresh_account_id=account.id,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._try_open_websocket_connect_attempt(
+            account,
+            {},
+            deadline=20.0,
+            api_key=None,
+            request_state=request_state,
+            client_send_lock=anyio.Lock(),
+            websocket=cast(WebSocket, SimpleNamespace()),
+            force_refresh=True,
+        )
+
+    assert exc_info.value is handshake_error
+    ensure_fresh.assert_awaited_once_with(account, force=True, timeout_seconds=10.0)
+    open_upstream.assert_awaited_once()
+    retry_after_401.assert_not_called()
+    assert request_state.force_refresh_account_id is None
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepalive_close(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

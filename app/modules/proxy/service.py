@@ -4689,7 +4689,7 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
-            if exc.status_code != 401:
+            if exc.status_code != 401 or force_refresh:
                 raise
             return await self._retry_websocket_connect_after_401(
                 account,

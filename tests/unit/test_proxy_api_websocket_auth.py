@@ -105,6 +105,42 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
 
 @pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_supports_legacy_auth_override(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    api_key = ApiKeyData(
+        id="key_legacy",
+        name="Legacy Key",
+        key_prefix="sk-legacy",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+    )
+    seen_authorizations: list[str | None] = []
+
+    async def legacy_auth_override(authorization: str | None):
+        seen_authorizations.append(authorization)
+        return api_key
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", legacy_auth_override)
+
+    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
+        cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer legacy-key"})),
+    )
+
+    assert response is None
+    assert resolved_api_key == api_key
+    assert seen_authorizations == ["Bearer legacy-key"]
+
+
+@pytest.mark.asyncio
 async def test_validate_proxy_websocket_request_allows_explicit_socket_peer_when_auth_disabled(monkeypatch):
     async def fake_denial(_websocket):
         return None

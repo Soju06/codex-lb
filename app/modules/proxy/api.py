@@ -2377,6 +2377,23 @@ def _error_details_from_content(
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 
+async def _validate_proxy_api_key_authorization_for_connection(
+    authorization: str | None,
+    connection: Request | WebSocket,
+) -> ApiKeyData | None:
+    try:
+        return await validate_proxy_api_key_authorization(authorization, request=connection)
+    except TypeError as exc:
+        if not _is_legacy_proxy_auth_override_type_error(exc):
+            raise
+    return await validate_proxy_api_key_authorization(authorization)
+
+
+def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
+    message = str(exc)
+    return "request" in message and "unexpected keyword argument" in message
+
+
 async def _validate_proxy_websocket_request(
     websocket: WebSocket,
 ) -> tuple[ApiKeyData | None, JSONResponse | None]:
@@ -2384,9 +2401,9 @@ async def _validate_proxy_websocket_request(
     if denial is not None:
         return None, denial
     try:
-        api_key = await validate_proxy_api_key_authorization(
+        api_key = await _validate_proxy_api_key_authorization_for_connection(
             websocket.headers.get("authorization"),
-            request=websocket,
+            websocket,
         )
     except ProxyAuthError as exc:
         return None, JSONResponse(
@@ -2403,9 +2420,9 @@ async def _validate_internal_bridge_api_key(
     if not dashboard_settings.api_key_auth_enabled:
         return None, None
     try:
-        api_key = await validate_proxy_api_key_authorization(
+        api_key = await _validate_proxy_api_key_authorization_for_connection(
             request.headers.get("authorization"),
-            request=request,
+            request,
         )
     except ProxyAuthError as exc:
         return None, JSONResponse(

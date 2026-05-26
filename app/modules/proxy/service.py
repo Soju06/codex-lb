@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import gzip
+import inspect
 import json
 import logging
 import math
@@ -2335,7 +2336,7 @@ class ProxyService:
         request_kind = f"thread_goal_{operation}"
 
         try:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_id,
                 kind=request_kind,
@@ -2449,7 +2450,7 @@ class ProxyService:
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
-                                selection = await self._select_account_with_budget(
+                                selection = await self._select_account_with_budget_compatible(
                                     deadline,
                                     request_id=request_id,
                                     kind=request_kind,
@@ -2550,7 +2551,7 @@ class ProxyService:
         request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
 
         try:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_id,
                 kind=request_kind,
@@ -2664,7 +2665,7 @@ class ProxyService:
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
-                                selection = await self._select_account_with_budget(
+                                selection = await self._select_account_with_budget_compatible(
                                     deadline,
                                     request_id=request_id,
                                     kind=request_kind,
@@ -3807,7 +3808,7 @@ class ProxyService:
                             )
                         continue
                     connect_headers = _headers_with_turn_state(filtered_headers, upstream_turn_state)
-                    account, upstream = await self._connect_proxy_websocket(
+                    account, upstream = await self._connect_proxy_websocket_compatible(
                         connect_headers,
                         sticky_key=request_affinity.key,
                         sticky_kind=request_affinity.kind,
@@ -4536,6 +4537,18 @@ class ProxyService:
                 error_message=error_message or "Upstream error",
             )
         return None, None
+
+    async def _connect_proxy_websocket_compatible(
+        self,
+        headers: dict[str, str],
+        **kwargs: Any,
+    ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
+        connector = self._connect_proxy_websocket
+        signature = inspect.signature(connector)
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            return await connector(headers, **kwargs)
+        compatible_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        return await connector(headers, **compatible_kwargs)
 
     async def _select_websocket_connect_account(
         self,
@@ -6320,7 +6333,7 @@ class ProxyService:
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
         while True:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -7095,7 +7108,7 @@ class ProxyService:
         retry_same_account_once = not skip_same_account
         preferred_candidate_id: str | None = None if skip_same_account else session.account.id
         while True:
-            selection = await self._select_account_with_budget(
+            selection = await self._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -11305,6 +11318,14 @@ class ProxyService:
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
+
+    async def _select_account_with_budget_compatible(self, deadline: float, **kwargs: Any) -> AccountSelection:
+        selector = self._select_account_with_budget
+        signature = inspect.signature(selector)
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            return await selector(deadline, **kwargs)
+        compatible_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        return await selector(deadline, **compatible_kwargs)
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)

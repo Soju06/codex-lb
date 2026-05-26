@@ -2725,7 +2725,7 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
     async def allow_firewall(_websocket):
         return None
 
-    async def allow_proxy_api_key(_authorization: str | None):
+    async def allow_proxy_api_key(_authorization: str | None, **_kwargs):
         return None
 
     async def fake_connect_proxy_websocket(

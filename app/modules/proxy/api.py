@@ -1808,7 +1808,7 @@ async def v1_chat_completions(
         api_key_reservation=reservation,
         suppress_text_done_events=True,
     )
-    stream, startup_error = await _probe_stream_startup_error(stream)
+    stream, startup_error = await _probe_stream_startup_error(stream, convert_event_errors=True)
     if startup_error is not None:
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:

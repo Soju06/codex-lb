@@ -315,6 +315,37 @@ async def test_v1_chat_completions_stream_preserves_tool_call_delta_before_failu
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_stream_returns_json_for_startup_failure(async_client, monkeypatch):
+    email = "chat-startup-failed@example.com"
+    raw_account_id = "acc_chat_startup_failed"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":'
+            '{"message":"Your input exceeds the context window of this model.",'
+            '"type":"invalid_request_error","code":"context_length_exceeded","param":"messages"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "too much context"}],
+        "stream": True,
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "context_length_exceeded"
+    assert body["error"]["param"] == "messages"
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatch):
     email = "chatusage@example.com"
     raw_account_id = "acc_chatusage"

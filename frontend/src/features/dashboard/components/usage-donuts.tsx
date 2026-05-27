@@ -98,20 +98,22 @@ export function UsageDonuts({
 				onChange={setStatusFilters}
 			/>
 			<div className="grid gap-4 lg:grid-cols-2">
-				<DonutChart
-					title="5h Remaining"
-					items={primaryChartItems}
-					total={filteredPrimaryItems.length === primaryItems.length ? primaryTotal : filteredPrimaryTotal}
-					centerValue={filteredPrimaryItems.length === primaryItems.length ? primaryCenterValue : filteredPrimaryCenterValue}
-					safeLine={safeLinePrimary}
-				/>
-				<DonutChart
-					title="Weekly Remaining"
-					items={secondaryChartItems}
-					total={filteredSecondaryItems.length === secondaryItems.length ? secondaryTotal : filteredSecondaryTotal}
-					centerValue={filteredSecondaryItems.length === secondaryItems.length ? secondaryCenterValue : filteredSecondaryCenterValue}
-					safeLine={safeLineSecondary}
-				/>
+			<DonutChart
+				title="5-Hour Credits"
+				items={primaryChartItems}
+				total={filteredPrimaryItems.length === primaryItems.length ? primaryTotal : filteredPrimaryTotal}
+				centerValue={filteredPrimaryItems.length === primaryItems.length ? primaryCenterValue : filteredPrimaryCenterValue}
+				safeLine={safeLinePrimary}
+				centerLayout="credits"
+			/>
+			<DonutChart
+				title="Weekly Credits"
+				items={secondaryChartItems}
+				total={filteredSecondaryItems.length === secondaryItems.length ? secondaryTotal : filteredSecondaryTotal}
+				centerValue={filteredSecondaryItems.length === secondaryItems.length ? secondaryCenterValue : filteredSecondaryCenterValue}
+				safeLine={safeLineSecondary}
+				centerLayout="credits"
+			/>
 			</div>
 		</div>
 	);

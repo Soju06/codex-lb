@@ -1,0 +1,5 @@
+- [x] Add an Alembic migration for the raw-window latest usage index.
+- [x] Register the index in ORM metadata and migration drift policy.
+- [x] Add regression tests for idempotent migration behavior and SQLite secondary latest-usage query planning.
+- [x] Validate migration, drift checks, and relevant usage repository tests locally.
+- [ ] Run OpenSpec validation once the `openspec` CLI is available in the workspace.

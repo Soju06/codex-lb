@@ -54,6 +54,7 @@ class Account(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
+    alias: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -76,6 +77,12 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_warmup_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -85,6 +92,11 @@ class Account(Base):
     request_logs: Mapped[list["RequestLog"]] = relationship(
         "RequestLog",
         back_populates="account",
+    )
+    limit_warmups: Mapped[list["AccountLimitWarmup"]] = relationship(
+        "AccountLimitWarmup",
+        back_populates="account",
+        cascade="all, delete-orphan",
     )
 
 
@@ -124,13 +136,19 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -149,6 +167,42 @@ class RequestLog(Base):
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
+    )
+
+
+class AccountLimitWarmup(Base):
+    __tablename__ = "account_limit_warmups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    window: Mapped[str] = mapped_column(String, nullable=False)
+    reset_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account: Mapped[Account] = relationship(
+        "Account",
+        back_populates="limit_warmups",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "window",
+            "reset_at",
+            name="uq_account_limit_warmups_account_window_reset",
+        ),
     )
 
 
@@ -269,6 +323,42 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    limit_warmup_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    limit_warmup_windows: Mapped[str] = mapped_column(
+        String,
+        default="both",
+        server_default=text("'both'"),
+        nullable=False,
+    )
+    limit_warmup_model: Mapped[str] = mapped_column(
+        String,
+        default="auto",
+        server_default=text("'auto'"),
+        nullable=False,
+    )
+    limit_warmup_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="Say OK.",
+        server_default=text("'Say OK.'"),
+        nullable=False,
+    )
+    limit_warmup_cooldown_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=3600,
+        server_default=text("3600"),
+        nullable=False,
+    )
+    limit_warmup_min_available_percent: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -293,6 +383,12 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_to_codex_model: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -517,6 +613,8 @@ class HttpBridgeSessionRecord(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -613,11 +711,27 @@ Index(
     UsageHistory.recorded_at.desc(),
     UsageHistory.id.desc(),
 )
+Index(
+    "idx_usage_window_raw_account_latest",
+    UsageHistory.window,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at.desc(),
+    UsageHistory.id.desc(),
+)
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_requested_at", RequestLog.requested_at)
+Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_deleted_at_requested_at_id",
+    RequestLog.deleted_at,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
 Index(
     "idx_logs_requested_at_model_tier",
     RequestLog.requested_at.desc(),
@@ -658,15 +772,38 @@ Index(
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
+Index(
+    "idx_account_limit_warmups_account_attempted", AccountLimitWarmup.account_id, AccountLimitWarmup.attempted_at.desc()
+)
+Index("idx_account_limit_warmups_status_attempted", AccountLimitWarmup.status, AccountLimitWarmup.attempted_at.desc())
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
 Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
+Index(
+    "idx_api_key_usage_reservations_status_updated_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.updated_at
+)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
+Index(
+    "idx_http_bridge_sessions_latest_turn_scope_state_seen",
+    HttpBridgeSessionRecord.latest_turn_state,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
+Index(
+    "idx_http_bridge_sessions_latest_response_scope_state_seen",
+    HttpBridgeSessionRecord.latest_response_id,
+    HttpBridgeSessionRecord.api_key_scope,
+    HttpBridgeSessionRecord.state,
+    HttpBridgeSessionRecord.last_seen_at.desc(),
+    HttpBridgeSessionRecord.updated_at.desc(),
+)
 Index(
     "idx_http_bridge_session_aliases_session_id",
     HttpBridgeSessionAlias.session_id,

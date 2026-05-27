@@ -20,8 +20,8 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("5h Remaining")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Remaining")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
     expect(screen.getByText("primary@example.com")).toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
   });
@@ -36,9 +36,11 @@ describe("UsageDonuts", () => {
       />,
     );
 
-    expect(screen.getByText("5h Remaining")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Remaining")).toBeInTheDocument();
-    expect(screen.getAllByText("Remaining").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
+    // Center label switched from "Remaining" -> "Credits" with the
+    // credits layout; assert that both donuts render the new label.
+    expect(screen.getAllByText("Credits").length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders safe line only for the primary donut", () => {
@@ -84,20 +86,27 @@ describe("UsageDonuts", () => {
     expect(screen.getAllByTestId("safe-line-tick")).toHaveLength(1);
   });
 
-  it("shows remaining totals in the center while donut totals can use capacity", () => {
-    const { container } = render(
+  it("shows remaining credits and capacity as stacked values with a divider in the center", () => {
+    // Regression for #371 + redesigned display: dashboard donuts previously
+    // showed compact-formatted numbers like "7.33k" / "7.56k". Operators
+    // asked for the raw remaining/total credit counts instead so the
+    // exact distance to the cap is visible at a glance. Now split into
+    // stacked rows: remaining on top, capacity below a divider.
+    render(
       <UsageDonuts
         primaryItems={[item({ accountId: "acc-1", label: "primary@example.com", value: 120, remainingPercent: 60, color: "#7bb661" })]}
-        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
+        secondaryItems={[item({ accountId: "acc-2", label: "secondary@example.com", value: 7331, remainingPercent: 97, color: "#d9a441" })]}
         primaryTotal={225}
         secondaryTotal={7560}
         primaryCenterValue={120}
-        secondaryCenterValue={80}
+        secondaryCenterValue={7331}
       />,
     );
 
-    const centerValues = Array.from(container.querySelectorAll(".text-base.font-semibold.tabular-nums")).map((node) => node.textContent);
-    expect(centerValues).toEqual(["120", "80"]);
+    const remaining = screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent);
+    const capacity = screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent);
+    expect(remaining).toEqual(["120", "7,331"]);
+    expect(capacity).toEqual(["225", "7,560"]);
   });
 
   it("hides deactivated account slices by default and allows choosing multiple statuses", async () => {

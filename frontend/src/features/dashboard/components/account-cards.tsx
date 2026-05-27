@@ -11,7 +11,7 @@ import { formatSlug } from "@/utils/formatters";
 const DEFAULT_ACCOUNT_STATUSES = ["active", "paused", "rate_limited", "quota_exceeded"];
 const ACCOUNT_CARD_VISIBLE_ROWS = 3;
 // Account cards can grow when the optional email row is rendered.
-const ACCOUNT_CARD_ROW_HEIGHT_REM = 12.5;
+const ACCOUNT_CARD_ROW_HEIGHT_REM = 11.5;
 const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {

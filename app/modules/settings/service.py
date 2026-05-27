@@ -20,6 +20,12 @@ class DashboardSettingsData:
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    limit_warmup_enabled: bool
+    limit_warmup_windows: str
+    limit_warmup_model: str
+    limit_warmup_prompt: str
+    limit_warmup_cooldown_seconds: int
+    limit_warmup_min_available_percent: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +42,12 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+    limit_warmup_enabled: bool
+    limit_warmup_windows: str
+    limit_warmup_model: str
+    limit_warmup_prompt: str
+    limit_warmup_cooldown_seconds: int
+    limit_warmup_min_available_percent: float
 
 
 class SettingsService:
@@ -60,6 +72,12 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            limit_warmup_enabled=row.limit_warmup_enabled,
+            limit_warmup_windows=row.limit_warmup_windows,
+            limit_warmup_model=row.limit_warmup_model,
+            limit_warmup_prompt=row.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -81,6 +99,12 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
+            limit_warmup_enabled=payload.limit_warmup_enabled,
+            limit_warmup_windows=payload.limit_warmup_windows,
+            limit_warmup_model=payload.limit_warmup_model,
+            limit_warmup_prompt=payload.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -98,4 +122,10 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            limit_warmup_enabled=row.limit_warmup_enabled,
+            limit_warmup_windows=row.limit_warmup_windows,
+            limit_warmup_model=row.limit_warmup_model,
+            limit_warmup_prompt=row.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
         )

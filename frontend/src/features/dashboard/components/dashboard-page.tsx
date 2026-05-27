@@ -12,6 +12,7 @@ import { RequestFilters } from "@/features/dashboard/components/filters/request-
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
+import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
@@ -21,6 +22,7 @@ import {
   type AccountSummary,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { formatModelLabel, formatSlug } from "@/utils/formatters";
@@ -32,13 +34,14 @@ export function DashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
+  const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
-  const { resumeMutation } = useAccountMutations();
+  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
 
@@ -71,9 +74,15 @@ export function DashboardPage() {
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
           break;
+        case "warmup-toggle":
+          void limitWarmupMutation.mutateAsync({
+            accountId: account.accountId,
+            enabled: !account.limitWarmupEnabled,
+          });
+          break;
       }
     },
-    [navigate, resumeMutation],
+    [limitWarmupMutation, navigate, resumeMutation],
   );
 
   const overview = dashboardQuery.data;
@@ -83,8 +92,11 @@ export function DashboardPage() {
     if (!overview || !logPage) {
       return null;
     }
-    return buildDashboardView(overview, logPage.requests, isDark);
-  }, [overview, logPage, isDark]);
+    return buildDashboardView(overview, logPage.requests, {
+      isDark,
+      showAccountBurnrate,
+    });
+  }, [overview, logPage, isDark, showAccountBurnrate]);
 
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();
@@ -171,6 +183,21 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
+          {view.weeklyCreditPace ? (
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
+              <UsageDonuts
+                primaryItems={view.primaryUsageItems}
+                secondaryItems={view.secondaryUsageItems}
+                primaryTotal={overview?.summary.primaryWindow.capacityCredits ?? 0}
+                secondaryTotal={overview?.summary.secondaryWindow?.capacityCredits ?? 0}
+                primaryCenterValue={view.primaryTotal}
+                secondaryCenterValue={view.secondaryTotal}
+                safeLinePrimary={view.safeLinePrimary}
+                safeLineSecondary={view.safeLineSecondary}
+              />
+              <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
+            </div>
+          ) : (
             <UsageDonuts
               primaryItems={view.primaryUsageItems}
               secondaryItems={view.secondaryUsageItems}
@@ -181,6 +208,7 @@ export function DashboardPage() {
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
             />
+          )}
 
           <section className="space-y-4">
             <div className="flex items-center gap-3">

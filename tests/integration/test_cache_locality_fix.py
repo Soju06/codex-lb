@@ -3,15 +3,21 @@ from __future__ import annotations
 import base64
 import json
 from datetime import timezone
+from typing import cast
 
 import pytest
 
 import app.modules.proxy.service as proxy_module
+from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+def _json_value(value: object) -> JsonValue:
+    return cast(JsonValue, value)
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -48,18 +54,18 @@ def test_mini_and_large_requests_use_different_cache_keys():
     """Verify that gpt-5.4-mini and gpt-5.3-codex requests produce different prompt_cache_keys
     due to model-class prefix separation."""
     from app.core.openai.requests import ResponsesRequest
-    from app.modules.proxy.service import _derive_prompt_cache_key
+    from app.modules.proxy.affinity import _derive_prompt_cache_key
 
     mini_payload = ResponsesRequest(
         model="gpt-5.4-mini",
         instructions="You are helpful.",
-        input=[{"role": "user", "content": "Hello"}],
+        input=_json_value([{"role": "user", "content": "Hello"}]),
     )
 
     large_payload = ResponsesRequest(
         model="gpt-5.3-codex",
         instructions="You are helpful.",
-        input=[{"role": "user", "content": "Hello"}],
+        input=_json_value([{"role": "user", "content": "Hello"}]),
     )
 
     mini_key = _derive_prompt_cache_key(mini_payload, None)
@@ -73,12 +79,12 @@ def test_mini_and_large_requests_use_different_cache_keys():
 def test_same_model_class_produces_same_cache_key():
     """Verify that two requests with the same model class produce the same cache key."""
     from app.core.openai.requests import ResponsesRequest
-    from app.modules.proxy.service import _derive_prompt_cache_key
+    from app.modules.proxy.affinity import _derive_prompt_cache_key
 
     payload = ResponsesRequest(
         model="gpt-5.3-codex",
         instructions="You are helpful.",
-        input=[{"role": "user", "content": "Hello"}],
+        input=_json_value([{"role": "user", "content": "Hello"}]),
     )
 
     key1 = _derive_prompt_cache_key(payload, None)
@@ -129,7 +135,7 @@ def test_codex_session_idle_ttl_unchanged():
 
 def test_model_class_extraction_for_all_model_types():
     """Verify model class extraction works correctly for mini, codex, and standard models."""
-    from app.modules.proxy.service import _extract_model_class
+    from app.modules.proxy.affinity import _extract_model_class
 
     assert _extract_model_class("gpt-5.4-mini") == "mini"
     assert _extract_model_class("gpt-4-mini") == "mini"

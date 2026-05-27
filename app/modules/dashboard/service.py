@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
@@ -20,6 +21,7 @@ from app.modules.dashboard.schemas import (
     DashboardUsageWindows,
     DepletionResponse,
 )
+from app.modules.dashboard.weekly_pace import build_weekly_credit_pace
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -29,7 +31,10 @@ from app.modules.usage.builders import (
 from app.modules.usage.depletion_service import (
     compute_aggregate_depletion,
     compute_depletion_for_account,
+    filter_depletion_history_since,
+    prune_depletion_cache,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 
 
 class DashboardService:
@@ -44,15 +49,22 @@ class DashboardService:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
         accounts = await self._repo.list_accounts()
+        account_ids = [account.id for account in accounts]
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        limit_warmups_by_account = await self._repo.latest_limit_warmups_by_account(account_ids)
 
-        account_summaries = build_account_summaries(
-            accounts=accounts,
-            primary_usage=primary_usage,
-            secondary_usage=secondary_usage,
-            encryptor=self._encryptor,
-            include_auth=False,
+        account_summaries = sorted(
+            build_account_summaries(
+                accounts=accounts,
+                primary_usage=primary_usage,
+                secondary_usage=secondary_usage,
+                limit_warmups_by_account=limit_warmups_by_account,
+                encryptor=self._encryptor,
+                include_auth=False,
+            ),
+            key=lambda a: a.capacity_credits_primary or 0,
+            reverse=True,
         )
 
         primary_rows_raw = _rows_from_latest(primary_usage)
@@ -189,31 +201,39 @@ class DashboardService:
         for account_id in all_account_ids:
             if account_id in normalized_primary_ids:
                 cutoff = pri_cutoffs[account_id]
-                rows = [r for r in all_pri_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
                 if rows:
                     primary_history[account_id] = rows
                 if account_id in sec_cutoffs:
                     s_cutoff = sec_cutoffs[account_id]
-                    s_rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= s_cutoff]
+                    s_rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), s_cutoff)
                     if s_rows:
                         secondary_history[account_id] = s_rows
             elif account_id in weekly_only_ids:
                 source = weekly_only_history_sources[account_id]
                 if source == "primary":
                     cutoff = pri_cutoffs[account_id]
-                    rows = [r for r in all_pri_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                    rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
                 else:
                     cutoff = sec_cutoffs[account_id]
-                    rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                    rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
                 if rows:
                     secondary_history[account_id] = rows
             else:
                 cutoff = sec_cutoffs[account_id]
-                rows = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= cutoff]
+                rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
                 if rows:
                     secondary_history[account_id] = rows
 
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
+        settings = get_settings()
+        weekly_credit_pace = build_weekly_credit_pace(
+            accounts=accounts,
+            account_summaries=account_summaries,
+            secondary_history=secondary_history,
+            now=now,
+            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+        )
 
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
@@ -225,6 +245,7 @@ class DashboardService:
             trends=trends,
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
+            weekly_credit_pace=weekly_credit_pace,
         )
 
 
@@ -234,6 +255,8 @@ def _build_depletion_by_window(
     now,
 ) -> tuple[DepletionResponse | None, DepletionResponse | None]:
     """Compute depletion independently per window."""
+    active_cache_keys = {(account_id, "standard", "primary") for account_id in primary_history}
+    active_cache_keys.update((account_id, "standard", "secondary") for account_id in secondary_history)
 
     def _aggregate(history: dict[str, list[UsageHistory]], window: str) -> DepletionResponse | None:
         metrics = []
@@ -258,20 +281,14 @@ def _build_depletion_by_window(
             seconds_until_exhaustion=agg.seconds_until_exhaustion,
         )
 
-    return _aggregate(primary_history, "primary"), _aggregate(secondary_history, "secondary")
+    primary_depletion = _aggregate(primary_history, "primary")
+    secondary_depletion = _aggregate(secondary_history, "secondary")
+    prune_depletion_cache(active_cache_keys)
+    return primary_depletion, secondary_depletion
 
 
 def _rows_from_latest(latest: dict[str, UsageHistory]) -> list[UsageWindowRow]:
-    return [
-        UsageWindowRow(
-            account_id=entry.account_id,
-            used_percent=entry.used_percent,
-            reset_at=entry.reset_at,
-            window_minutes=entry.window_minutes,
-            recorded_at=entry.recorded_at,
-        )
-        for entry in latest.values()
-    ]
+    return [usage_history_to_window_row(entry) for entry in latest.values()]
 
 
 def _should_use_weekly_primary_history(
@@ -279,18 +296,8 @@ def _should_use_weekly_primary_history(
     secondary_entry: UsageHistory | None,
 ) -> bool:
     return usage_core.should_use_weekly_primary(
-        _usage_history_to_window_row(primary_entry),
-        _usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None,
-    )
-
-
-def _usage_history_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
+        usage_history_to_window_row(primary_entry),
+        usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None,
     )
 
 

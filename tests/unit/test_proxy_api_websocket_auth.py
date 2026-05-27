@@ -17,6 +17,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.unit
@@ -32,7 +33,7 @@ async def test_validate_proxy_websocket_request_returns_firewall_denial(monkeypa
     async def fake_denial(_websocket):
         return denial
 
-    async def fail_auth(_authorization):
+    async def fail_auth(_authorization, *, request: object | None = None):
         raise AssertionError("authorization validation must not run when firewall already denied the websocket")
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
@@ -51,7 +52,7 @@ async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
     async def fake_denial(_websocket):
         return None
 
-    async def fail_auth(_authorization):
+    async def fail_auth(_authorization, *, request: object | None = None):
         raise ProxyAuthError("Missing API key in Authorization header")
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
@@ -88,7 +89,7 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
         last_used_at=None,
     )
 
-    async def pass_auth(authorization: str | None):
+    async def pass_auth(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer valid-key"
         return api_key
 
@@ -101,6 +102,66 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
     assert response is None
     assert resolved_api_key == api_key
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_supports_legacy_auth_override(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    api_key = ApiKeyData(
+        id="key_legacy",
+        name="Legacy Key",
+        key_prefix="sk-legacy",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+    )
+    seen_authorizations: list[str | None] = []
+
+    async def legacy_auth_override(authorization: str | None):
+        seen_authorizations.append(authorization)
+        return api_key
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", legacy_auth_override)
+
+    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
+        cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer legacy-key"})),
+    )
+
+    assert response is None
+    assert resolved_api_key == api_key
+    assert seen_authorizations == ["Bearer legacy-key"]
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_reraises_unrelated_type_error(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    calls = 0
+
+    async def broken_auth_override(authorization: str | None, *, request: object | None = None):
+        nonlocal calls
+        del authorization, request
+        calls += 1
+        raise TypeError("unexpected keyword argument 'request_id'")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", broken_auth_override)
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'request_id'"):
+        await proxy_api_module._validate_proxy_websocket_request(
+            cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer broken-key"})),
+        )
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -241,7 +302,10 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
     def fake_validate_model_access(_api_key, _model):
         return None
 
-    async def fake_enforce_request_limits(_api_key, *, request_model=None, request_service_tier=None):
+    async def fake_enforce_request_limits(
+        _api_key, *, request_model=None, request_service_tier=None, request_usage_budget=None
+    ):
+        del request_model, request_service_tier, request_usage_budget
         return None
 
     async def fake_release_reservation(_reservation):
@@ -424,7 +488,7 @@ def test_public_previous_response_error_event_is_masked_to_response_failed():
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
 
     assert violation_kind is None
     assert normalized is not None
@@ -496,7 +560,7 @@ def test_public_stream_incomplete_error_event_is_not_rewritten_when_already_publ
         },
     }
 
-    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(cast(dict[str, JsonValue], payload))
 
     assert violation_kind is None
     assert normalized == payload
@@ -521,3 +585,25 @@ def test_public_previous_response_top_level_error_envelope_is_parsed_for_masking
     error = masked.model_dump(mode="json")["error"]
     assert error["code"] == "stream_incomplete"
     assert "resp_missing" not in masked.model_dump_json()
+
+
+def test_public_missing_tool_output_input_error_preserves_client_status():
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": "No tool output found for function call call_W3U0TC60cgB5OD7gVCyS0qIq.",
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "param": "input",
+        },
+    }
+
+    parsed = proxy_api_module._parse_error_envelope(payload)
+    status_code, masked = proxy_api_module._mask_previous_response_not_found_error(parsed, default_status=400)
+
+    assert status_code == 400
+    error = masked.model_dump(mode="json")["error"]
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+    assert "call_W3U0TC60cgB5OD7gVCyS0qIq" in masked.model_dump_json()

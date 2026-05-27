@@ -6,32 +6,63 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.2)"
+        description: "Release tag (e.g. v1.19.0 or v1.19.0-beta.1)"
         required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  release-metadata:
+    name: Resolve release metadata
+    runs-on: ubuntu-24.04
+
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      base_version: ${{ steps.metadata.outputs.base_version }}
+      channel: ${{ steps.metadata.outputs.channel }}
+      is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
+      pypi_version: ${{ steps.metadata.outputs.pypi_version }}
+      make_latest: ${{ steps.metadata.outputs.make_latest }}
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Resolve tag metadata
+        id: metadata
+        shell: bash
+        run: python -m scripts.release_metadata --tag "${RELEASE_TAG}"
+
   build:
     name: Build (sdist + wheel)
+    needs: [release-metadata]
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.3.14"
+          no-cache: true
 
       - name: Install frontend dependencies
         run: cd frontend && bun install --frozen-lockfile
@@ -40,44 +71,17 @@ jobs:
         run: cd frontend && bun run build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.0.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
         with:
           python-version: "3.13"
-          enable-cache: true
+          enable-cache: false
 
-      - name: Verify tag matches pyproject version
+      - name: Verify tag matches release-managed versions
         shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          import sys
-          from pathlib import Path
-          try:
-              import tomllib  # py3.11+
-          except Exception:  # pragma: no cover
-              import tomli as tomllib
-
-          tag = os.environ.get("RELEASE_TAG", "")
-          if not tag:
-              print("Missing RELEASE_TAG")
-              sys.exit(1)
-          m = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
-          if not m:
-              print(f"Invalid tag format: {tag!r}")
-              sys.exit(1)
-          tag_ver = m.group(1)
-
-          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          proj_ver = data["project"]["version"]
-          if proj_ver != tag_ver:
-              print(f"pyproject.toml version ({proj_ver}) does not match tag ({tag_ver})")
-              sys.exit(1)
-          print(f"OK: {tag} matches pyproject.toml version {proj_ver}")
-          PY
+        run: python -m scripts.verify_release_version --tag "${RELEASE_TAG}"
 
       - name: Build sdist + wheel
-        run: uvx --from build python -m build
+        run: uvx --from build==1.3.0 python -m build
 
       - name: Verify wheel contains frontend assets
         shell: bash
@@ -105,7 +109,7 @@ jobs:
           PY
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dist
           path: dist/*
@@ -124,7 +128,7 @@ jobs:
 
     steps:
       - name: Download dist artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fc02353415da80201a0da48ab47022efd7725d11
         with:
           name: dist
           path: dist
@@ -133,14 +137,14 @@ jobs:
         run: ls -la dist/
 
       - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
         with:
           verbose: true
           print-hash: true
 
   docker-image:
     name: Build and push Docker image
-    needs: [build]
+    needs: [build, release-metadata]
     runs-on: ubuntu-24.04
 
     permissions:
@@ -150,18 +154,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -169,17 +174,18 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.release-metadata.outputs.is_prerelease == 'false' }}
+            type=semver,pattern={{major}},enable=${{ needs.release-metadata.outputs.is_prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.release-metadata.outputs.is_prerelease == 'false' }}
+            type=raw,value=${{ needs.release-metadata.outputs.channel }},enable=${{ needs.release-metadata.outputs.is_prerelease == 'true' }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
         with:
           context: .
           file: Dockerfile
@@ -187,27 +193,32 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=codex-lb-release
+          cache-to: type=gha,mode=max,scope=codex-lb-release
 
       - name: Set lowercase image ref
         id: image
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}:${{ steps.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_VERSION: ${{ steps.meta.outputs.version }}
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}:${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Scan Docker image with Trivy (SARIF)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.image.outputs.ref }}
           format: sarif
           output: trivy-results.sarif
-          severity: CRITICAL,HIGH
+          severity: CRITICAL,HIGH,MEDIUM,LOW
           ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
+          # Use the same Trivy category as CI so PR Code Scanning only has
+          # one default-branch Docker baseline to compare against.
+          category: .github/workflows/ci.yml:docker
 
   helm-chart:
     name: Publish Helm chart to GHCR
@@ -220,21 +231,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
 
       - name: Build Helm dependencies
         run: helm dependency build deploy/helm/codex-lb/
 
       - name: Log in to GHCR (Helm)
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | helm registry login ghcr.io \
-              --username ${{ github.actor }} \
+              --username "${REGISTRY_USERNAME}" \
               --password-stdin
 
       - name: Package Helm chart
@@ -249,7 +263,7 @@ jobs:
 
   create-github-release:
     name: Create GitHub Release
-    needs: [publish-to-pypi, docker-image, helm-chart]
+    needs: [publish-to-pypi, docker-image, helm-chart, release-metadata]
     runs-on: ubuntu-24.04
 
     permissions:
@@ -257,13 +271,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Download dist artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fc02353415da80201a0da48ab47022efd7725d11
         with:
           name: dist
           path: dist
@@ -271,27 +286,49 @@ jobs:
       - name: Resolve previous tag
         id: prev_tag
         shell: bash
+        env:
+          IS_PRERELEASE: ${{ needs.release-metadata.outputs.is_prerelease }}
         run: |
           set -euo pipefail
-          TAG_NAME="${RELEASE_TAG}"
-          PREV_TAG=""
-          if git describe --tags --abbrev=0 "${TAG_NAME}^" >/dev/null 2>&1; then
-            PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^")"
-          fi
-          if [ -n "${PREV_TAG}" ]; then
-            RANGE="${PREV_TAG}..${TAG_NAME}"
-          else
-            RANGE="${TAG_NAME}"
-          fi
-          {
-            echo "tag_name=${TAG_NAME}"
-            echo "prev_tag=${PREV_TAG}"
-            echo "range=${RANGE}"
-          } >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          tag_name = os.environ["RELEASE_TAG"]
+          is_prerelease = os.environ.get("IS_PRERELEASE") == "true"
+          prev_tag = ""
+
+          if is_prerelease:
+              proc = subprocess.run(
+                  ["git", "describe", "--tags", "--abbrev=0", f"{tag_name}^"],
+                  check=False,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+              )
+              if proc.returncode == 0:
+                  prev_tag = proc.stdout.strip()
+          else:
+              proc = subprocess.run(
+                  ["git", "tag", "--merged", f"{tag_name}^", "--sort=-v:refname"],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              )
+              stable_tag = re.compile(r"^v\d+\.\d+\.\d+$")
+              prev_tag = next((tag for tag in proc.stdout.splitlines() if stable_tag.fullmatch(tag)), "")
+
+          release_range = f"{prev_tag}..{tag_name}" if prev_tag else tag_name
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"tag_name={tag_name}\n")
+              fh.write(f"prev_tag={prev_tag}\n")
+              fh.write(f"range={release_range}\n")
+          PY
 
       - name: Generate release notes (GitHub)
         id: notes
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
           TAG_NAME: ${{ steps.prev_tag.outputs.tag_name }}
           PREV_TAG: ${{ steps.prev_tag.outputs.prev_tag }}
@@ -317,6 +354,8 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ steps.prev_tag.outputs.tag_name }}
+          IS_PRERELEASE: ${{ needs.release-metadata.outputs.is_prerelease }}
+          PYPI_VERSION: ${{ needs.release-metadata.outputs.pypi_version }}
         run: |
           set -euo pipefail
           TAG_VERSION="${TAG_NAME#v}"
@@ -324,18 +363,25 @@ jobs:
             echo
             echo "## Install / Run"
             echo '```bash'
-            echo 'uvx codex-lb'
-            echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
-            echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION}"
+            if [ "${IS_PRERELEASE}" = "true" ]; then
+              echo "uvx --from \"codex-lb==${PYPI_VERSION}\" codex-lb"
+              echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
+              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION} --devel"
+            else
+              echo 'uvx codex-lb'
+              echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
+              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION}"
+            fi
             echo '```'
           } >> release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ steps.notes.outputs.tag_name }}
           name: Release ${{ steps.notes.outputs.tag_name }}
           body_path: release_notes.md
           files: "dist/*"
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.release-metadata.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ needs.release-metadata.outputs.make_latest }}

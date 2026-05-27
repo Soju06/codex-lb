@@ -1,8 +1,14 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
+  AccountAliasRequestSchema,
+  AccountAliasResponseSchema,
+  AccountExportResponseSchema,
+  AccountOpenCodeAuthExportResponseSchema,
   AccountImportResponseSchema,
+  AccountLimitWarmupUpdateRequestSchema,
+  AccountLimitWarmupUpdateResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -44,6 +50,24 @@ export function reactivateAccount(accountId: string) {
   );
 }
 
+export function setAccountAlias(accountId: string, alias: string | null) {
+  const validated = AccountAliasRequestSchema.parse({ alias });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
+    AccountAliasResponseSchema,
+    { body: validated },
+  );
+}
+
+export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
+  const payload = AccountLimitWarmupUpdateRequestSchema.parse({ enabled });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
+    AccountLimitWarmupUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
 export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
@@ -51,10 +75,26 @@ export function getAccountTrends(accountId: string) {
   );
 }
 
-export function deleteAccount(accountId: string) {
+export function exportAccountOpenCodeAuth(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/opencode-auth`,
+    AccountOpenCodeAuthExportResponseSchema,
+  );
+}
+
+export function deleteAccount(accountId: string, deleteHistory = false) {
+  const qs = deleteHistory ? "?delete_history=true" : "";
   return del(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
     AccountActionResponseSchema,
+  );
+}
+
+export function exportAccount(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export`,
+    AccountExportResponseSchema,
+    { cache: "no-store" },
   );
 }
 
@@ -65,8 +105,9 @@ export function startOauth(payload: unknown) {
   });
 }
 
-export function getOauthStatus() {
-  return get(`${OAUTH_BASE_PATH}/status`, OauthStatusResponseSchema);
+export function getOauthStatus(flowId?: string) {
+  const query = flowId ? `?flowId=${encodeURIComponent(flowId)}` : "";
+  return get(`${OAUTH_BASE_PATH}/status${query}`, OauthStatusResponseSchema);
 }
 
 export function completeOauth(payload?: unknown) {

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 DEFAULT_EMAIL = "unknown@example.com"
 DEFAULT_PLAN = "unknown"
@@ -27,7 +27,12 @@ class AuthFile(BaseModel):
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     tokens: AuthTokens
-    last_refresh_at: datetime | None = Field(default=None, alias="lastRefreshAt")
+    last_refresh_at: datetime | None = Field(
+        default=None,
+        alias="lastRefreshAt",
+        validation_alias=AliasChoices("lastRefreshAt", "last_refresh"),
+        serialization_alias="lastRefreshAt",
+    )
 
 
 class OpenAIAuthClaims(BaseModel):
@@ -88,6 +93,16 @@ def claims_from_auth(auth: AuthFile) -> AccountClaims:
         email=claims.email,
         plan_type=plan_type,
     )
+
+
+def token_expiry_epoch_ms(token: str) -> int | None:
+    claims = extract_id_token_claims(token)
+    exp = claims.exp
+    if isinstance(exp, (int, float)):
+        return max(0, int(float(exp) * 1000))
+    if isinstance(exp, str) and exp.isdigit():
+        return max(0, int(exp) * 1000)
+    return None
 
 
 def generate_unique_account_id(account_id: str | None, email: str | None) -> str:

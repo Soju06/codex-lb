@@ -76,6 +76,7 @@ export function createAccountSummary(
 	return AccountSummarySchema.parse({
 		accountId: "acc_primary",
 		email: "primary@example.com",
+		alias: null,
 		displayName: "primary@example.com",
 		planType: "plus",
 		status: "active",
@@ -87,11 +88,15 @@ export function createAccountSummary(
 		resetAtSecondary: offsetIso(24 * 60),
 		windowMinutesPrimary: 300,
 		windowMinutesSecondary: 10_080,
+		capacityCreditsSecondary: 7_560,
+		remainingCreditsSecondary: 5_065.2,
 		auth: {
 			access: { expiresAt: offsetIso(30), state: null },
 			refresh: { state: "stored" },
 			idToken: { state: "parsed" },
 		},
+		limitWarmupEnabled: false,
+		limitWarmup: null,
 		...overrides,
 	});
 }
@@ -207,9 +212,11 @@ export function createDashboardOverview(
 				accounts: accounts.map((account) => ({
 					accountId: account.accountId,
 					remainingPercentAvg: account.usage?.secondaryRemainingPercent ?? 0,
-					capacityCredits: 7560,
+					capacityCredits: account.capacityCreditsSecondary ?? 7560,
 					remainingCredits:
-						((account.usage?.secondaryRemainingPercent ?? 0) / 100) * 7560,
+						account.remainingCreditsSecondary ??
+						((account.usage?.secondaryRemainingPercent ?? 0) / 100) *
+							(account.capacityCreditsSecondary ?? 7560),
 				})),
 			},
 		},
@@ -250,6 +257,7 @@ export function createRequestLogEntry(
 		apiKeyName: "Primary Key",
 		requestId: "req_1",
 		model: "gpt-5.1",
+		source: null,
 		transport: "http",
 		serviceTier: null,
 		requestedServiceTier: null,
@@ -258,9 +266,17 @@ export function createRequestLogEntry(
 		errorCode: null,
 		errorMessage: null,
 		tokens: 1800,
+		inputTokens: 1200,
+		outputTokens: 600,
 		cachedInputTokens: 320,
 		reasoningEffort: null,
 		costUsd: 0.0132,
+		costBreakdown: {
+			inputUsd: 0.0054,
+			cachedInputUsd: 0.0012,
+			outputUsd: 0.0066,
+			totalUsd: 0.0132,
+		},
 		latencyMs: 920,
 		...overrides,
 	});
@@ -355,6 +371,12 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		limitWarmupEnabled: false,
+		limitWarmupWindows: "both",
+		limitWarmupModel: "auto",
+		limitWarmupPrompt: "Say OK.",
+		limitWarmupCooldownSeconds: 3600,
+		limitWarmupMinAvailablePercent: 100,
 		...overrides,
 	});
 }
@@ -400,6 +422,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		name: "Default key",
 		keyPrefix: "sk-test",
 		allowedModels: ["gpt-5.1"],
+		applyToCodexModel: false,
 		expiresAt: offsetIso(30 * 24 * 60),
 		isActive: true,
 		accountAssignmentScopeEnabled: false,

@@ -3,10 +3,11 @@ import type { DashboardStat } from "@/features/dashboard/utils";
 import { cn } from "@/lib/utils";
 
 const ACCENT_STYLES = [
-  "bg-blue-500/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400",
-  "bg-violet-500/10 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400",
-  "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400",
-  "bg-amber-500/10 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
+  "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
 ];
 
 export type StatsGridProps = {
@@ -14,8 +15,10 @@ export type StatsGridProps = {
 };
 
 export function StatsGrid({ stats }: StatsGridProps) {
+  const columnsClass = stats.length >= 5 ? "xl:grid-cols-5" : "xl:grid-cols-4";
+
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className={cn("grid gap-3 sm:grid-cols-2", columnsClass)}>
       {stats.map((stat, index) => {
         const Icon = stat.icon;
         const accent = ACCENT_STYLES[index % ACCENT_STYLES.length];

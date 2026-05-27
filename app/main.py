@@ -26,6 +26,8 @@ from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
+    add_app_version_middleware,
+    add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
@@ -41,6 +43,7 @@ from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.firewall import api as firewall_api
@@ -56,6 +59,7 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.request_logs import api as request_logs_api
+from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
@@ -345,11 +349,14 @@ def create_app() -> FastAPI:
             dashboard_limit=settings.bulkhead_dashboard_limit,
         ),
     )
+    add_backend_api_codex_v1_alias_middleware(app)
+    add_app_version_middleware(app)
     add_exception_handlers(app)
 
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
+    app.include_router(proxy_api.wham_router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
@@ -360,6 +367,8 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
+    app.include_router(conversation_archive_api.router)
+    app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)

@@ -23,6 +23,7 @@ class AdditionalQuotaDefinition:
     quota_key: str
     display_label: str
     model_ids: frozenset[str] = frozenset()
+    applies_to_plans: frozenset[str] | None = None
     quota_key_aliases: frozenset[str] = frozenset()
     limit_name_aliases: frozenset[str] = frozenset()
     metered_feature_aliases: frozenset[str] = frozenset()
@@ -48,6 +49,7 @@ class AdditionalQuotaRegistryEntry(TypedDict, total=False):
     quota_key: str
     display_label: str
     model_ids: list[str]
+    applies_to_plans: list[str]
     quota_key_aliases: list[str]
     limit_name_aliases: list[str]
     metered_feature_aliases: list[str]
@@ -81,6 +83,14 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         for normalized in (_normalize_identifier(str(value)) for value in item.get("model_ids", []))
         if normalized is not None
     )
+    raw_applies_to_plans = item.get("applies_to_plans")
+    applies_to_plans = None
+    if raw_applies_to_plans is not None:
+        applies_to_plans = frozenset(
+            normalized
+            for normalized in (_normalize_identifier(str(value)) for value in raw_applies_to_plans)
+            if normalized is not None
+        )
     quota_key_aliases = frozenset(
         normalized
         for normalized in (_normalize_identifier(str(value)) for value in item.get("quota_key_aliases", []))
@@ -100,6 +110,7 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         quota_key=quota_key,
         display_label=display_label,
         model_ids=model_ids,
+        applies_to_plans=applies_to_plans,
         quota_key_aliases=quota_key_aliases,
         limit_name_aliases=limit_name_aliases,
         metered_feature_aliases=metered_feature_aliases,

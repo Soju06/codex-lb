@@ -1,0 +1,8 @@
+- [x] Add optional `refresh_repo_factory` to `AuthManager.__init__` (`Callable[[], AbstractAsyncContextManager[AccountsRepositoryPort]] | None`).
+- [x] Add `AuthManager._run_refresh` as the singleflight body and point `ensure_fresh` at it. When `refresh_repo_factory` is set, open a fresh repo (`async with self._refresh_repo_factory() as repo`) and run `refresh_account` via a temporary `AuthManager(repo, acquire_refresh_admission=...)`; otherwise fall back to `self.refresh_account(account)`.
+- [x] Add `ProxyService._accounts_refresh_scope` (`@asynccontextmanager`) yielding `repos.accounts` from `self._repo_factory()`, and pass `refresh_repo_factory=self._accounts_refresh_scope` where `_ensure_fresh` builds `AuthManager`.
+- [x] Add `test_ensure_fresh_detached_refresh_owns_session_on_caller_cancel` to `tests/unit/test_auth_manager.py`: refresh in flight, cancel the caller, assert the refresh wrote via the owned session (opened + closed) and never the request-scoped repo. Verify it fails before the fix and passes after.
+- [x] `uv run pytest tests/unit/test_auth_manager.py -q` green.
+- [x] `uvx ruff check` + `uvx ruff format --check` on touched files clean; `uv run ty check` on touched files clean.
+- [x] Add `ADDED Requirements` delta to `openspec/changes/fix-auth-refresh-detached-session-leak/specs/database-backends/spec.md`.
+- [x] Run `openspec validate --specs` where the OpenSpec CLI is available.

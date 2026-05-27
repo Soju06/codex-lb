@@ -6,7 +6,7 @@ import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountCards", () => {
-  it("caps the dashboard account grid at two visible rows without clipping taller cards", () => {
+  it("caps the dashboard account grid at three visible rows without clipping taller cards", () => {
     render(
       <AccountCards
         accounts={Array.from({ length: 7 }, (_, index) =>
@@ -21,7 +21,7 @@ describe("AccountCards", () => {
     );
 
     expect(screen.getByTestId("dashboard-account-cards")).toHaveStyle({
-      maxHeight: "calc(3 * 12.5rem + 2rem)",
+      maxHeight: "calc(3 * 11.5rem + 2rem)",
     });
   });
 
@@ -78,5 +78,30 @@ describe("AccountCards", () => {
     expect(screen.getByText("active@example.com")).toBeInTheDocument();
     expect(screen.getByText("paused@example.com")).toBeInTheDocument();
     expect(screen.getByText("inactive@example.com")).toBeInTheDocument();
+  });
+
+  it("gives each warm-up toggle a descriptive account-specific name", () => {
+    render(
+      <AccountCards
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-1",
+            email: "one@example.com",
+            displayName: "One Account",
+            limitWarmupEnabled: false,
+          }),
+          createAccountSummary({
+            accountId: "acc-2",
+            email: "two@example.com",
+            displayName: "Two Account",
+            limitWarmupEnabled: true,
+          }),
+        ]}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Enable limit warm-up for One Account" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable limit warm-up for Two Account" })).toBeInTheDocument();
   });
 });

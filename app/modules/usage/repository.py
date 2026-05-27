@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import Integer, cast, delete, func, literal_column, or_, select, true
+from sqlalchemy import Integer, and_, cast, delete, func, literal_column, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.db.session import sqlite_writer_section
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -116,8 +117,9 @@ class UsageRepository:
             recorded_at=recorded_at or utcnow(),
         )
         self._session.add(entry)
-        await self._session.commit()
-        await self._session.refresh(entry)
+        async with sqlite_writer_section():
+            await self._session.commit()
+            await self._session.refresh(entry)
         return entry
 
     async def aggregate_since(
@@ -158,12 +160,24 @@ class UsageRepository:
             for row in rows
         ]
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
         conditions = _window_clause(window)
+        if account_ids is not None and not account_ids:
+            return {}
+        if account_ids is not None:
+            conditions = and_(conditions, UsageHistory.account_id.in_(account_ids))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            acct_subq = select(Account.id).subquery("accts")
+            acct_stmt = select(Account.id)
+            if account_ids is not None:
+                acct_stmt = acct_stmt.where(Account.id.in_(account_ids))
+            acct_subq = acct_stmt.subquery("accts")
             lateral = (
                 select(UsageHistory.id)
                 .where(
@@ -263,21 +277,73 @@ class UsageRepository:
             conditions.append(UsageHistory.account_id == account_id)
 
         window_expr = _normalized_window_expr()
-        stmt = (
+        base_rows = (
             select(
                 bucket_col,
-                UsageHistory.account_id,
+                UsageHistory.id.label("usage_id"),
+                UsageHistory.account_id.label("account_id"),
                 window_expr.label("window"),
-                func.avg(UsageHistory.used_percent).label("avg_used_percent"),
-                func.count(UsageHistory.id).label("samples"),
+                UsageHistory.used_percent.label("used_percent"),
+                UsageHistory.reset_at.label("reset_at"),
+                UsageHistory.window_minutes.label("window_minutes"),
+                UsageHistory.recorded_at.label("recorded_at"),
             )
             .where(*conditions)
-            .group_by(
-                bucket_col,
-                UsageHistory.account_id,
-                window_expr,
+            .subquery()
+        )
+
+        aggregate_rows = (
+            select(
+                base_rows.c.bucket_epoch,
+                base_rows.c.account_id,
+                base_rows.c.window,
+                func.avg(base_rows.c.used_percent).label("avg_used_percent"),
+                func.count(base_rows.c.usage_id).label("samples"),
             )
-            .order_by(bucket_col)
+            .group_by(
+                base_rows.c.bucket_epoch,
+                base_rows.c.account_id,
+                base_rows.c.window,
+            )
+            .subquery()
+        )
+
+        latest_rows = select(
+            base_rows.c.bucket_epoch,
+            base_rows.c.account_id,
+            base_rows.c.window,
+            base_rows.c.reset_at,
+            base_rows.c.window_minutes,
+            base_rows.c.recorded_at,
+            func.row_number()
+            .over(
+                partition_by=(base_rows.c.bucket_epoch, base_rows.c.account_id, base_rows.c.window),
+                order_by=(base_rows.c.recorded_at.desc(), base_rows.c.usage_id.desc()),
+            )
+            .label("row_number"),
+        ).subquery()
+
+        stmt = (
+            select(
+                aggregate_rows.c.bucket_epoch,
+                aggregate_rows.c.account_id,
+                aggregate_rows.c.window,
+                aggregate_rows.c.avg_used_percent,
+                aggregate_rows.c.samples,
+                latest_rows.c.reset_at,
+                latest_rows.c.window_minutes,
+                latest_rows.c.recorded_at,
+            )
+            .join(
+                latest_rows,
+                and_(
+                    latest_rows.c.bucket_epoch == aggregate_rows.c.bucket_epoch,
+                    latest_rows.c.account_id == aggregate_rows.c.account_id,
+                    latest_rows.c.window == aggregate_rows.c.window,
+                    latest_rows.c.row_number == 1,
+                ),
+            )
+            .order_by(aggregate_rows.c.bucket_epoch)
         )
         result = await self._session.execute(stmt)
         return [
@@ -287,6 +353,9 @@ class UsageRepository:
                 window=row.window,
                 avg_used_percent=float(row.avg_used_percent) if row.avg_used_percent is not None else 0.0,
                 samples=int(row.samples),
+                reset_at=int(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                recorded_at=row.recorded_at,
             )
             for row in result.all()
         ]
@@ -333,12 +402,14 @@ class AdditionalUsageRepository:
             recorded_at=recorded_at or utcnow(),
         )
         self._session.add(entry)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.commit()
 
     async def delete_for_account(self, account_id: str) -> None:
         stmt = delete(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == account_id)
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_and_quota_key(self, account_id: str, quota_key: str) -> None:
         scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
@@ -348,8 +419,9 @@ class AdditionalUsageRepository:
             AdditionalUsageHistory.account_id == account_id,
             _additional_quota_match_clause(scope),
         )
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_and_limit(self, account_id: str, limit_name: str) -> None:
         await self.delete_for_account_and_quota_key(account_id, limit_name)
@@ -368,8 +440,9 @@ class AdditionalUsageRepository:
             _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
         )
-        await self._session.execute(stmt)
-        await self._session.commit()
+        async with sqlite_writer_section():
+            await self._session.execute(stmt)
+            await self._session.commit()
 
     async def delete_for_account_limit_window(
         self,

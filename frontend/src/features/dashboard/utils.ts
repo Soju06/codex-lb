@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame, type LucideIcon } from "lucide-react";
 
 import type {
   AccountSummary,
@@ -45,6 +45,36 @@ export interface SafeLineView {
   riskLevel: "safe" | "warning" | "danger" | "critical";
 }
 
+export type WeeklyCreditPaceStatus = "behind" | "on_track" | "ahead" | "danger";
+
+export type WeeklyCreditPace = {
+  totalFullCredits: number;
+  totalActualRemainingCredits: number;
+  totalExpectedRemainingCredits: number;
+  actualUsedPercent: number;
+  scheduledUsedPercent: number;
+  deltaPercent: number;
+  scheduleGapCredits: number;
+  /** Legacy alias for scheduleGapCredits while older components migrate. */
+  overPlanCredits: number;
+  projectedShortfallCredits: number;
+  pauseForBreakEvenHours: number | null;
+  paceMultiplier: number | null;
+  throttleToPercent: number | null;
+  reduceByPercent: number | null;
+  proAccountEquivalentToCoverOverPlan: number | null;
+  proAccountsToCoverOverPlan: number | null;
+  projectedDepletionHours: number | null;
+  projectedMinimumRemainingCredits: number | null;
+  forecastBurnRateCreditsPerHour: number | null;
+  scheduledBurnRateCreditsPerHour: number;
+  status: WeeklyCreditPaceStatus;
+  accountCount: number;
+  staleAccountCount: number;
+  inactiveAccountCount: number;
+  confidence: "high" | "medium" | "low";
+};
+
 export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
@@ -56,7 +86,26 @@ export type DashboardView = {
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
+  weeklyCreditPace: WeeklyCreditPace | null;
 };
+
+type DashboardViewOptions = {
+  isDark?: boolean;
+  showAccountBurnrate?: boolean;
+};
+
+function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boolean): Required<DashboardViewOptions> {
+  if (typeof optionsOrIsDark === "boolean") {
+    return {
+      isDark: optionsOrIsDark,
+      showAccountBurnrate: true,
+    };
+  }
+  return {
+    isDark: optionsOrIsDark.isDark ?? false,
+    showAccountBurnrate: optionsOrIsDark.showAccountBurnrate ?? true,
+  };
+}
 
 export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
@@ -164,7 +213,161 @@ function avgPerUnit(total: number, units: number): number {
   return total / units;
 }
 
-const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b"];
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function windowUsedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let usedEquivalent = 0;
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    let accountEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      accountEquivalent = Math.max(accountEquivalent, 1);
+    }
+
+    usedEquivalent += accountEquivalent;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? usedEquivalent : null;
+}
+
+function windowProjectedAccountEquivalents(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  let projectedEquivalent = 0;
+  let includedAccounts = 0;
+  const nowMs = Date.now();
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+    const resetAt = windowKey === "primary" ? account.resetAtPrimary : account.resetAtSecondary;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent) || windowMinutes <= 0) {
+      continue;
+    }
+
+    const usedEquivalent = (100 - clampPercent(remainingPercent)) / 100;
+    let projected = usedEquivalent;
+
+    if (resetAt) {
+      const resetAtMs = Date.parse(resetAt);
+      if (Number.isFinite(resetAtMs)) {
+        const windowMs = windowMinutes * 60_000;
+        const secondsUntilReset = Math.max(0, (resetAtMs - nowMs) / 1000);
+        const elapsedSeconds = Math.max(0, windowMs / 1000 - secondsUntilReset);
+        if (elapsedSeconds > 0) {
+          projected = usedEquivalent * ((windowMs / 1000) / elapsedSeconds);
+        }
+      }
+    }
+
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      projected = Math.max(projected, 1);
+    }
+
+    projectedEquivalent += projected;
+    includedAccounts += 1;
+  }
+
+  return includedAccounts > 0 ? projectedEquivalent : null;
+}
+
+function windowIncludedAccountCount(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number {
+  let includedAccounts = 0;
+
+  for (const account of overview.accounts) {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const remainingPercent =
+      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+
+    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+
+    includedAccounts += 1;
+  }
+
+  return includedAccounts;
+}
+
+function clampBurnEquivalent(value: number | null, maxEquivalent: number): number | null {
+  if (!isFiniteNumber(value)) {
+    return null;
+  }
+
+  const clamped = Math.max(0, value);
+  if (maxEquivalent <= 0) {
+    return clamped;
+  }
+  return Math.min(clamped, maxEquivalent);
+}
+
+function plusAccountsBurnEquivalent(
+  overview: DashboardOverview,
+  windowKey: "primary" | "secondary",
+): number | null {
+  const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
+  const projectedEquivalent = clampBurnEquivalent(windowProjectedAccountEquivalents(overview, windowKey), maxEquivalent);
+  const usedEquivalent = clampBurnEquivalent(windowUsedAccountEquivalents(overview, windowKey), maxEquivalent);
+
+  return projectedEquivalent ?? usedEquivalent;
+}
+
+function formatBurnEquivalent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(1);
+}
+
+function buildBurnTrend(points: TrendPoint[], currentValue: number | null): { value: number }[] {
+  if (currentValue === null || !Number.isFinite(currentValue) || currentValue <= 0 || points.length === 0) {
+    return [];
+  }
+
+  const lastPoint = points[points.length - 1]?.v ?? 0;
+  if (!Number.isFinite(lastPoint) || lastPoint <= 0) {
+    return points.map(() => ({ value: currentValue }));
+  }
+
+  const scale = currentValue / lastPoint;
+  return points.map((point) => ({ value: Math.max(0, point.v * scale) }));
+}
+
+function formatBurnWindowLabel(windowKey: "primary" | "secondary", windowMinutes: number | null | undefined): string {
+  const formatted = formatWindowMinutes(windowMinutes ?? null);
+  if (formatted !== "--") {
+    return formatted;
+  }
+  return windowKey === "primary" ? "5h" : "7d";
+}
+
+const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#ef4444", "#f59e0b"];
+const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));
@@ -175,11 +378,330 @@ export function sumRemaining(items: RemainingItem[]): number {
   return items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+export function weeklyCreditPaceStatus(deltaPercent: number, projectedShortfallCredits: number): WeeklyCreditPaceStatus {
+  if (projectedShortfallCredits > 0) return "danger";
+  if (deltaPercent < -5) return "behind";
+  if (deltaPercent > 5) return "ahead";
+  return "on_track";
+}
+
+type WeeklyPoolAccount = {
+  fullCredits: number;
+  remainingCredits: number;
+  resetAtMs: number;
+  windowMs: number;
+};
+
+type WeeklyPoolSimulationAccount = WeeklyPoolAccount & {
+  balanceCredits: number;
+};
+
+type WeeklyPoolProjection = {
+  burnRateCreditsPerMs: number;
+  projectedShortfallCredits: number;
+  projectedDepletionHours: number | null;
+  projectedMinimumRemainingCredits: number;
+  firstReplenishmentWaitMs: number | null;
+};
+
+type WeeklyResetEvent = {
+  fullCredits: number;
+  balanceCredits: number;
+  resetAtMs: number;
+  windowMs: number;
+};
+
+function totalWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[]): number {
+  return accounts.reduce((sum, account) => sum + account.balanceCredits, 0);
+}
+
+function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], amountCredits: number): void {
+  let remainingToConsume = amountCredits;
+  const spendOrder = [...accounts].sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  for (const account of spendOrder) {
+    if (remainingToConsume <= 0) {
+      return;
+    }
+
+    const consumed = Math.min(account.balanceCredits, remainingToConsume);
+    account.balanceCredits -= consumed;
+    remainingToConsume -= consumed;
+  }
+}
+
+function buildEmptyWeeklyPoolProjection(
+  accounts: WeeklyPoolAccount[],
+  burnRateCreditsPerMs: number,
+  nowMs: number,
+): WeeklyPoolProjection {
+  const resetEvents = accounts
+    .filter((account) => account.resetAtMs > nowMs)
+    .map((account) => ({
+      fullCredits: account.fullCredits,
+      resetAtMs: account.resetAtMs,
+    }))
+    .sort((a, b) => a.resetAtMs - b.resetAtMs);
+
+  if (resetEvents.length === 0) {
+    return {
+      burnRateCreditsPerMs,
+      projectedShortfallCredits: 0,
+      projectedDepletionHours: 0,
+      projectedMinimumRemainingCredits: 0,
+      firstReplenishmentWaitMs: 0,
+    };
+  }
+
+  let cursorMs = nowMs;
+  let balanceCredits = 0;
+  let minimumRemainingCredits = 0;
+  let minimumRemainingAtMs = resetEvents[0].resetAtMs;
+
+  for (const event of resetEvents) {
+    const intervalMs = event.resetAtMs - cursorMs;
+    balanceCredits -= burnRateCreditsPerMs * intervalMs;
+    if (balanceCredits < minimumRemainingCredits) {
+      minimumRemainingCredits = balanceCredits;
+      minimumRemainingAtMs = event.resetAtMs;
+    }
+    balanceCredits += event.fullCredits;
+    cursorMs = event.resetAtMs;
+  }
+
+  return {
+    burnRateCreditsPerMs,
+    projectedShortfallCredits: Math.max(0, -minimumRemainingCredits),
+    projectedDepletionHours: 0,
+    projectedMinimumRemainingCredits: 0,
+    firstReplenishmentWaitMs: Math.max(0, minimumRemainingAtMs - nowMs),
+  };
+}
+
+function buildWeeklyPoolProjection(accounts: WeeklyPoolAccount[], nowMs: number): WeeklyPoolProjection | null {
+  const totalRemainingCredits = accounts.reduce((sum, account) => sum + account.remainingCredits, 0);
+  const burnRateCreditsPerMs = accounts.reduce((sum, account) => {
+    const usedCredits = Math.max(0, account.fullCredits - account.remainingCredits);
+    const windowStartMs = account.resetAtMs - account.windowMs;
+    const elapsedMs = nowMs - windowStartMs;
+    if (usedCredits <= 0 || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+      return sum;
+    }
+    return sum + usedCredits / elapsedMs;
+  }, 0);
+  if (burnRateCreditsPerMs <= 0) {
+    return null;
+  }
+
+  if (totalRemainingCredits <= 0) {
+    return buildEmptyWeeklyPoolProjection(accounts, burnRateCreditsPerMs, nowMs);
+  }
+
+  const hasFutureReset = accounts.some((account) => account.resetAtMs > nowMs);
+  if (!hasFutureReset) {
+    return {
+      burnRateCreditsPerMs,
+      projectedShortfallCredits: 0,
+      projectedDepletionHours: null,
+      projectedMinimumRemainingCredits: totalRemainingCredits,
+      firstReplenishmentWaitMs: null,
+    };
+  }
+
+  const simulationAccounts: WeeklyPoolSimulationAccount[] = accounts.map((account) => ({
+    ...account,
+    balanceCredits: account.remainingCredits,
+  }));
+  const resetEvents: WeeklyResetEvent[] = simulationAccounts.filter((account) => account.resetAtMs > nowMs);
+
+  let cursorMs = nowMs;
+  let balanceCredits = totalRemainingCredits;
+  let minimumRemainingCredits = totalRemainingCredits;
+  const longestWindowMs = Math.max(...accounts.map((account) => account.windowMs));
+  const horizonMs = nowMs + longestWindowMs * 2;
+
+  while (cursorMs < horizonMs) {
+    resetEvents.sort((a, b) => a.resetAtMs - b.resetAtMs);
+    const event = resetEvents[0];
+    const nextEventAtMs = Math.min(event.resetAtMs, horizonMs);
+    const intervalMs = nextEventAtMs - cursorMs;
+    const intervalBurnCredits = burnRateCreditsPerMs * intervalMs;
+    if (intervalBurnCredits > balanceCredits) {
+      const projectedShortfallCredits = intervalBurnCredits - balanceCredits;
+      return {
+        burnRateCreditsPerMs,
+        projectedShortfallCredits,
+        projectedDepletionHours: (cursorMs - nowMs + balanceCredits / burnRateCreditsPerMs) / 3_600_000,
+        projectedMinimumRemainingCredits: 0,
+        firstReplenishmentWaitMs: nextEventAtMs - nowMs,
+      };
+    }
+
+    consumeWeeklyBalanceCredits(simulationAccounts, intervalBurnCredits);
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
+    minimumRemainingCredits = Math.min(minimumRemainingCredits, balanceCredits);
+    cursorMs = nextEventAtMs;
+    if (cursorMs >= horizonMs) {
+      break;
+    }
+
+    event.balanceCredits = event.fullCredits;
+    event.resetAtMs += event.windowMs;
+    balanceCredits = totalWeeklyBalanceCredits(simulationAccounts);
+  }
+
+  return {
+    burnRateCreditsPerMs,
+    projectedShortfallCredits: 0,
+    projectedDepletionHours: null,
+    projectedMinimumRemainingCredits: minimumRemainingCredits,
+    firstReplenishmentWaitMs: null,
+  };
+}
+
+function advanceWeeklyResetAt(resetAtMs: number, windowMs: number, nowMs: number): number {
+  if (!Number.isFinite(resetAtMs) || !isPositiveFinite(windowMs) || !Number.isFinite(nowMs)) {
+    return resetAtMs;
+  }
+  if (resetAtMs > nowMs) {
+    return resetAtMs;
+  }
+  const missedWindows = Math.floor((nowMs - resetAtMs) / windowMs) + 1;
+  return resetAtMs + missedWindows * windowMs;
+}
+
+export function buildWeeklyCreditPace(
+  accounts: AccountSummary[],
+  now: Date = new Date(),
+): WeeklyCreditPace | null {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    return null;
+  }
+
+  let totalFullCredits = 0;
+  let totalActualRemainingCredits = 0;
+  let totalExpectedRemainingCredits = 0;
+  let accountCount = 0;
+  const weeklyAccounts: WeeklyPoolAccount[] = [];
+
+  for (const account of accounts) {
+    const fullCredits = account.capacityCreditsSecondary;
+    const remainingCredits = account.remainingCreditsSecondary;
+    const resetAtMs = account.resetAtSecondary ? Date.parse(account.resetAtSecondary) : Number.NaN;
+    const windowMinutes = account.windowMinutesSecondary;
+
+    if (
+      !isPositiveFinite(fullCredits) ||
+      !isNonNegativeFinite(remainingCredits) ||
+      !Number.isFinite(resetAtMs) ||
+      !isPositiveFinite(windowMinutes)
+    ) {
+      continue;
+    }
+
+    const windowMs = windowMinutes * 60_000;
+    const effectiveResetAtMs = advanceWeeklyResetAt(resetAtMs, windowMs, nowMs);
+    const timeLeftMs = clamp(effectiveResetAtMs - nowMs, 0, windowMs);
+    const expectedRemainingCredits = fullCredits * (timeLeftMs / windowMs);
+    const actualRemainingCredits = clamp(remainingCredits, 0, fullCredits);
+
+    totalFullCredits += fullCredits;
+    totalActualRemainingCredits += actualRemainingCredits;
+    totalExpectedRemainingCredits += expectedRemainingCredits;
+    accountCount += 1;
+    weeklyAccounts.push({
+      fullCredits,
+      remainingCredits: actualRemainingCredits,
+      resetAtMs: effectiveResetAtMs,
+      windowMs,
+    });
+  }
+
+  if (accountCount === 0 || totalFullCredits <= 0) {
+    return null;
+  }
+
+  const actualUsedPercent = (100 * (totalFullCredits - totalActualRemainingCredits)) / totalFullCredits;
+  const scheduledUsedPercent = (100 * (totalFullCredits - totalExpectedRemainingCredits)) / totalFullCredits;
+  const deltaPercent = actualUsedPercent - scheduledUsedPercent;
+  const scheduleGapCredits = Math.max(0, totalExpectedRemainingCredits - totalActualRemainingCredits);
+  const scheduledBurnRateCreditsPerHour = weeklyAccounts.reduce(
+    (sum, account) => sum + (account.fullCredits / account.windowMs) * 3_600_000,
+    0,
+  );
+  const projection = buildWeeklyPoolProjection(weeklyAccounts, nowMs);
+  const projectedShortfallCredits = projection?.projectedShortfallCredits ?? 0;
+  const pauseForBreakEvenHours =
+    projection && projectedShortfallCredits > 0 && projection.burnRateCreditsPerMs > 0
+      ? projectedShortfallCredits / projection.burnRateCreditsPerMs / 3_600_000
+      : null;
+  const paceMultiplier =
+    projection && projectedShortfallCredits > 0 && projection.burnRateCreditsPerMs > 0 && scheduledBurnRateCreditsPerHour > 0
+      ? (projection.burnRateCreditsPerMs * 3_600_000) / scheduledBurnRateCreditsPerHour
+      : null;
+  const throttleToPercent =
+    projection && projectedShortfallCredits > 0 && projection.firstReplenishmentWaitMs && projection.burnRateCreditsPerMs > 0
+      ? clamp(
+          ((projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs - projectedShortfallCredits) /
+            (projection.firstReplenishmentWaitMs * projection.burnRateCreditsPerMs)) *
+            100,
+          0,
+          100,
+        )
+      : null;
+  const reduceByPercent = throttleToPercent != null ? 100 - throttleToPercent : null;
+  const proAccountEquivalentToCoverOverPlan =
+    projectedShortfallCredits > 0 ? projectedShortfallCredits / PRO_WEEKLY_CAPACITY_CREDITS : null;
+  const proAccountsToCoverOverPlan =
+    projectedShortfallCredits > 0 ? Math.ceil(projectedShortfallCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null;
+
+  return {
+    totalFullCredits,
+    totalActualRemainingCredits,
+    totalExpectedRemainingCredits,
+    actualUsedPercent,
+    scheduledUsedPercent,
+    deltaPercent,
+    scheduleGapCredits,
+    overPlanCredits: scheduleGapCredits,
+    projectedShortfallCredits,
+    pauseForBreakEvenHours,
+    paceMultiplier,
+    throttleToPercent,
+    reduceByPercent,
+    proAccountEquivalentToCoverOverPlan,
+    proAccountsToCoverOverPlan,
+    projectedDepletionHours: projection?.projectedDepletionHours ?? null,
+    projectedMinimumRemainingCredits: projection?.projectedMinimumRemainingCredits ?? null,
+    forecastBurnRateCreditsPerHour: projection ? projection.burnRateCreditsPerMs * 3_600_000 : null,
+    scheduledBurnRateCreditsPerHour,
+    status: weeklyCreditPaceStatus(deltaPercent, projectedShortfallCredits),
+    accountCount,
+    staleAccountCount: 0,
+    inactiveAccountCount: 0,
+    confidence: "low",
+  };
+}
+
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
-  isDark = false,
+  optionsOrIsDark: DashboardViewOptions | boolean = false,
 ): DashboardView {
+  const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
   const metrics = overview.summary.metrics;
@@ -194,11 +716,23 @@ export function buildDashboardView(
     timeframeHours <= 24
       ? `Avg/hr ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours)))}`
       : `Avg/day ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays)))}`;
-  const costMeta =
+  const costAverage =
     timeframeHours <= 24
       ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
       : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
+  const costMeta =
+    metrics?.cachedInputTokens && metrics.cachedInputTokens > 0
+      ? `${costAverage} · API estimate, ${formatCompactNumber(metrics.cachedInputTokens)} cached`
+      : `${costAverage} · API estimate`;
   const trends = overview.trends;
+  const primaryBurnLabel = formatBurnWindowLabel("primary", overview.summary.primaryWindow.windowMinutes);
+  const secondaryBurnLabel = formatBurnWindowLabel("secondary", overview.summary.secondaryWindow?.windowMinutes);
+  const primaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "primary");
+  const secondaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "secondary");
+  const combinedBurnEquivalent =
+    (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0) > 0
+      ? (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0)
+      : null;
 
   const stats: DashboardStat[] = [
     {
@@ -218,24 +752,36 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[1],
     },
     {
-      label: `Cost (${timeframeLabel})`,
+      label: `Est. API Cost (${timeframeLabel})`,
       value: formatCurrency(cost),
       meta: costMeta,
       icon: DollarSign,
       trend: trendPointsToValues(trends.cost),
       trendColor: TREND_COLORS[2],
     },
-    {
-      label: `Error rate (${timeframeLabel})`,
-      value: formatRate(metrics?.errorRate ?? null),
-      meta: metrics?.topError
-        ? `Top: ${metrics.topError}`
-        : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
-      icon: AlertTriangle,
-      trend: trendPointsToValues(trends.errorRate),
-      trendColor: TREND_COLORS[3],
-    },
   ];
+
+  if (showAccountBurnrate) {
+    stats.push({
+      label: `Account burn projection (${primaryBurnLabel}/${secondaryBurnLabel})`,
+      value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
+      meta: `Projected account-equivalents: ${formatBurnEquivalent(primaryBurnEquivalent)}/${primaryBurnLabel} · ${formatBurnEquivalent(secondaryBurnEquivalent)}/${secondaryBurnLabel}`,
+      icon: Flame,
+      trend: buildBurnTrend(trends.tokens, combinedBurnEquivalent),
+      trendColor: TREND_COLORS[3],
+    });
+  }
+
+  stats.push({
+    label: `Error rate (${timeframeLabel})`,
+    value: formatRate(metrics?.errorRate ?? null),
+    meta: metrics?.topError
+      ? `Top: ${metrics.topError}`
+      : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
+    icon: AlertTriangle,
+    trend: trendPointsToValues(trends.errorRate),
+    trendColor: TREND_COLORS[4],
+  });
 
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);
@@ -252,5 +798,9 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(overview.depletionSecondary),
+    weeklyCreditPace:
+      overview.weeklyCreditPace !== undefined
+        ? overview.weeklyCreditPace
+        : buildWeeklyCreditPace(overview.accounts),
   };
 }

@@ -24,6 +24,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
+import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
@@ -70,6 +71,46 @@ export type RecentRequestsTableProps = {
   onOffsetChange: (offset: number) => void;
 };
 
+function formatRequestCostSummary(request: RequestLog | null): string | null {
+  if (!request || request.status !== "ok") {
+    return null;
+  }
+
+  const totalUsd = request.costBreakdown?.totalUsd ?? request.costUsd;
+  const segments: string[] = [];
+  const cachedInputTokens = request.cachedInputTokens ?? 0;
+  const nonCachedInputTokens =
+    request.inputTokens == null ? null : Math.max(0, request.inputTokens - cachedInputTokens);
+
+  if (nonCachedInputTokens != null && request.costBreakdown?.inputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(nonCachedInputTokens)} Input (${formatCurrency(request.costBreakdown.inputUsd)})`,
+    );
+  }
+
+  if (request.cachedInputTokens != null && request.costBreakdown?.cachedInputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(request.cachedInputTokens)} Cached (${formatCurrency(request.costBreakdown.cachedInputUsd)})`,
+    );
+  }
+
+  if (request.outputTokens != null && request.costBreakdown?.outputUsd != null) {
+    segments.push(
+      `${formatCompactNumber(request.outputTokens)} Output (${formatCurrency(request.costBreakdown.outputUsd)})`,
+    );
+  }
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  if (totalUsd == null) {
+    return segments.join(" + ");
+  }
+
+  return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
+}
+
 export function RecentRequestsTable({
   requests,
   accounts,
@@ -82,6 +123,7 @@ export function RecentRequestsTable({
 }: RecentRequestsTableProps) {
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
+  const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest);
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -129,7 +171,7 @@ export function RecentRequestsTable({
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
-              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
+              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Details</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -244,7 +286,15 @@ export function RecentRequestsTable({
                         </Button>
                       </div>
                     ) : (
-                      <span className="text-xs text-muted-foreground">-</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        onClick={() => setSelectedRequest(request)}
+                      >
+                        View Details
+                      </Button>
                     )}
                   </TableCell>
                 </TableRow>
@@ -291,6 +341,19 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Error Code" value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
             </div>
+
+            <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />
+
+            {selectedRequestCostSummary ? (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Cost</h3>
+                <div className="rounded-md bg-muted/50 p-3">
+                  <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                    {selectedRequestCostSummary}
+                  </p>
+                </div>
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <div className="flex items-center gap-2">

@@ -1,4 +1,4 @@
-import { Pause, Play, RefreshCw, Trash2 } from "lucide-react";
+import { Download, Pause, Play, RefreshCw, Trash2, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { AccountSummary } from "@/features/accounts/schemas";
@@ -10,6 +10,9 @@ export type AccountActionsProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
+  onExport: (accountId: string) => void;
+  onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
+  onExportOpenCodeAuth: (accountId: string) => void;
 };
 
 export function AccountActions({
@@ -19,6 +22,9 @@ export function AccountActions({
   onResume,
   onDelete,
   onReauth,
+  onExport,
+  onLimitWarmupChange,
+  onExportOpenCodeAuth,
 }: AccountActionsProps) {
   return (
     <div className="flex flex-wrap gap-2 border-t pt-4">
@@ -60,6 +66,42 @@ export function AccountActions({
           Re-authenticate
         </Button>
       ) : null}
+
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 gap-1.5 text-xs"
+        onClick={() => onLimitWarmupChange(account.accountId, !account.limitWarmupEnabled)}
+        disabled={busy}
+      >
+        <Zap className="h-3.5 w-3.5" />
+        {account.limitWarmupEnabled ? "Disable warm-up" : "Enable warm-up"}
+      </Button>
+
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 gap-1.5 text-xs"
+        onClick={() => onExport(account.accountId)}
+        disabled={busy}
+      >
+        <Download className="h-3.5 w-3.5" />
+        Export
+      </Button>
+
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 gap-1.5 text-xs"
+        onClick={() => onExportOpenCodeAuth(account.accountId)}
+        disabled={busy}
+      >
+        <Download className="h-3.5 w-3.5" />
+        Export OpenCode auth
+      </Button>
 
       <Button
         type="button"

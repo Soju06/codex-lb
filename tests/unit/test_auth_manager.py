@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
 from typing import cast
@@ -68,6 +70,82 @@ class _DummyRepo:
             "chatgpt_account_id": chatgpt_account_id,
         }
         return True
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_detached_refresh_owns_session_on_caller_cancel(monkeypatch):
+    """Regression: a client disconnect during a forced token refresh must not
+    strand a background-pool connection. The shielded refresh task must write
+    via its OWN session (from refresh_repo_factory), never the request-scoped
+    repo that the cancelled caller closes. Pre-fix this leaked one pooled
+    connection per disconnect-during-refresh (codex-lb pool-exhaustion spiral).
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        started.set()
+        await release.wait()
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id="acc_disconnect",
+            plan_type="plus",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    request_repo = _DummyRepo()
+    owned_repo = _DummyRepo()
+    scope_state = {"opened": False, "closed": False}
+
+    @asynccontextmanager
+    async def _refresh_scope() -> AsyncIterator[AccountsRepositoryPort]:
+        scope_state["opened"] = True
+        try:
+            yield cast(AccountsRepositoryPort, owned_repo)
+        finally:
+            scope_state["closed"] = True
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_disconnect",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    manager = AuthManager(
+        cast(AccountsRepositoryPort, request_repo),
+        refresh_repo_factory=_refresh_scope,
+    )
+
+    caller = asyncio.create_task(manager.ensure_fresh(account, force=True))
+    await started.wait()  # refresh is in-flight
+    caller.cancel()  # simulate the client disconnecting mid-refresh
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    # The shielded refresh task survives the caller's cancellation; let it finish.
+    release.set()
+    for _ in range(200):
+        if owned_repo.tokens_payload is not None and scope_state["closed"]:
+            break
+        await asyncio.sleep(0.005)
+
+    # The refresh wrote through its OWN session and never the request-scoped one.
+    assert owned_repo.tokens_payload is not None
+    assert owned_repo.tokens_payload["account_id"] == "acc_disconnect"
+    assert request_repo.tokens_payload is None
+    # The owned session was opened and deterministically closed (connection returned).
+    assert scope_state["opened"] is True
+    assert scope_state["closed"] is True
 
 
 @pytest.mark.asyncio
@@ -256,6 +334,47 @@ async def test_ensure_fresh_reuses_recent_failure_without_reissuing_refresh(monk
         await manager.ensure_fresh(account, force=True)
 
     assert refresh_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_does_not_reuse_recent_transport_failure(monkeypatch):
+    refresh_calls = 0
+
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise RefreshError("transport_error", "temporary dns failure", False, transport_error=True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+    )
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_transport_fail_cache",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError):
+        await manager.ensure_fresh(account, force=True)
+    await asyncio.sleep(0)
+    with pytest.raises(RefreshError):
+        await manager.ensure_fresh(account, force=True)
+
+    assert refresh_calls == 2
 
 
 @pytest.mark.asyncio

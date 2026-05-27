@@ -28,6 +28,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
           {
@@ -36,6 +37,7 @@ describe("AccountList", () => {
             displayName: "Secondary",
             planType: "pro",
             status: "paused",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
         ]}
@@ -69,6 +71,7 @@ describe("AccountList", () => {
             displayName: "Hidden Early",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: 18,
@@ -85,6 +88,7 @@ describe("AccountList", () => {
             displayName: "Visible Early",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 82,
               secondaryRemainingPercent: 73,
@@ -119,6 +123,7 @@ describe("AccountList", () => {
             displayName: "Stale",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: 18,
@@ -135,6 +140,7 @@ describe("AccountList", () => {
             displayName: "Fresh",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 82,
               secondaryRemainingPercent: 73,
@@ -169,6 +175,7 @@ describe("AccountList", () => {
             displayName: "Late",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 42,
               secondaryRemainingPercent: null,
@@ -185,6 +192,7 @@ describe("AccountList", () => {
             displayName: "Early",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             usage: {
               primaryRemainingPercent: 82,
               secondaryRemainingPercent: null,
@@ -221,6 +229,7 @@ describe("AccountList", () => {
             displayName: "Primary",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
         ]}
@@ -245,6 +254,7 @@ describe("AccountList", () => {
             displayName: "Duplicate A",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
           {
@@ -253,6 +263,7 @@ describe("AccountList", () => {
             displayName: "Duplicate B",
             planType: "plus",
             status: "active",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
           {
@@ -261,6 +272,7 @@ describe("AccountList", () => {
             displayName: "Unique",
             planType: "pro",
             status: "active",
+            limitWarmupEnabled: false,
             additionalQuotas: [],
           },
         ]}

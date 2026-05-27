@@ -70,6 +70,7 @@ describe("ApiDetail", () => {
 		expect(screen.getByRole("heading", { name: "Analytics Key" })).toBeInTheDocument();
 		expect(screen.getByText("Tokens")).toBeInTheDocument();
 		expect(screen.getByText("Cost")).toBeInTheDocument();
+		expect(screen.getByTestId("api-trend-legend")).toBeInTheDocument();
 		expect(screen.getByRole("switch")).toBeInTheDocument();
 		expect(screen.getByText("Key Details")).toBeInTheDocument();
 	});
@@ -96,6 +97,78 @@ describe("ApiDetail", () => {
 		expect(screen.getByText(/45K cached/)).toBeInTheDocument();
 		expect(screen.getByText(/350 req/)).toBeInTheDocument();
 		expect(screen.getByText(/\$2.47/)).toBeInTheDocument();
+	});
+
+	it("renders unknown and deleted account buckets distinctly in the cost donut", () => {
+		renderApiDetail({
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [
+					{ accountId: null, email: null, costUsd: 0.11, isDeleted: false },
+					{ accountId: null, email: null, costUsd: 0.29, isDeleted: true },
+				],
+			}),
+		});
+
+		expect(screen.getByText("Unknown Account")).toBeInTheDocument();
+		expect(screen.getByText("Deleted Account")).toBeInTheDocument();
+	});
+
+	it("renders the donut and trend sections inside a shared usage panel", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.12 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1200 }],
+			}),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const usagePanel = screen.getByTestId("api-usage-panel");
+		expect(usagePanel).toContainElement(screen.getByTestId("account-cost-panel"));
+		expect(usagePanel).toContainElement(screen.getByTestId("api-trend-panel"));
+		expect(screen.getByTestId("api-trend-panel")).toHaveClass("lg:border-l");
+	});
+
+	it("does not render an empty trend pane when only donut data is available", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({ cost: [], tokens: [] }),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const usagePanel = screen.getByTestId("api-usage-panel");
+		expect(usagePanel).toContainElement(screen.getByTestId("account-cost-panel"));
+		expect(screen.queryByTestId("api-trend-panel")).not.toBeInTheDocument();
+		expect(screen.queryByText("Usage Trend")).not.toBeInTheDocument();
+	});
+
+	it("lets the donut use the full usage panel width when no trend data is available", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({ cost: [], tokens: [] }),
+			usage7Day: createApiKeyUsage7Day({
+				accountCosts: [{ accountId: "acc-1", email: "a@example.com", costUsd: 0.12, isDeleted: false }],
+				totalCostUsd: 0.12,
+			}),
+		});
+
+		const donutWrapper = screen.getByTestId("account-cost-panel").parentElement;
+		expect(donutWrapper).not.toHaveClass("lg:w-[25%]");
+		expect(donutWrapper).not.toHaveClass("lg:pr-4");
+	});
+
+	it("names the accumulated trend switch for assistive technology", () => {
+		renderApiDetail({
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.12 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1200 }],
+			}),
+		});
+
+		expect(screen.getByRole("switch", { name: "Accumulated" })).toBeInTheDocument();
 	});
 
 	it("does not fall back to list summary usage while the 7 day query is loading", () => {
@@ -220,7 +293,13 @@ describe("ApiDetail", () => {
 
 	it("disables all mutation actions while busy", async () => {
 		const user = userEvent.setup();
-		renderApiDetail({ busy: true });
+		renderApiDetail({
+			busy: true,
+			trends: createApiKeyTrends({
+				cost: [{ t: "2026-01-01T00:00:00Z", v: 0.2 }],
+				tokens: [{ t: "2026-01-01T00:00:00Z", v: 1500 }],
+			}),
+		});
 
 		expect(screen.getByRole("button", { name: "Actions" })).toBeDisabled();
 		expect(screen.getByRole("button", { name: "Disable" })).toBeDisabled();

@@ -1,0 +1,81 @@
+name: Codex review labels
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  actions: write
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: read
+  statuses: read
+
+concurrency:
+  group: codex-review-labels-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.head_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync-pr:
+    name: Sync Codex labels for PR
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        github.event_name == 'pull_request_target' ||
+        github.event_name == 'pull_request_review' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+      }}
+
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then
+            echo ".github/scripts/sync_codex_ok_labels.py is not available on the default branch yet; skipping bootstrap run"
+            exit 0
+          fi
+          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --pr "$PR_NUMBER" --apply --tolerate-write-permission-errors
+
+  sync-after-ci:
+    name: Sync Codex labels after CI
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'pull_request'
+      }}
+
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then
+            echo ".github/scripts/sync_codex_ok_labels.py is not available on the default branch yet; skipping bootstrap run"
+            exit 0
+          fi
+          python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --all-open --apply --tolerate-write-permission-errors --tolerate-read-errors

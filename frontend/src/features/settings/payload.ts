@@ -14,6 +14,12 @@ export function buildSettingsUpdateRequest(
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+    limitWarmupEnabled: settings.limitWarmupEnabled,
+    limitWarmupWindows: settings.limitWarmupWindows,
+    limitWarmupModel: settings.limitWarmupModel,
+    limitWarmupPrompt: settings.limitWarmupPrompt,
+    limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
+    limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     ...patch,
   };
 }

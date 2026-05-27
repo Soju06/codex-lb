@@ -220,6 +220,162 @@ async def test_backend_codex_models_filters_disallowed_models(async_client):
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility",
+            "allowedModels": ["gpt-5.2"],
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "list"
+    assert entries["gpt-5.3-codex"]["visibility"] == "hide"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_visibility_allowlist_respects_enforced_model(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility-enforced",
+            "allowedModels": ["gpt-5.2", "gpt-5.3-codex"],
+            "applyToCodexModel": True,
+            "enforcedModel": "gpt-5.3-codex",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.3-codex"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_preserves_original_flow_without_allowlist(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "codex-visibility-no-allowlist",
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.3-codex"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_supported_in_api_false_models(async_client):
     registry = get_model_registry()
     models = [
@@ -292,7 +448,9 @@ async def test_model_context_window_override(async_client, monkeypatch):
     resp_v1 = await async_client.get("/v1/models")
     assert resp_v1.status_code == 200
     v1_entry = next(m for m in resp_v1.json()["data"] if m["id"] == "gpt-5.4")
-    assert v1_entry["metadata"]["context_window"] == 515000
+    metadata = v1_entry["metadata"]
+    assert metadata["context_window"] == 515000
+    assert metadata["input_context_window"] == 272000
 
 
 @pytest.mark.asyncio
@@ -305,3 +463,57 @@ async def test_model_context_window_no_override(async_client):
     assert resp.status_code == 200
     entry = next(m for m in resp.json()["models"] if m["slug"] == "gpt-5.4")
     assert entry["context_window"] == 272000
+
+
+def _raw_with_max_context_window(max_context_window: int) -> dict[str, JsonValue]:
+    return {
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "max_context_window": max_context_window,
+        "auto_compact_token_limit": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v1_models_reports_backend_context_window(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(1_000_000)),
+        _make_upstream_model("gpt-5.5", raw=_raw_with_max_context_window(272_000)),
+        _make_upstream_model("gpt-5.4-mini", raw=_raw_with_max_context_window(272_000)),
+        _make_upstream_model("gpt-5.3-codex", raw=_raw_with_max_context_window(272_000)),
+    ]
+    await registry.update({"pro": models})
+
+    resp_v1 = await async_client.get("/v1/models")
+    assert resp_v1.status_code == 200
+    metadata_by_id = {item["id"]: item["metadata"] for item in resp_v1.json()["data"]}
+
+    for slug in ("gpt-5.4", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"):
+        metadata = metadata_by_id[slug]
+        assert metadata["context_window"] == 272_000
+        assert metadata["input_context_window"] == 272_000
+        assert metadata["max_output_tokens"] == 128_000
+
+    resp_codex = await async_client.get("/backend-api/codex/models")
+    assert resp_codex.status_code == 200
+    codex_by_slug = {item["slug"]: item for item in resp_codex.json()["models"]}
+    assert codex_by_slug["gpt-5.4"]["context_window"] == 272_000
+    assert codex_by_slug["gpt-5.4"]["max_context_window"] == 1_000_000
+    assert codex_by_slug["gpt-5.5"]["context_window"] == 272_000
+    assert codex_by_slug["gpt-5.5"]["max_context_window"] == 272_000
+
+
+@pytest.mark.asyncio
+async def test_v1_models_does_not_promote_raw_max_context_window(async_client):
+    registry = get_model_registry()
+    models = [_make_upstream_model("gpt-custom", raw=_raw_with_max_context_window(900_000))]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/v1/models")
+    assert resp.status_code == 200
+    entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-custom")
+
+    assert entry["metadata"]["context_window"] == 272_000
+    assert entry["metadata"]["input_context_window"] == 272_000
+    assert entry["metadata"].get("max_output_tokens") is None

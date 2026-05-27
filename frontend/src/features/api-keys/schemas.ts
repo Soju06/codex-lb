@@ -38,6 +38,7 @@ export const ApiKeySchema = z.object({
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
+  applyToCodexModel: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
@@ -55,11 +56,15 @@ export const ApiKeySchema = z.object({
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
   usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
+  pooledRemainingPercentPrimary: z.number().nullable().default(null),
+  pooledRemainingPercentSecondary: z.number().nullable().default(null),
+  pooledCapacityCreditsPrimary: z.number().default(0),
 });
 
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
+  applyToCodexModel: z.boolean().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
@@ -71,6 +76,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
 });
 
@@ -81,6 +87,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
+  applyToCodexModel: z.boolean().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])

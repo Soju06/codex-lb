@@ -16,6 +16,8 @@ _DEFAULT_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 @dataclass(slots=True)
 class AdmissionLease:
     _semaphore: asyncio.Semaphore | None
+    stage: str = "disabled"
+    request_id: str | None = None
     _released: bool = False
 
     def release(self) -> None:
@@ -35,7 +37,12 @@ class AdmissionLease:
             return
         self._released = True
         self._semaphore.release()
-        logger.warning("AdmissionLease was garbage-collected without release() — this indicates a bug in the caller")
+        logger.warning(
+            "AdmissionLease was garbage-collected without release() — this indicates a bug in the caller "
+            "stage=%s request_id=%s",
+            self.stage,
+            self.request_id,
+        )
 
 
 @dataclass(slots=True)
@@ -72,7 +79,7 @@ class WorkAdmissionController:
 
     async def _acquire(self, gate: _AdmissionGate | None, *, stage: str) -> AdmissionLease:
         if gate is None:
-            return AdmissionLease(None)
+            return AdmissionLease(None, stage=stage, request_id=get_request_id())
         try:
             await asyncio.wait_for(gate.semaphore.acquire(), timeout=gate.wait_timeout_seconds)
         except asyncio.TimeoutError:
@@ -88,7 +95,7 @@ class WorkAdmissionController:
                 message,
             )
             raise ProxyResponseError(429, local_overload_error(message))
-        return AdmissionLease(gate.semaphore)
+        return AdmissionLease(gate.semaphore, stage=stage, request_id=get_request_id())
 
 
 def _make_gate(limit: int, wait_timeout_seconds: float) -> _AdmissionGate | None:

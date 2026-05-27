@@ -14,6 +14,7 @@ import {
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
 }
 
 /**

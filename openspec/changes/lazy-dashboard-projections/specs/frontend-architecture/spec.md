@@ -1,3 +1,5 @@
+## ADDED Requirements
+
 ### Requirement: Dashboard projections load after the primary dashboard data
 
 The dashboard SPA SHALL render primary dashboard content from `GET /api/dashboard/overview`

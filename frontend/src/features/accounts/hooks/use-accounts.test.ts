@@ -45,6 +45,7 @@ describe("useAccounts", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     });
   });
 
@@ -93,6 +94,7 @@ describe("useAccounts", () => {
       expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-export");
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     } finally {
       clickSpy.mockRestore();
       Object.defineProperty(URL, "createObjectURL", {

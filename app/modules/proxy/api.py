@@ -75,7 +75,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
-from app.core.types import JsonObject, JsonValue
+from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (

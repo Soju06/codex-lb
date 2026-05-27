@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowRightLeft, Tag } from "lucide-react";
+import { Activity, ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
 import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
+import { getRuntimeVersion } from "@/features/runtime/api";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -38,6 +39,12 @@ export function StatusBar() {
     queryKey: ["settings", "detail"],
     queryFn: getSettings,
   });
+  const { data: runtimeVersion } = useQuery({
+    queryKey: ["runtime", "version"],
+    queryFn: getRuntimeVersion,
+    retry: false,
+    staleTime: 6 * 60 * 60 * 1000,
+  });
   const lastSync = formatTimeLong(lastSyncAt);
   const [isLive, setIsLive] = useState(false);
   useEffect(() => {
@@ -52,6 +59,12 @@ export function StatusBar() {
   const routingLabel = settings
     ? getRoutingLabel(settings.routingStrategy, settings.stickyThreadsEnabled, settings.preferEarlierResetAccounts)
     : "—";
+  const currentVersion = runtimeVersion?.currentVersion ?? __APP_VERSION__;
+  const latestVersion = runtimeVersion?.latestVersion ?? null;
+  const showUpdateAvailable = runtimeVersion?.updateAvailable === true && latestVersion;
+  const updateLabel = latestVersion
+    ? `New version available: ${latestVersion}. Open release notes.`
+    : "New version available. Open release notes.";
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]">
@@ -71,7 +84,19 @@ export function StatusBar() {
           </span>
           <span className="inline-flex items-center gap-1.5">
             <Tag className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">Version:</span> {__APP_VERSION__}
+            <span className="font-medium">Version:</span> {currentVersion}
+            {showUpdateAvailable ? (
+              <a
+                aria-label={updateLabel}
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full text-amber-500 transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 focus-visible:ring-offset-2"
+                href={runtimeVersion.releaseUrl}
+                rel="noreferrer"
+                target="_blank"
+                title={updateLabel}
+              >
+                <ArrowUpCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              </a>
+            ) : null}
           </span>
         </div>
         <a

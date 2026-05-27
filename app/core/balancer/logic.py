@@ -20,6 +20,8 @@ PERMANENT_FAILURE_CODES = {
     # returned a fresh token pair instead. Treat it as a permanent failure so
     # the account stops being routed to until it is re-authenticated.
     "token_expired": "Authentication token expired - re-login required",
+    "account_session_expired": "ChatGPT session ended - re-login required",
+    "account_auth_invalidated": "Authentication failed after token refresh - re-login required",
     "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
@@ -162,6 +164,7 @@ def select_account(
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
                 state.error_count = 0
                 state.reset_at = None
             else:
@@ -170,6 +173,7 @@ def select_account(
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
+                state.secondary_used_percent = 0.0
                 state.reset_at = None
             else:
                 continue

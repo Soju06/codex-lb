@@ -22,6 +22,7 @@ import {
   type AccountSummary,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { formatModelLabel, formatSlug } from "@/utils/formatters";
@@ -33,13 +34,14 @@ export function DashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
+  const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
-  const { resumeMutation } = useAccountMutations();
+  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
 
@@ -72,9 +74,15 @@ export function DashboardPage() {
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
           break;
+        case "warmup-toggle":
+          void limitWarmupMutation.mutateAsync({
+            accountId: account.accountId,
+            enabled: !account.limitWarmupEnabled,
+          });
+          break;
       }
     },
-    [navigate, resumeMutation],
+    [limitWarmupMutation, navigate, resumeMutation],
   );
 
   const overview = dashboardQuery.data;
@@ -84,8 +92,11 @@ export function DashboardPage() {
     if (!overview || !logPage) {
       return null;
     }
-    return buildDashboardView(overview, logPage.requests, isDark);
-  }, [overview, logPage, isDark]);
+    return buildDashboardView(overview, logPage.requests, {
+      isDark,
+      showAccountBurnrate,
+    });
+  }, [overview, logPage, isDark, showAccountBurnrate]);
 
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();

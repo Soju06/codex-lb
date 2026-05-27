@@ -15,6 +15,7 @@ from app.core.auth import (
     claims_from_auth,
     generate_unique_account_id,
     parse_auth_json,
+    token_expiry_epoch_ms,
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
@@ -31,11 +32,16 @@ from app.modules.accounts.schemas import (
     AccountAdditionalWindow,
     AccountExportResponse,
     AccountImportResponse,
+    AccountOpenCodeAuthExportAccount,
+    AccountOpenCodeAuthExportResponse,
     AccountProbeResponse,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
+    OpenCodeAuthJson,
+    OpenCodeOAuthAuth,
 )
+from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -69,10 +75,12 @@ class AccountsService:
         repo: AccountsRepository,
         usage_repo: UsageRepository | None = None,
         additional_usage_repo: AdditionalUsageRepository | AdditionalUsageRepositoryPort | None = None,
+        limit_warmup_repo: LimitWarmupRepository | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
         self._additional_usage_repo = additional_usage_repo
+        self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
 
@@ -85,6 +93,9 @@ class AccountsService:
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
         request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
+        limit_warmups_by_account = (
+            await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
+        )
         request_usage_by_account = {
             account_id: AccountRequestUsage(
                 request_count=row.request_count,
@@ -139,6 +150,7 @@ class AccountsService:
             secondary_usage=secondary_usage,
             request_usage_by_account=request_usage_by_account,
             additional_quotas_by_account=additional_quotas_by_account,
+            limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
         )
 
@@ -162,6 +174,31 @@ class AccountsService:
             primary=trend.primary if trend else [],
             secondary=trend.secondary if trend else [],
             secondary_scheduled=trend.secondary_scheduled if trend else [],
+        )
+
+    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+
+        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        expires = token_expiry_epoch_ms(access_token) or 0
+        return AccountOpenCodeAuthExportResponse(
+            filename=_opencode_auth_export_filename(account),
+            account=AccountOpenCodeAuthExportAccount(
+                account_id=account.id,
+                chatgpt_account_id=account.chatgpt_account_id,
+                email=account.email,
+            ),
+            auth_json=OpenCodeAuthJson(
+                openai=OpenCodeOAuthAuth(
+                    refresh=refresh_token,
+                    access=access_token,
+                    expires=expires,
+                    account_id=account.chatgpt_account_id,
+                ),
+            ),
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:
@@ -214,8 +251,11 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
-    async def delete_account(self, account_id: str) -> bool:
-        result = await self._repo.delete(account_id)
+    async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
+        return await self._repo.update_limit_warmup_enabled(account_id, enabled)
+
+    async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
+        result = await self._repo.delete(account_id, delete_history=delete_history)
         if result:
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
@@ -223,6 +263,12 @@ class AccountsService:
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
         return result
+
+    async def set_account_alias(self, account_id: str, alias: str | None) -> bool:
+        normalized = alias.strip() if isinstance(alias, str) else None
+        if normalized == "":
+            normalized = None
+        return await self._repo.update_alias(account_id, normalized)
 
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
         account = await self._repo.get_by_id(account_id)
@@ -358,3 +404,9 @@ class AccountsService:
                 exc,
             )
             return PROBE_NETWORK_FAILURE_STATUS
+
+
+def _opencode_auth_export_filename(account: Account) -> str:
+    source = account.email or account.id
+    safe = "".join(char if char.isalnum() or char in "._-" else "-" for char in source).strip("-._")
+    return f"opencode-auth-{safe or account.id}.json"

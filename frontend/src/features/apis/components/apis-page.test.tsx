@@ -142,4 +142,20 @@ describe("ApisPage", () => {
 		expect(apiKeysQuery.refetch).toHaveBeenCalledTimes(1);
 		expect(screen.queryByText("Create API Key")).not.toBeInTheDocument();
 	});
+
+	it("labels the legacy limit bar as API Limit", () => {
+		renderApisPage({
+			apiKeys: [
+				createApiKey({
+					pooledRemainingPercentPrimary: 67.5,
+					pooledRemainingPercentSecondary: 85,
+					pooledCapacityCreditsPrimary: 225,
+				}),
+			],
+		});
+
+		expect(screen.getByText("Pooled 5h")).toBeInTheDocument();
+		expect(screen.getByText("Pooled Weekly")).toBeInTheDocument();
+		expect(screen.getByText("API Limit")).toBeInTheDocument();
+	});
 });

@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import TracebackType
 
 import aiohttp
+import certifi
 from aiohttp_retry import RetryClient
 
 from app.core.config.settings import get_settings
@@ -35,6 +37,12 @@ _http_client: _ManagedHttpClient | None = None
 _http_client_lock = asyncio.Lock()
 _retired_http_clients: list[_ManagedHttpClient] = []
 _closing_http_clients: list[_ManagedHttpClient] = []
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
 
 
 class HttpClientLease:
@@ -66,6 +74,7 @@ async def _build_http_client() -> HttpClient:
     connector = aiohttp.TCPConnector(
         limit=settings.http_connector_limit,
         limit_per_host=settings.http_connector_limit_per_host,
+        ssl=_build_ssl_context(),
     )
     session = aiohttp.ClientSession(
         connector=connector,
@@ -76,6 +85,7 @@ async def _build_http_client() -> HttpClient:
         # Match Codex CLI's direct websocket transport by avoiding env proxies unless operators
         # explicitly opt in for websocket handshakes.
         websocket_session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=_build_ssl_context()),
             timeout=aiohttp.ClientTimeout(total=None),
             trust_env=settings.upstream_websocket_trust_env,
         )

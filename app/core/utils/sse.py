@@ -11,11 +11,14 @@ from app.core.utils.json_guards import is_json_dict
 type JsonPayload = Mapping[str, JsonValue] | ResponseFailedEvent
 
 SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
+CODEX_KEEPALIVE_FRAME = 'event: codex.keepalive\ndata: {"type":"codex.keepalive"}\n\n'
 
 
 async def inject_sse_keepalives(
     source: AsyncIterator[str],
     interval_seconds: float,
+    *,
+    keepalive_frame: str = SSE_KEEPALIVE_FRAME,
 ) -> AsyncIterator[str]:
     """Wrap an SSE event iterator and emit comment heartbeats on idle gaps.
 
@@ -46,7 +49,7 @@ async def inject_sse_keepalives(
                     timeout=interval_seconds,
                 )
             except asyncio.TimeoutError:
-                yield SSE_KEEPALIVE_FRAME
+                yield keepalive_frame
                 continue
             except StopAsyncIteration:
                 pending = None

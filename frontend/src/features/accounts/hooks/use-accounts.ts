@@ -4,11 +4,14 @@ import { toast } from "sonner";
 import {
   deleteAccount,
   exportAccount,
+  exportAccountOpenCodeAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  setAccountAlias,
+  updateAccountLimitWarmup,
 } from "@/features/accounts/api";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
@@ -57,8 +60,21 @@ export function useAccountMutations() {
     },
   });
 
+  const setAliasMutation = useMutation({
+    mutationFn: ({ accountId, alias }: { accountId: string; alias: string | null }) =>
+      setAccountAlias(accountId, alias),
+    onSuccess: () => {
+      toast.success("Account alias updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Alias update failed");
+    },
+  });
+
   const deleteMutation = useMutation({
-    mutationFn: deleteAccount,
+    mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
+      deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
       invalidateAccountRelatedQueries(queryClient);
@@ -87,7 +103,38 @@ export function useAccountMutations() {
     },
   });
 
-  return { importMutation, pauseMutation, resumeMutation, deleteMutation, exportMutation };
+  const limitWarmupMutation = useMutation({
+    mutationFn: ({ accountId, enabled }: { accountId: string; enabled: boolean }) =>
+      updateAccountLimitWarmup(accountId, enabled),
+    onSuccess: (data) => {
+      toast.success(data.enabled ? "Limit warm-up enabled" : "Limit warm-up disabled");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Limit warm-up update failed");
+    },
+  });
+
+  const exportOpenCodeAuthMutation = useMutation({
+    mutationFn: exportAccountOpenCodeAuth,
+    onSuccess: () => {
+      toast.success("OpenCode auth export generated");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
+  return {
+    importMutation,
+    pauseMutation,
+    resumeMutation,
+    setAliasMutation,
+    deleteMutation,
+    exportMutation,
+    limitWarmupMutation,
+    exportOpenCodeAuthMutation,
+  };
 }
 
 export function useAccountTrends(accountId: string | null) {

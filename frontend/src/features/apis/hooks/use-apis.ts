@@ -4,16 +4,15 @@ import { toast } from "sonner";
 import {
   createApiKey,
   deleteApiKey,
-  getApiKeyTrends,
-  getApiKeyUsage7Day,
   listApiKeys,
   regenerateApiKey,
   updateApiKey,
-} from "@/features/apis/api";
+} from "@/features/api-keys/api";
 import type {
   ApiKeyCreateRequest,
   ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
+import { getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
 
 function invalidateApiKeys(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });

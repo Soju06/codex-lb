@@ -56,6 +56,9 @@ export const ApiKeySchema = z.object({
   lastUsedAt: z.string().datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
   usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
+  pooledRemainingPercentPrimary: z.number().nullable().default(null),
+  pooledRemainingPercentSecondary: z.number().nullable().default(null),
+  pooledCapacityCreditsPrimary: z.number().default(0),
 });
 
 export const ApiKeyCreateRequestSchema = z.object({

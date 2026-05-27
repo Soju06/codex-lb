@@ -23,6 +23,12 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["limitWarmupEnabled"] is False
+    assert payload["limitWarmupWindows"] == "both"
+    assert payload["limitWarmupModel"] == "auto"
+    assert payload["limitWarmupPrompt"] == "Say OK."
+    assert payload["limitWarmupCooldownSeconds"] == 3600
+    assert payload["limitWarmupMinAvailablePercent"] == 100.0
 
     response = await async_client.put(
         "/api/settings",
@@ -39,6 +45,12 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "limitWarmupEnabled": True,
+            "limitWarmupWindows": "primary",
+            "limitWarmupModel": "gpt-5.1-codex-mini",
+            "limitWarmupPrompt": "Say OK.",
+            "limitWarmupCooldownSeconds": 7200,
+            "limitWarmupMinAvailablePercent": 99.0,
         },
     )
     assert response.status_code == 200
@@ -56,6 +68,12 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["limitWarmupEnabled"] is True
+    assert updated["limitWarmupWindows"] == "primary"
+    assert updated["limitWarmupModel"] == "gpt-5.1-codex-mini"
+    assert updated["limitWarmupPrompt"] == "Say OK."
+    assert updated["limitWarmupCooldownSeconds"] == 7200
+    assert updated["limitWarmupMinAvailablePercent"] == 99.0
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -73,3 +91,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["limitWarmupEnabled"] is True
+    assert payload["limitWarmupWindows"] == "primary"
+    assert payload["limitWarmupModel"] == "gpt-5.1-codex-mini"
+    assert payload["limitWarmupPrompt"] == "Say OK."
+    assert payload["limitWarmupCooldownSeconds"] == 7200
+    assert payload["limitWarmupMinAvailablePercent"] == 99.0

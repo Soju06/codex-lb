@@ -71,6 +71,11 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
             if row.usage_summary is not None
             else None
         ),
+        pooled_remaining_percent_primary=(row.pooled_credits.remaining_percent_primary if row.pooled_credits else None),
+        pooled_remaining_percent_secondary=(
+            row.pooled_credits.remaining_percent_secondary if row.pooled_credits else None
+        ),
+        pooled_capacity_credits_primary=(row.pooled_credits.capacity_credits_primary if row.pooled_credits else 0.0),
     )
 
 

@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
@@ -333,6 +334,37 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_delete_account_with_delete_history_hard_deletes_request_logs(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_hard_delete", "hard-delete@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_hard_delete",
+            request_id="req_hard_delete_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=25,
+            status="success",
+            error_code=None,
+            requested_at=utcnow(),
+        )
+
+    delete = await async_client.delete("/api/accounts/acc_hard_delete?delete_history=true")
+    assert delete.status_code == 200
+    assert delete.json()["status"] == "deleted"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1"))
+        assert result.scalar_one_or_none() is None
+
+    request_logs = await async_client.get("/api/request-logs?limit=10")
+    assert request_logs.status_code == 200
+    assert request_logs.json()["total"] == 0
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_includes_per_account_reset_times(async_client, db_setup):
     primary_a = 1735689600
     primary_b = 1735693200
@@ -542,6 +574,77 @@ async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client,
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_ignores_hidden_zero_capacity_primary_for_status(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_dirty_primary", "free-dirty@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_dirty_primary",
+            100.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_free_dirty_primary",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_dirty_primary"]
+    assert account["status"] == "active"
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_client, db_setup):
+    expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
+    account = _make_account("acc_free_recovered_primary", "free-recovered@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = expired_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_recovered_primary",
+            24.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_free_recovered_primary",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_recovered_primary"]
+    assert account_payload["status"] == "active"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     stale_reset = 1735689600
@@ -580,3 +683,110 @@ async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(a
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] == 10080
     assert account["resetAtSecondary"] == _iso_utc(weekly_reset)
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_recovers_quota_exceeded_status_from_secondary_usage(async_client, db_setup):
+    expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
+    blocked_at = int((utcnow() - timedelta(hours=2)).timestamp())
+    account = _make_account("acc_quota_recovered_secondary", "quota-recovered@example.com")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = expired_reset
+    account.blocked_at = blocked_at
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_quota_recovered_secondary",
+            42.0,
+            window="secondary",
+            reset_at=int((utcnow() + timedelta(days=1)).timestamp()),
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_quota_recovered_secondary"]
+    assert account_payload["status"] == "active"
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(58.0)
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_stale_rate_limited_status_recovers_after_background_reconcile(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = 1_700_000_000.0
+    past_reset = int(now - 300)
+    blocked_at = int(now - 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.utcnow",
+        lambda: datetime.fromtimestamp(now, tz=timezone.utc).replace(tzinfo=None),
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_stuck_status", "stuck@example.com"))
+        await session.execute(
+            update(Account)
+            .where(Account.id == "acc_stuck_status")
+            .values(
+                status=AccountStatus.RATE_LIMITED,
+                reset_at=past_reset,
+                blocked_at=blocked_at,
+                deactivation_reason=None,
+            )
+        )
+        await session.commit()
+
+        await usage_repo.add_entry(
+            "acc_stuck_status",
+            10.0,
+            window="primary",
+            reset_at=past_reset,
+            window_minutes=300,
+            recorded_at=datetime.fromtimestamp(now - 10, tz=timezone.utc).replace(tzinfo=None),
+        )
+        await usage_repo.add_entry(
+            "acc_stuck_status",
+            20.0,
+            window="secondary",
+            reset_at=int(now + 7200),
+            window_minutes=10080,
+            recorded_at=datetime.fromtimestamp(now - 10, tz=timezone.utc).replace(tzinfo=None),
+        )
+
+    stale = await async_client.get("/api/accounts")
+    assert stale.status_code == 200
+    stale_account = next(item for item in stale.json()["accounts"] if item["accountId"] == "acc_stuck_status")
+    assert stale_account["status"] == "rate_limited"
+    assert stale_account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        account = await accounts_repo.get_by_id("acc_stuck_status")
+        assert account is not None
+        recovered = await reconcile_recoverable_account_statuses(
+            accounts_repo=accounts_repo,
+            usage_repo=usage_repo,
+            accounts=[account],
+        )
+        assert recovered == 1
+
+    reconciled = await async_client.get("/api/accounts")
+    assert reconciled.status_code == 200
+    reconciled_account = next(item for item in reconciled.json()["accounts"] if item["accountId"] == "acc_stuck_status")
+    assert reconciled_account["status"] == "active"
+    assert reconciled_account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)

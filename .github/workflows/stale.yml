@@ -1,4 +1,4 @@
-name: Stale issues
+name: Stale issues and PRs
 
 on:
   schedule:
@@ -8,13 +8,14 @@ on:
 
 permissions:
   issues: write
+  pull-requests: write
 
 jobs:
   stale:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Mark needs-info issues stale and close after timeout
+      - name: Mark stale issues and PRs
         uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639
         with:
           # 7 days with no activity after needs-info is applied -> mark stale
@@ -22,7 +23,7 @@ jobs:
           # 7 more days after stale -> close (14 days total)
           days-before-issue-close: 7
 
-          only-labels: "needs-info"
+          only-issue-labels: "needs-info"
           stale-issue-label: "stale"
           close-issue-reason: "not_planned"
 
@@ -42,12 +43,32 @@ jobs:
 
             Please feel free to reopen with the requested details. 🙏
 
-          # Do not touch pull requests
-          days-before-pr-stale: -1
-          days-before-pr-close: -1
+          # 7 days with no PR activity -> poke the author
+          days-before-pr-stale: 7
+          # 23 more days after stale -> close (30 days total)
+          days-before-pr-close: 23
+          stale-pr-label: "stale"
+
+          stale-pr-message: |
+            This pull request has been automatically marked as **stale** because it has had no activity for 7 days.
+
+            It will be closed in 23 more days unless there is new activity.
+
+            If this is still relevant, please:
+            - Rebase or push an update if the branch drifted
+            - Address pending review feedback if there is any
+            - Leave a short comment confirming it is still being worked on
+
+            Thanks for the contribution 🙏
+
+          close-pr-message: |
+            Closing this pull request because it has had no activity for about 30 days after the stale warning.
+
+            Please feel free to reopen it, or open a fresh PR rebased on current `main`, if the change is still relevant. 🙏
 
           # Operator-protected labels
           exempt-issue-labels: "pinned,security,in-progress"
+          exempt-pr-labels: "pinned,security,in-progress,autorelease: pending"
 
           # Safety cap per run
           operations-per-run: 100

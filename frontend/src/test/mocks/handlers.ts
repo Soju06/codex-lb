@@ -71,6 +71,10 @@ const ApiKeyUpdatePayloadSchema = z
 	})
 	.passthrough();
 
+const AccountAliasPayloadSchema = z.object({
+	alias: z.string().max(255).nullable(),
+});
+
 const SettingsPayloadSchema = z
 	.object({
 		stickyThreadsEnabled: z.boolean().optional(),
@@ -315,6 +319,17 @@ export const handlers = [
 		return HttpResponse.json({ status: "ok" });
 	}),
 
+	http.get("/api/runtime/version", () => {
+		return HttpResponse.json({
+			currentVersion: "1.19.0",
+			latestVersion: "1.19.0",
+			updateAvailable: false,
+			checkedAt: "2026-05-26T00:00:00Z",
+			source: "github",
+			releaseUrl: "https://github.com/Soju06/codex-lb/releases/latest",
+		});
+	}),
+
 	http.get("/api/dashboard/overview", () => {
 		return HttpResponse.json(
 			createDashboardOverview({
@@ -396,6 +411,45 @@ export const handlers = [
 		}
 		account.status = "active";
 		return HttpResponse.json({ status: "reactivated" });
+	}),
+
+	http.put("/api/accounts/:accountId/alias", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await parseJsonBody(request, AccountAliasPayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid alias payload" } },
+				{ status: 422 },
+			);
+		}
+		const normalized = typeof payload.alias === "string" ? payload.alias.trim() : null;
+		account.alias = normalized === "" ? null : normalized;
+		account.displayName = account.alias ?? account.email;
+		return HttpResponse.json({ accountId, alias: account.alias });
+	}),
+
+	http.put("/api/accounts/:accountId/limit-warmup", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const body = await request.json().catch(() => ({}));
+		const enabled = typeof body === "object" && body !== null && "enabled" in body
+			? Boolean((body as { enabled?: unknown }).enabled)
+			: false;
+		account.limitWarmupEnabled = enabled;
+		return HttpResponse.json({ status: enabled ? "enabled" : "disabled", enabled });
 	}),
 
 	http.get("/api/accounts/:accountId/trends", ({ params }) => {

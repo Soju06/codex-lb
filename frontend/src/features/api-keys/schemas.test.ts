@@ -56,6 +56,29 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.limits).toEqual([]);
     expect(parsed.applyToCodexModel).toBe(false);
+    expect(parsed.pooledRemainingPercentPrimary).toBeNull();
+    expect(parsed.pooledRemainingPercentSecondary).toBeNull();
+    expect(parsed.pooledCapacityCreditsPrimary).toBe(0);
+  });
+
+  it("parses pooled credit fields", () => {
+    const parsed = ApiKeySchema.parse({
+      id: "key-1",
+      name: "Service Key",
+      keyPrefix: "sk-live",
+      allowedModels: null,
+      expiresAt: null,
+      isActive: true,
+      createdAt: ISO,
+      lastUsedAt: null,
+      pooledRemainingPercentPrimary: 67.5,
+      pooledRemainingPercentSecondary: 85.0,
+      pooledCapacityCreditsPrimary: 225.0,
+    });
+
+    expect(parsed.pooledRemainingPercentPrimary).toBe(67.5);
+    expect(parsed.pooledRemainingPercentSecondary).toBe(85.0);
+    expect(parsed.pooledCapacityCreditsPrimary).toBe(225.0);
   });
 });
 

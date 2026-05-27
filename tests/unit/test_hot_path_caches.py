@@ -16,7 +16,7 @@ import app.core.middleware.api_firewall as api_firewall_module
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.crypto import TokenEncryptor
 from app.core.middleware.api_firewall import add_api_firewall_middleware
-from app.core.middleware.firewall_cache import get_firewall_ip_cache
+from app.core.middleware.firewall_cache import get_firewall_ip_cache, reset_firewall_ip_cache_for_testing
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -614,3 +614,19 @@ async def test_invalidate_clears_all_keyed_entries() -> None:
     # Next call must re-load from DB
     await balancer._load_selection_inputs(model=None)
     assert accounts_repo.calls == 2  # must re-load after invalidation
+
+
+def test_firewall_cache_singleton_reflects_configured_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config.settings import get_settings
+
+    monkeypatch.setenv("CODEX_LB_FIREWALL_IP_CACHE_TTL_SECONDS", "61")
+    get_settings.cache_clear()
+    reset_firewall_ip_cache_for_testing()
+    try:
+        settings = get_settings()
+        cache = get_firewall_ip_cache()
+        assert settings.firewall_ip_cache_ttl_seconds == 61
+        assert cache.ttl_seconds == 61
+    finally:
+        reset_firewall_ip_cache_for_testing()
+        get_settings.cache_clear()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -8,7 +9,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyAccountAssignment, ApiKeyLimit, LimitType, UsageHistory
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -30,6 +31,7 @@ from app.modules.api_keys.service import (
     _build_api_key_trends,
     _is_sqlite_database_locked,
 )
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.unit
 
@@ -54,6 +56,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._accounts: dict[str, Account] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
+        self.list_all_accounts_calls = 0
+        self.list_accounts_by_ids_calls: list[list[str]] = []
         self.commit_calls = 0
         self.rollback_calls = 0
         self.commit_count = 0
@@ -90,7 +94,12 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         return result
 
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]:
+        self.list_accounts_by_ids_calls.append(list(account_ids))
         return [self._accounts[account_id] for account_id in account_ids if account_id in self._accounts]
+
+    async def list_all_accounts(self) -> list[Account]:
+        self.list_all_accounts_calls += 1
+        return list(self._accounts.values())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
@@ -407,6 +416,32 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         return True
 
 
+class _FakeUsageRepository(UsageRepository):
+    def __init__(
+        self,
+        *,
+        primary: dict[str, UsageHistory],
+        secondary: dict[str, UsageHistory],
+    ) -> None:
+        self._primary = primary
+        self._secondary = secondary
+        self.calls: list[tuple[str | None, list[str] | None]] = []
+
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        self.calls.append((window, None if account_ids is None else list(account_ids)))
+        source = self._secondary if window == "secondary" else self._primary
+        rows = dict(source)
+        if account_ids is not None:
+            allowed = set(account_ids)
+            rows = {account_id: row for account_id, row in rows.items() if account_id in allowed}
+        return rows
+
+
 class _TransactionalAssignmentFailureRepo(_FakeApiKeysRepository):
     def __init__(self) -> None:
         super().__init__()
@@ -470,6 +505,23 @@ def _find_limit_by_id(
 
 async def _async_noop(*args, **kwargs) -> None:
     del args, kwargs
+
+
+def _make_usage_history(
+    account_id: str,
+    *,
+    used_percent: float,
+    reset_at: int | None = None,
+    window_minutes: int | None = None,
+    recorded_at: datetime | None = None,
+) -> UsageHistory:
+    return UsageHistory(
+        account_id=account_id,
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_minutes=window_minutes,
+        recorded_at=recorded_at or utcnow(),
+    )
 
 
 @pytest.mark.asyncio
@@ -735,6 +787,127 @@ async def test_create_key_rejects_unknown_assigned_accounts() -> None:
                 assigned_account_ids=["missing-account"],
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_list_keys_uses_only_assigned_accounts_for_pooled_credits() -> None:
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-a",
+            refresh_token_encrypted=b"refresh-a",
+            id_token_encrypted=b"id-a",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+        "acc-b": Account(
+            id="acc-b",
+            chatgpt_account_id=None,
+            email="b@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-b",
+            refresh_token_encrypted=b"refresh-b",
+            id_token_encrypted=b"id-b",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    service = ApiKeysService(
+        repo,
+        _FakeUsageRepository(
+            primary={
+                "acc-a": _make_usage_history("acc-a", used_percent=25.0),
+                "acc-b": _make_usage_history("acc-b", used_percent=75.0),
+            },
+            secondary={
+                "acc-a": _make_usage_history("acc-a", used_percent=10.0),
+                "acc-b": _make_usage_history("acc-b", used_percent=60.0),
+            },
+        ),
+    )
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assigned-only",
+            allowed_models=None,
+            expires_at=None,
+            assigned_account_ids=["acc-a"],
+        )
+    )
+
+    account_calls_before_list = len(repo.list_accounts_by_ids_calls)
+    listed = await service.list_keys()
+    account_calls_after_list = repo.list_accounts_by_ids_calls[account_calls_before_list:]
+
+    assert listed[0].id == created.id
+    assert listed[0].pooled_credits is not None
+    assert repo.list_all_accounts_calls == 0
+    assert account_calls_after_list == [["acc-a"]]
+    assert cast(_FakeUsageRepository, service._usage_repository).calls == [
+        ("primary", ["acc-a"]),
+        ("secondary", ["acc-a"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_keys_falls_back_to_all_accounts_when_key_is_unassigned() -> None:
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-a",
+            refresh_token_encrypted=b"refresh-a",
+            id_token_encrypted=b"id-a",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+        "acc-b": Account(
+            id="acc-b",
+            chatgpt_account_id=None,
+            email="b@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-b",
+            refresh_token_encrypted=b"refresh-b",
+            id_token_encrypted=b"id-b",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={
+            "acc-a": _make_usage_history("acc-a", used_percent=25.0),
+            "acc-b": _make_usage_history("acc-b", used_percent=75.0),
+        },
+        secondary={
+            "acc-a": _make_usage_history("acc-a", used_percent=10.0),
+            "acc-b": _make_usage_history("acc-b", used_percent=60.0),
+        },
+    )
+    service = ApiKeysService(repo, usage_repo)
+
+    await service.create_key(
+        ApiKeyCreateData(
+            name="unassigned",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    account_calls_before_list = len(repo.list_accounts_by_ids_calls)
+    listed = await service.list_keys()
+    account_calls_after_list = repo.list_accounts_by_ids_calls[account_calls_before_list:]
+
+    assert listed[0].pooled_credits is not None
+    assert repo.list_all_accounts_calls == 1
+    assert account_calls_after_list == []
+    assert usage_repo.calls == [("primary", None), ("secondary", None)]
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,7 @@ export function createAccountSummary(
 	return AccountSummarySchema.parse({
 		accountId: "acc_primary",
 		email: "primary@example.com",
+		alias: null,
 		displayName: "primary@example.com",
 		planType: "plus",
 		status: "active",
@@ -94,6 +95,8 @@ export function createAccountSummary(
 			refresh: { state: "stored" },
 			idToken: { state: "parsed" },
 		},
+		limitWarmupEnabled: false,
+		limitWarmup: null,
 		...overrides,
 	});
 }
@@ -254,6 +257,7 @@ export function createRequestLogEntry(
 		apiKeyName: "Primary Key",
 		requestId: "req_1",
 		model: "gpt-5.1",
+		source: null,
 		transport: "http",
 		serviceTier: null,
 		requestedServiceTier: null,
@@ -367,6 +371,12 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		limitWarmupEnabled: false,
+		limitWarmupWindows: "both",
+		limitWarmupModel: "auto",
+		limitWarmupPrompt: "Say OK.",
+		limitWarmupCooldownSeconds: 3600,
+		limitWarmupMinAvailablePercent: 100,
 		...overrides,
 	});
 }

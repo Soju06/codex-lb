@@ -255,3 +255,49 @@ async def test_set_and_clear_account_alias(async_client):
     matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
     assert matched["alias"] is None
     assert matched["displayName"] == email
+
+
+@pytest.mark.asyncio
+async def test_list_accounts_flags_email_duplicates(async_client):
+    """Pin codex-lb #787 (B): after a token-invalidation cascade, the
+    re-add OAuth flow creates a second account row with the same email
+    but a fresh accountId. /api/accounts surfaces that pair via
+    is_email_duplicate=True on both rows so the dashboard can flag the
+    operator's "stale + fresh" pair without forcing them to group by
+    email themselves.
+    """
+    from app.core.crypto import TokenEncryptor
+    from app.core.utils.time import utcnow
+    from app.db.models import Account, AccountStatus
+    from app.db.session import SessionLocal
+    from app.modules.accounts.repository import AccountsRepository
+
+    encryptor = TokenEncryptor()
+
+    def _account(account_id: str, email: str, chatgpt_id: str) -> Account:
+        return Account(
+            id=account_id,
+            chatgpt_account_id=chatgpt_id,
+            email=email,
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("dup-stale", "dup@example.com", "chatgpt_stale"), merge_by_email=False)
+        await repo.upsert(_account("dup-fresh", "dup@example.com", "chatgpt_fresh"), merge_by_email=False)
+        await repo.upsert(_account("solo", "solo@example.com", "chatgpt_solo"), merge_by_email=False)
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts_by_id = {a["accountId"]: a for a in response.json()["accounts"]}
+
+    assert accounts_by_id["dup-stale"]["isEmailDuplicate"] is True
+    assert accounts_by_id["dup-fresh"]["isEmailDuplicate"] is True
+    assert accounts_by_id["solo"]["isEmailDuplicate"] is False

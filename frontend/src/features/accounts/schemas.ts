@@ -79,6 +79,7 @@ export const AccountSummarySchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
+  isEmailDuplicate: z.boolean().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({

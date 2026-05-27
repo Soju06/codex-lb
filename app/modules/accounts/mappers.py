@@ -35,6 +35,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> list[AccountSummary]:
+    duplicate_emails = _emails_appearing_more_than_once(accounts)
     return [
         _account_to_summary(
             account,
@@ -45,9 +46,27 @@ def build_account_summaries(
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
             encryptor,
             include_auth=include_auth,
+            is_email_duplicate=bool(account.email) and account.email in duplicate_emails,
         )
         for account in accounts
     ]
+
+
+def _emails_appearing_more_than_once(accounts: list[Account]) -> set[str]:
+    """Return the set of emails shared by two or more accounts in this list.
+
+    Emails are compared case-sensitively to match the storage normalization
+    already performed at OAuth-import time. Blank/None emails are excluded
+    so the legacy DEFAULT_EMAIL placeholder used by malformed imports does
+    not get flagged as a duplicate.
+    """
+    counts: dict[str, int] = {}
+    for account in accounts:
+        email = account.email
+        if not email:
+            continue
+        counts[email] = counts.get(email, 0) + 1
+    return {email for email, count in counts.items() if count > 1}
 
 
 def _account_to_summary(
@@ -59,6 +78,7 @@ def _account_to_summary(
     limit_warmup: AccountLimitWarmup | None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
+    is_email_duplicate: bool = False,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
@@ -145,6 +165,7 @@ def _account_to_summary(
         auth=auth_status,
         limit_warmup_enabled=account.limit_warmup_enabled,
         limit_warmup=_limit_warmup_to_status(limit_warmup),
+        is_email_duplicate=is_email_duplicate,
     )
 
 

@@ -75,7 +75,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
@@ -2776,7 +2776,7 @@ def _cursor_context_length_error_envelope(
         return envelope
     if error_value.type == "context_length_exceeded":
         return envelope
-    if "context window" in error_value.message.lower():
+    if error_value.message is not None and "context window" in error_value.message.lower():
         return envelope
     return None
 
@@ -2825,30 +2825,28 @@ async def _cursor_context_length_chat_stream(
     message: str,
     created: int,
 ) -> AsyncIterator[str]:
-    yield format_sse_event(
-        {
-            "id": "chatcmpl_context_length_exceeded",
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": message},
-                    "finish_reason": None,
-                }
-            ],
-        }
-    )
-    yield format_sse_event(
-        {
-            "id": "chatcmpl_context_length_exceeded",
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        }
-    )
+    content_chunk: JsonObject = {
+        "id": "chatcmpl_context_length_exceeded",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": message},
+                "finish_reason": None,
+            }
+        ],
+    }
+    stop_chunk: JsonObject = {
+        "id": "chatcmpl_context_length_exceeded",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield format_sse_event(content_chunk)
+    yield format_sse_event(stop_chunk)
     yield "data: [DONE]\n\n"
 
 

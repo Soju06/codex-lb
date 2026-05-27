@@ -2499,7 +2499,7 @@ async def _stream_with_cursor_usage_fallback(
             yield line
             continue
         completion_chars += _chat_completion_delta_chars(parsed)
-        if _is_terminal_chat_completion_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
+        if _is_chat_completion_usage_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
             completion_tokens = max(1, _estimate_tokens_from_chars(completion_chars))
             parsed["usage"] = {
                 "prompt_tokens": prompt_tokens,
@@ -2517,16 +2517,8 @@ async def _stream_with_cursor_usage_fallback(
         yield line
 
 
-def _is_terminal_chat_completion_chunk(payload: dict[str, JsonValue]) -> bool:
-    choices = payload.get("choices")
-    if choices == []:
-        return True
-    if not isinstance(choices, list):
-        return False
-    for choice in choices:
-        if isinstance(choice, dict) and choice.get("finish_reason") is not None:
-            return True
-    return False
+def _is_chat_completion_usage_chunk(payload: dict[str, JsonValue]) -> bool:
+    return payload.get("choices") == []
 
 
 def _parse_chat_completion_sse(line: str) -> dict[str, JsonValue] | None:

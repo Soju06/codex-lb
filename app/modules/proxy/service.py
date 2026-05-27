@@ -13680,6 +13680,8 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
         return "usage_weighted"
     if value == "relative_availability":
         return "relative_availability"
+    if value == "fill_first":
+        return "fill_first"
     return "capacity_weighted"
 
 

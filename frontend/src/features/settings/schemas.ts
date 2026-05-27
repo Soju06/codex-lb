@@ -5,6 +5,7 @@ export const RoutingStrategySchema = z.enum([
   "round_robin",
   "capacity_weighted",
   "relative_availability",
+  "fill_first",
 ]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
 export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"]);

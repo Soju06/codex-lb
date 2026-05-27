@@ -52,7 +52,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.upstreamStreamTransport).toBe("default");
-    expect(parsed.routingStrategy).toBe("usage_weighted");
+    expect(parsed.routingStrategy).toBe("capacity_weighted");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
@@ -128,6 +128,26 @@ describe("SettingsUpdateRequestSchema", () => {
     const result = SettingsUpdateRequestSchema.safeParse({
       stickyThreadsEnabled: "yes",
       preferEarlierResetAccounts: true,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts fill_first as a valid routing strategy", () => {
+    const parsed = SettingsUpdateRequestSchema.parse({
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      routingStrategy: "fill_first",
+    });
+
+    expect(parsed.routingStrategy).toBe("fill_first");
+  });
+
+  it("rejects unknown routing strategies", () => {
+    const result = SettingsUpdateRequestSchema.safeParse({
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      routingStrategy: "fill_last",
     });
 
     expect(result.success).toBe(false);

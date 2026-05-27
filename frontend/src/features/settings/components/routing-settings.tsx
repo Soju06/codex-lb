@@ -135,6 +135,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <SelectContent align="end">
                 <SelectItem value="capacity_weighted">Capacity weighted</SelectItem>
                 <SelectItem value="relative_availability">Relative availability</SelectItem>
+                <SelectItem value="fill_first">Fill first</SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>

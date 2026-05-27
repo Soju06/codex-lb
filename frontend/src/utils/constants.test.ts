@@ -40,6 +40,7 @@ describe("ROUTING_LABELS", () => {
     expect(ROUTING_LABELS.round_robin).toBe("round robin");
     expect(ROUTING_LABELS.capacity_weighted).toBe("capacity weighted");
     expect(ROUTING_LABELS.relative_availability).toBe("relative availability");
+    expect(ROUTING_LABELS.fill_first).toBe("fill first");
     expect(ROUTING_LABELS.sticky).toBe("sticky");
   });
 });

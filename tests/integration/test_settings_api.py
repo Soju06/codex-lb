@@ -105,3 +105,34 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_accepts_fill_first_routing_strategy(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "fill_first",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["routingStrategy"] == "fill_first"
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["routingStrategy"] == "fill_first"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_unknown_routing_strategy(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "fill_last",
+        },
+    )
+    assert response.status_code == 422

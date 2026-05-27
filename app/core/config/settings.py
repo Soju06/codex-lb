@@ -26,9 +26,15 @@ def _in_container() -> bool:
 
 
 def _default_home_dir() -> Path:
+    env_dir = os.getenv("CODEX_LB_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
+    home_dir = Path.home() / ".codex-lb"
+    if home_dir.exists():
+        return home_dir
     if _in_container():
         return DOCKER_DATA_DIR
-    return Path.home() / ".codex-lb"
+    return home_dir
 
 
 def _default_oauth_callback_host() -> str:
@@ -45,6 +51,8 @@ def _default_http_bridge_instance_id() -> str:
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+DEFAULT_CONVERSATION_ARCHIVE_DIR = DEFAULT_HOME_DIR / "conversation-archive"
+DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
 type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
@@ -117,7 +125,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    data_dir: Path = Field(default_factory=_default_home_dir)
+    database_url: str = DEFAULT_DATABASE_URL
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
     database_background_pool_size: int | None = Field(default=None, gt=0)
@@ -185,7 +194,7 @@ class Settings(BaseSettings):
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
     conversation_archive_enabled: bool = False
-    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
+    conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
@@ -275,6 +284,18 @@ class Settings(BaseSettings):
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
 
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def _expand_data_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return _default_home_dir()
+            return Path(stripped).expanduser()
+        raise TypeError("data_dir must be a path")
+
     @field_validator("database_url")
     @classmethod
     def _expand_database_url(cls, value: str) -> str:
@@ -293,6 +314,15 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("conversation_archive_dir", mode="before")
+    @classmethod
+    def _expand_conversation_archive_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            return Path(value).expanduser()
+        raise TypeError("conversation_archive_dir must be a path")
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
@@ -390,6 +420,18 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
+
+    @model_validator(mode="after")
+    def _apply_data_dir_defaults(self) -> "Settings":
+        if self.data_dir == DEFAULT_HOME_DIR:
+            return self
+        if self.database_url == DEFAULT_DATABASE_URL:
+            self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'store.db'}"
+        if self.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE:
+            self.encryption_key_file = self.data_dir / "encryption.key"
+        if self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR:
+            self.conversation_archive_dir = self.data_dir / "conversation-archive"
+        return self
 
     @model_validator(mode="after")
     def _validate_http_bridge_instance_configuration(self) -> "Settings":

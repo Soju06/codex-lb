@@ -110,7 +110,7 @@ model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
-name = "OpenAI"  # required — enables remote /responses/compact
+name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
@@ -146,7 +146,7 @@ match Codex CLI's native transport.
 
 ```toml
 [model_providers.codex-lb]
-name = "OpenAI"
+name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"

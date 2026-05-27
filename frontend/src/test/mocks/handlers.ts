@@ -319,6 +319,17 @@ export const handlers = [
 		return HttpResponse.json({ status: "ok" });
 	}),
 
+	http.get("/api/runtime/version", () => {
+		return HttpResponse.json({
+			currentVersion: "1.19.0",
+			latestVersion: "1.19.0",
+			updateAvailable: false,
+			checkedAt: "2026-05-26T00:00:00Z",
+			source: "github",
+			releaseUrl: "https://github.com/Soju06/codex-lb/releases/latest",
+		});
+	}),
+
 	http.get("/api/dashboard/overview", () => {
 		return HttpResponse.json(
 			createDashboardOverview({

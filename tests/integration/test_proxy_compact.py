@@ -408,7 +408,7 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
             )
         return OpenAIResponsePayload.model_validate({"output": []})
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         if force:
             account.chatgpt_account_id = "acc_compact_retry_new"
         return account
@@ -476,7 +476,7 @@ async def test_proxy_compact_repeated_401_after_refresh_fails_over(async_client,
             )
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         return account
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
@@ -516,7 +516,7 @@ async def test_proxy_compact_repeated_401_settles_reservation_if_error_recording
             ),
         )
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         return account
 
     async def fake_handle_proxy_error(self, account, exc):

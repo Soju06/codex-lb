@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import gzip
-import inspect
 import json
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -38,9 +38,14 @@ from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
+from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
     CodexControlResponse,
+    ImageFetchSession,
     ProxyResponseError,
+    _as_image_fetch_session,
+    _inline_content_images,
+    _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -65,6 +70,8 @@ from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
+    PREVIOUS_RESPONSE_STALE_CODE,
+    PREVIOUS_RESPONSE_STALE_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
@@ -362,6 +369,17 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "quota_exceeded",
     }
 )
+_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication"})
+_WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS = (
+    "session has ended",
+    "session expired",
+    "log in again",
+    "login again",
+    "reauth",
+    "re-auth",
+)
+_WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE = "account_session_expired"
+_WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
@@ -1536,6 +1554,16 @@ class ProxyService:
             while True:
                 keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
+                    settings = get_settings()
+                    stream_idle_timeout_seconds = getattr(
+                        settings,
+                        "stream_idle_timeout_seconds",
+                        keepalive_interval * _STREAM_KEEPALIVE_MAX_COUNT,
+                    )
+                    max_keepalive_count = max(
+                        _STREAM_KEEPALIVE_MAX_COUNT,
+                        math.ceil(max(0.001, stream_idle_timeout_seconds) / keepalive_interval),
+                    )
                     wait_timeout = keepalive_interval
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS)
@@ -1544,11 +1572,13 @@ class ProxyService:
                     except asyncio.TimeoutError:
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if keepalive_count > _STREAM_KEEPALIVE_MAX_COUNT:
+                        if keepalive_count > max_keepalive_count:
                             logger.info(
-                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s",
+                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
+                                "max_keepalive_count=%s",
                                 request_state.request_id,
                                 keepalive_count,
+                                max_keepalive_count,
                             )
                             yield format_sse_event(
                                 cast(
@@ -1986,7 +2016,7 @@ class ProxyService:
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
             for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
-                selection = await self._select_account_with_budget_compatible(
+                selection = await self._select_account_with_budget(
                     deadline,
                     request_id=request_id,
                     kind="compact",
@@ -2298,7 +2328,7 @@ class ProxyService:
         request_kind = f"thread_goal_{operation}"
 
         try:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_id,
                 kind=request_kind,
@@ -2410,7 +2440,7 @@ class ProxyService:
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
-                                selection = await self._select_account_with_budget_compatible(
+                                selection = await self._select_account_with_budget(
                                     deadline,
                                     request_id=request_id,
                                     kind=request_kind,
@@ -2509,7 +2539,7 @@ class ProxyService:
         request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
 
         try:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_id,
                 kind=request_kind,
@@ -2621,7 +2651,7 @@ class ProxyService:
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
-                                selection = await self._select_account_with_budget_compatible(
+                                selection = await self._select_account_with_budget(
                                     deadline,
                                     request_id=request_id,
                                     kind=request_kind,
@@ -2712,7 +2742,7 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_id,
                 kind="transcribe",
@@ -2828,7 +2858,7 @@ class ProxyService:
                 except ProxyResponseError as retry_exc:
                     await self._handle_proxy_error(account, retry_exc)
                     if retry_exc.status_code == 401:
-                        selection = await self._select_account_with_budget_compatible(
+                        selection = await self._select_account_with_budget(
                             deadline,
                             request_id=request_id,
                             kind="transcribe",
@@ -3153,7 +3183,7 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_id,
                 kind=kind,
@@ -3278,7 +3308,7 @@ class ProxyService:
                 except ProxyResponseError as retry_exc:
                     await self._handle_proxy_error(account, retry_exc)
                     if retry_exc.status_code == 401:
-                        selection = await self._select_account_with_budget_compatible(
+                        selection = await self._select_account_with_budget(
                             deadline,
                             request_id=request_id,
                             kind=kind,
@@ -3533,6 +3563,7 @@ class ProxyService:
                                     error_code="upstream_error",
                                     error_message="Upstream error",
                                     surface="websocket_connect",
+                                    expose_stale_previous_response_classifier=codex_session_affinity,
                                 )
                                 async with client_send_lock:
                                     await websocket.send_text(
@@ -3620,6 +3651,7 @@ class ProxyService:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
+                        error_param = error.param if error else None
                         await self._release_websocket_request_state_reservation(request_state)
                         await self._write_websocket_connect_failure(
                             account_id=None,
@@ -3635,6 +3667,7 @@ class ProxyService:
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
                             error_type=error_type,
+                            error_param=error_param,
                             downstream_activity=downstream_activity,
                         )
                         request_state = None
@@ -3690,6 +3723,7 @@ class ProxyService:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
+                        error_param = error.param if error else None
                         await self._release_websocket_request_state_reservation(request_state)
                         await self._write_websocket_connect_failure(
                             account_id=account.id if account else None,
@@ -3705,6 +3739,7 @@ class ProxyService:
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
                             error_type=error_type,
+                            error_param=error_param,
                             downstream_activity=downstream_activity,
                         )
                         _release_websocket_response_create_gate(request_state, response_create_gate)
@@ -4000,6 +4035,7 @@ class ProxyService:
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
             raise
+        request_state.expose_stale_previous_response_classifier = codex_session_affinity
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
@@ -4246,6 +4282,70 @@ class ProxyService:
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
 
+    async def _inline_http_bridge_image_urls(
+        self,
+        text_data: str,
+        request_state: _WebSocketRequestState,
+    ) -> str:
+        """Inline external ``input_image`` URLs into ``data:`` URLs.
+
+        The HTTP direct-stream path already does this via
+        ``_inline_input_image_urls`` in :mod:`app.core.clients.proxy`, but the
+        HTTP bridge (WebSocket pool) path was missing the conversion.  The
+        upstream ChatGPT WebSocket only accepts ``data:image/…`` payloads; an
+        external ``https://`` image URL causes it to silently reject or hang
+        the request.
+
+        This method applies the same transformation to the already-serialised
+        ``text_data`` JSON that will be sent on the upstream WebSocket.
+        If any external image URLs survive inlining (because the fetch failed),
+        the request is rejected immediately with a 400 error rather than
+        allowing the upstream to hang.
+        """
+        settings = get_settings()
+        if not settings.image_inline_fetch_enabled:
+            return text_data
+        # Quick string-level pre-check: skip the parse/fetch cycle when the
+        # payload contains no ``input_image`` items with an ``http`` URL.
+        if "input_image" not in text_data:
+            return text_data
+        try:
+            payload_dict: dict[str, JsonValue] = json.loads(text_data)
+        except (json.JSONDecodeError, TypeError):
+            return text_data
+        connect_timeout = getattr(settings, "upstream_connect_timeout_seconds", 5.0)
+        async with lease_http_session() as http_session:
+            image_fetch_session = _as_image_fetch_session(http_session)
+            inlined = await _inline_input_image_urls(
+                payload_dict,
+                image_fetch_session,
+                connect_timeout,
+            )
+            inlined = await _inline_top_level_input_image_urls(inlined, image_fetch_session, connect_timeout)
+        # After inlining, check if any external URLs survived (i.e. fetch
+        # failed).  The upstream WS only accepts data: URLs so sending an
+        # external URL would just cause a silent hang.
+        remaining_external = _count_external_image_urls(inlined)
+        if remaining_external > 0:
+            raise ProxyResponseError(
+                400,
+                openai_error(
+                    "image_download_failed",
+                    (
+                        f"Failed to download {remaining_external} external image(s). "
+                        "The upstream API only accepts inline data: URLs. "
+                        "Send images as base64 data URLs (data:image/png;base64,...) "
+                        "or ensure the image URLs are publicly accessible."
+                    ),
+                ),
+            )
+        updated_text = json.dumps(inlined, ensure_ascii=True, separators=(",", ":"))
+        if updated_text == text_data:
+            return text_data
+        request_state.request_text = updated_text
+        _enforce_response_create_size_limit(request_state)
+        return updated_text
+
     async def _acquire_request_state_response_create_admission(
         self,
         request_state: _WebSocketRequestState,
@@ -4298,36 +4398,35 @@ class ProxyService:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         base_settings = get_settings()
         max_attempts = _WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
-        excluded_account_ids: set[str] = set()
+        excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
         last_failover_account: Account | None = None
         for attempt in range(max_attempts):
             is_retry = attempt > 0
+            forced_refresh_account_id = request_state.force_refresh_account_id
+            preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
             require_preferred_account = (
                 request_state.previous_response_id is not None and request_state.preferred_account_id is not None
             )
-            select_kwargs: dict[str, Any] = {
-                "sticky_key": sticky_key,
-                "sticky_kind": sticky_kind,
-                "prefer_earlier_reset": prefer_earlier_reset,
-                "routing_strategy": routing_strategy,
-                "model": model,
-                "request_state": request_state,
-                "api_key": api_key,
-                "client_send_lock": client_send_lock,
-                "websocket": websocket,
-                "reallocate_sticky": True if is_retry else reallocate_sticky,
-                "sticky_max_age_seconds": sticky_max_age_seconds,
-                "exclude_account_ids": excluded_account_ids,
-                "preferred_account_id": request_state.preferred_account_id,
-                "require_preferred_account": require_preferred_account,
-            }
-            if "defer_no_account_error" in inspect.signature(self._select_websocket_connect_account).parameters:
-                select_kwargs["defer_no_account_error"] = (
-                    last_failover_exc is not None and not require_preferred_account
-                )
             try:
-                account = await self._select_websocket_connect_account(deadline, **select_kwargs)
+                account = await self._select_websocket_connect_account(
+                    deadline,
+                    sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
+                    prefer_earlier_reset=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=model,
+                    request_state=request_state,
+                    api_key=api_key,
+                    client_send_lock=client_send_lock,
+                    websocket=websocket,
+                    reallocate_sticky=True if is_retry else reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
+                    exclude_account_ids=excluded_account_ids,
+                    preferred_account_id=preferred_account_id,
+                    require_preferred_account=require_preferred_account,
+                    defer_no_account_error=last_failover_exc is not None and not require_preferred_account,
+                )
             except _WebSocketConnectFailureEmitted:
                 return None, None
             if account is None:
@@ -4347,6 +4446,10 @@ class ProxyService:
                 if last_failover_exc is not None and not require_preferred_account:
                     break
                 return None, None
+            if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
+                request_state.force_refresh_account_id = None
+                if request_state.preferred_account_id == forced_refresh_account_id:
+                    request_state.preferred_account_id = None
 
             try:
                 connect_result = await self._try_open_websocket_connect_attempt(
@@ -4357,6 +4460,7 @@ class ProxyService:
                     request_state=request_state,
                     client_send_lock=client_send_lock,
                     websocket=websocket,
+                    force_refresh=forced_refresh_account_id == account.id,
                 )
             except ProxyResponseError as exc:
                 action = await self._decide_websocket_failover_action(
@@ -4430,7 +4534,7 @@ class ProxyService:
         defer_no_account_error: bool = False,
     ) -> Account | None:
         try:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="websocket",
@@ -4546,6 +4650,7 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        force_refresh: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         try:
             remaining_budget = _remaining_budget_seconds(deadline)
@@ -4558,7 +4663,13 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
-            account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+            account = await self._ensure_fresh_with_budget(
+                account,
+                force=force_refresh,
+                timeout_seconds=remaining_budget,
+            )
+            if force_refresh and request_state.force_refresh_account_id == account.id:
+                request_state.force_refresh_account_id = None
 
             remaining_budget = _remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
@@ -4585,7 +4696,7 @@ class ProxyService:
                     request_state=request_state,
                 )
                 return None
-            if exc.status_code != 401:
+            if exc.status_code != 401 or force_refresh:
                 raise
             return await self._retry_websocket_connect_after_401(
                 account,
@@ -4799,24 +4910,6 @@ class ProxyService:
             )
             return max(visible_pending_count, session.queued_request_count)
 
-    async def _select_account_with_budget_compatible(
-        self,
-        deadline: float,
-        **kwargs: object,
-    ) -> AccountSelection:
-        select_account = self._select_account_with_budget
-        select_account_any = cast(Any, select_account)
-        try:
-            signature = inspect.signature(select_account)
-        except (TypeError, ValueError):
-            return await select_account_any(deadline, **kwargs)
-
-        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
-            return await select_account_any(deadline, **kwargs)
-
-        supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
-        return await select_account_any(deadline, **supported_kwargs)
-
     async def _select_codex_control_account_without_budget(
         self,
         *,
@@ -4840,24 +4933,6 @@ class ProxyService:
         if selection.account is None:
             return None
         return _detached_account_copy(selection.account)
-
-    async def _create_http_bridge_session_compatible(
-        self,
-        key: "_HTTPBridgeSessionKey",
-        **kwargs: object,
-    ) -> "_HTTPBridgeSession":
-        create_session = self._create_http_bridge_session
-        create_session_any = cast(Any, create_session)
-        try:
-            signature = inspect.signature(create_session)
-        except (TypeError, ValueError):
-            return await create_session_any(key, **kwargs)
-
-        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
-            return await create_session_any(key, **kwargs)
-
-        supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
-        return await create_session_any(key, **supported_kwargs)
 
     async def _fail_http_bridge_inflight_session_creation(
         self,
@@ -5811,7 +5886,7 @@ class ProxyService:
             session_registered = False
             require_preferred_account = previous_response_id is not None and preferred_account_id is not None
             try:
-                created_session = await self._create_http_bridge_session_compatible(
+                created_session = await self._create_http_bridge_session(
                     key,
                     headers=headers,
                     affinity=affinity,
@@ -6214,7 +6289,7 @@ class ProxyService:
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
         while True:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -6461,6 +6536,7 @@ class ProxyService:
                 )
             session.queued_request_count += 1
         try:
+            text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
             self._start_request_state_api_key_reservation_heartbeat(
                 request_state,
                 api_key=request_state.api_key,
@@ -6744,7 +6820,7 @@ class ProxyService:
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
-                    proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                    proxy_request_budget_seconds=runtime_settings.http_responses_session_bridge_request_budget_seconds,
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
                 try:
@@ -6879,6 +6955,7 @@ class ProxyService:
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
                 await session.upstream.send_text(retry_text_data)
+            _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -6985,7 +7062,7 @@ class ProxyService:
         retry_same_account_once = not skip_same_account
         preferred_candidate_id: str | None = None if skip_same_account else session.account.id
         while True:
-            selection = await self._select_account_with_budget_compatible(
+            selection = await self._select_account_with_budget(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
@@ -7301,6 +7378,13 @@ class ProxyService:
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
+            grouped_error_reason = (
+                "previous_response_not_found"
+                if is_previous_response_not_found_event
+                else "missing_tool_output"
+                if is_missing_tool_output_event
+                else "stream_incomplete"
+            )
             for grouped_request_state in grouped_previous_response_request_states:
                 grouped_request_state.error_http_status_override = 502
                 (
@@ -7309,7 +7393,10 @@ class ProxyService:
                     grouped_event,
                     grouped_payload,
                     grouped_event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                ) = _build_stream_incomplete_terminal_event_for_request(
+                    grouped_request_state,
+                    reason=grouped_error_reason,
+                )
                 if grouped_request_state.event_queue is not None:
                     await grouped_request_state.event_queue.put(grouped_event_block)
                     await grouped_request_state.event_queue.put(None)
@@ -7851,6 +7938,7 @@ class ProxyService:
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
                         continuity_state=continuity_state,
+                        codex_session_affinity=codex_session_affinity,
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
@@ -8039,9 +8127,18 @@ class ProxyService:
         upstream_control: _WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
         continuity_state: "_WebSocketContinuityState | None" = None,
+        codex_session_affinity: bool = False,
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
+        if payload is None:
+            try:
+                raw_payload = json.loads(text)
+            except json.JSONDecodeError:
+                raw_payload = None
+            if isinstance(raw_payload, dict):
+                payload = cast(dict[str, JsonValue], raw_payload)
+                event_block = format_sse_event(payload)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
@@ -8207,6 +8304,13 @@ class ProxyService:
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True
             downstream_texts: list[str] = []
+            grouped_error_reason = (
+                "previous_response_not_found"
+                if is_previous_response_not_found_event
+                else "missing_tool_output"
+                if is_missing_tool_output_event
+                else "stream_incomplete"
+            )
             for grouped_request_state in grouped_previous_response_request_states:
                 (
                     grouped_downstream_text,
@@ -8214,7 +8318,10 @@ class ProxyService:
                     grouped_event,
                     grouped_payload,
                     grouped_event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(grouped_request_state)
+                ) = _build_stream_incomplete_terminal_event_for_request(
+                    grouped_request_state,
+                    reason=grouped_error_reason,
+                )
                 downstream_texts.append(grouped_downstream_text)
                 await self._finalize_websocket_request_state(
                     grouped_request_state,
@@ -8239,12 +8346,16 @@ class ProxyService:
         if request_state is None:
             if is_previous_response_not_found_event:
                 upstream_control.reconnect_requested = True
+                fallback_error_code, fallback_error_message = _websocket_continuity_error_fields(
+                    reason="previous_response_not_found",
+                    expose_stale_previous_response_classifier=codex_session_affinity,
+                )
                 downstream_text = json.dumps(
                     cast(
                         dict[str, JsonValue],
                         response_failed_event(
-                            "stream_incomplete",
-                            "Upstream websocket closed before response.completed",
+                            fallback_error_code,
+                            fallback_error_message,
                             error_type="server_error",
                             response_id=get_request_id(),
                         ),
@@ -8271,6 +8382,21 @@ class ProxyService:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
+        auth_error_code = _websocket_precreated_auth_error_code(
+            request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
+        if auth_error_code is not None:
+            handled_auth_failure = await self._handle_precreated_websocket_auth_failure(
+                account=account,
+                request_state=request_state,
+                upstream_control=upstream_control,
+                error_message=_websocket_event_error_message(event_type, payload),
+            )
+            if handled_auth_failure:
+                return text
         event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
             request_state=request_state,
             event=event,
@@ -8320,6 +8446,7 @@ class ProxyService:
                     request_state.replay_count += 1
                     request_state.awaiting_response_created = True
                     request_state.response_id = None
+                    _clear_websocket_request_error_overrides(request_state)
                     upstream_control.suppress_downstream_event = True
                     upstream_control.replay_request_state = request_state
             else:
@@ -8327,6 +8454,7 @@ class ProxyService:
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
+                _clear_websocket_request_error_overrides(request_state)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
                 await self._handle_stream_error(
@@ -8356,6 +8484,39 @@ class ProxyService:
             response_create_gate=response_create_gate,
         )
         return downstream_text
+
+    async def _handle_precreated_websocket_auth_failure(
+        self,
+        *,
+        account: Account,
+        request_state: "_WebSocketRequestState",
+        upstream_control: "_WebSocketUpstreamControl",
+        error_message: str | None,
+    ) -> bool:
+        if _prepare_websocket_request_state_for_auth_replay(request_state) is None:
+            return False
+
+        if _websocket_auth_failure_requires_reauth(error_message):
+            failure_code = _WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
+        elif request_state.auth_replay_counts_by_account.get(account.id, 0) == 0:
+            request_state.auth_replay_counts_by_account[account.id] = 1
+            request_state.force_refresh_account_id = account.id
+            request_state.preferred_account_id = account.id
+            upstream_control.reconnect_requested = True
+            upstream_control.suppress_downstream_event = True
+            upstream_control.replay_request_state = request_state
+            return True
+        else:
+            failure_code = _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
+
+        await self._load_balancer.mark_permanent_failure(account, failure_code)
+        request_state.force_refresh_account_id = None
+        request_state.preferred_account_id = None
+        request_state.excluded_account_ids.add(account.id)
+        upstream_control.reconnect_requested = True
+        upstream_control.suppress_downstream_event = True
+        upstream_control.replay_request_state = request_state
+        return True
 
     async def _next_websocket_receive_timeout(
         self,
@@ -9333,7 +9494,10 @@ class ProxyService:
         start = time.monotonic()
         base_settings = get_settings()
         settings = await get_settings_cache().get()
-        deadline = start + base_settings.proxy_request_budget_seconds
+        deadline = start + _stream_request_budget_seconds(
+            base_settings,
+            request_transport=request_transport,
+        )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
@@ -9420,7 +9584,7 @@ class ProxyService:
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
                 try:
-                    selection = await self._select_account_with_budget_compatible(
+                    selection = await self._select_account_with_budget(
                         deadline,
                         request_id=request_id,
                         kind="stream",
@@ -9439,7 +9603,7 @@ class ProxyService:
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
-                    if error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted":
+                    if _is_proxy_budget_exhausted_error(exc):
                         await self._write_stream_preflight_error(
                             account_id=None,
                             api_key=api_key,
@@ -10990,10 +11154,7 @@ class ProxyService:
         force: bool = False,
         timeout_seconds: float | None = None,
     ) -> Account:
-        parameters = inspect.signature(self._ensure_fresh).parameters
-        if "timeout_seconds" in parameters:
-            return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
-        return await self._ensure_fresh(account, force=force)
+        return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
 
     async def _ensure_fresh_with_budget_or_auth_error(
         self,
@@ -11267,6 +11428,14 @@ def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str
     return "upstream_unavailable", message
 
 
+def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestState) -> None:
+    request_state.error_code_override = None
+    request_state.error_message_override = None
+    request_state.error_type_override = None
+    request_state.error_param_override = None
+    request_state.error_http_status_override = None
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -11282,19 +11451,17 @@ def _websocket_request_can_replay_before_visible_output(request_state: "_WebSock
         return False
     if request_state.downstream_visible:
         return False
+    has_retry_safe_fresh_payload = (
+        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
+    )
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
+    if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
+        return False
     created_only_pending = (
         request_state.response_id is not None
         and not request_state.awaiting_response_created
         and request_state.response_event_count <= 1
-        and (
-            request_state.previous_response_id is None
-            or (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and bool(request_state.fresh_upstream_request_text)
-            )
-        )
+        and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
@@ -11307,11 +11474,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     downstream_response_id = None
     if request_state.response_id is not None and not request_state.awaiting_response_created:
         downstream_response_id = request_state.response_id
-    if (
-        request_state.proxy_injected_previous_response_id
-        and request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
-    ):
+    if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
         request_state.request_text = request_state.fresh_upstream_request_text
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
@@ -11326,6 +11489,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_event_count = 0
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
+    _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 
@@ -11354,10 +11518,15 @@ class _WebSocketRequestState:
     api_key: ApiKeyData | None = None
     request_text: str | None = None
     replay_count: int = 0
+    auth_replay_count: int = 0
+    auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
+    force_refresh_account_id: str | None = None
+    excluded_account_ids: set[str] = field(default_factory=set)
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
+    expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
     # injection form of this request that can be replayed as a fresh turn.
@@ -12047,6 +12216,85 @@ def _websocket_precreated_retry_error_code(
     return error_code
 
 
+def _websocket_precreated_auth_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    has_other_pending_requests: bool,
+) -> str | None:
+    if request_state is None:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.response_id is not None:
+        return None
+    if request_state.response_event_count > 0:
+        return None
+    if not request_state.awaiting_response_created:
+        return None
+    if not request_state.request_text:
+        return None
+    if request_state.downstream_visible:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
+    error_type = _websocket_event_error_type(event_type, payload)
+    if error_code in _WEBSOCKET_AUTH_FAILURE_CODES or error_type == "authentication_error":
+        return "invalid_api_key"
+    return None
+
+
+def _websocket_auth_failure_requires_reauth(message: str | None) -> bool:
+    if not isinstance(message, str):
+        return False
+    lowered = message.lower()
+    return any(marker in lowered for marker in _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS)
+
+
+def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
+    if request_state.previous_response_id is None or request_state.preferred_account_id is None:
+        return True
+    return bool(
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    )
+
+
+def _prepare_websocket_request_state_for_auth_replay(
+    request_state: _WebSocketRequestState,
+) -> str | None:
+    if not _websocket_auth_request_can_switch_account(request_state):
+        return None
+    if (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        request_state.request_text = request_state.fresh_upstream_request_text
+        request_state.previous_response_id = None
+        request_state.preferred_account_id = None
+        request_state.proxy_injected_previous_response_id = False
+        request_state.fresh_upstream_request_is_retry_safe = False
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    request_text = request_state.request_text
+    if not isinstance(request_text, str):
+        return None
+    request_state.replay_count += 1
+    request_state.auth_replay_count += 1
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    _clear_websocket_request_error_overrides(request_state)
+    return request_text
+
+
 def _websocket_owner_pinned_quota_error_code(
     request_state: _WebSocketRequestState | None,
     *,
@@ -12264,6 +12512,16 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     )
 
 
+def _websocket_continuity_error_fields(
+    *,
+    reason: str,
+    expose_stale_previous_response_classifier: bool,
+) -> tuple[str, str]:
+    if reason == "previous_response_not_found" and expose_stale_previous_response_classifier:
+        return PREVIOUS_RESPONSE_STALE_CODE, PREVIOUS_RESPONSE_STALE_MESSAGE
+    return "stream_incomplete", PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
+
+
 def _rewrite_websocket_continuity_corruption_event(
     *,
     request_state: _WebSocketRequestState,
@@ -12281,9 +12539,13 @@ def _rewrite_websocket_continuity_corruption_event(
         previous_response_id=request_state.previous_response_id,
         session_id=request_state.session_id,
     )
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     rewritten_event_payload = response_failed_event(
-        "stream_incomplete",
-        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        rewritten_code,
+        rewritten_message,
         error_type="server_error",
         response_id=_websocket_downstream_response_id(request_state),
     )
@@ -12353,6 +12615,7 @@ def _sanitize_websocket_connect_failure(
         error_code=error_code,
         error_message=error_message,
         surface="websocket_connect",
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
     )
 
 
@@ -12365,6 +12628,7 @@ def _sanitize_websocket_previous_response_error(
     error_code: str,
     error_message: str,
     surface: str,
+    expose_stale_previous_response_classifier: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelope, str, str]:
     if previous_response_id is None:
         return status_code, payload, error_code, error_message
@@ -12390,7 +12654,10 @@ def _sanitize_websocket_previous_response_error(
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
-    rewritten_message = PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=expose_stale_previous_response_classifier,
+    )
     _record_continuity_fail_closed(
         surface=surface,
         reason=reason,
@@ -12401,11 +12668,11 @@ def _sanitize_websocket_previous_response_error(
     return (
         502,
         openai_error(
-            "stream_incomplete",
+            rewritten_code,
             rewritten_message,
             error_type="server_error",
         ),
-        "stream_incomplete",
+        rewritten_code,
         rewritten_message,
     )
 
@@ -12432,9 +12699,13 @@ def _sanitize_websocket_terminal_error_fields(
         session_id=request_state.session_id,
         upstream_error_code=normalized_code,
     )
+    rewritten_code, rewritten_message = _websocket_continuity_error_fields(
+        reason="previous_response_not_found",
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     return (
-        "stream_incomplete",
-        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        rewritten_code,
+        rewritten_message,
         "server_error",
         None,
     )
@@ -12789,18 +13060,24 @@ def _pop_matching_websocket_request_states(
 
 def _build_stream_incomplete_terminal_event_for_request(
     request_state: _WebSocketRequestState,
+    *,
+    reason: str = "stream_incomplete",
 ) -> tuple[str, str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None]:
+    error_code, error_message = _websocket_continuity_error_fields(
+        reason=reason,
+        expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
+    )
     event_block, event, payload, event_type = _build_rewritten_stream_response_failed_event(
         response_id=_websocket_downstream_response_id(request_state),
-        error_code="stream_incomplete",
-        error_message="Upstream websocket closed before response.completed",
+        error_code=error_code,
+        error_message=error_message,
     )
     downstream_text = json.dumps(
         cast(
             dict[str, JsonValue],
             response_failed_event(
-                "stream_incomplete",
-                "Upstream websocket closed before response.completed",
+                error_code,
+                error_message,
                 error_type="server_error",
                 response_id=_websocket_downstream_response_id(request_state),
             ),
@@ -12979,6 +13256,56 @@ def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonV
 
 def _is_inline_image_reference(value: JsonValue) -> bool:
     return isinstance(value, str) and value.startswith("data:image/")
+
+
+async def _inline_top_level_input_image_urls(
+    payload: dict[str, JsonValue],
+    session: ImageFetchSession,
+    connect_timeout: float,
+) -> dict[str, JsonValue]:
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return payload
+
+    updated_input: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        if not isinstance(item, dict) or item.get("type") != "input_image":
+            updated_input.append(item)
+            continue
+        updated_item, item_changed = await _inline_content_images(item, session, connect_timeout)
+        updated_input.append(updated_item)
+        changed = changed or item_changed
+    if not changed:
+        return payload
+
+    updated_payload = dict(payload)
+    updated_payload["input"] = updated_input
+    return updated_payload
+
+
+def _count_external_image_urls(payload: dict[str, JsonValue]) -> int:
+    """Count input_image items that still reference an external (non data:) URL."""
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return 0
+    count = 0
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        content_value = item.get("content")
+        content_parts = content_value if isinstance(content_value, list) else [content_value]
+        if item.get("type") == "input_image":
+            content_parts = [item, *content_parts]
+        for part in content_parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "input_image":
+                continue
+            image_url = part.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
+                count += 1
+    return count
 
 
 def _should_slim_historical_tool_output(output: str) -> bool:
@@ -13439,6 +13766,14 @@ def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
+def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
+    if request_transport == _REQUEST_TRANSPORT_HTTP:
+        budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
+        if budget is not None:
+            return float(budget)
+    return float(getattr(settings, "proxy_request_budget_seconds"))
+
+
 def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:
     started_at = request_state.started_at if request_state.started_at > 0 else time.monotonic()
     return started_at + budget_seconds
@@ -13469,7 +13804,7 @@ def _should_retry_stream_error(code: str) -> bool:
 def _raise_proxy_budget_exhausted() -> NoReturn:
     raise ProxyResponseError(
         502,
-        openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+        openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
     )
 
 
@@ -13484,7 +13819,9 @@ def _is_proxy_budget_exhausted_error(exc: ProxyResponseError) -> bool:
     error = _parse_openai_error(exc.payload)
     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
     error_message = error.message if error else None
-    return error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted"
+    return error_code in {"upstream_request_timeout", "upstream_unavailable"} and (
+        error_message == "Proxy request budget exhausted"
+    )
 
 
 def _should_suppress_text_done_event(

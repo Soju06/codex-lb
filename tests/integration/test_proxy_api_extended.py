@@ -361,7 +361,7 @@ async def test_thread_goal_get_propagates_selection_failures(async_client, monke
             error_code="no_accounts",
         )
 
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select)
 
     response = await async_client.post(
         "/backend-api/codex/thread/goal/get",
@@ -490,7 +490,7 @@ async def test_thread_goal_set_uses_active_account_when_budget_selection_is_empt
         calls.append((operation, dict(payload), access_token, account_id, method, timeout_seconds))
         return {"cleared": True}
 
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select)
     monkeypatch.setattr(proxy_module, "core_thread_goal_request", fake_thread_goal)
     payload = {"threadId": "019debd9-2372-7f23-92b9-9f34002a6355"}
 
@@ -666,6 +666,7 @@ async def test_codex_control_retry_failure_after_forced_refresh_updates_account_
     )
 
     assert response.status_code == 503
+    assert "X-App-Version" not in response.headers
     assert calls == 2
     assert len(handled) == 1
     assert handled[0][0].startswith("acc_codex_retry_error")

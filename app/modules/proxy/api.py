@@ -2499,7 +2499,7 @@ async def _stream_with_cursor_usage_fallback(
             yield line
             continue
         completion_chars += _chat_completion_delta_chars(parsed)
-        if _is_chat_completion_usage_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
+        if _is_terminal_chat_completion_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
             completion_tokens = max(1, _estimate_tokens_from_chars(completion_chars))
             parsed["usage"] = {
                 "prompt_tokens": prompt_tokens,
@@ -2517,8 +2517,16 @@ async def _stream_with_cursor_usage_fallback(
         yield line
 
 
-def _is_chat_completion_usage_chunk(payload: dict[str, JsonValue]) -> bool:
-    return payload.get("choices") == []
+def _is_terminal_chat_completion_chunk(payload: dict[str, JsonValue]) -> bool:
+    choices = payload.get("choices")
+    if choices == []:
+        return True
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if isinstance(choice, dict) and choice.get("finish_reason") is not None:
+            return True
+    return False
 
 
 def _parse_chat_completion_sse(line: str) -> dict[str, JsonValue] | None:
@@ -2756,98 +2764,6 @@ def _stream_startup_error_response(
         envelope.model_dump(mode="json", exclude_none=True),
         headers=headers,
     )
-
-
-def _cursor_context_length_error_envelope(
-    api_key: ApiKeyData | None,
-    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
-) -> OpenAIErrorEnvelopeModel | None:
-    if api_key is None or api_key.name.strip().lower() != "cursor":
-        return None
-    if isinstance(error, ProxyResponseError):
-        envelope = _parse_error_envelope(error.payload)
-        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
-    else:
-        _, envelope = _mask_previous_response_not_found_error(error)
-    error_value = envelope.error
-    if error_value is None:
-        return None
-    if error_value.code == "context_length_exceeded":
-        return envelope
-    if error_value.type == "context_length_exceeded":
-        return envelope
-    if error_value.message is not None and "context window" in error_value.message.lower():
-        return envelope
-    return None
-
-
-def _cursor_context_length_chat_response(
-    stream: bool | None,
-    model: str,
-    envelope: OpenAIErrorEnvelopeModel,
-    *,
-    headers: Mapping[str, str],
-) -> Response:
-    error = envelope.error
-    message = (
-        error.message
-        if error is not None and error.message
-        else "Your input exceeds the context window of this model. Please adjust your input and try again."
-    )
-    created = int(time.time())
-    if stream:
-        return StreamingResponse(
-            _cursor_context_length_chat_stream(model, message, created),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **headers},
-        )
-    return JSONResponse(
-        content={
-            "id": "chatcmpl_context_length_exceeded",
-            "object": "chat.completion",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": message},
-                    "finish_reason": "stop",
-                }
-            ],
-        },
-        status_code=200,
-        headers=headers,
-    )
-
-
-async def _cursor_context_length_chat_stream(
-    model: str,
-    message: str,
-    created: int,
-) -> AsyncIterator[str]:
-    content_chunk: JsonObject = {
-        "id": "chatcmpl_context_length_exceeded",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": message},
-                "finish_reason": None,
-            }
-        ],
-    }
-    stop_chunk: JsonObject = {
-        "id": "chatcmpl_context_length_exceeded",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield format_sse_event(content_chunk)
-    yield format_sse_event(stop_chunk)
-    yield "data: [DONE]\n\n"
 
 
 def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel | None:

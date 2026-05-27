@@ -7319,6 +7319,9 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         started_at=1.0,
         previous_response_id="resp_prev_1",
         transport="http",
+        error_code_override="upstream_unavailable",
+        error_message_override="Proxy request budget exhausted",
+        error_http_status_override=502,
     )
     reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
@@ -7332,6 +7335,9 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
 
     assert recovered is True
     assert request_state.replay_count == 1
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert request_state.error_http_status_override is None
     reconnect.assert_awaited_once_with(
         session,
         request_state=request_state,

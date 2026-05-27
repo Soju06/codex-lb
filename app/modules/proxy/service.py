@@ -6951,6 +6951,7 @@ class ProxyService:
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
                 await session.upstream.send_text(retry_text_data)
+            _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -8433,6 +8434,7 @@ class ProxyService:
                     request_state.replay_count += 1
                     request_state.awaiting_response_created = True
                     request_state.response_id = None
+                    _clear_websocket_request_error_overrides(request_state)
                     upstream_control.suppress_downstream_event = True
                     upstream_control.replay_request_state = request_state
             else:
@@ -8440,6 +8442,7 @@ class ProxyService:
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
+                _clear_websocket_request_error_overrides(request_state)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
                 await self._handle_stream_error(
@@ -11410,6 +11413,14 @@ def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str
     return "upstream_unavailable", message
 
 
+def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestState) -> None:
+    request_state.error_code_override = None
+    request_state.error_message_override = None
+    request_state.error_type_override = None
+    request_state.error_param_override = None
+    request_state.error_http_status_override = None
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -11469,6 +11480,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_event_count = 0
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
+    _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 
@@ -12270,6 +12282,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 

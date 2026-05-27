@@ -9512,6 +9512,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
         started_at=0.0,
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -9548,6 +9551,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     assert upstream_control.suppress_downstream_event is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
     assert list(pending_requests) == []
 
 
@@ -9579,6 +9585,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
         started_at=0.0,
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -9615,6 +9624,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     assert upstream_control.suppress_downstream_event is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
     assert list(pending_requests) == []
 
 
@@ -11478,6 +11490,11 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         previous_response_id="resp_anchor",
         fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
         fresh_upstream_request_is_retry_safe=True,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_type_override="server_error",
+        error_param_override="previous_response_id",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -11515,6 +11532,11 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
     # Retry-safety flag is consumed (set back to False) so we don't loop.
     assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_type_override is None
+    assert pending_request.error_param_override is None
+    assert pending_request.error_http_status_override is None
 
 
 @pytest.mark.asyncio
@@ -11581,6 +11603,9 @@ async def test_pop_replayable_created_without_visible_output_request_state():
         awaiting_response_created=False,
         response_event_count=1,
         downstream_visible=False,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
 
@@ -11597,6 +11622,38 @@ async def test_pop_replayable_created_without_visible_output_request_state():
     assert pending_request.response_event_count == 0
     assert pending_request.suppress_next_created_downstream is True
     assert pending_request.replay_downstream_response_id == "resp_created_then_closed"
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
+
+
+def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_auth_replay_overrides",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"retry"}',
+        awaiting_response_created=True,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous auth replay failed",
+        error_type_override="server_error",
+        error_param_override="previous_response_id",
+        error_http_status_override=502,
+    )
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_auth_replay(request_state)
+
+    assert replay_text == '{"type":"response.create","input":"retry"}'
+    assert request_state.replay_count == 1
+    assert request_state.auth_replay_count == 1
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert request_state.error_type_override is None
+    assert request_state.error_param_override is None
+    assert request_state.error_http_status_override is None
 
 
 @pytest.mark.asyncio

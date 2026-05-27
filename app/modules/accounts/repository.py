@@ -118,19 +118,33 @@ class AccountsRepository:
                 sqlite_lock_acquired = True
             merge_by_email = await self._merge_by_email_enabled()
 
-        if merge_by_email:
-            if dialect_name == "sqlite" and not sqlite_lock_acquired:
-                await self._acquire_sqlite_merge_lock()
-            elif dialect_name == "postgresql":
+        if dialect_name == "sqlite" and not sqlite_lock_acquired:
+            # sqlite BEGIN IMMEDIATE serializes all writers globally, so
+            # the identity-reconciliation branch is already mutually
+            # exclusive on this dialect.
+            await self._acquire_sqlite_merge_lock()
+        elif dialect_name == "postgresql":
+            # Identity-keyed advisory lock must always be acquired when
+            # identity reconciliation is in play, regardless of
+            # merge_by_email. Two concurrent reauths for the same
+            # upstream chatgpt_account_id but different email claims
+            # (e.g. user changed email upstream) would otherwise take
+            # different email-scoped locks, both miss the canonical-row
+            # lookup below, and both INSERT a duplicate row for the
+            # same identity.
+            #
+            # Ordering identity-first, then email, gives a stable
+            # acquisition order across all callers so two concurrent
+            # reauths that overlap on either key serialize without
+            # deadlock.
+            identity_locked = False
+            if merge_by_chatgpt_identity and account.chatgpt_account_id:
+                await self._acquire_postgresql_identity_lock(f"chatgpt:{account.chatgpt_account_id}")
+                identity_locked = True
+            if merge_by_email:
                 await self._acquire_postgresql_merge_lock(account.email)
-        else:
-            if dialect_name == "sqlite" and not sqlite_lock_acquired:
-                await self._acquire_sqlite_merge_lock()
-            elif dialect_name == "postgresql":
-                if merge_by_chatgpt_identity and account.chatgpt_account_id:
-                    await self._acquire_postgresql_identity_lock(f"chatgpt:{account.chatgpt_account_id}")
-                else:
-                    await self._acquire_postgresql_identity_lock(account.id)
+            elif not identity_locked:
+                await self._acquire_postgresql_identity_lock(account.id)
 
         # Identity-aware reconciliation runs before the deterministic-id
         # check so that a deactivated row whose refresh token was revoked

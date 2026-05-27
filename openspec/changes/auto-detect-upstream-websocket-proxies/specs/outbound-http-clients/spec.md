@@ -2,8 +2,7 @@
 
 ### Requirement: Upstream websocket handshakes auto-detect standard proxy environment variables
 
-When operators don't explicitly configure `upstream_websocket_trust_env`, upstream websocket
-handshakes MUST honor standard outbound proxy environment variables before connecting directly.
+When operators don't explicitly configure `upstream_websocket_trust_env`, upstream websocket handshakes MUST honor standard outbound proxy environment variables before connecting directly.
 Explicit configuration MUST still override auto-detection.
 
 #### Scenario: websocket handshakes honor env proxies by default

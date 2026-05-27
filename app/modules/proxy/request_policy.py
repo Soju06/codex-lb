@@ -31,15 +31,33 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
-# Cursor exposes "GPT-5.5 Extra" as a chat-completions model slug, but the
-# ChatGPT/Codex upstream accepts the canonical GPT-5.5 slug with high reasoning
-# rather than a separate `gpt-5.5-extra` model name.
-_UPSTREAM_MODEL_ALIASES: dict[str, str] = {
-    "gpt-5.5-extra": "gpt-5.5",
+# Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
+# High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
+# slug plus request fields, not those synthetic suffixes in the model name.
+# Keep this deliberately narrow: only strip known Cursor-style suffix tokens
+# from known GPT-5 base model slugs, and leave every other model untouched.
+_GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = ("gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2", "gpt-5.1", "gpt-5")
+_MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "extra": "high",
 }
-_UPSTREAM_MODEL_ALIAS_REASONING_EFFORTS: dict[str, str] = {
-    "gpt-5.5-extra": "high",
+_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
+_MODEL_ALIAS_SERVICE_TIER_TOKENS: dict[str, str] = {
+    "fast": "priority",
+    "priority": "priority",
 }
+_MODEL_ALIAS_IGNORED_TOKENS: frozenset[str] = frozenset({"reasoning", "thinking"})
+_MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
+    {
+        *tuple(_MODEL_ALIAS_REASONING_TOKENS),
+        *tuple(_MODEL_ALIAS_SERVICE_TIER_TOKENS),
+        *tuple(_MODEL_ALIAS_IGNORED_TOKENS),
+    }
+)
 
 # Service tier values codex-lb accepts at the API-key surface but that the
 # ChatGPT/Codex backend rejects with ``Unsupported service_tier: <value>``.
@@ -128,24 +146,19 @@ def apply_api_key_enforcement(
 
 
 def resolve_model_alias(model: str | None) -> str | None:
-    if not isinstance(model, str):
+    alias = _resolve_model_alias_parts(model)
+    if alias is None:
         return model
-    normalized = model.strip().lower()
-    if not normalized:
-        return model
-    return _UPSTREAM_MODEL_ALIASES.get(normalized, model)
+    return alias[0]
 
 
 def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactRequest) -> None:
     requested_model = payload.model
-    normalized = requested_model.strip().lower() if isinstance(requested_model, str) else ""
-    if not normalized:
+    alias = _resolve_model_alias_parts(requested_model)
+    if alias is None:
         return
 
-    canonical_model = _UPSTREAM_MODEL_ALIASES.get(normalized)
-    if canonical_model is None:
-        return
-
+    canonical_model, alias_effort, alias_service_tier = alias
     if payload.model != canonical_model:
         logger.info(
             "model_alias_normalized request_id=%s requested_model=%s normalized_model=%s",
@@ -155,25 +168,75 @@ def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactR
         )
         payload.model = canonical_model
 
-    alias_effort = _UPSTREAM_MODEL_ALIAS_REASONING_EFFORTS.get(normalized)
-    if alias_effort is None:
-        return
+    if alias_effort is not None:
+        requested_effort = payload.reasoning.effort if payload.reasoning else None
+        if payload.reasoning is None:
+            payload.reasoning = ResponsesReasoning(effort=alias_effort)
+        else:
+            payload.reasoning.effort = alias_effort
+        if requested_effort != alias_effort:
+            logger.info(
+                "model_alias_reasoning_normalized request_id=%s requested_model=%s "
+                "normalized_model=%s requested_effort=%s normalized_effort=%s",
+                get_request_id(),
+                requested_model,
+                canonical_model,
+                requested_effort,
+                alias_effort,
+            )
 
-    requested_effort = payload.reasoning.effort if payload.reasoning else None
-    if payload.reasoning is None:
-        payload.reasoning = ResponsesReasoning(effort=alias_effort)
-    else:
-        payload.reasoning.effort = alias_effort
-    if requested_effort != alias_effort:
+    if alias_service_tier is not None and getattr(payload, "service_tier", None) is None:
+        setattr(payload, "service_tier", alias_service_tier)
         logger.info(
-            "model_alias_reasoning_normalized request_id=%s requested_model=%s "
-            "normalized_model=%s requested_effort=%s normalized_effort=%s",
+            "model_alias_service_tier_normalized request_id=%s requested_model=%s "
+            "normalized_model=%s normalized_service_tier=%s",
             get_request_id(),
             requested_model,
             canonical_model,
-            requested_effort,
-            alias_effort,
+            alias_service_tier,
         )
+
+
+def _resolve_model_alias_parts(model: str | None) -> tuple[str, str | None, str | None] | None:
+    if not isinstance(model, str):
+        return None
+    normalized = model.strip().lower()
+    if not normalized:
+        return None
+
+    for base_model in _GPT5_ALIAS_BASE_MODELS:
+        prefix = f"{base_model}-"
+        if not normalized.startswith(prefix):
+            continue
+        suffix = normalized[len(prefix) :]
+        tokens = [token for token in suffix.split("-") if token]
+        if not tokens or any(token not in _MODEL_ALIAS_TOKENS for token in tokens):
+            return None
+        return base_model, _resolve_alias_reasoning_effort(tokens), _resolve_alias_service_tier(tokens)
+
+    return None
+
+
+def _resolve_alias_reasoning_effort(tokens: list[str]) -> str | None:
+    selected: str | None = None
+    selected_rank = -1
+    for token in tokens:
+        effort = _MODEL_ALIAS_REASONING_TOKENS.get(token)
+        if effort is None:
+            continue
+        rank = _MODEL_ALIAS_REASONING_RANK[effort]
+        if rank > selected_rank:
+            selected = effort
+            selected_rank = rank
+    return selected
+
+
+def _resolve_alias_service_tier(tokens: list[str]) -> str | None:
+    for token in tokens:
+        service_tier = _MODEL_ALIAS_SERVICE_TIER_TOKENS.get(token)
+        if service_tier is not None:
+            return service_tier
+    return None
 
 
 def normalize_unsupported_reasoning_effort(

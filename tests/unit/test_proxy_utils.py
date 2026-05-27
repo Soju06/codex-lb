@@ -14457,6 +14457,49 @@ async def test_compact_responses_forced_refresh_connection_reset_preserves_file_
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_initial_refresh_connection_reset_preserves_file_pin(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_initial_reset_pinned")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh",
+        AsyncMock(side_effect=aiohttp.ClientConnectionError("[Errno 104] Connection reset by peer")),
+    )
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    core_compact_responses = AsyncMock()
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact_responses)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_pinned"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert select_account.await_count == 1
+    handle_stream_error.assert_not_awaited()
+    core_compact_responses.assert_not_awaited()
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account.id
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_refresh_non_transient_client_error_does_not_penalize_accounts(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

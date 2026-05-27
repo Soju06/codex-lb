@@ -2206,6 +2206,8 @@ class ProxyService:
                     )
                     if not _should_retry_transient_stream_error("upstream_unavailable", message):
                         _raise_proxy_unavailable(message)
+                    if file_preferred_account_id is not None:
+                        _raise_proxy_unavailable(message)
                     await self._handle_stream_error(
                         account,
                         {"message": message},

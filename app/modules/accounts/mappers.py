@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.auth import DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
+from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -35,7 +35,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> list[AccountSummary]:
-    duplicate_emails = _emails_appearing_more_than_once(accounts)
+    duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
     return [
         _account_to_summary(
             account,
@@ -46,27 +46,40 @@ def build_account_summaries(
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
             encryptor,
             include_auth=include_auth,
-            is_email_duplicate=bool(account.email) and account.email in duplicate_emails,
+            is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
         )
         for account in accounts
     ]
 
 
-def _emails_appearing_more_than_once(accounts: list[Account]) -> set[str]:
-    """Return the set of emails shared by two or more accounts in this list.
+def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str]]:
+    """Return duplicate (email, ChatGPT account id) keys in this list.
 
     Emails are compared case-sensitively to match the storage normalization
-    already performed at OAuth-import time. Blank/None emails are excluded
-    so the legacy DEFAULT_EMAIL placeholder used by malformed imports does
-    not get flagged as a duplicate.
+    already performed at OAuth-import time. Blank/None emails, the legacy
+    DEFAULT_EMAIL placeholder used by malformed imports, and rows without a
+    ChatGPT account identity are excluded so valid same-email accounts in
+    different workspaces are not flagged as stale/fresh duplicates.
     """
-    counts: dict[str, int] = {}
+    counts: dict[tuple[str, str], int] = {}
     for account in accounts:
-        email = account.email
-        if not email:
+        key = _duplicate_detection_key(account)
+        if key is None:
             continue
-        counts[email] = counts.get(email, 0) + 1
-    return {email for email, count in counts.items() if count > 1}
+        counts[key] = counts.get(key, 0) + 1
+    return {key for key, count in counts.items() if count > 1}
+
+
+def _duplicate_detection_key(account: Account) -> tuple[str, str] | None:
+    email = account.email
+    chatgpt_account_id = account.chatgpt_account_id
+    if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
+        return None
+    return email, chatgpt_account_id
+
+
+def _is_duplicate_detection_email(email: str | None) -> bool:
+    return bool(email and email.strip()) and email != DEFAULT_EMAIL
 
 
 def _account_to_summary(

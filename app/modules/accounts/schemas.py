@@ -91,7 +91,8 @@ class AccountSummary(DashboardModel):
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
-    # True when another account row in the same response shares this email.
+    # True when another account row in the same response shares this real email
+    # and ChatGPT account identity.
     # Operators see this after a token-invalidation cascade where re-adding
     # via OAuth creates a side-by-side row with a fresh refresh token; the
     # older row keeps a revoked token and keeps generating 401s through the

@@ -1888,6 +1888,15 @@ async def v1_chat_completions(
                 payload,
                 headers=rate_limit_headers,
             )
+        cursor_context_limit_error = _cursor_context_length_error_envelope(api_key, startup_error)
+        if cursor_context_limit_error is not None:
+            await _release_reservation(reservation)
+            return _cursor_context_length_chat_response(
+                payload.stream,
+                responses_payload.model,
+                cursor_context_limit_error,
+                headers=rate_limit_headers,
+            )
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
@@ -2747,6 +2756,100 @@ def _stream_startup_error_response(
         envelope.model_dump(mode="json", exclude_none=True),
         headers=headers,
     )
+
+
+def _cursor_context_length_error_envelope(
+    api_key: ApiKeyData | None,
+    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
+) -> OpenAIErrorEnvelopeModel | None:
+    if api_key is None or api_key.name.strip().lower() != "cursor":
+        return None
+    if isinstance(error, ProxyResponseError):
+        envelope = _parse_error_envelope(error.payload)
+        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+    else:
+        _, envelope = _mask_previous_response_not_found_error(error)
+    error_value = envelope.error
+    if error_value is None:
+        return None
+    if error_value.code == "context_length_exceeded":
+        return envelope
+    if error_value.type == "context_length_exceeded":
+        return envelope
+    if "context window" in error_value.message.lower():
+        return envelope
+    return None
+
+
+def _cursor_context_length_chat_response(
+    stream: bool | None,
+    model: str,
+    envelope: OpenAIErrorEnvelopeModel,
+    *,
+    headers: Mapping[str, str],
+) -> Response:
+    error = envelope.error
+    message = (
+        error.message
+        if error is not None and error.message
+        else "Your input exceeds the context window of this model. Please adjust your input and try again."
+    )
+    created = int(time.time())
+    if stream:
+        return StreamingResponse(
+            _cursor_context_length_chat_stream(model, message, created),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **headers},
+        )
+    return JSONResponse(
+        content={
+            "id": "chatcmpl_context_length_exceeded",
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": message},
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+        status_code=200,
+        headers=headers,
+    )
+
+
+async def _cursor_context_length_chat_stream(
+    model: str,
+    message: str,
+    created: int,
+) -> AsyncIterator[str]:
+    yield format_sse_event(
+        {
+            "id": "chatcmpl_context_length_exceeded",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": message},
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
+    yield format_sse_event(
+        {
+            "id": "chatcmpl_context_length_exceeded",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+    )
+    yield "data: [DONE]\n\n"
 
 
 def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel | None:

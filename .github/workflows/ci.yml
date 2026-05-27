@@ -14,6 +14,21 @@ permissions:
   contents: read
 
 jobs:
+  contributors:
+    name: Contributors attribution
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Check all-contributors coverage
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/check_all_contributors.py
+
   frontend-lint:
     name: Frontend lint (eslint)
     runs-on: ubuntu-24.04

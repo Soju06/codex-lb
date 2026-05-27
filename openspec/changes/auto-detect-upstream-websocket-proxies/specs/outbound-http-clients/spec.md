@@ -5,9 +5,17 @@
 When operators don't explicitly configure `upstream_websocket_trust_env`, upstream websocket handshakes MUST honor standard outbound proxy environment variables before connecting directly.
 Explicit configuration MUST still override auto-detection.
 
-#### Scenario: websocket handshakes honor env proxies by default
+#### Scenario: secure websocket handshakes honor scheme-compatible env proxies by default
 
-- **WHEN** `wss_proxy`, `ws_proxy`, `https_proxy`, `http_proxy`, or `all_proxy` is set
+- **WHEN** an upstream websocket URL uses the `wss://` scheme
+- **AND** `wss_proxy`, `socks_proxy`, `https_proxy`, or `all_proxy` is set
+- **AND** `upstream_websocket_trust_env` is not explicitly configured
+- **THEN** upstream websocket handshakes use the configured proxy instead of bypassing it
+
+#### Scenario: plain websocket handshakes honor scheme-compatible env proxies by default
+
+- **WHEN** an upstream websocket URL uses the `ws://` scheme
+- **AND** `ws_proxy`, `socks_proxy`, `https_proxy`, `http_proxy`, or `all_proxy` is set
 - **AND** `upstream_websocket_trust_env` is not explicitly configured
 - **THEN** upstream websocket handshakes use the configured proxy instead of bypassing it
 

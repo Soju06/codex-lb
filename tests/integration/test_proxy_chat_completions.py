@@ -394,8 +394,6 @@ async def test_v1_chat_completions_cursor_context_limit_returns_usage_stream(asy
         "total_tokens": 1000000,
     }
     assert lines[-1] == "data: [DONE]"
-
-
 @pytest.mark.asyncio
 async def test_v1_chat_completions_cursor_context_limit_non_stream_returns_json(async_client, monkeypatch):
     email = "chat-startup-cursor-context-json@example.com"

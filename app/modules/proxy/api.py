@@ -2401,6 +2401,15 @@ def _cursor_context_limit_usage_stream(
                         "finish_reason": "stop",
                     }
                 ],
+            }
+        )
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
                 "usage": {
                     "prompt_tokens": usage_tokens,
                     "completion_tokens": 0,

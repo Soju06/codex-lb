@@ -382,11 +382,18 @@ async def test_v1_chat_completions_cursor_context_limit_returns_usage_stream(asy
 
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
-    body = resp.text
-    assert '"prompt_tokens":1000000' in body
-    assert '"total_tokens":1000000' in body
-    assert '"finish_reason":"stop"' in body
-    assert "data: [DONE]" in body
+    lines = [line for line in resp.text.splitlines() if line]
+    chunks = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+
+    assert chunks[-2]["choices"][0]["finish_reason"] == "stop"
+    assert "usage" not in chunks[-2]
+    assert chunks[-1]["choices"] == []
+    assert chunks[-1]["usage"] == {
+        "prompt_tokens": 1000000,
+        "completion_tokens": 0,
+        "total_tokens": 1000000,
+    }
+    assert lines[-1] == "data: [DONE]"
 
 
 @pytest.mark.asyncio

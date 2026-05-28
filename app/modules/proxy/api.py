@@ -1638,6 +1638,8 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
                     "maxOutputTokens": _v1_max_output_tokens(model),
                     "supports_reasoning": _v1_supports_reasoning(model),
                     "supportsReasoning": _v1_supports_reasoning(model),
+                    "supports_images": _v1_supports_vision(model),
+                    "supportsImages": _v1_supports_vision(model),
                     "supports_vision": _v1_supports_vision(model),
                     "supportsVision": _v1_supports_vision(model),
                 }
@@ -1743,6 +1745,8 @@ def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
         "context_length": _v1_input_context_window(model),
         "max_output_tokens": _v1_max_output_tokens(model),
         "supports_reasoning": _v1_supports_reasoning(model),
+        "supports_images": _v1_supports_vision(model),
+        "supportsImages": _v1_supports_vision(model),
         "supports_vision": _v1_supports_vision(model),
         "supports_tool_use": True,
         "supports_streaming": True,

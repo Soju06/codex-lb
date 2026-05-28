@@ -76,6 +76,8 @@ async def test_v1_models_list(async_client):
         assert item["context_length"] == item["metadata"]["input_context_window"]
         assert item["supportsReasoning"] is True
         assert item["supports_reasoning"] is True
+        assert item["supportsImages"] is True
+        assert item["supports_images"] is True
         assert item["supportsVision"] is True
         assert item["supports_vision"] is True
 
@@ -513,6 +515,8 @@ async def test_v1_models_reports_backend_context_window(async_client):
         assert entry["capabilities"]["context_length"] == 272_000
         assert entry["capabilities"]["max_output_tokens"] == 128_000
         assert entry["capabilities"]["supports_reasoning"] is True
+        assert entry["capabilities"]["supportsImages"] is True
+        assert entry["capabilities"]["supports_images"] is True
         assert entry["capabilities"]["supports_vision"] is True
         assert entry["capabilities"]["supports_tool_use"] is True
         assert entry["capabilities"]["supports_streaming"] is True

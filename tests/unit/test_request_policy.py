@@ -19,6 +19,9 @@ from app.modules.proxy.request_policy import apply_api_key_enforcement, validate
         ("gpt-5.2-medium-fast", "gpt-5.2", "medium", "priority"),
         ("gpt-5.3-priority", "gpt-5.3", None, "priority"),
         ("gpt-5.4-xhigh", "gpt-5.4", "high", None),
+        ("gpt-5.4-mini-high", "gpt-5.4-mini", "high", None),
+        ("gpt-5.3-codex-fast", "gpt-5.3-codex", None, "priority"),
+        ("gpt-5.1-codex-mini-extra-fast", "gpt-5.1-codex-mini", "high", "priority"),
         ("gpt-5.5-extra-high-fast", "gpt-5.5", "high", "priority"),
     ],
 )
@@ -82,6 +85,12 @@ def test_model_access_accepts_allowed_canonical_model_alias() -> None:
     api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.5"})))
 
     validate_model_access(api_key, "gpt-5.5-extra-high-fast")
+
+
+def test_model_access_accepts_allowed_qualified_canonical_model_alias() -> None:
+    api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.4-mini"})))
+
+    validate_model_access(api_key, "gpt-5.4-mini-high")
 
 
 def test_model_access_rejects_alias_when_canonical_model_not_allowed() -> None:

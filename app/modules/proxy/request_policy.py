@@ -36,7 +36,21 @@ _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 # slug plus request fields, not those synthetic suffixes in the model name.
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
-_GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = ("gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2", "gpt-5.1", "gpt-5")
+_GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+)
 _MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
     "minimal": "minimal",
     "low": "low",

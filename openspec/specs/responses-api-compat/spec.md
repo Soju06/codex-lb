@@ -334,6 +334,22 @@ When an API key carries an enforced service tier, the proxy MUST override any in
 - **WHEN** an API key is configured with `enforcedServiceTier: "fast"`
 - **THEN** the forwarded upstream payload uses the canonical value `priority`
 
+### Requirement: Cursor GPT-5 model aliases normalize to canonical slugs
+
+For Responses proxy traffic, the service MUST recognize Cursor-style GPT-5 model aliases formed by appending known suffix tokens (`minimal`, `low`, `medium`, `high`, `xhigh`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias resolver MUST match longer qualified canonical slugs before shorter family prefixes so aliases such as `gpt-5.4-mini-high` and `gpt-5.3-codex-fast` normalize to the intended model. Unknown suffix tokens MUST leave the requested model unchanged.
+
+#### Scenario: Qualified mini model alias normalizes reasoning
+
+- **WHEN** a client sends a Responses request with `model: "gpt-5.4-mini-high"`
+- **THEN** the forwarded upstream request uses `model: "gpt-5.4-mini"`
+- **AND** the forwarded upstream request uses `reasoning.effort: "high"`
+
+#### Scenario: Qualified codex model alias normalizes service tier
+
+- **WHEN** a client sends a Responses request with `model: "gpt-5.3-codex-fast"`
+- **THEN** the forwarded upstream request uses `model: "gpt-5.3-codex"`
+- **AND** the forwarded upstream request uses `service_tier: "priority"`
+
 ### Requirement: OpenAI-compatible Responses payload sanitation removes provider-specific thinking aliases
 
 The shared OpenAI-compatible Responses sanitation path MUST normalize third-party thinking aliases into the canonical `reasoning` object before upstream forwarding. Unknown provider-specific thinking controls MUST NOT be passed through unchanged to the upstream ChatGPT backend.
@@ -531,4 +547,3 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **WHEN** a forwarded hard-continuity bridge request reaches another non-owner replica
 - **THEN** the service MUST fail the request with a generic 5xx bridge-forward error
 - **AND** it MUST NOT attempt another owner handoff
-

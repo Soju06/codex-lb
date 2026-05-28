@@ -53,7 +53,7 @@ async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
         return None
 
     async def fail_auth(_authorization, *, request: object | None = None):
-        raise ProxyAuthError("Missing API key in Authorization header")
+        raise ProxyAuthError("Missing API key in Authorization header or x-api-key header")
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", fail_auth)
@@ -67,7 +67,7 @@ async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
     assert response.status_code == 401
     payload = json.loads(cast(bytes, response.body).decode("utf-8"))
     assert payload["error"]["code"] == "invalid_api_key"
-    assert payload["error"]["message"] == "Missing API key in Authorization header"
+    assert payload["error"]["message"] == "Missing API key in Authorization header or x-api-key header"
 
 
 @pytest.mark.asyncio
@@ -91,6 +91,7 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
     async def pass_auth(authorization: str | None, *, request: object | None = None):
         assert authorization == "Bearer valid-key"
+        assert request is not None
         return api_key
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
@@ -98,6 +99,41 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
     resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
         cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer valid-key"})),
+    )
+
+    assert response is None
+    assert resolved_api_key == api_key
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_accepts_x_api_key(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    api_key = ApiKeyData(
+        id="key_x_header",
+        name="Header Key",
+        key_prefix="sk-header",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+    )
+
+    async def pass_auth(authorization: str | None, *, request: object | None = None):
+        assert authorization is None
+        assert request is not None
+        return api_key
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", pass_auth)
+
+    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
+        cast(WebSocket, SimpleNamespace(headers={"x-api-key": "valid-key"})),
     )
 
     assert response is None

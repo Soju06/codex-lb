@@ -79,6 +79,10 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
         resolved = await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}")
         assert resolved == api_key_data
 
+    for _ in range(10):
+        resolved = await auth_dependencies.validate_proxy_api_key_headers(None, x_api_key=token)
+        assert resolved == api_key_data
+
     assert calls == 1
     cache = get_api_key_cache()
     assert expected_hash in cache._cache

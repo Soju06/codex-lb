@@ -483,6 +483,15 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
     valid = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert valid.status_code == 200
 
+    valid_x_api_key = await async_client.get("/v1/models", headers={"x-api-key": created.key})
+    assert valid_x_api_key.status_code == 200
+
+    fallback_x_api_key = await async_client.get(
+        "/v1/models",
+        headers={"Authorization": "Bearer invalid-key", "x-api-key": created.key},
+    )
+    assert fallback_x_api_key.status_code == 200
+
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         row = await repo.get_by_id(created.id)
@@ -518,6 +527,14 @@ async def test_api_key_branch_disabled_then_enabled(async_client):
     over_limit = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {created.key}"})
     assert over_limit.status_code == 429
     assert over_limit.json()["error"]["code"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_x_api_key_does_not_replace_bearer_only_codex_usage_identity(async_client):
+    blocked = await async_client.get("/api/codex/usage", headers={"x-api-key": "sk-clb-test"})
+
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio

@@ -168,6 +168,7 @@ def test_trim_websocket_previous_response_input_items_keeps_non_replay_prefix() 
 def test_filter_inbound_headers_strips_auth_and_account():
     headers = {
         "Authorization": "Bearer x",
+        "x-api-key": "sk-clb-test",
         "chatgpt-account-id": "acc_1",
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
@@ -175,6 +176,7 @@ def test_filter_inbound_headers_strips_auth_and_account():
     }
     filtered = filter_inbound_headers(headers)
     assert "Authorization" not in filtered
+    assert "x-api-key" not in filtered
     assert "chatgpt-account-id" not in filtered
     assert filtered["Content-Encoding"] == "gzip"
     assert filtered["Content-Type"] == "application/json"

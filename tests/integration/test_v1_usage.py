@@ -263,7 +263,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
 @pytest.mark.parametrize(
     ("headers", "expected_message"),
     [
-        ({}, "Missing API key in Authorization header"),
+        ({}, "Missing API key in Authorization header or x-api-key header"),
         ({"Authorization": "Bearer invalid-key"}, "Invalid API key"),
     ],
 )
@@ -281,6 +281,23 @@ async def test_v1_usage_returns_zero_usage_for_key_without_logs(async_client):
     _, plain_key = await _create_api_key(name="zero-usage")
 
     response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_count": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "total_cost_usd": 0.0,
+        "limits": [],
+        "upstream_limits": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_accepts_x_api_key(async_client):
+    _, plain_key = await _create_api_key(name="x-api-key-usage")
+
+    response = await async_client.get("/v1/usage", headers={"x-api-key": plain_key})
 
     assert response.status_code == 200
     assert response.json() == {

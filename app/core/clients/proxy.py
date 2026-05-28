@@ -67,6 +67,7 @@ from app.core.utils.sse import format_sse_event
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
+    "x-api-key",
     "chatgpt-account-id",
     "content-length",
     "host",

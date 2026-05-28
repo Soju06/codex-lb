@@ -69,11 +69,6 @@ class ChatCompletionsRequest(BaseModel):
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
 
-    @field_validator("tools")
-    @classmethod
-    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value)
-
     @field_validator("messages")
     @classmethod
     def _reject_file_id(cls, value: list[OpenAIMessage] | None) -> list[OpenAIMessage] | None:
@@ -124,6 +119,15 @@ class ChatCompletionsRequest(BaseModel):
                 _validate_assistant_tool_calls(message)
             elif role_name == "tool":
                 _validate_tool_message(message)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tools(self) -> "ChatCompletionsRequest":
+        responses_shaped_payload = not self.messages and self.input is not None
+        self.tools = validate_tool_types(
+            self.tools,
+            allow_builtin_tools=responses_shaped_payload,
+        )
         return self
 
     def to_responses_request(self) -> ResponsesRequest:

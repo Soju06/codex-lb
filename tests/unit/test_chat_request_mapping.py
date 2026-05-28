@@ -78,6 +78,29 @@ def test_chat_endpoint_preserves_responses_shaped_tools():
     assert responses.tool_choice == {"type": "mcp", "server_label": "filesystem"}
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
+        {"type": "image_generation", "output_format": "png"},
+    ],
+)
+def test_chat_endpoint_preserves_responses_shaped_builtin_tools(tool):
+    input_items = [{"role": "user", "content": [{"type": "input_text", "text": "Run tool."}]}]
+    payload = {
+        "model": "gpt-5.2",
+        "input": input_items,
+        "tools": [tool],
+        "tool_choice": {"type": tool["type"]},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.input == input_items
+    assert responses.tools == [tool]
+    assert responses.tool_choice == {"type": tool["type"]}
+
+
 def test_chat_messages_accept_responses_style_text_parts():
     payload = {
         "model": "gpt-5.2",

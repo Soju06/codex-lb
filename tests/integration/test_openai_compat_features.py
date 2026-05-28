@@ -961,6 +961,37 @@ async def test_v1_chat_completions_rejects_builtin_tools(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_accepts_responses_shaped_builtin_tools(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_builtin_tools", "chat-builtin-tools@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, account_id, base_url, raise_for_status
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Generate an image."}],
+            }
+        ],
+        "tools": [image_tool],
+        "tool_choice": {"type": "image_generation"},
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+    assert seen["payload"].tool_choice == {"type": "image_generation"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
 async def test_v1_chat_completions_allows_web_search(async_client, monkeypatch, tool_type):
     await _import_account(async_client, "acc_chat_web_search", "chat-web-search@example.com")

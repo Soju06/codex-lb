@@ -338,6 +338,62 @@ async def test_backend_codex_models_visibility_allowlist_respects_enforced_model
 
 
 @pytest.mark.asyncio
+async def test_model_catalogs_canonicalize_enforced_model_alias(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.4-mini",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "catalog-enforced-alias",
+            "allowedModels": ["gpt-5.4-mini-high"],
+            "applyToCodexModel": True,
+            "enforcedModel": "gpt-5.4-mini-high",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    v1_resp = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert v1_resp.status_code == 200
+    assert [entry["id"] for entry in v1_resp.json()["data"]] == ["gpt-5.4-mini"]
+
+    codex_resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert codex_resp.status_code == 200
+    entries = {entry["slug"]: entry for entry in codex_resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.4-mini"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.4-mini"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_preserves_original_flow_without_allowlist(async_client):
     registry = get_model_registry()
     models = [

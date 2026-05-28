@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Final, cast
@@ -112,6 +112,7 @@ from app.modules.proxy.request_policy import (
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_validation_error,
+    resolve_model_alias,
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
@@ -1650,11 +1651,19 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
-    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    allowed_models = _canonical_model_set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     if api_key and api_key.enforced_model:
-        forced = {api_key.enforced_model}
+        forced = {_canonical_model_slug(api_key.enforced_model)}
         return forced if allowed_models is None else (allowed_models & forced)
     return allowed_models
+
+
+def _canonical_model_set(models: Iterable[str]) -> set[str]:
+    return {_canonical_model_slug(model) for model in models}
+
+
+def _canonical_model_slug(model: str) -> str:
+    return resolve_model_alias(model) or model
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:

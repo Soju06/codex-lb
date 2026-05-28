@@ -86,11 +86,11 @@ _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
         return
-    allowed_models = api_key.allowed_models
-    if not allowed_models:
+    if not api_key.allowed_models:
         return
+    allowed_models = {resolve_model_alias(allowed_model) for allowed_model in api_key.allowed_models}
     effective_model = resolve_model_alias(model)
-    if model is None or model in allowed_models or effective_model in allowed_models:
+    if model is None or effective_model in allowed_models:
         return
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 

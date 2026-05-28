@@ -170,6 +170,12 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **WHEN** a key has `allowed_models: ["o3-pro"]` and a request is made for model `gpt-4.1`
 - **THEN** the proxy returns 403 with OpenAI-format error `{ "error": { "code": "model_not_allowed", "message": "This API key does not have access to model 'gpt-4.1'" } }`
 
+#### Scenario: Cursor alias allowed model permits canonical request
+
+- **WHEN** a key has `allowed_models: ["gpt-5.4-mini-high"]`
+- **AND** a request is made for model `gpt-5.4-mini`
+- **THEN** the proxy permits the request because the allowed alias resolves to the requested canonical model
+
 #### Scenario: All models allowed
 
 - **WHEN** a key has `allowed_models: null`

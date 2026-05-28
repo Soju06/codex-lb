@@ -93,6 +93,12 @@ def test_model_access_accepts_allowed_qualified_canonical_model_alias() -> None:
     validate_model_access(api_key, "gpt-5.4-mini-high")
 
 
+def test_model_access_accepts_allowed_cursor_alias_for_canonical_model() -> None:
+    api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.4-mini-high"})))
+
+    validate_model_access(api_key, "gpt-5.4-mini")
+
+
 def test_model_access_rejects_alias_when_canonical_model_not_allowed() -> None:
     api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.2"})))
 

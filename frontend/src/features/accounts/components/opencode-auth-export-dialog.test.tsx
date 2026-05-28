@@ -45,6 +45,10 @@ describe("OpenCodeAuthExportDialog", () => {
   it("copies only the official OpenCode auth.json payload", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -91,6 +95,10 @@ describe("OpenCodeAuthExportDialog", () => {
   it("shows truncated token previews but copies the full access token", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },

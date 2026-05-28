@@ -1865,7 +1865,12 @@ async def v1_chat_completions(
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
             await _release_reservation(reservation)
-            return _cursor_context_limit_usage_stream(
+            if payload.stream:
+                return _cursor_context_limit_usage_stream(
+                    payload,
+                    headers=rate_limit_headers,
+                )
+            return _cursor_context_limit_usage_completion(
                 payload,
                 headers=rate_limit_headers,
             )
@@ -2402,6 +2407,39 @@ def _cursor_context_limit_usage_stream(
         yield sse_data("[DONE]")
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
+
+
+def _cursor_context_limit_usage_completion(
+    payload: ChatCompletionsRequest,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    response_id = f"chatcmpl_{time.time_ns()}"
+    created = int(time.time())
+    model = payload.model
+    usage_tokens = _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS
+    return JSONResponse(
+        content={
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage_tokens,
+                "completion_tokens": 0,
+                "total_tokens": usage_tokens,
+            },
+        },
+        status_code=200,
+        headers=headers,
+    )
 
 
 async def _stream_with_cursor_usage_fallback(

@@ -390,6 +390,49 @@ async def test_v1_chat_completions_cursor_context_limit_returns_usage_stream(asy
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_cursor_context_limit_non_stream_returns_json(async_client, monkeypatch):
+    email = "chat-startup-cursor-context-json@example.com"
+    raw_account_id = "acc_chat_startup_cursor_context_json"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+        yield 'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n'
+        yield (
+            'event: error\ndata: {"type":"error","error":'
+            '{"message":"Input token limit exceeded",'
+            '"type":"invalid_request_error","code":"context_length_exceeded","param":"input"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "too much context"}],
+    }
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"User-Agent": "Cursor/1.0"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    body = resp.json()
+    assert body["object"] == "chat.completion"
+    assert body["choices"][0]["message"] == {"role": "assistant", "content": ""}
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["usage"] == {
+        "prompt_tokens": 1000000,
+        "completion_tokens": 0,
+        "total_tokens": 1000000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatch):
     email = "chatusage@example.com"
     raw_account_id = "acc_chatusage"

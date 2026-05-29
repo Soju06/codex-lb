@@ -25,6 +25,8 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
+    AccountAuthExportResponse,
+    AccountAuthExportTokens,
     AccountExportResponse,
     AccountImportResponse,
     AccountOpenCodeAuthExportAccount,
@@ -32,6 +34,8 @@ from app.modules.accounts.schemas import (
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
+    CodexAuthJson,
+    CodexAuthTokens,
     OpenCodeAuthJson,
     OpenCodeOAuthAuth,
 )
@@ -179,6 +183,56 @@ class AccountsService:
                     account_id=account.chatgpt_account_id,
                 ),
             ),
+        )
+
+    async def export_auth(self, account_id: str) -> AccountAuthExportResponse | None:
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+
+        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        id_token = self._encryptor.decrypt(account.id_token_encrypted)
+        expires = token_expiry_epoch_ms(access_token) or 0
+
+        tokens = AccountAuthExportTokens(
+            id_token=id_token,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at_ms=expires,
+        )
+
+        codex_auth_json = CodexAuthJson(
+            auth_mode="chatgpt",
+            openai_api_key=None,
+            tokens=CodexAuthTokens(
+                id_token=id_token,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                account_id=account.chatgpt_account_id,
+            ),
+            last_refresh=account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+        )
+
+        opencode_auth_json = OpenCodeAuthJson(
+            openai=OpenCodeOAuthAuth(
+                refresh=refresh_token,
+                access=access_token,
+                expires=expires,
+                account_id=account.chatgpt_account_id,
+            ),
+        )
+
+        return AccountAuthExportResponse(
+            filename=_opencode_auth_export_filename(account),
+            account=AccountOpenCodeAuthExportAccount(
+                account_id=account.id,
+                chatgpt_account_id=account.chatgpt_account_id,
+                email=account.email,
+            ),
+            tokens=tokens,
+            codex_auth_json=codex_auth_json,
+            opencode_auth_json=opencode_auth_json,
         )
 
     async def import_account(self, raw: bytes) -> AccountImportResponse:

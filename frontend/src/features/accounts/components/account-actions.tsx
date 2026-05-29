@@ -10,9 +10,8 @@ export type AccountActionsProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
-  onExport: (accountId: string) => void;
+  onExportAuth: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onExportOpenCodeAuth: (accountId: string) => void;
 };
 
 export function AccountActions({
@@ -22,9 +21,8 @@ export function AccountActions({
   onResume,
   onDelete,
   onReauth,
-  onExport,
+  onExportAuth,
   onLimitWarmupChange,
-  onExportOpenCodeAuth,
 }: AccountActionsProps) {
   return (
     <div className="flex flex-wrap gap-2 border-t pt-4">
@@ -84,23 +82,11 @@ export function AccountActions({
         size="sm"
         variant="outline"
         className="h-8 gap-1.5 text-xs"
-        onClick={() => onExport(account.accountId)}
+        onClick={() => onExportAuth(account.accountId)}
         disabled={busy}
       >
         <Download className="h-3.5 w-3.5" />
         Export
-      </Button>
-
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-8 gap-1.5 text-xs"
-        onClick={() => onExportOpenCodeAuth(account.accountId)}
-        disabled={busy}
-      >
-        <Download className="h-3.5 w-3.5" />
-        Export OpenCode auth
       </Button>
 
       <Button

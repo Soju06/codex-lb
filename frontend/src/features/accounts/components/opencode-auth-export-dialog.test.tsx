@@ -25,7 +25,24 @@ const exportData = {
     chatgptAccountId: "chatgpt-acc-1",
     email: "user@example.com",
   },
-  authJson: {
+  tokens: {
+    idToken: "id-token-value",
+    accessToken: "access-token-value",
+    refreshToken: "refresh-token-value",
+    expiresAtMs: 2_000_000_000_000,
+  },
+  codexAuthJson: {
+    authMode: "chatgpt",
+    openaiApiKey: null,
+    tokens: {
+      idToken: "id-token-value",
+      accessToken: "access-token-value",
+      refreshToken: "refresh-token-value",
+      accountId: "chatgpt-acc-1" as string | null | undefined,
+    },
+    lastRefresh: "2026-01-01T00:00:00.000000Z",
+  },
+  opencodeAuthJson: {
     openai: {
       type: "oauth" as const,
       refresh: "refresh-token-abcdefghijklmnopqrstuvwxyz-0123456789",
@@ -61,7 +78,7 @@ describe("OpenCodeAuthExportDialog", () => {
     await user.click(screen.getByRole("button", { name: "Copy auth.json" }));
 
     await waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith(`${JSON.stringify(exportData.authJson, null, 2)}\n`);
+      expect(writeText).toHaveBeenCalledWith(`${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`);
     });
     expect(writeText.mock.calls[0]?.[0]).not.toContain("user@example.com");
     expect(toastSuccess).toHaveBeenCalledWith("Copied to clipboard");
@@ -111,12 +128,12 @@ describe("OpenCodeAuthExportDialog", () => {
     expect(screen.getByText(/Truncated on screen for readability/i)).toBeInTheDocument();
     expect(screen.getAllByText(/access-token-abcde/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/QRSTUVWXYZ/).length).toBeGreaterThan(0);
-    expect(screen.queryByText(exportData.authJson.openai.access)).not.toBeInTheDocument();
+    expect(screen.queryByText(exportData.opencodeAuthJson.openai.access)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Copy access token" }));
 
     await waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith(exportData.authJson.openai.access);
+      expect(writeText).toHaveBeenCalledWith(exportData.opencodeAuthJson.openai.access);
     });
   });
 });

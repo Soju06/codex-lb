@@ -123,6 +123,35 @@ export const AccountOpenCodeAuthExportResponseSchema = z.object({
   authJson: OpenCodeAuthJsonSchema,
 });
 
+export const CodexAuthTokensSchema = z.object({
+  idToken: z.string(),
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  accountId: z.string().nullable().optional(),
+});
+
+export const CodexAuthJsonSchema = z.object({
+  authMode: z.string(),
+  openaiApiKey: z.string().nullable().optional(),
+  tokens: CodexAuthTokensSchema,
+  lastRefresh: z.string(),
+});
+
+export const AccountAuthExportTokensSchema = z.object({
+  idToken: z.string(),
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  expiresAtMs: z.number().int().nonnegative(),
+});
+
+export const AccountAuthExportResponseSchema = z.object({
+  filename: z.string(),
+  account: AccountOpenCodeAuthExportAccountSchema,
+  tokens: AccountAuthExportTokensSchema,
+  codexAuthJson: CodexAuthJsonSchema,
+  opencodeAuthJson: OpenCodeAuthJsonSchema,
+});
+
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
@@ -230,6 +259,9 @@ export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
 export type AccountOpenCodeAuthExportResponse = z.infer<
   typeof AccountOpenCodeAuthExportResponseSchema
 >;
+export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;
+export type AccountAuthExportTokens = z.infer<typeof AccountAuthExportTokensSchema>;
+export type AccountAuthExportResponse = z.infer<typeof AccountAuthExportResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

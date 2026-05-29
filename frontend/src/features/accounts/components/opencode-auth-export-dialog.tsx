@@ -11,16 +11,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { AccountOpenCodeAuthExportResponse } from "@/features/accounts/schemas";
+import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 
 export type OpenCodeAuthExportDialogProps = {
   open: boolean;
-  exportData: AccountOpenCodeAuthExportResponse | null;
+  exportData: AccountAuthExportResponse | null;
   onOpenChange: (open: boolean) => void;
 };
 
-function stringifyAuthJson(exportData: AccountOpenCodeAuthExportResponse): string {
-  return `${JSON.stringify(exportData.authJson, null, 2)}\n`;
+function stringifyAuthJson(exportData: AccountAuthExportResponse): string {
+  return `${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`;
 }
 
 function truncateSecret(value: string, leading = 18, trailing = 10): string {
@@ -28,13 +28,13 @@ function truncateSecret(value: string, leading = 18, trailing = 10): string {
   return `${value.slice(0, leading)}…${value.slice(-trailing)}`;
 }
 
-function stringifyAuthPreview(exportData: AccountOpenCodeAuthExportResponse): string {
+function stringifyAuthPreview(exportData: AccountAuthExportResponse): string {
   return `${JSON.stringify(
     {
       openai: {
-        ...exportData.authJson.openai,
-        access: truncateSecret(exportData.authJson.openai.access),
-        refresh: truncateSecret(exportData.authJson.openai.refresh),
+        ...exportData.opencodeAuthJson.openai,
+        access: truncateSecret(exportData.opencodeAuthJson.openai.access),
+        refresh: truncateSecret(exportData.opencodeAuthJson.openai.refresh),
       },
     },
     null,
@@ -42,7 +42,7 @@ function stringifyAuthPreview(exportData: AccountOpenCodeAuthExportResponse): st
   )}\n`;
 }
 
-function downloadAuthJson(exportData: AccountOpenCodeAuthExportResponse): void {
+function downloadAuthJson(exportData: AccountAuthExportResponse): void {
   const blob = new Blob([stringifyAuthJson(exportData)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -98,18 +98,18 @@ export function OpenCodeAuthExportDialog({
                     <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                       Access token
                     </div>
-                    <div className="truncate font-mono text-xs">{truncateSecret(exportData.authJson.openai.access)}</div>
+                    <div className="truncate font-mono text-xs">{truncateSecret(exportData.opencodeAuthJson.openai.access)}</div>
                   </div>
-                  <CopyButton value={exportData.authJson.openai.access} label="Copy access token" iconOnly />
+                  <CopyButton value={exportData.opencodeAuthJson.openai.access} label="Copy access token" iconOnly />
                 </div>
                 <div className="flex items-center justify-between gap-3 px-3 py-2">
                   <div className="min-w-0">
                     <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                       Refresh token
                     </div>
-                    <div className="truncate font-mono text-xs">{truncateSecret(exportData.authJson.openai.refresh)}</div>
+                    <div className="truncate font-mono text-xs">{truncateSecret(exportData.opencodeAuthJson.openai.refresh)}</div>
                   </div>
-                  <CopyButton value={exportData.authJson.openai.refresh} label="Copy refresh token" iconOnly />
+                  <CopyButton value={exportData.opencodeAuthJson.openai.refresh} label="Copy refresh token" iconOnly />
                 </div>
               </div>
             </div>

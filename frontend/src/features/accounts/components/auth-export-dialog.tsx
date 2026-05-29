@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Download } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -98,33 +98,24 @@ function downloadAuthJson(exportData: AccountAuthExportResponse, format: AuthFor
   URL.revokeObjectURL(url);
 }
 
-export function AuthExportDialog({
-  open,
+function AuthExportDialogBody({
   exportData,
   onOpenChange,
-}: AuthExportDialogProps) {
+}: {
+  exportData: AccountAuthExportResponse;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [format, setFormat] = useState<AuthFormat>("codex");
 
-  useEffect(() => {
-    if (open) {
-      setFormat("codex");
-    }
-  }, [open]);
+  const authPreview = format === "codex" ? codexAuthPreview(exportData) : opencodeAuthPreview(exportData);
 
-  const authPreview = exportData
-    ? format === "codex"
-      ? codexAuthPreview(exportData)
-      : opencodeAuthPreview(exportData)
-    : "";
-
-  const authJson = exportData
-    ? format === "codex"
+  const authJson =
+    format === "codex"
       ? codexAuthString(exportData)
-      : `${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`
-    : "";
+      : `${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`;
 
-  const tokenPreviewRows = exportData
-    ? format === "codex"
+  const tokenPreviewRows =
+    format === "codex"
       ? [
           {
             label: "ID token",
@@ -153,9 +144,93 @@ export function AuthExportDialog({
             value: exportData.opencodeAuthJson.openai.refresh,
             copyLabel: "Copy refresh token",
           },
-        ]
-    : [];
+        ];
 
+  return (
+    <>
+      <div className="space-y-4">
+        <AlertMessage variant="warning">
+          This payload contains raw access and refresh tokens. Store it only on machines you trust.
+        </AlertMessage>
+
+        <div className="rounded-lg border bg-muted/20 p-3 text-xs">
+          <div className="font-medium">Exported account</div>
+          <div className="mt-1 text-muted-foreground">{exportData.account.email}</div>
+          <div className="mt-1 font-mono text-muted-foreground">
+            {exportData.account.chatgptAccountId ?? exportData.account.accountId}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Format</Label>
+          <Select value={format} onValueChange={(v) => setFormat(v as AuthFormat)}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="codex">codex</SelectItem>
+              <SelectItem value="opencode">opencode</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <div>
+            <div className="text-sm font-medium">Token preview</div>
+            <div className="text-xs text-muted-foreground">
+              Truncated on screen for readability. Copy buttons still use the full token.
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border bg-muted/20">
+            {tokenPreviewRows.map((row, index) => (
+              <div
+                key={row.copyLabel}
+                className={`flex items-center justify-between gap-3 px-3 py-2 ${
+                  index < tokenPreviewRows.length - 1 ? "border-b" : ""
+                }`}
+              >
+                <div className="min-w-0">
+                  <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {row.label}
+                  </div>
+                  <div className="truncate font-mono text-xs">{truncateSecret(row.value)}</div>
+                </div>
+                <CopyButton value={row.value} label={row.copyLabel} iconOnly />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-medium">auth.json</div>
+            <CopyButton value={authJson} label="Copy auth.json" />
+          </div>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/20 p-3 text-xs">
+            {authPreview}
+          </pre>
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          Close
+        </Button>
+        <Button type="button" className="gap-1.5" onClick={() => downloadAuthJson(exportData, format)}>
+          <Download className="h-4 w-4" />
+          Download
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+export function AuthExportDialog({
+  open,
+  exportData,
+  onOpenChange,
+}: AuthExportDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
@@ -167,88 +242,12 @@ export function AuthExportDialog({
         </DialogHeader>
 
         {exportData ? (
-          <div className="space-y-4">
-            <AlertMessage variant="warning">
-              This payload contains raw access and refresh tokens. Store it only on machines you trust.
-            </AlertMessage>
-
-            <div className="rounded-lg border bg-muted/20 p-3 text-xs">
-              <div className="font-medium">Exported account</div>
-              <div className="mt-1 text-muted-foreground">{exportData.account.email}</div>
-              <div className="mt-1 font-mono text-muted-foreground">
-                {exportData.account.chatgptAccountId ?? exportData.account.accountId}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Format</Label>
-              <Select value={format} onValueChange={(v) => setFormat(v as AuthFormat)}>
-                <SelectTrigger className="w-[180px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="codex">codex</SelectItem>
-                  <SelectItem value="opencode">opencode</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <div>
-                <div className="text-sm font-medium">Token preview</div>
-                <div className="text-xs text-muted-foreground">
-                  Truncated on screen for readability. Copy buttons still use the full token.
-                </div>
-              </div>
-
-              <div className="overflow-hidden rounded-lg border bg-muted/20">
-                {tokenPreviewRows.map((row, index) => (
-                  <div
-                    key={row.copyLabel}
-                    className={`flex items-center justify-between gap-3 px-3 py-2 ${
-                      index < tokenPreviewRows.length - 1 ? "border-b" : ""
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                        {row.label}
-                      </div>
-                      <div className="truncate font-mono text-xs">{truncateSecret(row.value)}</div>
-                    </div>
-                    <CopyButton value={row.value} label={row.copyLabel} iconOnly />
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium">auth.json</div>
-                <CopyButton value={authJson} label="Copy auth.json" />
-              </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/20 p-3 text-xs">
-                {authPreview}
-              </pre>
-            </div>
-          </div>
+          <AuthExportDialogBody
+            key={open ? "open" : "closed"}
+            exportData={exportData}
+            onOpenChange={onOpenChange}
+          />
         ) : null}
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-          <Button
-            type="button"
-            className="gap-1.5"
-            disabled={!exportData}
-            onClick={() => {
-              if (exportData) downloadAuthJson(exportData, format);
-            }}
-          >
-            <Download className="h-4 w-4" />
-            Download
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

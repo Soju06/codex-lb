@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -55,17 +55,18 @@ function codexAuthString(exportData: AccountAuthExportResponse): string {
 }
 
 function codexAuthPreview(exportData: AccountAuthExportResponse): string {
+  const codex = exportData.codexAuthJson;
   return `${JSON.stringify(
     {
-      authMode: exportData.codexAuthJson.authMode,
-      openaiApiKey: exportData.codexAuthJson.openaiApiKey,
+      auth_mode: codex.authMode,
+      OPENAI_API_KEY: codex.openaiApiKey,
       tokens: {
-        idToken: truncateSecret(exportData.codexAuthJson.tokens.idToken),
-        accessToken: truncateSecret(exportData.codexAuthJson.tokens.accessToken),
-        refreshToken: truncateSecret(exportData.codexAuthJson.tokens.refreshToken),
-        accountId: exportData.codexAuthJson.tokens.accountId,
+        id_token: truncateSecret(codex.tokens.idToken),
+        access_token: truncateSecret(codex.tokens.accessToken),
+        refresh_token: truncateSecret(codex.tokens.refreshToken),
+        account_id: codex.tokens.accountId,
       },
-      lastRefresh: exportData.codexAuthJson.lastRefresh,
+      last_refresh: codex.lastRefresh,
     },
     null,
     2,
@@ -103,6 +104,12 @@ export function AuthExportDialog({
   onOpenChange,
 }: AuthExportDialogProps) {
   const [format, setFormat] = useState<AuthFormat>("codex");
+
+  useEffect(() => {
+    if (open) {
+      setFormat("codex");
+    }
+  }, [open]);
 
   const authPreview = exportData
     ? format === "codex"

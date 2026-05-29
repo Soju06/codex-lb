@@ -18,14 +18,40 @@ vi.mock("sonner", () => ({
   },
 }));
 
+function truncateSecret(value: string, leading = 18, trailing = 10): string {
+  if (value.length <= leading + trailing + 1) return value;
+  return `${value.slice(0, leading)}…${value.slice(-trailing)}`;
+}
+
+const idToken = "id-token-abcdefghijklmnopqrstuvwxyz-0123456789";
+const accessToken =
+  "access-token-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const refreshToken = "refresh-token-abcdefghijklmnopqrstuvwxyz-0123456789";
+
+const codexAuthPreviewContent = `${JSON.stringify(
+    {
+      auth_mode: "chatgpt",
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: truncateSecret(idToken),
+        access_token: truncateSecret(accessToken),
+        refresh_token: truncateSecret(refreshToken),
+        account_id: "chatgpt-acc-1",
+      },
+      last_refresh: "2026-01-01T00:00:00.000000Z",
+    },
+    null,
+    2,
+  )}\n`;
+
 const codexAuthStringContent = `${JSON.stringify(
     {
       auth_mode: "chatgpt",
       OPENAI_API_KEY: null,
       tokens: {
-        id_token: "id-token-abcdefghijklmnopqrstuvwxyz-0123456789",
-        access_token: "access-token-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        refresh_token: "refresh-token-abcdefghijklmnopqrstuvwxyz-0123456789",
+        id_token: idToken,
+        access_token: accessToken,
+        refresh_token: refreshToken,
         account_id: "chatgpt-acc-1",
       },
       last_refresh: "2026-01-01T00:00:00.000000Z",
@@ -42,18 +68,18 @@ const exportData = {
     email: "user@example.com",
   },
   tokens: {
-    idToken: "id-token-abcdefghijklmnopqrstuvwxyz-0123456789",
-    accessToken: "access-token-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    refreshToken: "refresh-token-abcdefghijklmnopqrstuvwxyz-0123456789",
+    idToken,
+    accessToken,
+    refreshToken,
     expiresAtMs: 2_000_000_000_000,
   },
   codexAuthJson: {
     authMode: "chatgpt",
     openaiApiKey: null,
     tokens: {
-      idToken: "id-token-abcdefghijklmnopqrstuvwxyz-0123456789",
-      accessToken: "access-token-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-      refreshToken: "refresh-token-abcdefghijklmnopqrstuvwxyz-0123456789",
+      idToken,
+      accessToken,
+      refreshToken,
       accountId: "chatgpt-acc-1" as string | null | undefined,
     },
     lastRefresh: "2026-01-01T00:00:00.000000Z",
@@ -135,6 +161,10 @@ describe("AuthExportDialog", () => {
     expect(screen.getByText("ID token")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Copy access token" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Copy refresh token" })).toHaveLength(1);
+    expect(
+      screen.getByText((_, element) => element?.tagName === "PRE" && element.textContent === codexAuthPreviewContent),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("authMode")).not.toBeInTheDocument();
   });
 
   it("switches to opencode token preview rows", async () => {
@@ -183,5 +213,24 @@ describe("AuthExportDialog", () => {
     expect(screen.getByText("Format")).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
     expect(screen.getByText(/This payload contains raw access and refresh tokens/i)).toBeInTheDocument();
+  });
+
+  it("resets the format to codex when reopened", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithProviders(
+      <AuthExportDialog open exportData={exportData} onOpenChange={vi.fn()} />,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: "opencode" }));
+    expect(screen.getByText("Access token")).toBeInTheDocument();
+
+    rerender(<AuthExportDialog open={false} exportData={exportData} onOpenChange={vi.fn()} />);
+    rerender(<AuthExportDialog open exportData={exportData} onOpenChange={vi.fn()} />);
+
+    expect(screen.getByText("ID token")).toBeInTheDocument();
+    expect(
+      screen.getByText((_, element) => element?.tagName === "PRE" && element.textContent === codexAuthPreviewContent),
+    ).toBeInTheDocument();
   });
 });

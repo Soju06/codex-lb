@@ -60,6 +60,7 @@ from app.modules.proxy.ring_membership import (
 )
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
+from app.modules.reports import api as reports_api
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
@@ -373,6 +374,7 @@ def create_app() -> FastAPI:
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
     app.include_router(quota_planner_api.router)
+    app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)
     app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)

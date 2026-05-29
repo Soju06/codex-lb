@@ -20,9 +20,8 @@ export type AccountDetailProps = {
   onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
-  onExport: (accountId: string) => void;
+  onExportAuth: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onExportOpenCodeAuth: (accountId: string) => void;
 };
 
 export function AccountDetail({
@@ -34,9 +33,8 @@ export function AccountDetail({
   onSetAlias,
   onDelete,
   onReauth,
-  onExport,
+  onExportAuth,
   onLimitWarmupChange,
-  onExportOpenCodeAuth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -90,9 +88,8 @@ export function AccountDetail({
         onResume={onResume}
         onDelete={onDelete}
         onReauth={onReauth}
-        onExport={onExport}
+        onExportAuth={onExportAuth}
         onLimitWarmupChange={onLimitWarmupChange}
-        onExportOpenCodeAuth={onExportOpenCodeAuth}
       />
     </div>
   );

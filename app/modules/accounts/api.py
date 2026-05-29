@@ -10,6 +10,7 @@ from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
     AccountAliasResponse,
+    AccountAuthExportResponse,
     AccountDeleteResponse,
     AccountExportResponse,
     AccountImportResponse,
@@ -66,6 +67,27 @@ async def export_account(
         "account_exported",
         actor_ip=request.client.host if request.client else None,
         details={"account_id": result.account_id},
+    )
+    return result
+
+
+@router.post("/{account_id}/export/auth", response_model=AccountAuthExportResponse)
+async def export_account_auth(
+    request: Request,
+    response: Response,
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountAuthExportResponse:
+    result = await context.service.export_auth(account_id)
+    if not result:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    AuditService.log_async(
+        "account_auth_exported",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
     )
     return result
 

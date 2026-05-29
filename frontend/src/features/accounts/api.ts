@@ -4,6 +4,7 @@ import {
   AccountActionResponseSchema,
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
+  AccountAuthExportResponseSchema,
   AccountExportResponseSchema,
   AccountOpenCodeAuthExportResponseSchema,
   AccountImportResponseSchema,
@@ -79,6 +80,13 @@ export function exportAccountOpenCodeAuth(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/opencode-auth`,
     AccountOpenCodeAuthExportResponseSchema,
+  );
+}
+
+export function exportAccountAuth(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/auth`,
+    AccountAuthExportResponseSchema,
   );
 }
 

@@ -182,6 +182,35 @@ class AccountTrendsResponse(DashboardModel):
     secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)
 
 
+class CodexAuthTokens(DashboardModel):
+    id_token: str
+    access_token: str
+    refresh_token: str
+    account_id: str | None = None
+
+
+class CodexAuthJson(DashboardModel):
+    auth_mode: str = "chatgpt"
+    openai_api_key: str | None = None
+    tokens: CodexAuthTokens
+    last_refresh: str
+
+
+class AccountAuthExportTokens(DashboardModel):
+    id_token: str
+    access_token: str
+    refresh_token: str
+    expires_at_ms: int = Field(ge=0)
+
+
+class AccountAuthExportResponse(DashboardModel):
+    filename: str
+    account: AccountOpenCodeAuthExportAccount
+    tokens: AccountAuthExportTokens
+    codex_auth_json: CodexAuthJson
+    opencode_auth_json: OpenCodeAuthJson
+
+
 class AccountAliasRequest(DashboardModel):
     alias: str | None = Field(default=None, max_length=255)
 

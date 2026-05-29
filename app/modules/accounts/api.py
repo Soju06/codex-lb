@@ -50,7 +50,7 @@ async def get_account_trends(
     return result
 
 
-@router.post("/{account_id}/export", response_model=AccountExportResponse)
+@router.post("/{account_id}/export", response_model=AccountExportResponse, deprecated=True)
 async def export_account(
     request: Request,
     response: Response,
@@ -92,7 +92,7 @@ async def export_account_auth(
     return result
 
 
-@router.post("/{account_id}/export/opencode-auth", response_model=AccountOpenCodeAuthExportResponse)
+@router.post("/{account_id}/export/opencode-auth", response_model=AccountOpenCodeAuthExportResponse, deprecated=True)
 async def export_account_opencode_auth(
     request: Request,
     response: Response,

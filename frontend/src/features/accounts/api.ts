@@ -5,8 +5,6 @@ import {
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
   AccountAuthExportResponseSchema,
-  AccountExportResponseSchema,
-  AccountOpenCodeAuthExportResponseSchema,
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
@@ -76,13 +74,6 @@ export function getAccountTrends(accountId: string) {
   );
 }
 
-export function exportAccountOpenCodeAuth(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/opencode-auth`,
-    AccountOpenCodeAuthExportResponseSchema,
-  );
-}
-
 export function exportAccountAuth(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/auth`,
@@ -95,14 +86,6 @@ export function deleteAccount(accountId: string, deleteHistory = false) {
   return del(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
     AccountActionResponseSchema,
-  );
-}
-
-export function exportAccount(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export`,
-    AccountExportResponseSchema,
-    { cache: "no-store" },
   );
 }
 

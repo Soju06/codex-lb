@@ -124,12 +124,6 @@ export const AccountOpenCodeAuthExportAccountSchema = z.object({
   email: z.string(),
 });
 
-export const AccountOpenCodeAuthExportResponseSchema = z.object({
-  filename: z.string(),
-  account: AccountOpenCodeAuthExportAccountSchema,
-  authJson: OpenCodeAuthJsonSchema,
-});
-
 export const CodexAuthTokensSchema = z.object({
   id_token: z.string(),
   access_token: z.string(),
@@ -179,17 +173,6 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
   status: z.string(),
   enabled: z.boolean(),
-});
-
-export const AccountExportResponseSchema = z.object({
-  accountId: z.string(),
-  email: z.string(),
-  workspaceId: z.string().nullable().optional(),
-  workspaceLabel: z.string().nullable().optional(),
-  seatType: z.string().nullable().optional(),
-  planType: z.string(),
-  status: z.string(),
-  authJson: z.string(),
 });
 
 export const OauthStartRequestSchema = z.object({
@@ -261,14 +244,9 @@ export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountLimitWarmupStatus = z.infer<typeof AccountLimitWarmupStatusSchema>;
-export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
-export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
-export type AccountOpenCodeAuthExportResponse = z.infer<
-  typeof AccountOpenCodeAuthExportResponseSchema
->;
 export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;
 export type AccountAuthExportTokens = z.infer<typeof AccountAuthExportTokensSchema>;
 export type AccountAuthExportResponse = z.infer<typeof AccountAuthExportResponseSchema>;

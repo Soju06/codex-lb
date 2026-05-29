@@ -55,13 +55,13 @@ async def test_export_account_auth_combined(async_client) -> None:
     assert tokens["expiresAtMs"] == access_exp * 1000
 
     codex_auth = payload["codexAuthJson"]
-    assert codex_auth["authMode"] == "chatgpt"
-    assert codex_auth["openaiApiKey"] is None
-    assert codex_auth["tokens"]["idToken"] == tokens["idToken"]
-    assert codex_auth["tokens"]["accessToken"] == tokens["accessToken"]
-    assert codex_auth["tokens"]["refreshToken"] == tokens["refreshToken"]
-    assert codex_auth["tokens"]["accountId"] == raw_account_id
-    assert "lastRefresh" in codex_auth
+    assert codex_auth["auth_mode"] == "chatgpt"
+    assert codex_auth["OPENAI_API_KEY"] is None
+    assert codex_auth["tokens"]["id_token"] == tokens["idToken"]
+    assert codex_auth["tokens"]["access_token"] == tokens["accessToken"]
+    assert codex_auth["tokens"]["refresh_token"] == tokens["refreshToken"]
+    assert codex_auth["tokens"]["account_id"] == raw_account_id
+    assert "last_refresh" in codex_auth
 
     opencode_auth = payload["opencodeAuthJson"]
     assert set(opencode_auth) == {"openai"}

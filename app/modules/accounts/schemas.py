@@ -165,17 +165,25 @@ class AccountTrendsResponse(DashboardModel):
 
 
 class CodexAuthTokens(DashboardModel):
-    id_token: str
-    access_token: str
-    refresh_token: str
-    account_id: str | None = None
+    id_token: str = Field(serialization_alias="id_token", validation_alias="id_token")
+    access_token: str = Field(serialization_alias="access_token", validation_alias="access_token")
+    refresh_token: str = Field(serialization_alias="refresh_token", validation_alias="refresh_token")
+    account_id: str | None = Field(
+        default=None,
+        serialization_alias="account_id",
+        validation_alias="account_id",
+    )
 
 
 class CodexAuthJson(DashboardModel):
-    auth_mode: str = "chatgpt"
-    openai_api_key: str | None = None
+    auth_mode: str = Field(default="chatgpt", serialization_alias="auth_mode", validation_alias="auth_mode")
+    openai_api_key: str | None = Field(
+        default=None,
+        serialization_alias="OPENAI_API_KEY",
+        validation_alias="OPENAI_API_KEY",
+    )
     tokens: CodexAuthTokens
-    last_refresh: str
+    last_refresh: str = Field(serialization_alias="last_refresh", validation_alias="last_refresh")
 
 
 class AccountAuthExportTokens(DashboardModel):

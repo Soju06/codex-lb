@@ -74,15 +74,15 @@ const exportData = {
     expiresAtMs: 2_000_000_000_000,
   },
   codexAuthJson: {
-    authMode: "chatgpt",
-    openaiApiKey: null,
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
     tokens: {
-      idToken,
-      accessToken,
-      refreshToken,
-      accountId: "chatgpt-acc-1" as string | null | undefined,
+      id_token: idToken,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      account_id: "chatgpt-acc-1" as string | null | undefined,
     },
-    lastRefresh: "2026-01-01T00:00:00.000000Z",
+    last_refresh: "2026-01-01T00:00:00.000000Z",
   },
   opencodeAuthJson: {
     openai: {
@@ -200,7 +200,7 @@ describe("AuthExportDialog", () => {
     await user.click(within(idTokenRow as HTMLElement).getByRole("button", { name: "Copy ID token" }));
 
     await waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith(exportData.codexAuthJson.tokens.idToken);
+      expect(writeText).toHaveBeenCalledWith(exportData.codexAuthJson.tokens.id_token);
     });
   });
 

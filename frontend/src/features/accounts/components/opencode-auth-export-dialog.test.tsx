@@ -32,15 +32,15 @@ const exportData = {
     expiresAtMs: 2_000_000_000_000,
   },
   codexAuthJson: {
-    authMode: "chatgpt",
-    openaiApiKey: null,
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
     tokens: {
-      idToken: "id-token-value",
-      accessToken: "access-token-value",
-      refreshToken: "refresh-token-value",
-      accountId: "chatgpt-acc-1" as string | null | undefined,
+      id_token: "id-token-value",
+      access_token: "access-token-value",
+      refresh_token: "refresh-token-value",
+      account_id: "chatgpt-acc-1" as string | null | undefined,
     },
-    lastRefresh: "2026-01-01T00:00:00.000000Z",
+    last_refresh: "2026-01-01T00:00:00.000000Z",
   },
   opencodeAuthJson: {
     openai: {

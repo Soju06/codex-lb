@@ -528,15 +528,15 @@ export const handlers = [
 				expiresAtMs: 2_000_000_000_000,
 			},
 			codexAuthJson: {
-				authMode: "chatgpt",
-				openaiApiKey: null,
+				auth_mode: "chatgpt",
+				OPENAI_API_KEY: null,
 				tokens: {
-					idToken: "id-token",
-					accessToken: "access-token",
-					refreshToken: "refresh-token",
-					accountId: accountId,
+					id_token: "id-token",
+					access_token: "access-token",
+					refresh_token: "refresh-token",
+					account_id: accountId,
 				},
-				lastRefresh: "2026-01-01T12:00:00.000000Z",
+				last_refresh: "2026-01-01T12:00:00.000000Z",
 			},
 			opencodeAuthJson: {
 				openai: {

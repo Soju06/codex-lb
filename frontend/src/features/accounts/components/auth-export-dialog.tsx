@@ -36,37 +36,21 @@ function truncateSecret(value: string, leading = 18, trailing = 10): string {
 }
 
 function codexAuthString(exportData: AccountAuthExportResponse): string {
-  const codex = exportData.codexAuthJson;
-  return `${JSON.stringify(
-    {
-      auth_mode: codex.authMode,
-      OPENAI_API_KEY: codex.openaiApiKey,
-      tokens: {
-        id_token: codex.tokens.idToken,
-        access_token: codex.tokens.accessToken,
-        refresh_token: codex.tokens.refreshToken,
-        account_id: codex.tokens.accountId,
-      },
-      last_refresh: codex.lastRefresh,
-    },
-    null,
-    2,
-  )}\n`;
+  return `${JSON.stringify(exportData.codexAuthJson, null, 2)}\n`;
 }
 
 function codexAuthPreview(exportData: AccountAuthExportResponse): string {
-  const codex = exportData.codexAuthJson;
   return `${JSON.stringify(
     {
-      auth_mode: codex.authMode,
-      OPENAI_API_KEY: codex.openaiApiKey,
+      auth_mode: exportData.codexAuthJson.auth_mode,
+      OPENAI_API_KEY: exportData.codexAuthJson.OPENAI_API_KEY,
       tokens: {
-        id_token: truncateSecret(codex.tokens.idToken),
-        access_token: truncateSecret(codex.tokens.accessToken),
-        refresh_token: truncateSecret(codex.tokens.refreshToken),
-        account_id: codex.tokens.accountId,
+        id_token: truncateSecret(exportData.codexAuthJson.tokens.id_token),
+        access_token: truncateSecret(exportData.codexAuthJson.tokens.access_token),
+        refresh_token: truncateSecret(exportData.codexAuthJson.tokens.refresh_token),
+        account_id: exportData.codexAuthJson.tokens.account_id,
       },
-      last_refresh: codex.lastRefresh,
+      last_refresh: exportData.codexAuthJson.last_refresh,
     },
     null,
     2,
@@ -110,26 +94,24 @@ function AuthExportDialogBody({
   const authPreview = format === "codex" ? codexAuthPreview(exportData) : opencodeAuthPreview(exportData);
 
   const authJson =
-    format === "codex"
-      ? codexAuthString(exportData)
-      : `${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`;
+    format === "codex" ? codexAuthString(exportData) : `${JSON.stringify(exportData.opencodeAuthJson, null, 2)}\n`;
 
   const tokenPreviewRows =
     format === "codex"
       ? [
           {
             label: "ID token",
-            value: exportData.codexAuthJson.tokens.idToken,
+            value: exportData.codexAuthJson.tokens.id_token,
             copyLabel: "Copy ID token",
           },
           {
             label: "Access token",
-            value: exportData.codexAuthJson.tokens.accessToken,
+            value: exportData.codexAuthJson.tokens.access_token,
             copyLabel: "Copy access token",
           },
           {
             label: "Refresh token",
-            value: exportData.codexAuthJson.tokens.refreshToken,
+            value: exportData.codexAuthJson.tokens.refresh_token,
             copyLabel: "Copy refresh token",
           },
         ]

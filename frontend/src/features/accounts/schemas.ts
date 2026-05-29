@@ -131,17 +131,17 @@ export const AccountOpenCodeAuthExportResponseSchema = z.object({
 });
 
 export const CodexAuthTokensSchema = z.object({
-  idToken: z.string(),
-  accessToken: z.string(),
-  refreshToken: z.string(),
-  accountId: z.string().nullable().optional(),
+  id_token: z.string(),
+  access_token: z.string(),
+  refresh_token: z.string(),
+  account_id: z.string().nullable().optional(),
 });
 
 export const CodexAuthJsonSchema = z.object({
-  authMode: z.string(),
-  openaiApiKey: z.string().nullable().optional(),
+  auth_mode: z.string(),
+  OPENAI_API_KEY: z.string().nullable().optional(),
   tokens: CodexAuthTokensSchema,
-  lastRefresh: z.string(),
+  last_refresh: z.string(),
 });
 
 export const AccountAuthExportTokensSchema = z.object({

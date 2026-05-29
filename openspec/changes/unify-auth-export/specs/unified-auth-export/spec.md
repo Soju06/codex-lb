@@ -12,7 +12,7 @@ The system SHALL expose `POST /api/accounts/{id}/export/auth` that returns struc
 - **WHEN** a client calls `POST /api/accounts/acct-123/export/auth`
 - **THEN** the response includes `account` with `email`, `accountId`, and `chatgptAccountId`
 - **AND** `tokens` includes decrypted `id_token`, `access_token`, `refresh_token`, and `expires_at_ms`
-- **AND** `codexAuthJson` contains an object with `auth_mode: "chatgpt"`, `tokens`, and `last_refresh`
+- **AND** `codexAuthJson` contains an object with Codex keys `auth_mode: "chatgpt"`, `OPENAI_API_KEY`, `tokens.id_token`, `tokens.access_token`, `tokens.refresh_token`, `tokens.account_id`, and `last_refresh`
 - **AND** `opencodeAuthJson` contains an object with `openai.type: "oauth"`, `refresh`, `access`, `expires`, `accountId`
 - **AND** `filename` contains a sanitized filename for download
 - **AND** the response includes `Cache-Control: no-store` headers

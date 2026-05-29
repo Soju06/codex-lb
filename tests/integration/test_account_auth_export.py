@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 
 from app.core.auth import generate_unique_account_id
 
-from .test_account_opencode_auth_export import _encode_jwt, _make_auth_json, _wait_for_audit_log
+from .test_account_opencode_auth_export import _make_auth_json, _wait_for_audit_log
 
 pytestmark = pytest.mark.integration
 
@@ -47,8 +48,9 @@ async def test_export_account_auth_combined(async_client) -> None:
     }
 
     tokens = payload["tokens"]
-    assert tokens["idToken"] == _make_auth_json(raw_account_id, email, access_exp=access_exp)["tokens"]["idToken"]
-    assert tokens["accessToken"] == _make_auth_json(raw_account_id, email, access_exp=access_exp)["tokens"]["accessToken"]
+    expected_auth = cast(dict[str, str], _make_auth_json(raw_account_id, email, access_exp=access_exp)["tokens"])
+    assert tokens["idToken"] == expected_auth["idToken"]
+    assert tokens["accessToken"] == expected_auth["accessToken"]
     assert tokens["refreshToken"] == "refresh-token"
     assert tokens["expiresAtMs"] == access_exp * 1000
 

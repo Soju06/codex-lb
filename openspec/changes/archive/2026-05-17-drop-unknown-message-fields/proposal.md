@@ -12,7 +12,7 @@ codex-lb's `/v1/chat/completions` accepts unknown message-object fields (the sta
 
 OpenAI's own `/v1/chat/completions` does not behave this way — it parses the documented chat-message fields and silently drops everything else. codex-lb advertises chat-completions compatibility, so client code written against the OpenAI contract (which often attaches its own message-object bookkeeping keys, or sets the documented standard `name` field) breaks against codex-lb but works against OpenAI.
 
-Concrete failure observed against `https://codex.nekos.me/v1/chat/completions` (Hermes Agent, 2026-05-15):
+Concrete failure observed against a public codex-lb `/v1/chat/completions` deployment (Hermes Agent, 2026-05-15):
 
 1. Client appends two synthetic recovery messages carrying an internal marker key `_empty_recovery_synthetic` (a normal pattern: bookkeeping flags on the local message buffer that the client never expected to wire).
 2. codex-lb forwards the marker into the Responses `input` items.

@@ -17,11 +17,9 @@ Usage:
         --api-key <codex-lb dashboard key> \\
         --model gpt-5.5
 
-Or against the public deployment after the fix is deployed:
-    .venv/bin/python scripts/verify_v1_responses_openai_sdk.py \\
-        --base-url https://codex.nekos.me/v1 \\
-        --api-key $CODEX_NEKOS_API_KEY \\
-        --model gpt-5.5
+To verify another deployment after the fix is deployed, pass that deployment's
+`/v1` base URL via `--base-url` and the matching dashboard key via
+`--api-key`.
 
 Exits 0 on full pass, non-zero on any failure (with a per-case PASS/FAIL
 summary printed before exit).

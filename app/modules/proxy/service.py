@@ -280,19 +280,27 @@ def _log_http_bridge_startup_wait_timeout(
     request_model: str | None = None,
     pending_count: int | None = None,
     inflight_count: int | None = None,
+    queued_count: int | None = None,
     available: int | None = None,
+    pending_request_ids: Sequence[str] | None = None,
+    pending_request_ages_seconds: Sequence[float] | None = None,
 ) -> None:
     logger.warning(
         "http_bridge_startup_wait_timeout request_id=%s stage=%s wait_timeout_seconds=%.1f "
-        "affinity_kind=%s model_class=%s pending_count=%s inflight_count=%s available=%s",
+        "affinity_kind=%s bridge_key=%s model_class=%s pending_count=%s queued_count=%s "
+        "inflight_count=%s available=%s pending_request_ids=%s pending_request_ages_seconds=%s",
         request_id or get_request_id() or "unknown",
         stage,
         timeout_seconds,
         key.affinity_kind if key is not None else None,
+        _hash_identifier(key.affinity_key) if key is not None else None,
         _extract_model_class(request_model) if request_model else None,
         pending_count,
+        queued_count,
         inflight_count,
         available,
+        ",".join(pending_request_ids) if pending_request_ids else None,
+        ",".join(f"{age:.1f}" for age in pending_request_ages_seconds) if pending_request_ages_seconds else None,
     )
 
 
@@ -4559,6 +4567,7 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         *,
         response_create_gate: asyncio.Semaphore,
+        bridge_session: "_HTTPBridgeSession | None" = None,
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
@@ -4579,12 +4588,29 @@ class ProxyService:
             request_state.response_create_gate = None
             request_state.response_create_gate_acquired = False
             request_state.awaiting_response_created = False
+            pending_count = None
+            queued_count = None
+            pending_request_ids: list[str] | None = None
+            pending_request_ages_seconds: list[float] | None = None
+            if bridge_session is not None:
+                now = time.monotonic()
+                async with bridge_session.pending_lock:
+                    pending_states = list(bridge_session.pending_requests)
+                    pending_count = len(pending_states)
+                    queued_count = bridge_session.queued_request_count
+                pending_request_ids = [state.request_log_id or state.request_id for state in pending_states]
+                pending_request_ages_seconds = [max(0.0, now - state.started_at) for state in pending_states]
             _log_http_bridge_startup_wait_timeout(
                 stage="response_create_gate",
                 timeout_seconds=timeout_seconds,
+                key=bridge_session.key if bridge_session is not None else None,
                 request_id=request_state.request_id,
                 request_model=request_state.model,
+                pending_count=pending_count,
+                queued_count=queued_count,
                 available=getattr(response_create_gate, "_value", None),
+                pending_request_ids=pending_request_ids,
+                pending_request_ages_seconds=pending_request_ages_seconds,
             )
             raise _http_bridge_startup_wait_timeout_error(
                 "http_bridge_response_create_gate",
@@ -4850,6 +4876,17 @@ class ProxyService:
             request_state.websocket_stream_lease = selection.lease
             return account
         if defer_no_account_error:
+            logger.warning(
+                "Websocket account selection deferred no-account error request_id=%s model=%s "
+                "preferred_account_id=%s require_preferred=%s error_code=%s error=%s excluded_count=%s",
+                request_state.request_log_id or request_state.request_id,
+                model,
+                preferred_account_id,
+                require_preferred_account,
+                selection.error_code,
+                selection.error_message,
+                len(exclude_account_ids),
+            )
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
@@ -4895,6 +4932,18 @@ class ProxyService:
                 error_message=message,
             )
             return None
+        logger.warning(
+            "Websocket account selection failed request_id=%s model=%s preferred_account_id=%s "
+            "require_preferred=%s error_code=%s error=%s excluded_count=%s api_key_present=%s",
+            request_state.request_log_id or request_state.request_id,
+            model,
+            preferred_account_id,
+            require_preferred_account,
+            error_code,
+            error_message,
+            len(exclude_account_ids),
+            api_key is not None,
+        )
         status_code = 429 if is_local_overload_error_code(error_code) else 503
         await self._emit_websocket_connect_failure(
             websocket,
@@ -6921,6 +6970,7 @@ class ProxyService:
                 response_create_gate=session.response_create_gate,
                 account_id=session.account.id,
                 surface="http_bridge",
+                bridge_session=session,
             )
             gate_acquired = True
             async with session.pending_lock:
@@ -7042,6 +7092,7 @@ class ProxyService:
                     response_create_gate=session.response_create_gate,
                     account_id=session.account.id,
                     surface="http_bridge_prewarm",
+                    bridge_session=session,
                 )
                 gate_acquired = True
                 async with session.pending_lock:
@@ -7191,6 +7242,43 @@ class ProxyService:
             )
         return True
 
+    async def _retire_stale_pending_http_bridge_session(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        detail: str,
+    ) -> None:
+        session.closed = True
+        async with self._http_bridge_lock:
+            if self._http_bridge_sessions.get(session.key) is session:
+                self._http_bridge_sessions.pop(session.key, None)
+                self._unregister_http_bridge_turn_states_locked(session)
+                self._unregister_http_bridge_previous_response_ids_locked(session)
+        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            try:
+                await self._durable_bridge.release_live_session(
+                    session_id=session.durable_session_id,
+                    instance_id=get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                )
+            except Exception:
+                logger.warning("Failed to release stale pending HTTP bridge session lease", exc_info=True)
+        try:
+            await session.upstream.close()
+        except Exception:
+            logger.debug("Failed to close stale pending HTTP bridge upstream websocket", exc_info=True)
+        _log_http_bridge_event(
+            "retire_stale_pending",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=await self._http_bridge_pending_count(session),
+            detail=detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+
     async def _relay_http_bridge_upstream_messages(
         self,
         session: "_HTTPBridgeSession",
@@ -7222,17 +7310,22 @@ class ProxyService:
                         continue
                     async with session.pending_lock:
                         session.queued_request_count = 0
-                    await self._fail_pending_websocket_requests(
-                        account=session.account,
-                        account_id_value=session.account.id,
-                        pending_requests=session.pending_requests,
-                        pending_lock=session.pending_lock,
-                        error_code=receive_timeout.error_code,
-                        error_message=receive_timeout.error_message,
-                        api_key=None,
-                        response_create_gate=session.response_create_gate,
-                    )
-                    session.closed = True
+                    try:
+                        await self._fail_pending_websocket_requests(
+                            account=session.account,
+                            account_id_value=session.account.id,
+                            pending_requests=session.pending_requests,
+                            pending_lock=session.pending_lock,
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                            api_key=None,
+                            response_create_gate=session.response_create_gate,
+                        )
+                    finally:
+                        await self._retire_stale_pending_http_bridge_session(
+                            session,
+                            detail=receive_timeout.error_code,
+                        )
                     break
 
                 if message.kind == "text" and message.text is not None:
@@ -7248,17 +7341,22 @@ class ProxyService:
                     continue
                 async with session.pending_lock:
                     session.queued_request_count = 0
-                await self._fail_pending_websocket_requests(
-                    account=session.account,
-                    account_id_value=session.account.id,
-                    pending_requests=session.pending_requests,
-                    pending_lock=session.pending_lock,
-                    error_code="stream_incomplete",
-                    error_message=_upstream_websocket_disconnect_message(message),
-                    api_key=None,
-                    response_create_gate=session.response_create_gate,
-                )
-                session.closed = True
+                try:
+                    await self._fail_pending_websocket_requests(
+                        account=session.account,
+                        account_id_value=session.account.id,
+                        pending_requests=session.pending_requests,
+                        pending_lock=session.pending_lock,
+                        error_code="stream_incomplete",
+                        error_message=_upstream_websocket_disconnect_message(message),
+                        api_key=None,
+                        response_create_gate=session.response_create_gate,
+                    )
+                finally:
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail="stream_incomplete",
+                    )
                 break
         except asyncio.CancelledError:
             raise
@@ -10824,6 +10922,17 @@ class ProxyService:
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
+            logger.warning(
+                "Proxy streaming exhausted accounts request_id=%s model=%s transport=%s attempts=%s "
+                "excluded_count=%s preferred_account_id=%s api_key_present=%s",
+                request_id,
+                payload.model,
+                request_transport,
+                attempt,
+                len(excluded_account_ids),
+                preferred_account_id,
+                api_key is not None,
+            )
             event = response_failed_event(
                 "no_accounts",
                 retries_exhausted_msg,
@@ -11748,23 +11857,48 @@ class ProxyService:
             else None
         )
         excluded_account_ids_set = set(exclude_account_ids or ())
+        logger.info(
+            "Proxy account selection start request_id=%s kind=%s request_stage=%s model=%s "
+            "additional_limit=%s sticky=%s sticky_kind=%s reallocate_sticky=%s prefer_earlier_reset=%s "
+            "routing_strategy=%s api_key_present=%s api_key_scope_enabled=%s scoped_count=%s "
+            "excluded_count=%s preferred_account_id=%s remaining_budget=%.2f",
+            request_id,
+            kind,
+            request_stage,
+            model,
+            additional_limit_name,
+            bool(sticky_key),
+            sticky_kind.value if hasattr(sticky_kind, "value") else sticky_kind,
+            reallocate_sticky,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            api_key is not None,
+            bool(api_key is not None and api_key.account_assignment_scope_enabled),
+            None if scoped_account_ids is None else len(scoped_account_ids),
+            len(excluded_account_ids_set),
+            preferred_account_id,
+            remaining_budget,
+        )
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
-                preferred_account_selectable = (
+                preferred_eligible = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
                     and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
                 )
-                if preferred_account_id is not None and not preferred_account_selectable:
-                    if not fallback_on_preferred_account_unavailable:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Preferred account is unavailable",
-                            error_code="no_accounts",
-                        )
-                if preferred_account_selectable:
-                    assert preferred_account_id is not None
+                if preferred_account_id is not None and not preferred_eligible:
+                    logger.warning(
+                        "Proxy preferred account skipped request_id=%s kind=%s request_stage=%s "
+                        "preferred_account_id=%s excluded=%s outside_api_key_scope=%s",
+                        request_id,
+                        kind,
+                        request_stage,
+                        preferred_account_id,
+                        preferred_account_id in excluded_account_ids_set,
+                        scoped_account_ids is not None and preferred_account_id not in scoped_account_ids,
+                    )
+                if preferred_eligible:
                     preferred_selection = await self._load_balancer.select_account(
                         sticky_key=sticky_key,
                         sticky_kind=sticky_kind,
@@ -11791,6 +11925,16 @@ class ProxyService:
                         )
                         return preferred_selection
                     if not fallback_on_preferred_account_unavailable:
+                        logger.warning(
+                            "Proxy preferred account unavailable request_id=%s kind=%s request_stage=%s "
+                            "preferred_account_id=%s error_code=%s error=%s",
+                            request_id,
+                            kind,
+                            request_stage,
+                            preferred_account_id,
+                            preferred_selection.error_code,
+                            preferred_selection.error_message,
+                        )
                         return preferred_selection
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
@@ -11810,11 +11954,33 @@ class ProxyService:
                     estimated_lease_tokens=estimated_lease_tokens,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
+                    logger.warning(
+                        "Proxy account selection returned excluded account request_id=%s kind=%s request_stage=%s "
+                        "account_id=%s excluded_count=%s",
+                        request_id,
+                        kind,
+                        request_stage,
+                        selection.account.id,
+                        len(excluded_account_ids_set),
+                    )
                     return AccountSelection(
                         account=None,
                         error_message="No active accounts available",
                         error_code="no_accounts",
                     )
+                logger.info(
+                    "Proxy account selection result request_id=%s kind=%s request_stage=%s model=%s "
+                    "selected_account_id=%s error_code=%s error=%s scoped_count=%s excluded_count=%s",
+                    request_id,
+                    kind,
+                    request_stage,
+                    model,
+                    selection.account.id if selection.account is not None else None,
+                    selection.error_code,
+                    selection.error_message,
+                    None if scoped_account_ids is None else len(scoped_account_ids),
+                    len(excluded_account_ids_set),
+                )
                 return selection
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)

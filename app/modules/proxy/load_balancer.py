@@ -128,6 +128,13 @@ class LoadBalancer:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
 
+        # When an additional (gated) quota is being used, the primary-window
+        # QUOTA_EXCEEDED status may be stale or irrelevant — the additional
+        # quota gate has already determined eligibility.  Signal downstream
+        # selection to keep these accounts in the pool rather than filtering
+        # them out.
+        _effective_bypass_quota_exceeded = additional_limit_name is not None
+
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
@@ -184,6 +191,7 @@ class LoadBalancer:
                     relative_availability_power=relative_availability_power,
                     relative_availability_top_k=relative_availability_top_k,
                     budget_threshold_pct=budget_threshold_pct,
+                    bypass_quota_exceeded=_effective_bypass_quota_exceeded,
                 )
 
                 selected_account_map = account_map
@@ -322,6 +330,7 @@ class LoadBalancer:
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
+                        bypass_quota_exceeded=_effective_bypass_quota_exceeded,
                     )
                     selected_account_map = account_map
                     selected_states = []
@@ -662,6 +671,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
+        bypass_quota_exceeded: bool = False,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
@@ -671,6 +681,7 @@ class LoadBalancer:
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
+                bypass_quota_exceeded=bypass_quota_exceeded,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -722,6 +733,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
+                        bypass_quota_exceeded=bypass_quota_exceeded,
                     )
                     if pinned_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -742,6 +754,7 @@ class LoadBalancer:
                             relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
+                            bypass_quota_exceeded=bypass_quota_exceeded,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
@@ -760,6 +773,7 @@ class LoadBalancer:
                                 allow_backoff_fallback=False,
                                 relative_availability_power=relative_availability_power,
                                 relative_availability_top_k=relative_availability_top_k,
+                                bypass_quota_exceeded=bypass_quota_exceeded,
                             )
                             if pinned_result.account is not None:
                                 if sticky_max_age_seconds is not None:
@@ -786,6 +800,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
+                        bypass_quota_exceeded=bypass_quota_exceeded,
                     )
                     if grace_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -816,6 +831,7 @@ class LoadBalancer:
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
+            bypass_quota_exceeded=bypass_quota_exceeded,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1468,6 +1484,7 @@ def _select_account_preferring_budget_safe(
     budget_threshold_pct: float,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
+    bypass_quota_exceeded: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
     preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
@@ -1481,6 +1498,7 @@ def _select_account_preferring_budget_safe(
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
+            bypass_quota_exceeded=bypass_quota_exceeded,
         )
         if preferred.account is not None:
             return preferred
@@ -1494,6 +1512,7 @@ def _select_account_preferring_budget_safe(
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             primary_first_usage_weighted=True,
+            bypass_quota_exceeded=bypass_quota_exceeded,
         )
     return select_account(
         state_list,
@@ -1503,6 +1522,7 @@ def _select_account_preferring_budget_safe(
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,
+        bypass_quota_exceeded=bypass_quota_exceeded,
     )
 
 

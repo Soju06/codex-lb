@@ -135,6 +135,7 @@ def select_account(
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
     primary_first_usage_weighted: bool = False,
+    bypass_quota_exceeded: bool = False,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -163,6 +164,12 @@ def select_account(
             relative-availability candidates retained before weighted draw.
         primary_first_usage_weighted: Whether usage-weighted routing should
             rank by primary-window pressure before secondary-window pressure.
+        bypass_quota_exceeded: When ``True``, accounts with
+            ``QUOTA_EXCEEDED`` status are **not** filtered out.  This is
+            intended for gated models where an additional (independent) quota
+            has already been verified as available, so the primary-window
+            ``QUOTA_EXCEEDED`` status should not cause the account to be
+            excluded.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -188,7 +195,12 @@ def select_account(
             else:
                 continue
         if state.status == AccountStatus.QUOTA_EXCEEDED:
-            if state.reset_at and current >= state.reset_at:
+            if bypass_quota_exceeded:
+                # Primary-window quota is exhausted but an additional
+                # independent quota (already verified upstream) is
+                # available — keep the account in the pool.
+                pass
+            elif state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
                 state.secondary_used_percent = 0.0

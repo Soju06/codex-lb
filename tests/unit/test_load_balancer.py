@@ -538,6 +538,38 @@ def test_quota_exceeded_cooldown_allows_selection_after_expiry():
     assert result.account.account_id == "a"
 
 
+def test_bypass_quota_exceeded_keeps_account_in_pool():
+    """When bypass_quota_exceeded=True, a QUOTA_EXCEEDED account should not be filtered out."""
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        reset_at=int(now) + 3600,
+    )
+    # Default (bypass=False) → account is excluded.
+    result_default = select_account([state], now=now)
+    assert result_default.account is None
+
+    # With bypass=True → account stays in the pool.
+    result_bypass = select_account([state], now=now, bypass_quota_exceeded=True)
+    assert result_bypass.account is not None
+    assert result_bypass.account.account_id == "a"
+
+
+def test_bypass_quota_exceeded_does_not_affect_other_statuses():
+    """bypass_quota_exceeded should only affect QUOTA_EXCEEDED, not PAUSED/DEACTIVATED."""
+    now = 1_700_000_000.0
+    paused = AccountState("p", AccountStatus.PAUSED, used_percent=5.0)
+    deactivated = AccountState("d", AccountStatus.DEACTIVATED, used_percent=5.0)
+    quota = AccountState("q", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now) + 3600)
+
+    result = select_account([paused, deactivated, quota], now=now, bypass_quota_exceeded=True)
+    # PAUSED and DEACTIVATED still excluded; QUOTA_EXCEEDED is kept.
+    assert result.account is not None
+    assert result.account.account_id == "q"
+
+
 def _make_test_account(
     account_id: str = "a",
     status: AccountStatus = AccountStatus.ACTIVE,

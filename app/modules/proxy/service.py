@@ -67,7 +67,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
     filter_inbound_websocket_headers,
 )
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings import DEFAULT_HOME_DIR, Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
@@ -225,7 +225,9 @@ _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline im
 
 
 def _oversized_response_create_dump_dir() -> Path:
-    return get_settings().data_dir / "debug" / "response-create-dumps"
+    data_dir = getattr(get_settings(), "data_dir", DEFAULT_HOME_DIR)
+    return data_dir / "debug" / "response-create-dumps"
+
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")

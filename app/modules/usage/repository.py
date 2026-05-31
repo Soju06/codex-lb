@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import datetime
 
+from anyio import to_thread
 from sqlalchemy import Integer, and_, cast, delete, func, literal_column, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import sqlite_writer_section
+from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -17,6 +22,16 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+
+
+@dataclass(frozen=True, slots=True)
+class UsageHistorySnapshot:
+    id: int
+    account_id: str
+    used_percent: float
+    recorded_at: datetime
+    reset_at: float | None
+    window_minutes: int | None
 
 
 def _normalized_window_expr():
@@ -27,6 +42,114 @@ def _window_clause(window: str | None):
     if not window or window == "primary":
         return _normalized_window_expr() == "primary"
     return UsageHistory.window == window
+
+
+def _parse_sqlite_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+def _usage_history_from_sqlite_row(row) -> UsageHistory:
+    return UsageHistory(
+        id=int(row[0]),
+        account_id=str(row[1]),
+        recorded_at=_parse_sqlite_datetime(row[2]),
+        window=row[3],
+        used_percent=float(row[4]),
+        input_tokens=int(row[5]) if row[5] is not None else None,
+        output_tokens=int(row[6]) if row[6] is not None else None,
+        reset_at=int(row[7]) if row[7] is not None else None,
+        window_minutes=int(row[8]) if row[8] is not None else None,
+        credits_has=bool(row[9]) if row[9] is not None else None,
+        credits_unlimited=bool(row[10]) if row[10] is not None else None,
+        credits_balance=float(row[11]) if row[11] is not None else None,
+    )
+
+
+def _latest_by_account_sqlite(
+    db_path: str,
+    window: str | None,
+    account_ids: list[str] | None,
+) -> dict[str, UsageHistory]:
+    if account_ids is None:
+        account_sql = "select id from accounts"
+        account_params: list[object] = []
+    elif not account_ids:
+        return {}
+    else:
+        placeholders = ",".join("?" for _ in account_ids)
+        account_sql = f"select id from accounts where id in ({placeholders})"
+        account_params = list(account_ids)
+
+    if not window or window == "primary":
+        window_clause = "coalesce(window, 'primary') = 'primary'"
+        window_params: list[object] = []
+    else:
+        window_clause = "window = ?"
+        window_params = [window]
+    latest_sql = f"""
+        select id, account_id, recorded_at, window, used_percent,
+               input_tokens, output_tokens, reset_at, window_minutes,
+               credits_has, credits_unlimited, credits_balance
+        from usage_history
+        where account_id = ?
+          and {window_clause}
+        order by recorded_at desc, id desc
+        limit 1
+    """
+
+    latest: dict[str, UsageHistory] = {}
+    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        accounts = [str(row[0]) for row in conn.execute(account_sql, account_params)]
+        for account_id in accounts:
+            row = conn.execute(latest_sql, [account_id, *window_params]).fetchone()
+            if row is not None:
+                entry = _usage_history_from_sqlite_row(row)
+                latest[entry.account_id] = entry
+    return latest
+
+
+def _bulk_history_since_sqlite(
+    db_path: str,
+    account_ids: list[str],
+    window: str,
+    since: datetime,
+) -> dict[str, list[UsageHistorySnapshot]]:
+    placeholders = ",".join("?" for _ in account_ids)
+    since_param = since.isoformat(sep=" ")
+    if window == "primary":
+        window_clause = "coalesce(window, 'primary') = 'primary'"
+        params: list[object] = [*account_ids, since_param]
+    else:
+        window_clause = "window = ?"
+        params = [*account_ids, window, since_param]
+    sql = f"""
+        select id, account_id, used_percent, recorded_at, reset_at, window_minutes
+        from usage_history
+        where account_id in ({placeholders})
+          and {window_clause}
+          and recorded_at >= ?
+        order by account_id, recorded_at asc
+    """
+    grouped: dict[str, list[UsageHistorySnapshot]] = {}
+    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        rows = conn.execute(sql, params)
+        for row in rows:
+            snapshot = UsageHistorySnapshot(
+                id=int(row[0]),
+                account_id=str(row[1]),
+                used_percent=float(row[2]),
+                recorded_at=_parse_sqlite_datetime(row[3]),
+                reset_at=float(row[4]) if row[4] is not None else None,
+                window_minutes=int(row[5]) if row[5] is not None else None,
+            )
+            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+    return grouped
 
 
 def _resolve_additional_quota_key(
@@ -173,6 +296,14 @@ class UsageRepository:
             conditions = and_(conditions, UsageHistory.account_id.in_(account_ids))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
+        sqlite_path = sqlite_db_path_from_url(get_settings().database_url) if dialect == "sqlite" else None
+        if sqlite_path is not None:
+            return await to_thread.run_sync(
+                _latest_by_account_sqlite,
+                str(sqlite_path),
+                window,
+                list(account_ids) if account_ids is not None else None,
+            )
         if dialect == "postgresql":
             acct_stmt = select(Account.id)
             if account_ids is not None:
@@ -235,12 +366,31 @@ class UsageRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
-    ) -> dict[str, list[UsageHistory]]:
-        """Fetch usage history for multiple accounts in a single query."""
+    ) -> dict[str, list[UsageHistorySnapshot]]:
+        """Fetch minimal usage history fields for multiple accounts in a single query."""
         if not account_ids:
             return {}
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        sqlite_path = sqlite_db_path_from_url(get_settings().database_url) if dialect == "sqlite" else None
+        if sqlite_path is not None:
+            return await to_thread.run_sync(
+                _bulk_history_since_sqlite,
+                str(sqlite_path),
+                list(account_ids),
+                window,
+                since,
+            )
+
         stmt = (
-            select(UsageHistory)
+            select(
+                UsageHistory.id,
+                UsageHistory.account_id,
+                UsageHistory.used_percent,
+                UsageHistory.recorded_at,
+                UsageHistory.reset_at,
+                UsageHistory.window_minutes,
+            )
             .where(
                 UsageHistory.account_id.in_(account_ids),
                 _window_clause(window),
@@ -249,9 +399,17 @@ class UsageRepository:
             .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
         )
         result = await self._session.execute(stmt)
-        grouped: dict[str, list[UsageHistory]] = {}
-        for row in result.scalars().all():
-            grouped.setdefault(row.account_id, []).append(row)
+        grouped: dict[str, list[UsageHistorySnapshot]] = {}
+        for row in result.all():
+            snapshot = UsageHistorySnapshot(
+                id=int(row.id),
+                account_id=row.account_id,
+                used_percent=float(row.used_percent),
+                recorded_at=row.recorded_at,
+                reset_at=float(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+            )
+            grouped.setdefault(snapshot.account_id, []).append(snapshot)
         return grouped
 
     async def trends_by_bucket(

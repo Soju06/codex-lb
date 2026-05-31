@@ -521,7 +521,7 @@ requires-dist = [
     { name = "pyotp", specifier = ">=2.9.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-multipart", specifier = ">=0.0.27" },
-    { name = "python-socks", specifier = ">=2.7.2" },
+    { name = "python-socks", extras = ["asyncio"], specifier = ">=2.7.2" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "sqlalchemy", specifier = ">=2.0.45" },
     { name = "urllib3", specifier = ">=2.7.0" },

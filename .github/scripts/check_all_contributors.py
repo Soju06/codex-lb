@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-NOREPLY_RE = re.compile(r"^\d+\+([^@]+)@users\.noreply\.github\.com$")
+NOREPLY_RE = re.compile(r"^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$")
 
 
 def _request_json(url: str, token: str | None) -> tuple[list[dict[str, object]], str | None]:

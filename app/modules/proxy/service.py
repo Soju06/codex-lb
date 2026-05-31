@@ -13054,7 +13054,7 @@ def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> Proxy
         retryable_same_contract=False,
         failure_detail="previous_response_not_found",
         failure_exception_type=exc.failure_exception_type,
-        upstream_status_code=exc.upstream_status_code or exc.status_code,
+        upstream_status_code=exc.upstream_status_code,
     )
 
 
@@ -13081,7 +13081,7 @@ def _request_log_failure_metadata(
         failure_phase=exc.failure_phase,
         failure_detail=exc.failure_detail,
         failure_exception_type=exc.failure_exception_type,
-        upstream_status_code=exc.upstream_status_code or exc.status_code,
+        upstream_status_code=exc.upstream_status_code,
         upstream_error_code=upstream_error_code,
         bridge_stage=resolved_bridge_stage,
     )

@@ -1454,6 +1454,20 @@ def test_request_log_failure_metadata_does_not_tag_direct_http_errors_as_owner_f
     assert metadata.bridge_stage is None
 
 
+def test_request_log_failure_metadata_preserves_missing_upstream_status() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            413,
+            openai_error("payload_too_large", "Request body is too large"),
+            failure_phase="validation",
+        )
+    )
+
+    assert metadata.failure_phase == "validation"
+    assert metadata.upstream_status_code is None
+    assert metadata.upstream_error_code == "payload_too_large"
+
+
 def test_request_log_failure_metadata_tags_owner_forward_failures() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(

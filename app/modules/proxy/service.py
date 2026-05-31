@@ -13101,10 +13101,7 @@ def _request_log_failure_metadata(
     ):
         resolved_bridge_stage = "owner_forward"
     upstream_status_code = exc.upstream_status_code
-    if (
-        upstream_status_code is None
-        and _should_infer_upstream_status_from_proxy_error(exc, upstream_error_code)
-    ):
+    if upstream_status_code is None and _should_infer_upstream_status_from_proxy_error(exc, upstream_error_code):
         upstream_status_code = exc.status_code
     return _RequestLogFailureMetadata(
         failure_phase=exc.failure_phase,

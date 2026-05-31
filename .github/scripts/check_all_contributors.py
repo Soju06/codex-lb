@@ -117,6 +117,12 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
     pull_request = _pull_request_event(event_path)
     if pull_request is None:
         return set()
+    commit_count = pull_request.get("commits")
+    if isinstance(commit_count, int) and commit_count > 250:
+        raise SystemExit(
+            "Pull request has more than 250 commits; GitHub's PR commits endpoint is capped, "
+            "so all-contributors coverage cannot be validated safely."
+        )
     commits_url = pull_request.get("commits_url")
     if not isinstance(commits_url, str) or not commits_url:
         return set()

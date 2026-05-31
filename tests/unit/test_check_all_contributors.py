@@ -64,3 +64,26 @@ def test_pull_request_commit_authors_include_normal_email_contributors(tmp_path,
 
     assert checker.pull_request_commit_author_logins(str(event_path), "token") == {"normalauthor"}
     assert requested_urls == ["https://api.github.test/repos/example/codex-lb/pulls/1/commits?per_page=100"]
+
+
+def test_pull_request_commit_authors_fail_when_github_endpoint_is_capped(tmp_path):
+    checker = _load_checker_module()
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "commits": 251,
+                    "commits_url": "https://api.github.test/repos/example/codex-lb/pulls/1/commits",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        checker.pull_request_commit_author_logins(str(event_path), "token")
+    except SystemExit as exc:
+        assert "more than 250 commits" in str(exc)
+    else:
+        raise AssertionError("expected capped PR commit list to fail closed")

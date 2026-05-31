@@ -144,6 +144,12 @@ describe("RequestLogsResponseSchema", () => {
           status: "ok",
           errorCode: null,
           errorMessage: null,
+          failurePhase: "status",
+          failureDetail: "upstream_5xx",
+          failureExceptionType: "ProxyResponseError",
+          upstreamStatusCode: 503,
+          upstreamErrorCode: "server_error",
+          bridgeStage: "owner_forward_status",
           tokens: 10,
           inputTokens: 8,
           outputTokens: 2,
@@ -167,6 +173,12 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.failurePhase).toBe("status");
+    expect(parsed.requests[0]?.failureDetail).toBe("upstream_5xx");
+    expect(parsed.requests[0]?.failureExceptionType).toBe("ProxyResponseError");
+    expect(parsed.requests[0]?.upstreamStatusCode).toBe(503);
+    expect(parsed.requests[0]?.upstreamErrorCode).toBe("server_error");
+    expect(parsed.requests[0]?.bridgeStage).toBe("owner_forward_status");
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
@@ -200,6 +212,8 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.inputTokens).toBeNull();
     expect(parsed.requests[0]?.outputTokens).toBeNull();
+    expect(parsed.requests[0]?.failurePhase).toBeNull();
+    expect(parsed.requests[0]?.upstreamStatusCode).toBeNull();
     expect(parsed.requests[0]?.costBreakdown).toBeNull();
   });
 

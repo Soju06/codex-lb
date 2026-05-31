@@ -2711,6 +2711,9 @@ class ProxyService:
                 await self._handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
+            failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+            if isinstance(failed_account, Account):
+                account_id_value = failed_account.id
             failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -2962,6 +2965,9 @@ class ProxyService:
                 await self._handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
+            failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+            if isinstance(failed_account, Account):
+                account_id_value = failed_account.id
             failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -3192,6 +3198,9 @@ class ProxyService:
                                 raise
                     raise
         except ProxyResponseError as exc:
+            failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+            if isinstance(failed_account, Account):
+                account_id_value = failed_account.id
             failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -3686,6 +3695,9 @@ class ProxyService:
                                 raise
                     raise
         except ProxyResponseError as exc:
+            failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+            if isinstance(failed_account, Account):
+                account_id_value = failed_account.id
             failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -12048,10 +12060,17 @@ class ProxyService:
         if selection.account is None:
             return None
         await self._handle_proxy_error(failed_account, exc)
-        next_account = await self._ensure_fresh_with_budget_or_auth_error(
-            selection.account,
-            timeout_seconds=_remaining_budget_seconds(deadline),
-        )
+        try:
+            next_account = await self._ensure_fresh_with_budget_or_auth_error(
+                selection.account,
+                timeout_seconds=_remaining_budget_seconds(deadline),
+            )
+        except ProxyResponseError as failover_exc:
+            failover_failed_account = _proxy_response_failed_account(failover_exc, selection.account)
+            setattr(failover_exc, _FAILED_ACCOUNT_ATTR, failover_failed_account)
+            if failover_exc.status_code != 401:
+                await self._handle_proxy_error(failover_failed_account, failover_exc)
+            raise
         try:
             result = await call_next(next_account)
         except ProxyResponseError as failover_exc:

@@ -95,6 +95,14 @@ async def test_prefers_websockets_uses_snapshot_value():
     assert registry.prefers_websockets("unknown-model") is False
 
 
+@pytest.mark.asyncio
+async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"plus": [_model("model-http")]})
+
+    assert registry.prefers_websockets("gpt-5.3-codex-spark") is False
+
+
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 

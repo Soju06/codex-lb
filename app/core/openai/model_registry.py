@@ -221,6 +221,7 @@ class ModelRegistry:
             model = self._snapshot.models.get(slug) or self._snapshot.models.get(normalized_slug)
             if model is not None:
                 return model.prefer_websockets
+            return False
 
         bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
         if bootstrap_model is not None:

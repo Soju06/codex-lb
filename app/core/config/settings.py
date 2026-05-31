@@ -425,11 +425,15 @@ class Settings(BaseSettings):
     def _apply_data_dir_defaults(self) -> "Settings":
         if self.data_dir == DEFAULT_HOME_DIR:
             return self
-        if self.database_url == DEFAULT_DATABASE_URL:
+        explicitly_set = self.model_fields_set
+        if "database_url" not in explicitly_set and self.database_url == DEFAULT_DATABASE_URL:
             self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'store.db'}"
-        if self.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE:
+        if "encryption_key_file" not in explicitly_set and self.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE:
             self.encryption_key_file = self.data_dir / "encryption.key"
-        if self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR:
+        if (
+            "conversation_archive_dir" not in explicitly_set
+            and self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR
+        ):
             self.conversation_archive_dir = self.data_dir / "conversation-archive"
         return self
 

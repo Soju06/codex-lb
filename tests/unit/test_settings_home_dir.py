@@ -4,7 +4,14 @@ from unittest.mock import patch
 
 import pytest
 
-from app.core.config.settings import DOCKER_DATA_DIR, Settings, _default_home_dir
+from app.core.config.settings import (
+    DEFAULT_CONVERSATION_ARCHIVE_DIR,
+    DEFAULT_DATABASE_URL,
+    DEFAULT_ENCRYPTION_KEY_FILE,
+    DOCKER_DATA_DIR,
+    Settings,
+    _default_home_dir,
+)
 
 
 def _settings_from_env_file(env_file: Path) -> Settings:
@@ -118,3 +125,33 @@ def test_data_dir_keeps_explicit_related_overrides(tmp_path: Path, monkeypatch: 
     assert settings.database_url == "sqlite+aiosqlite:///explicit.db"
     assert settings.encryption_key_file == key_file
     assert settings.conversation_archive_dir == archive_dir
+
+
+def test_data_dir_keeps_explicit_related_overrides_that_equal_old_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODEX_LB_DATA_DIR", raising=False)
+    monkeypatch.delenv("CODEX_LB_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_LB_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.delenv("CODEX_LB_CONVERSATION_ARCHIVE_DIR", raising=False)
+    data_dir = tmp_path / "configured"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"CODEX_LB_DATA_DIR={data_dir}",
+                f"CODEX_LB_DATABASE_URL={DEFAULT_DATABASE_URL}",
+                f"CODEX_LB_ENCRYPTION_KEY_FILE={DEFAULT_ENCRYPTION_KEY_FILE}",
+                f"CODEX_LB_CONVERSATION_ARCHIVE_DIR={DEFAULT_CONVERSATION_ARCHIVE_DIR}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = _settings_from_env_file(env_file)
+
+    assert settings.data_dir == data_dir
+    assert settings.database_url == DEFAULT_DATABASE_URL
+    assert settings.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE
+    assert settings.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR

@@ -11,19 +11,35 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
 
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
+  accounts?: AccountSummary[];
+  accountsLoading?: boolean;
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
 
-export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+function accountLabel(account: AccountSummary): string {
+  const name = account.alias?.trim() || account.displayName?.trim() || account.email?.trim() || account.accountId;
+  const compactId = formatCompactAccountId(account.accountId, 6, 4);
+  return `${name} (${compactId})`;
+}
+
+export function RoutingSettings({
+  settings,
+  accounts = [],
+  accountsLoading = false,
+  busy,
+  onSave,
+}: RoutingSettingsProps) {
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
   );
@@ -135,6 +151,9 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               <SelectContent align="end">
                 <SelectItem value="capacity_weighted">Capacity weighted</SelectItem>
                 <SelectItem value="relative_availability">Relative availability</SelectItem>
+                <SelectItem value="sequential_drain">Sequential drain</SelectItem>
+                <SelectItem value="reset_drain">Reset drain</SelectItem>
+                <SelectItem value="single_account">Single account</SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>
@@ -218,6 +237,39 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 </div>
               </div>
             </>
+          ) : null}
+
+          {settings.routingStrategy === "single_account" ? (
+            <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-medium">Selected account</p>
+                <p className="text-xs text-muted-foreground">
+                  Route every eligible request through one account until this setting changes.
+                </p>
+              </div>
+              <Select
+                value={settings.singleAccountId ?? undefined}
+                onValueChange={(value) => save({ singleAccountId: value })}
+              >
+                <SelectTrigger
+                  aria-label="Selected account"
+                  className="h-8 w-full text-xs sm:w-64"
+                  disabled={busy || accountsLoading || accounts.length === 0}
+                >
+                  <SelectValue placeholder={accountsLoading ? "Loading accounts..." : "Choose account"} />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  {accounts.map((account) => (
+                    <SelectItem key={account.accountId} value={account.accountId}>
+                      {accountLabel(account)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!accountsLoading && accounts.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Import an account before enabling single-account routing.</p>
+              ) : null}
+            </div>
           ) : null}
 
           <div className="flex items-center justify-between p-3">

@@ -395,6 +395,7 @@ export function createDashboardSettings(
 		routingStrategy: "usage_weighted",
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
+		singleAccountId: null,
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
 		importWithoutOverwrite: false,

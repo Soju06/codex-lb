@@ -16,6 +16,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
+    assert payload["singleAccountId"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 43200
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
@@ -41,6 +42,7 @@ async def test_settings_api_get_and_update(async_client):
             "routingStrategy": "relative_availability",
             "relativeAvailabilityPower": 1.5,
             "relativeAvailabilityTopK": 7,
+            "singleAccountId": None,
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "dashboardSessionTtlSeconds": 31536000,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
@@ -65,6 +67,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["routingStrategy"] == "relative_availability"
     assert updated["relativeAvailabilityPower"] == 1.5
     assert updated["relativeAvailabilityTopK"] == 7
+    assert updated["singleAccountId"] is None
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["dashboardSessionTtlSeconds"] == 31536000
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
@@ -90,6 +93,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["routingStrategy"] == "relative_availability"
     assert payload["relativeAvailabilityPower"] == 1.5
     assert payload["relativeAvailabilityTopK"] == 7
+    assert payload["singleAccountId"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800

@@ -952,6 +952,7 @@ class LoadBalancer:
                         StickySessionKind.STICKY_THREAD,
                         StickySessionKind.CODEX_SESSION,
                     )
+                    and routing_strategy not in ("sequential_drain", "reset_drain", "single_account")
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
@@ -1797,6 +1798,14 @@ def _select_account_preferring_budget_safe(
     deterministic_probe: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
+    if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+        return select_account(
+            state_list,
+            prefer_earlier_reset=prefer_earlier_reset,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+        )
     preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list

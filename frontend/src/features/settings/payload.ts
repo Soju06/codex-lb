@@ -11,6 +11,7 @@ export function buildSettingsUpdateRequest(
     routingStrategy: settings.routingStrategy,
     relativeAvailabilityPower: settings.relativeAvailabilityPower,
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
+    singleAccountId: settings.singleAccountId,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
     importWithoutOverwrite: settings.importWithoutOverwrite,

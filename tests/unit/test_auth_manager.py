@@ -58,6 +58,9 @@ class _DummyRepo:
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
     ) -> bool:
         self.tokens_payload = {
             "account_id": account_id,
@@ -68,6 +71,9 @@ class _DummyRepo:
             "plan_type": plan_type,
             "email": email,
             "chatgpt_account_id": chatgpt_account_id,
+            "workspace_id": workspace_id,
+            "workspace_label": workspace_label,
+            "seat_type": seat_type,
         }
         return True
 

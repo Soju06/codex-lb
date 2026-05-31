@@ -73,6 +73,9 @@ class AccountSummary(DashboardModel):
     email: str
     alias: str | None = None
     display_name: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
     usage: AccountUsage | None = None
@@ -109,6 +112,9 @@ class AccountsResponse(DashboardModel):
 class AccountImportResponse(DashboardModel):
     account_id: str
     email: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
 
@@ -161,6 +167,9 @@ class AccountDeleteResponse(DashboardModel):
 class AccountExportResponse(DashboardModel):
     account_id: str
     email: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
     auth_json: str

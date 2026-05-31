@@ -10,7 +10,12 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
-from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
+from app.modules.accounts.repository import (
+    AccountIdentityConflictError,
+    AccountsRepository,
+    _slot_lock_key,
+    _slot_lock_keys,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -139,6 +144,45 @@ async def test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgre
         await repo.upsert(_make_account("acc_non_merge_lock", "non-merge-lock@example.com"), merge_by_email=False)
 
         assert acquired_identity_locks == ["acc_non_merge_lock"]
+
+
+def test_slot_lock_key_serializes_unknown_workspace_overwrite_by_email():
+    first = _make_account("acc_unknown_a", "unknown-workspace@example.com")
+    second = _make_account("acc_unknown_b", "unknown-workspace@example.com")
+
+    assert _slot_lock_key(first, preserve_unknown_workspace_duplicates=False) == _slot_lock_key(
+        second,
+        preserve_unknown_workspace_duplicates=False,
+    )
+    assert _slot_lock_key(first, preserve_unknown_workspace_duplicates=True) != _slot_lock_key(
+        second,
+        preserve_unknown_workspace_duplicates=True,
+    )
+
+
+def test_slot_lock_key_serializes_email_workspace_slot_when_account_id_appears_later():
+    email_only = _make_account("acc_generated", "late-id@example.com")
+    email_only.workspace_id = "ws_late"
+    with_account_id = _make_account("acc_raw", "late-id@example.com")
+    with_account_id.chatgpt_account_id = "raw_account_id"
+    with_account_id.workspace_id = "ws_late"
+
+    assert set(_slot_lock_keys(email_only)) & set(_slot_lock_keys(with_account_id)) == {
+        "slot-email:late-id@example.com:ws_late",
+    }
+
+
+def test_slot_lock_key_serializes_account_workspace_slot_when_email_changes():
+    old_email = _make_account("acc_generated_old", "old-email@example.com")
+    old_email.chatgpt_account_id = "raw_account_id"
+    old_email.workspace_id = "ws_late"
+    new_email = _make_account("acc_generated_new", "new-email@example.com")
+    new_email.chatgpt_account_id = "raw_account_id"
+    new_email.workspace_id = "ws_late"
+
+    assert set(_slot_lock_keys(old_email)) & set(_slot_lock_keys(new_email)) == {
+        "slot:raw_account_id:ws_late",
+    }
 
 
 @pytest.mark.asyncio

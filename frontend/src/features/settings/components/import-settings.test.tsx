@@ -19,7 +19,7 @@ describe("ImportSettings", () => {
     expect(screen.getByText("Allow import without overwrite")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Keep duplicate imports as separate accounts instead of replacing existing ones.",
+        "Keep separate workspace or unknown credential slots instead of replacing by email.",
       ),
     ).toBeInTheDocument();
   });

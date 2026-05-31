@@ -9,6 +9,7 @@ import { AccountUsagePanel } from "@/features/accounts/components/account-usage-
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
+import { formatSlug } from "@/utils/formatters";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -59,6 +60,8 @@ export function AccountDetail({
     ? account.email
     : null;
   const idSuffix = showAccountId ? ` (${compactId})` : "";
+  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
 
   return (
     <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
@@ -72,6 +75,9 @@ export function AccountDetail({
             <span className={blurred ? "privacy-blur" : ""}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
           </p>
         ) : null}
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {workspaceLabel} | {formatSlug(account.planType)}{seatLabel}
+        </p>
       </div>
 
       <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />

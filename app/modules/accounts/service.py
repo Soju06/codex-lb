@@ -190,7 +190,7 @@ class AccountsService:
 
         email = claims.email or DEFAULT_EMAIL
         raw_account_id = claims.account_id
-        account_id = generate_unique_account_id(raw_account_id, email)
+        account_id = generate_unique_account_id(raw_account_id, email, claims.workspace_id)
         plan_type = coerce_account_plan_type(claims.plan_type, DEFAULT_PLAN)
         last_refresh = to_utc_naive(auth.last_refresh_at) if auth.last_refresh_at else utcnow()
 
@@ -198,6 +198,9 @@ class AccountsService:
             id=account_id,
             chatgpt_account_id=raw_account_id,
             email=email,
+            workspace_id=claims.workspace_id,
+            workspace_label=claims.workspace_label,
+            seat_type=claims.seat_type,
             plan_type=plan_type,
             access_token_encrypted=self._encryptor.encrypt(auth.tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
@@ -207,7 +210,7 @@ class AccountsService:
             deactivation_reason=None,
         )
 
-        saved = await self._repo.upsert(account)
+        saved = await self._repo.upsert_account_slot(account)
         if self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)
@@ -215,6 +218,9 @@ class AccountsService:
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,
+            workspace_id=saved.workspace_id,
+            workspace_label=saved.workspace_label,
+            seat_type=saved.seat_type,
             plan_type=saved.plan_type,
             status=saved.status,
         )
@@ -271,6 +277,9 @@ class AccountsService:
         return AccountExportResponse(
             account_id=account.id,
             email=account.email,
+            workspace_id=account.workspace_id,
+            workspace_label=account.workspace_label,
+            seat_type=account.seat_type,
             plan_type=account.plan_type,
             status=account.status.value,
             auth_json=json.dumps(auth_json, indent=2),

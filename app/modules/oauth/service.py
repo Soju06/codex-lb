@@ -14,8 +14,10 @@ from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
     OpenAIAuthClaims,
+    clean_account_identity_part,
     extract_id_token_claims,
     generate_unique_account_id,
+    normalize_seat_type,
 )
 from app.core.clients.oauth import (
     OAuthError,
@@ -528,7 +530,10 @@ class OauthService:
         auth_claims = claims.auth or OpenAIAuthClaims()
         raw_account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
         email = claims.email or DEFAULT_EMAIL
-        account_id = generate_unique_account_id(raw_account_id, email)
+        workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
+        workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
+        seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
+        account_id = generate_unique_account_id(raw_account_id, email, workspace_id)
         plan_type = coerce_account_plan_type(
             auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type,
             DEFAULT_PLAN,
@@ -538,6 +543,9 @@ class OauthService:
             id=account_id,
             chatgpt_account_id=raw_account_id,
             email=email,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
             plan_type=plan_type,
             access_token_encrypted=self._encryptor.encrypt(tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(tokens.refresh_token),
@@ -548,9 +556,9 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert(account)
+                await repo.upsert_account_slot(account)
         else:
-            await self._accounts_repo.upsert(account)
+            await self._accounts_repo.upsert_account_slot(account)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

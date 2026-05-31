@@ -65,6 +65,9 @@ export const AccountSummarySchema = z.object({
   email: z.string(),
   alias: z.string().nullable().optional(),
   displayName: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -96,6 +99,9 @@ export const AccountsResponseSchema = z.object({
 export const AccountImportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
 });
@@ -149,6 +155,9 @@ export const AccountLimitWarmupUpdateResponseSchema = z.object({
 export const AccountExportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
   authJson: z.string(),

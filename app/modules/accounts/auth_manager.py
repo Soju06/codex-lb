@@ -41,6 +41,9 @@ class AccountsRepositoryPort(Protocol):
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
     ) -> bool: ...
 
 
@@ -217,6 +220,12 @@ class AuthManager:
             account.plan_type = DEFAULT_PLAN
         if result.email:
             account.email = result.email
+        if result.workspace_id:
+            account.workspace_id = result.workspace_id
+        if result.workspace_label:
+            account.workspace_label = result.workspace_label
+        if result.seat_type:
+            account.seat_type = result.seat_type
 
         await self._repo.update_tokens(
             account.id,
@@ -227,6 +236,9 @@ class AuthManager:
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
+            workspace_id=account.workspace_id,
+            workspace_label=account.workspace_label,
+            seat_type=account.seat_type,
         )
         return account
 
@@ -262,6 +274,9 @@ class AuthManager:
                 plan_type=account.plan_type,
                 email=account.email,
                 chatgpt_account_id=raw_account_id,
+                workspace_id=account.workspace_id,
+                workspace_label=account.workspace_label,
+                seat_type=account.seat_type,
             )
         except Exception:
             logger.warning("Failed to persist chatgpt_account_id account_id=%s", account.id, exc_info=True)

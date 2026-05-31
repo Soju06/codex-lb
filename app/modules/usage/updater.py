@@ -344,7 +344,23 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        await self._sync_plan_type(account, payload)
+        if _payload_mismatches_account_slot(account, payload):
+            logger.warning(
+                "Usage refresh payload identity mismatch; skipping account mutation "
+                "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
+                "payload_plan_type=%s stored_seat_type=%s payload_seat_type=%s request_id=%s",
+                account.id,
+                account.workspace_id,
+                payload.workspace_id,
+                account.plan_type,
+                payload.plan_type,
+                account.seat_type,
+                payload.seat_type,
+                get_request_id(),
+            )
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        await self._sync_identity_metadata(account, payload)
 
         now_epoch = _now_epoch()
         if self._additional_usage_repo is not None:
@@ -458,12 +474,23 @@ class UsageUpdater:
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
 
-    async def _sync_plan_type(self, account: Account, payload: UsagePayload) -> None:
+    async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> None:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
-        if next_plan_type == account.plan_type:
+        next_workspace_id = _clean_optional(payload.workspace_id) or account.workspace_id
+        next_workspace_label = _clean_optional(payload.workspace_label) or account.workspace_label
+        next_seat_type = _clean_optional(payload.seat_type) or account.seat_type
+        if (
+            next_plan_type == account.plan_type
+            and next_workspace_id == account.workspace_id
+            and next_workspace_label == account.workspace_label
+            and next_seat_type == account.seat_type
+        ):
             return
 
         account.plan_type = next_plan_type
+        account.workspace_id = next_workspace_id
+        account.workspace_label = next_workspace_label
+        account.seat_type = next_seat_type
         if not self._auth_manager:
             return
 
@@ -476,6 +503,9 @@ class UsageUpdater:
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
+            workspace_id=account.workspace_id,
+            workspace_label=account.workspace_label,
+            seat_type=account.seat_type,
         )
 
     async def _recover_quota_status_from_usage(
@@ -531,6 +561,9 @@ class UsageUpdater:
             return
         account.chatgpt_account_id = stored.chatgpt_account_id
         account.email = stored.email
+        account.workspace_id = stored.workspace_id
+        account.workspace_label = stored.workspace_label
+        account.seat_type = stored.seat_type
         account.plan_type = stored.plan_type
         account.access_token_encrypted = stored.access_token_encrypted
         account.refresh_token_encrypted = stored.refresh_token_encrypted
@@ -550,6 +583,25 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     credits_unlimited = credits.unlimited
     balance_value = credits.balance
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
+
+
+def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+    payload_workspace_id = _clean_optional(payload.workspace_id)
+    if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
+        return True
+    if not payload_workspace_id:
+        payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+        stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
+        if payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type:
+            return True
+    return False
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:

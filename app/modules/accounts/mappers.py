@@ -157,6 +157,9 @@ def _account_to_summary(
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,
+        workspace_id=account.workspace_id,
+        workspace_label=account.workspace_label,
+        seat_type=account.seat_type,
         plan_type=plan_type,
         status=effective_status.value,
         usage=AccountUsage(

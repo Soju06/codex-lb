@@ -12,6 +12,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import cast
 
 NOREPLY_RE = re.compile(r"^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$")
 
@@ -104,6 +105,7 @@ def pull_request_author_login(event_path: str | None) -> set[str]:
     user = pull_request.get("user")
     if not isinstance(user, dict):
         return set()
+    user = cast(dict[str, object], user)
     login = user.get("login")
     user_type = user.get("type")
     if not isinstance(login, str) or user_type == "Bot" or login.endswith("[bot]"):
@@ -130,6 +132,7 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
             author = commit.get("author")
             if not isinstance(author, dict):
                 continue
+            author = cast(dict[str, object], author)
             login = author.get("login")
             author_type = author.get("type")
             if not isinstance(login, str) or author_type == "Bot" or login.endswith("[bot]"):

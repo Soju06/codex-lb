@@ -79,6 +79,18 @@ def test_blank_data_dir_from_env_file_uses_default_home_dir(
     assert settings.conversation_archive_dir == expected_data_dir / "conversation-archive"
 
 
+def test_blank_data_dir_from_process_env_uses_default_home_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_DATA_DIR", "   ")
+
+    expected_data_dir = Path("/home/user") / ".codex-lb"
+    with (
+        patch("app.core.config.settings.Path.home", return_value=Path("/home/user")),
+        patch("app.core.config.settings._in_container", return_value=False),
+        patch.object(Path, "exists", return_value=False),
+    ):
+        assert _default_home_dir() == expected_data_dir
+
+
 def test_data_dir_keeps_explicit_related_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_DATA_DIR", raising=False)
     monkeypatch.delenv("CODEX_LB_DATABASE_URL", raising=False)

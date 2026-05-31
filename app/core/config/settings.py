@@ -27,8 +27,8 @@ def _in_container() -> bool:
 
 def _default_home_dir() -> Path:
     env_dir = os.getenv("CODEX_LB_DATA_DIR")
-    if env_dir:
-        return Path(env_dir)
+    if env_dir and env_dir.strip():
+        return Path(env_dir.strip())
     home_dir = Path.home() / ".codex-lb"
     if home_dir.exists():
         return home_dir

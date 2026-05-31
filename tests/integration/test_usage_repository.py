@@ -4,13 +4,13 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -111,6 +111,39 @@ async def test_latest_by_account_uses_recorded_at_with_deterministic_tie_breaker
 
         latest = await repo.latest_by_account(window="primary")
         assert latest["acc1"].used_percent == 30.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_sqlite_avoids_window_function_for_latest_rows(db_setup):
+    now = utcnow()
+    statements: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only SQL shape test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await accounts_repo.upsert(_make_account("acc2"))
+        await repo.add_entry("acc1", 10.0, window=None, recorded_at=now - timedelta(hours=2))
+        await repo.add_entry("acc1", 20.0, window="primary", recorded_at=now)
+        await repo.add_entry("acc2", 30.0, window=None, recorded_at=now - timedelta(hours=1))
+        await repo.add_entry("acc2", 40.0, window="primary", recorded_at=now)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            latest = await repo.latest_by_account(window="primary")
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
+    assert set(latest.keys()) == {"acc1", "acc2"}
+    emitted_sql = "\n".join(statements).lower()
+    assert "row_number" not in emitted_sql
+    assert " over " not in emitted_sql
 
 
 @pytest.mark.asyncio

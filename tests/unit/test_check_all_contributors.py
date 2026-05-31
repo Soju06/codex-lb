@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -24,3 +25,42 @@ def test_noreply_regex_accepts_current_and_legacy_github_formats():
     assert current.group(1) == "octocat"
     assert legacy is not None
     assert legacy.group(1) == "SHAREN"
+
+
+def test_pull_request_commit_authors_include_normal_email_contributors(tmp_path, monkeypatch):
+    checker = _load_checker_module()
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "commits_url": "https://api.github.test/repos/example/codex-lb/pulls/1/commits",
+                    "user": {"login": "opener", "type": "User"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    requested_urls: list[str] = []
+
+    def fake_request_json(url, token):
+        requested_urls.append(url)
+        assert token == "token"
+        return (
+            [
+                {
+                    "commit": {"author": {"email": "normal@example.com"}},
+                    "author": {"login": "NormalAuthor", "type": "User"},
+                },
+                {
+                    "commit": {"author": {"email": "bot@example.com"}},
+                    "author": {"login": "dependabot[bot]", "type": "Bot"},
+                },
+            ],
+            None,
+        )
+
+    monkeypatch.setattr(checker, "_request_json", fake_request_json)
+
+    assert checker.pull_request_commit_author_logins(str(event_path), "token") == {"normalauthor"}
+    assert requested_urls == ["https://api.github.test/repos/example/codex-lb/pulls/1/commits?per_page=100"]

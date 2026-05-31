@@ -86,15 +86,20 @@ def local_commit_author_logins() -> set[str]:
     return logins
 
 
-def pull_request_author_login(event_path: str | None) -> set[str]:
+def _pull_request_event(event_path: str | None) -> dict[str, object] | None:
     if not event_path:
-        return set()
+        return None
     path = Path(event_path)
     if not path.exists():
-        return set()
+        return None
     event = json.loads(path.read_text(encoding="utf-8"))
     pull_request = event.get("pull_request")
-    if not isinstance(pull_request, dict):
+    return pull_request if isinstance(pull_request, dict) else None
+
+
+def pull_request_author_login(event_path: str | None) -> set[str]:
+    pull_request = _pull_request_event(event_path)
+    if pull_request is None:
         return set()
     user = pull_request.get("user")
     if not isinstance(user, dict):
@@ -104,6 +109,34 @@ def pull_request_author_login(event_path: str | None) -> set[str]:
     if not isinstance(login, str) or user_type == "Bot" or login.endswith("[bot]"):
         return set()
     return {login.lower()}
+
+
+def pull_request_commit_author_logins(event_path: str | None, token: str | None) -> set[str]:
+    pull_request = _pull_request_event(event_path)
+    if pull_request is None:
+        return set()
+    commits_url = pull_request.get("commits_url")
+    if not isinstance(commits_url, str) or not commits_url:
+        return set()
+    url: str | None = f"{commits_url}?per_page=100"
+    logins: set[str] = set()
+    while url:
+        try:
+            page, link = _request_json(url, token)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise SystemExit(f"GitHub PR commits request failed: HTTP {exc.code}: {detail}") from exc
+        for commit in page:
+            author = commit.get("author")
+            if not isinstance(author, dict):
+                continue
+            login = author.get("login")
+            author_type = author.get("type")
+            if not isinstance(login, str) or author_type == "Bot" or login.endswith("[bot]"):
+                continue
+            logins.add(login.lower())
+        url = _next_link(link)
+    return logins
 
 
 def load_all_contributors(path: Path) -> set[str]:
@@ -134,6 +167,7 @@ def main() -> int:
         fetch_contributor_logins(args.repo, os.environ.get("GITHUB_TOKEN"))
         | local_commit_author_logins()
         | pull_request_author_login(os.environ.get("GITHUB_EVENT_PATH"))
+        | pull_request_commit_author_logins(os.environ.get("GITHUB_EVENT_PATH"), os.environ.get("GITHUB_TOKEN"))
     )
     recorded = load_all_contributors(args.config)
     missing = sorted(expected - recorded)

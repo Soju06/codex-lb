@@ -1468,6 +1468,20 @@ def test_request_log_failure_metadata_uses_status_code_for_direct_upstream_failu
     assert metadata.bridge_stage is None
 
 
+def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_failures() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            503,
+            openai_error("no_accounts", "No active accounts available"),
+        )
+    )
+
+    assert metadata.failure_phase is None
+    assert metadata.upstream_status_code is None
+    assert metadata.upstream_error_code == "no_accounts"
+    assert metadata.bridge_stage is None
+
+
 def test_request_log_failure_metadata_preserves_missing_upstream_status() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(

@@ -13065,6 +13065,29 @@ def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
     return _normalize_error_code(error.code, error.type)
 
 
+_LOCAL_PROXY_ERROR_CODES = frozenset(
+    {
+        "bridge_owner_forward_failed",
+        "bridge_owner_unreachable",
+        "insufficient_image_quota",
+        "ip_forbidden",
+        "no_accounts",
+        "payload_too_large",
+        "previous_response_not_found",
+        "upstream_request_timeout",
+        "upstream_unavailable",
+    }
+)
+
+
+def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:
+    if exc.failure_phase == "status":
+        return True
+    if exc.failure_phase is not None:
+        return False
+    return upstream_error_code not in _LOCAL_PROXY_ERROR_CODES
+
+
 def _request_log_failure_metadata(
     exc: ProxyResponseError,
     *,
@@ -13080,8 +13103,7 @@ def _request_log_failure_metadata(
     upstream_status_code = exc.upstream_status_code
     if (
         upstream_status_code is None
-        and exc.failure_phase in {None, "status"}
-        and upstream_error_code not in {"payload_too_large", "upstream_unavailable"}
+        and _should_infer_upstream_status_from_proxy_error(exc, upstream_error_code)
     ):
         upstream_status_code = exc.status_code
     return _RequestLogFailureMetadata(

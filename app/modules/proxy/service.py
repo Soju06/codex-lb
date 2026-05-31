@@ -13077,11 +13077,18 @@ def _request_log_failure_metadata(
         or upstream_error_code in {"bridge_owner_unreachable", "bridge_owner_forward_failed"}
     ):
         resolved_bridge_stage = "owner_forward"
+    upstream_status_code = exc.upstream_status_code
+    if (
+        upstream_status_code is None
+        and exc.failure_phase in {None, "status"}
+        and upstream_error_code not in {"payload_too_large", "upstream_unavailable"}
+    ):
+        upstream_status_code = exc.status_code
     return _RequestLogFailureMetadata(
         failure_phase=exc.failure_phase,
         failure_detail=exc.failure_detail,
         failure_exception_type=exc.failure_exception_type,
-        upstream_status_code=exc.upstream_status_code,
+        upstream_status_code=upstream_status_code,
         upstream_error_code=upstream_error_code,
         bridge_stage=resolved_bridge_stage,
     )

@@ -1454,6 +1454,20 @@ def test_request_log_failure_metadata_does_not_tag_direct_http_errors_as_owner_f
     assert metadata.bridge_stage is None
 
 
+def test_request_log_failure_metadata_uses_status_code_for_direct_upstream_failures() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            503,
+            openai_error("server_error", "direct upstream failed"),
+        )
+    )
+
+    assert metadata.failure_phase is None
+    assert metadata.upstream_status_code == 503
+    assert metadata.upstream_error_code == "server_error"
+    assert metadata.bridge_stage is None
+
+
 def test_request_log_failure_metadata_preserves_missing_upstream_status() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(

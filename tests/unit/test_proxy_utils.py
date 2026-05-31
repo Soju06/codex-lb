@@ -16417,6 +16417,78 @@ async def test_thread_goal_second_refresh_connection_reset_marks_second_account(
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_failover_refresh_error_marks_failover_account(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_refresh_original")
+    account_b = _make_account("acc_thread_goal_refresh_permanent")
+    mark_permanent_failure = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh",
+        AsyncMock(
+            side_effect=[
+                aiohttp.ClientConnectionError("[Errno 104] Connection reset by peer"),
+                proxy_service.RefreshError("refresh_token_expired", "expired", True),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "core_thread_goal_request",
+        AsyncMock(side_effect=AssertionError("upstream must not be called after refresh failures")),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.thread_goal_request("get", {}, {"session_id": "sid-thread-goal"})
+
+    assert exc_info.value.status_code == 401
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    mark_permanent_failure.assert_awaited_once_with(account_b, "refresh_token_expired")
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_b.id
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_upstream_connection_reset_without_failover_records_once(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_thread_goal_call_no_failover")
+    record_error = AsyncMock()
+    selection_calls: list[set[str]] = []
+
+    async def select_account(**kwargs):
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        selection_calls.append(excluded_account_ids)
+        if account.id in excluded_account_ids:
+            return AccountSelection(account=None, error_message="No available accounts")
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def fake_thread_goal_request(*args, **kwargs):
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service.thread_goal_request("get", {}, {"session_id": "sid-thread-goal"})
+
+    assert selection_calls == [set(), {account.id}]
+    record_error.assert_awaited_once_with(account)
+
+
+@pytest.mark.asyncio
 async def test_codex_control_refresh_connection_reset_fails_over(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

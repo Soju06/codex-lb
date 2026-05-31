@@ -2598,7 +2598,9 @@ class ProxyService:
                 return response
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    failed_account = _refresh_error_failed_account(refresh_exc, account)
+                    account_id_value = failed_account.id
+                    await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                 raise ProxyResponseError(
                     401,
                     openai_error(
@@ -2688,7 +2690,9 @@ class ProxyService:
                             raise
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
-                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            failed_account = _refresh_error_failed_account(refresh_exc, account)
+                            account_id_value = failed_account.id
+                            await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                         raise exc
                     except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
                         logger.warning(
@@ -2848,7 +2852,9 @@ class ProxyService:
                 return response
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    failed_account = _refresh_error_failed_account(refresh_exc, account)
+                    account_id_value = failed_account.id
+                    await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                 raise ProxyResponseError(
                     401,
                     openai_error(
@@ -2938,7 +2944,9 @@ class ProxyService:
                             raise
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
-                            await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            failed_account = _refresh_error_failed_account(refresh_exc, account)
+                            account_id_value = failed_account.id
+                            await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                         raise exc
                     except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
                         logger.warning(
@@ -3081,7 +3089,9 @@ class ProxyService:
                 return result
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    failed_account = _refresh_error_failed_account(refresh_exc, account)
+                    account_id_value = failed_account.id
+                    await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                 raise ProxyResponseError(
                     401,
                     openai_error(
@@ -3135,7 +3145,9 @@ class ProxyService:
                     account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        failed_account = _refresh_error_failed_account(refresh_exc, account)
+                        account_id_value = failed_account.id
+                        await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                     raise exc
                 except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
                     logger.warning(
@@ -3563,7 +3575,9 @@ class ProxyService:
                 return result, account_id_value
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
-                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    failed_account = _refresh_error_failed_account(refresh_exc, account)
+                    account_id_value = failed_account.id
+                    await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                 raise ProxyResponseError(
                     401,
                     openai_error(
@@ -3619,7 +3633,9 @@ class ProxyService:
                     account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        failed_account = _refresh_error_failed_account(refresh_exc, account)
+                        account_id_value = failed_account.id
+                        await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
                     raise exc
                 except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
                     logger.warning(
@@ -11981,6 +11997,9 @@ class ProxyService:
                     force=force_current,
                     timeout_seconds=remaining_budget,
                 )
+            except RefreshError as exc:
+                setattr(exc, _FAILED_ACCOUNT_ATTR, current)
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 message = str(exc) or "Request to upstream timed out"
                 logger.warning(
@@ -12025,10 +12044,10 @@ class ProxyService:
         failed_account = _proxy_response_failed_account(exc, account)
         if strict_account_id is not None and failed_account.id == strict_account_id:
             return None
-        await self._handle_proxy_error(failed_account, exc)
         selection = await select_next_account({failed_account.id})
         if selection.account is None:
             return None
+        await self._handle_proxy_error(failed_account, exc)
         next_account = await self._ensure_fresh_with_budget_or_auth_error(
             selection.account,
             timeout_seconds=_remaining_budget_seconds(deadline),
@@ -12052,7 +12071,8 @@ class ProxyService:
             return await self._ensure_fresh_with_budget(account, timeout_seconds=timeout_seconds)
         except RefreshError as refresh_exc:
             if refresh_exc.is_permanent:
-                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                failed_account = _refresh_error_failed_account(refresh_exc, account)
+                await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
             raise ProxyResponseError(
                 401,
                 openai_error(
@@ -14863,6 +14883,11 @@ def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoRe
 
 
 def _proxy_response_failed_account(exc: ProxyResponseError, fallback: Account) -> Account:
+    account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
+    return account if isinstance(account, Account) else fallback
+
+
+def _refresh_error_failed_account(exc: RefreshError, fallback: Account) -> Account:
     account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
     return account if isinstance(account, Account) else fallback
 

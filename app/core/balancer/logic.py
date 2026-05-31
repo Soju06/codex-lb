@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
@@ -136,6 +137,7 @@ def select_account(
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
     primary_first_usage_weighted: bool = False,
     bypass_quota_exceeded: bool = False,
+    bypass_quota_exceeded_account_ids: Collection[str] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -170,6 +172,9 @@ def select_account(
             has already been verified as available, so the primary-window
             ``QUOTA_EXCEEDED`` status should not cause the account to be
             excluded.
+        bypass_quota_exceeded_account_ids: Optional narrower account-id scope
+            for the same bypass. This lets callers keep ordinary quota
+            enforcement for accounts whose independent quota was not verified.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -180,6 +185,7 @@ def select_account(
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
+    bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
         if state.status == AccountStatus.DEACTIVATED:
@@ -195,16 +201,16 @@ def select_account(
             else:
                 continue
         if state.status == AccountStatus.QUOTA_EXCEEDED:
-            if bypass_quota_exceeded:
-                # Primary-window quota is exhausted but an additional
-                # independent quota (already verified upstream) is
-                # available — keep the account in the pool.
-                pass
-            elif state.reset_at and current >= state.reset_at:
+            if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
                 state.secondary_used_percent = 0.0
                 state.reset_at = None
+            elif bypass_quota_exceeded or (bypass_account_ids is not None and state.account_id in bypass_account_ids):
+                # Primary-window quota is exhausted but an additional
+                # independent quota (already verified upstream) is
+                # available — keep the account in the pool.
+                pass
             else:
                 continue
         if state.cooldown_until and current >= state.cooldown_until:

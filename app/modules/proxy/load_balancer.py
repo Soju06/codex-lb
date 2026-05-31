@@ -92,6 +92,7 @@ class _SelectionInputs:
     latest_primary: dict[str, UsageHistory]
     latest_secondary: dict[str, UsageHistory]
     runtime_accounts: list[Account] | None = None
+    quota_exceeded_bypass_account_ids: frozenset[str] = frozenset()
     error_message: str | None = None
     error_code: str | None = None
 
@@ -128,17 +129,12 @@ class LoadBalancer:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
 
-        # When an additional (gated) quota is being used, the primary-window
-        # QUOTA_EXCEEDED status may be stale or irrelevant — the additional
-        # quota gate has already determined eligibility.  Signal downstream
-        # selection to keep these accounts in the pool rather than filtering
-        # them out.
-        _effective_bypass_quota_exceeded = additional_limit_name is not None
+        effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
-                additional_limit_name=additional_limit_name,
+                additional_limit_name=effective_limit_name,
                 account_ids=scoped_account_ids,
             )
             if excluded_ids and selection_inputs.accounts:
@@ -147,6 +143,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime_accounts=selection_inputs.runtime_accounts,
+                    quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
@@ -191,7 +188,7 @@ class LoadBalancer:
                     relative_availability_power=relative_availability_power,
                     relative_availability_top_k=relative_availability_top_k,
                     budget_threshold_pct=budget_threshold_pct,
-                    bypass_quota_exceeded=_effective_bypass_quota_exceeded,
+                    bypass_quota_exceeded_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
                 )
 
                 selected_account_map = account_map
@@ -330,7 +327,7 @@ class LoadBalancer:
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
-                        bypass_quota_exceeded=_effective_bypass_quota_exceeded,
+                        bypass_quota_exceeded_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
                     )
                     selected_account_map = account_map
                     selected_states = []
@@ -475,7 +472,12 @@ class LoadBalancer:
                 return selection_inputs
 
             if effective_limit_name:
-                accounts, error_code, error_message = await self._filter_accounts_for_additional_limit(
+                (
+                    accounts,
+                    quota_exceeded_bypass_account_ids,
+                    error_code,
+                    error_message,
+                ) = await self._filter_accounts_for_additional_limit(
                     accounts,
                     model=model,
                     limit_name=effective_limit_name,
@@ -520,6 +522,9 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
+                quota_exceeded_bypass_account_ids=frozenset(quota_exceeded_bypass_account_ids)
+                if effective_limit_name
+                else frozenset(),
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -534,9 +539,9 @@ class LoadBalancer:
         limit_name: str,
         explicit_limit: bool = False,
         repos: ProxyRepositories,
-    ) -> tuple[list[Account], str | None, str | None]:
+    ) -> tuple[list[Account], frozenset[str], str | None, str | None]:
         if not accounts:
-            return [], None, None
+            return [], frozenset(), None, None
 
         fresh_since = _additional_usage_fresh_since()
         account_ids = [account.id for account in accounts]
@@ -570,8 +575,13 @@ class LoadBalancer:
         fresh_account_ids = set(fresh_primary) | set(fresh_secondary)
 
         eligible_accounts: list[Account] = []
+        quota_exceeded_bypass_account_ids: set[str] = set()
         blocked_by_data = False
         for account in accounts:
+            additional_quota_applies = _additional_quota_applies_to_plan(
+                quota_key=limit_name,
+                plan_type=account.plan_type,
+            )
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
                 account_plan_type=account.plan_type,
@@ -584,6 +594,8 @@ class LoadBalancer:
             )
             if eligibility == "eligible":
                 eligible_accounts.append(account)
+                if additional_quota_applies:
+                    quota_exceeded_bypass_account_ids.add(account.id)
                 continue
             if eligibility == "data_unavailable":
                 blocked_by_data = True
@@ -607,7 +619,7 @@ class LoadBalancer:
                 len(accounts),
                 len(fresh_account_ids),
             )
-            return ([], error_code, error_message)
+            return ([], frozenset(), error_code, error_message)
 
         logger.info(
             (
@@ -620,7 +632,7 @@ class LoadBalancer:
             len(fresh_account_ids),
             len(eligible_accounts),
         )
-        return eligible_accounts, None, None
+        return eligible_accounts, frozenset(quota_exceeded_bypass_account_ids), None, None
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}
@@ -671,7 +683,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
-        bypass_quota_exceeded: bool = False,
+        bypass_quota_exceeded_account_ids: Collection[str] | None = None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
@@ -681,7 +693,7 @@ class LoadBalancer:
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
-                bypass_quota_exceeded=bypass_quota_exceeded,
+                bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -733,7 +745,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
-                        bypass_quota_exceeded=bypass_quota_exceeded,
+                        bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
                     )
                     if pinned_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -754,7 +766,7 @@ class LoadBalancer:
                             relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
-                            bypass_quota_exceeded=bypass_quota_exceeded,
+                            bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
                         )
                         pool_exhausted = (
                             _state_above_budget_threshold
@@ -765,18 +777,18 @@ class LoadBalancer:
                             pool_best.account.account_id == pinned.account_id
                             or pool_exhausted(pool_best.account, budget_threshold_pct)
                         )
-                        if pool_also_exhausted:
-                            pinned_result = select_account(
-                                [pinned],
-                                prefer_earlier_reset=prefer_earlier_reset_accounts,
-                                routing_strategy=routing_strategy,
-                                allow_backoff_fallback=False,
-                                relative_availability_power=relative_availability_power,
-                                relative_availability_top_k=relative_availability_top_k,
-                                bypass_quota_exceeded=bypass_quota_exceeded,
-                            )
-                            if pinned_result.account is not None:
-                                if sticky_max_age_seconds is not None:
+                            if pool_also_exhausted:
+                                pinned_result = select_account(
+                                    [pinned],
+                                    prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                    routing_strategy=routing_strategy,
+                                    allow_backoff_fallback=False,
+                                    relative_availability_power=relative_availability_power,
+                                    relative_availability_top_k=relative_availability_top_k,
+                                    bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
+                                )
+                                if pinned_result.account is not None:
+                                    if sticky_max_age_seconds is not None:
                                     await sticky_repo.upsert(
                                         sticky_key,
                                         pinned.account_id,
@@ -800,7 +812,7 @@ class LoadBalancer:
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
-                        bypass_quota_exceeded=bypass_quota_exceeded,
+                        bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
                     )
                     if grace_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -831,7 +843,7 @@ class LoadBalancer:
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
-            bypass_quota_exceeded=bypass_quota_exceeded,
+            bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -1376,6 +1388,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             if selection_inputs.runtime_accounts is None
             else [_clone_account(account) for account in selection_inputs.runtime_accounts]
         ),
+        quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
     )
@@ -1484,7 +1497,7 @@ def _select_account_preferring_budget_safe(
     budget_threshold_pct: float,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
-    bypass_quota_exceeded: bool = False,
+    bypass_quota_exceeded_account_ids: Collection[str] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     preferred_states = [state for state in state_list if not _state_above_budget_threshold(state, budget_threshold_pct)]
@@ -1498,7 +1511,7 @@ def _select_account_preferring_budget_safe(
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
-            bypass_quota_exceeded=bypass_quota_exceeded,
+            bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
         )
         if preferred.account is not None:
             return preferred
@@ -1512,7 +1525,7 @@ def _select_account_preferring_budget_safe(
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             primary_first_usage_weighted=True,
-            bypass_quota_exceeded=bypass_quota_exceeded,
+            bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
         )
     return select_account(
         state_list,
@@ -1522,7 +1535,7 @@ def _select_account_preferring_budget_safe(
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,
-        bypass_quota_exceeded=bypass_quota_exceeded,
+        bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
     )
 
 

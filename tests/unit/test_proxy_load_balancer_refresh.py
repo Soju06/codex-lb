@@ -2089,6 +2089,112 @@ async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkey
     assert selection.account is not None
     assert selection.account.id == account.id
     assert selection.error_code is None
+    cached_selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+    assert cached_selection.account is not None
+    assert cached_selection.account.id == account.id
+    assert cached_selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_bypasses_primary_quota_for_model_derived_gated_limit(monkeypatch) -> None:
+    account = _make_account("acc-gated-quota-bypass", "gated-quota-bypass@example.com")
+    account.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = now_epoch + 3600
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(model_plans={}),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_keeps_exempt_plan_quota_exceeded_for_model_derived_limit(monkeypatch) -> None:
+    account = _make_account("acc-gated-exempt-bypass", "gated-exempt-bypass@example.com")
+    account.plan_type = "plus"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = now_epoch + 3600
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=20.0,
+        reset_at=now_epoch + 3600,
+        window_minutes=60,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(model_plans={}),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_message is not None
+    assert "Rate limit exceeded" in selection.error_message
+    assert selection.error_code is None
 
 
 @pytest.mark.asyncio

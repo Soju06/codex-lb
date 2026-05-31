@@ -198,6 +198,12 @@ def _effective_status_from_usage(
         credits_balance=credits_balance,
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
+        if _has_credit_override(
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        ):
+            return status
         if (
             account.blocked_at is None
             and account.reset_at is not None
@@ -206,6 +212,15 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
+
+
+def _has_credit_override(
+    *,
+    credits_has: bool | None,
+    credits_unlimited: bool | None,
+    credits_balance: float | None,
+) -> bool:
+    return credits_unlimited is True or credits_has is True or (credits_balance is not None and credits_balance > 0)
 
 
 def _effective_usage_windows(

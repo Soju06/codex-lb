@@ -141,7 +141,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(async_client):
+async def test_proxy_compact_surfaces_additional_quota_exhausted(async_client):
     email = "compact-gated@example.com"
     raw_account_id = "acc_compact_gated"
     auth_json = _make_auth_json(raw_account_id, email, plan_type="pro")
@@ -179,7 +179,7 @@ async def test_proxy_compact_surfaces_no_additional_quota_eligible_accounts(asyn
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 503
     error = response.json()["error"]
-    assert error["code"] == "no_additional_quota_eligible_accounts"
+    assert error["code"] == "quota_exhausted"
 
 
 @pytest.mark.asyncio

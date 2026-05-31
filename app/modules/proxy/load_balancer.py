@@ -61,8 +61,16 @@ _RECOVERABLE_STATUSES = frozenset(
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
+ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
-_ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
+
+
+@dataclass(frozen=True, slots=True)
+class RequestedLimitState:
+    credential_slot_id: str
+    quota_key: str
+    primary: AdditionalUsageHistory | None = None
+    secondary: AdditionalUsageHistory | None = None
 
 
 @dataclass
@@ -93,6 +101,7 @@ class _SelectionInputs:
     latest_secondary: dict[str, UsageHistory]
     runtime_accounts: list[Account] | None = None
     quota_exceeded_bypass_account_ids: frozenset[str] = frozenset()
+    requested_limit_account_ids: frozenset[str] = frozenset()
     error_message: str | None = None
     error_code: str | None = None
 
@@ -144,6 +153,7 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
+                    requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
@@ -179,6 +189,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
+                    requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
                 )
 
                 result = _select_account_preferring_budget_safe(
@@ -212,13 +223,15 @@ class LoadBalancer:
                         selected_reset_at = selected.reset_at
                         for state in states:
                             if state.account_id == result.account.account_id:
-                                state.status = result.account.status
-                                state.deactivation_reason = result.account.deactivation_reason
-                                selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                if not state.limit_scoped_usage:
+                                    state.status = result.account.status
+                                    state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
                                 break
                         selected_snapshot = _clone_account(selected)
-                        selected_snapshot.status = result.account.status
-                        selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                        if not result.account.limit_scoped_usage:
+                            selected_snapshot.status = result.account.status
+                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
                         selected_snapshot.reset_at = selected_reset_at
                 else:
                     error_message = result.error_message
@@ -312,6 +325,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
+                    requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
                 )
                 async with self._repo_factory() as repos:
                     result = await self._select_with_stickiness(
@@ -349,13 +363,15 @@ class LoadBalancer:
                             selected_reset_at = selected.reset_at
                             for state in selected_states:
                                 if state.account_id == result.account.account_id:
-                                    state.status = result.account.status
-                                    state.deactivation_reason = result.account.deactivation_reason
-                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                    if not state.limit_scoped_usage:
+                                        state.status = result.account.status
+                                        state.deactivation_reason = result.account.deactivation_reason
+                                        selected_reset_at = int(state.reset_at) if state.reset_at else None
                                     break
                             selected_snapshot = _clone_account(selected)
-                            selected_snapshot.status = result.account.status
-                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            if not result.account.limit_scoped_usage:
+                                selected_snapshot.status = result.account.status
+                                selected_snapshot.deactivation_reason = result.account.deactivation_reason
                             selected_snapshot.reset_at = selected_reset_at
                     else:
                         error_message = result.error_message
@@ -414,9 +430,18 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
+        canonical_limit_name = (
+            canonicalize_additional_quota_key(
+                quota_key=additional_limit_name,
+                limit_name=additional_limit_name,
+            )
+            if additional_limit_name is not None
+            else None
+        )
         cache_key = (
             model,
             additional_limit_name,
+            canonical_limit_name,
             None if account_ids is None else tuple(sorted(set(account_ids))),
         )
         cached = await self._selection_inputs_cache.get(cache_key)
@@ -427,7 +452,9 @@ class LoadBalancer:
 
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
-            effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
+            effective_limit_name = canonical_limit_name or additional_limit_name or _gated_limit_name_for_model(model)
+            quota_exceeded_bypass_account_ids: frozenset[str] = frozenset()
+            requested_limit_states: dict[str, RequestedLimitState] = {}
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
@@ -475,6 +502,7 @@ class LoadBalancer:
                 (
                     accounts,
                     quota_exceeded_bypass_account_ids,
+                    requested_limit_states,
                     error_code,
                     error_message,
                 ) = await self._filter_accounts_for_additional_limit(
@@ -513,18 +541,22 @@ class LoadBalancer:
                 repos.usage.latest_by_account(),
                 repos.usage.latest_by_account(window="secondary"),
             )
+            latest_primary = {account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()}
+            latest_secondary = {
+                account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
+            }
+            for credential_slot_id, requested_limit in requested_limit_states.items():
+                if requested_limit.primary is not None:
+                    latest_primary[credential_slot_id] = _additional_usage_to_usage_history(requested_limit.primary)
+                if requested_limit.secondary is not None:
+                    latest_secondary[credential_slot_id] = _additional_usage_to_usage_history(requested_limit.secondary)
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
-                },
-                latest_secondary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
-                },
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
-                quota_exceeded_bypass_account_ids=frozenset(quota_exceeded_bypass_account_ids)
-                if effective_limit_name
-                else frozenset(),
+                quota_exceeded_bypass_account_ids=quota_exceeded_bypass_account_ids,
+                requested_limit_account_ids=frozenset(requested_limit_states),
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -539,9 +571,9 @@ class LoadBalancer:
         limit_name: str,
         explicit_limit: bool = False,
         repos: ProxyRepositories,
-    ) -> tuple[list[Account], frozenset[str], str | None, str | None]:
+    ) -> tuple[list[Account], frozenset[str], dict[str, RequestedLimitState], str | None, str | None]:
         if not accounts:
-            return [], frozenset(), None, None
+            return [], frozenset(), {}, None, None
 
         fresh_since = _additional_usage_fresh_since()
         account_ids = [account.id for account in accounts]
@@ -576,7 +608,9 @@ class LoadBalancer:
 
         eligible_accounts: list[Account] = []
         quota_exceeded_bypass_account_ids: set[str] = set()
+        requested_limit_states: dict[str, RequestedLimitState] = {}
         blocked_by_data = False
+        blocked_by_exhaustion = False
         for account in accounts:
             additional_quota_applies = _additional_quota_applies_to_plan(
                 quota_key=limit_name,
@@ -585,6 +619,8 @@ class LoadBalancer:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
                 account_plan_type=account.plan_type,
+                account_status=account.status,
+                account_blocked_at=account.blocked_at,
                 quota_key=limit_name,
                 explicit_limit=explicit_limit,
                 latest_primary=latest_primary,
@@ -592,20 +628,40 @@ class LoadBalancer:
                 fresh_primary=fresh_primary,
                 fresh_secondary=fresh_secondary,
             )
+            if eligibility == "not_applicable":
+                eligible_accounts.append(account)
+                continue
             if eligibility == "eligible":
                 eligible_accounts.append(account)
                 if additional_quota_applies:
                     quota_exceeded_bypass_account_ids.add(account.id)
+                    requested_limit_states[account.id] = RequestedLimitState(
+                        credential_slot_id=account.id,
+                        quota_key=canonicalize_additional_quota_key(quota_key=limit_name) or limit_name,
+                        primary=fresh_primary.get(account.id) or latest_primary.get(account.id),
+                        secondary=fresh_secondary.get(account.id) or latest_secondary.get(account.id),
+                    )
                 continue
             if eligibility == "data_unavailable":
                 blocked_by_data = True
+            elif eligibility == "quota_exhausted":
+                blocked_by_exhaustion = True
 
         if not eligible_accounts:
-            error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE if blocked_by_data else NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+            if blocked_by_data:
+                error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+            elif blocked_by_exhaustion:
+                error_code = ADDITIONAL_QUOTA_EXHAUSTED
+            else:
+                error_code = NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
             error_message = (
                 f"No fresh additional quota data available for model '{model}'"
                 if blocked_by_data
-                else f"No accounts with available additional quota for model '{model}'"
+                else (
+                    f"Requested additional quota is exhausted for model '{model}'"
+                    if blocked_by_exhaustion
+                    else f"No accounts with available additional quota for model '{model}'"
+                )
             )
             logger.warning(
                 (
@@ -619,7 +675,7 @@ class LoadBalancer:
                 len(accounts),
                 len(fresh_account_ids),
             )
-            return ([], frozenset(), error_code, error_message)
+            return ([], frozenset(), {}, error_code, error_message)
 
         logger.info(
             (
@@ -632,7 +688,7 @@ class LoadBalancer:
             len(fresh_account_ids),
             len(eligible_accounts),
         )
-        return eligible_accounts, frozenset(quota_exceeded_bypass_account_ids), None, None
+        return eligible_accounts, frozenset(quota_exceeded_bypass_account_ids), requested_limit_states, None, None
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}
@@ -777,18 +833,18 @@ class LoadBalancer:
                             pool_best.account.account_id == pinned.account_id
                             or pool_exhausted(pool_best.account, budget_threshold_pct)
                         )
-                            if pool_also_exhausted:
-                                pinned_result = select_account(
-                                    [pinned],
-                                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                                    routing_strategy=routing_strategy,
-                                    allow_backoff_fallback=False,
-                                    relative_availability_power=relative_availability_power,
-                                    relative_availability_top_k=relative_availability_top_k,
-                                    bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
-                                )
-                                if pinned_result.account is not None:
-                                    if sticky_max_age_seconds is not None:
+                        if pool_also_exhausted:
+                            pinned_result = select_account(
+                                [pinned],
+                                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                routing_strategy=routing_strategy,
+                                allow_backoff_fallback=False,
+                                relative_availability_power=relative_availability_power,
+                                relative_availability_top_k=relative_availability_top_k,
+                                bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
+                            )
+                            if pinned_result.account is not None:
+                                if sticky_max_age_seconds is not None:
                                     await sticky_repo.upsert(
                                         sticky_key,
                                         pinned.account_id,
@@ -947,13 +1003,14 @@ class LoadBalancer:
             return False
 
         dirty = False
-        if runtime.reset_at != state.reset_at:
+        can_sync_account_usage = not state.limit_scoped_usage
+        if can_sync_account_usage and runtime.reset_at != state.reset_at:
             runtime.reset_at = state.reset_at
             dirty = True
         if runtime.cooldown_until != state.cooldown_until:
             runtime.cooldown_until = state.cooldown_until
             dirty = True
-        if runtime.blocked_at != state.blocked_at:
+        if can_sync_account_usage and runtime.blocked_at != state.blocked_at:
             runtime.blocked_at = state.blocked_at
             dirty = True
         if runtime.last_error_at != state.last_error_at:
@@ -962,7 +1019,7 @@ class LoadBalancer:
         if runtime.error_count != state.error_count:
             runtime.error_count = state.error_count
             dirty = True
-        if account.status != state.status:
+        if can_sync_account_usage and account.status != state.status:
             dirty = True
         if account.deactivation_reason != state.deactivation_reason:
             dirty = True
@@ -994,6 +1051,8 @@ class LoadBalancer:
         account: Account,
         state: AccountState,
     ) -> None:
+        if state.limit_scoped_usage:
+            return
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
@@ -1020,6 +1079,8 @@ class LoadBalancer:
         account: Account,
         state: AccountState,
     ) -> bool:
+        if state.limit_scoped_usage:
+            return True
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
         status_changed = account.status != state.status
@@ -1063,9 +1124,11 @@ def _build_states(
     latest_primary: dict[str, UsageHistory],
     latest_secondary: dict[str, UsageHistory],
     runtime: dict[str, RuntimeState],
+    requested_limit_account_ids: Collection[str] | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
+    requested_limit_ids = set(requested_limit_account_ids or ())
 
     for account in accounts:
         state = _state_from_account(
@@ -1073,6 +1136,7 @@ def _build_states(
             primary_entry=latest_primary.get(account.id),
             secondary_entry=latest_secondary.get(account.id),
             runtime=runtime.setdefault(account.id, RuntimeState()),
+            requested_limit_priority=account.id in requested_limit_ids,
         )
         states.append(state)
         account_map[account.id] = account
@@ -1085,6 +1149,7 @@ def _state_from_account(
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
     runtime: RuntimeState,
+    requested_limit_priority: bool = False,
 ) -> AccountState:
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
@@ -1117,6 +1182,12 @@ def _state_from_account(
         if secondary_reset is not None and secondary_reset <= now_epoch:
             secondary_used = 0.0
             secondary_reset = None
+
+    priority_used = primary_used if requested_limit_priority else None
+    priority_secondary_used = secondary_used if requested_limit_priority else None
+    priority_reset_at = (
+        (secondary_reset if secondary_reset is not None else primary_reset) if requested_limit_priority else None
+    )
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
@@ -1237,6 +1308,11 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         health_tier=new_tier,
+        priority_used_percent=priority_used,
+        priority_secondary_used_percent=priority_secondary_used,
+        priority_reset_at=priority_reset_at,
+        priority_capacity_credits=100.0 if requested_limit_priority else None,
+        limit_scoped_usage=requested_limit_priority,
     )
 
 
@@ -1374,6 +1450,23 @@ def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
     return UsageHistory(**data)
 
 
+def _additional_usage_to_usage_history(entry: AdditionalUsageHistory) -> UsageHistory:
+    return UsageHistory(
+        id=entry.id,
+        account_id=entry.account_id,
+        recorded_at=entry.recorded_at,
+        window=entry.window,
+        used_percent=entry.used_percent,
+        input_tokens=None,
+        output_tokens=None,
+        reset_at=entry.reset_at,
+        window_minutes=entry.window_minutes,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=None,
+    )
+
+
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
@@ -1389,6 +1482,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             else [_clone_account(account) for account in selection_inputs.runtime_accounts]
         ),
         quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
+        requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
     )
@@ -1428,6 +1522,8 @@ def _additional_quota_eligibility(
     *,
     account_id: str,
     account_plan_type: str | None,
+    account_status: AccountStatus,
+    account_blocked_at: int | None,
     quota_key: str | None,
     explicit_limit: bool = False,
     latest_primary: dict[str, AdditionalUsageHistory],
@@ -1440,8 +1536,8 @@ def _additional_quota_eligibility(
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
 
-    if not explicit_limit and not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
-        return "eligible"
+    if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+        return "not_applicable"
 
     if latest_primary_entry is None and latest_secondary_entry is None:
         return "data_unavailable"
@@ -1449,6 +1545,14 @@ def _additional_quota_eligibility(
         return "data_unavailable"
     if latest_secondary_entry is not None and secondary_entry is None:
         return "data_unavailable"
+    if account_status == AccountStatus.QUOTA_EXCEEDED and account_blocked_at is not None:
+        if primary_entry is not None and not _additional_usage_recorded_after_block(primary_entry, account_blocked_at):
+            return "data_unavailable"
+        if secondary_entry is not None and not _additional_usage_recorded_after_block(
+            secondary_entry,
+            account_blocked_at,
+        ):
+            return "data_unavailable"
 
     if primary_entry is not None and _additional_usage_is_exhausted(primary_entry):
         return "quota_exhausted"
@@ -1464,9 +1568,14 @@ def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str |
     normalized_plan = normalize_account_plan_type(plan_type)
     if normalized_plan is None:
         return True
-    if normalized_plan in definition.applies_to_plans:
-        return True
-    return normalized_plan not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
+    return normalized_plan in definition.applies_to_plans
+
+
+def _additional_usage_recorded_after_block(entry: AdditionalUsageHistory, blocked_at: int) -> bool:
+    recorded_at = entry.recorded_at
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_at.timestamp() > float(blocked_at)
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
@@ -1478,12 +1587,19 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
 
 
 def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
-    return state.used_percent is not None and state.used_percent > budget_threshold_pct
+    used_percent = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    return used_percent is not None and used_percent > budget_threshold_pct
 
 
 def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
-    return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
-        state.secondary_used_percent is not None and state.secondary_used_percent > budget_threshold_pct
+    used_percent = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    secondary_used_percent = (
+        state.priority_secondary_used_percent
+        if state.priority_secondary_used_percent is not None
+        else state.secondary_used_percent
+    )
+    return (used_percent is not None and used_percent > budget_threshold_pct) or (
+        secondary_used_percent is not None and secondary_used_percent > budget_threshold_pct
     )
 
 

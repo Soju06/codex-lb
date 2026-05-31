@@ -593,6 +593,49 @@ def test_bypass_quota_exceeded_can_be_scoped_to_account_ids():
     assert result.account.account_id == "allowed"
 
 
+def test_scoped_quota_bypass_ignores_quota_cooldown_only_for_allowed_account():
+    now = 1_700_000_000.0
+    blocked = AccountState(
+        "blocked",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        reset_at=int(now) + 3600,
+        cooldown_until=now + 120.0,
+    )
+    allowed = AccountState(
+        "allowed",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        reset_at=int(now) + 3600,
+        cooldown_until=now + 120.0,
+    )
+
+    result = select_account(
+        [blocked, allowed],
+        now=now,
+        routing_strategy="round_robin",
+        bypass_quota_exceeded_account_ids={"allowed"},
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "allowed"
+    assert allowed.cooldown_until == now + 120.0
+
+
+def test_scoped_quota_bypass_does_not_ignore_active_account_cooldown():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        cooldown_until=now + 120.0,
+    )
+
+    result = select_account([state], now=now, bypass_quota_exceeded_account_ids={"a"})
+
+    assert result.account is None
+
+
 def test_bypass_quota_exceeded_does_not_affect_other_statuses():
     """bypass_quota_exceeded should only affect QUOTA_EXCEEDED, not PAUSED/DEACTIVATED."""
     now = 1_700_000_000.0
@@ -1498,12 +1541,20 @@ def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallbac
     assert counts["plus"] > counts["unknown-plan"]
 
 
-@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise", "edu", "unknown", None])
+@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise"])
 def test_additional_quota_applies_to_quota_enforced_and_unmapped_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is True
 
 
-@pytest.mark.parametrize("plan_type", ["free", "plus"])
+def test_additional_quota_applies_conservatively_when_plan_is_missing():
+    assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=None) is True
+
+
+def test_additional_quota_applies_conservatively_when_plan_is_unknown():
+    assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type="unknown") is True
+
+
+@pytest.mark.parametrize("plan_type", ["free", "plus", "edu"])
 def test_additional_quota_does_not_apply_to_known_non_additional_quota_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is False
 
@@ -1763,6 +1814,112 @@ def test_sticky_budget_threshold_still_counts_secondary_pressure():
     )
 
     assert _state_above_sticky_budget_threshold(state, 95.0) is True
+
+
+def test_select_account_uses_requested_limit_usage_before_account_usage():
+    states = [
+        AccountState(
+            "account-high-limit-low",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            priority_used_percent=10.0,
+            priority_secondary_used_percent=10.0,
+        ),
+        AccountState(
+            "account-low-limit-high",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            priority_used_percent=80.0,
+            priority_secondary_used_percent=80.0,
+        ),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "account-high-limit-low"
+
+
+def test_select_account_uses_requested_limit_reset_for_burn_first():
+    now = time.time()
+    states = [
+        AccountState(
+            "base-early-limit-late",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 3600),
+            priority_used_percent=10.0,
+            priority_secondary_used_percent=10.0,
+            priority_reset_at=int(now + 5 * 24 * 3600),
+        ),
+        AccountState(
+            "base-late-limit-early",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            secondary_reset_at=int(now + 5 * 24 * 3600),
+            priority_used_percent=90.0,
+            priority_secondary_used_percent=90.0,
+            priority_reset_at=int(now + 3600),
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        prefer_earlier_reset=True,
+        routing_strategy="usage_weighted",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "base-late-limit-early"
+
+
+def test_budget_safe_selection_uses_requested_limit_pressure():
+    states = [
+        AccountState(
+            "base-pressured-limit-safe",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=99.0,
+            priority_used_percent=10.0,
+            priority_secondary_used_percent=10.0,
+        ),
+        AccountState(
+            "base-safe-limit-pressured",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            priority_used_percent=99.0,
+            priority_secondary_used_percent=99.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "base-pressured-limit-safe"
+
+
+def test_sticky_budget_threshold_uses_requested_limit_pressure():
+    state = AccountState(
+        "sticky",
+        AccountStatus.ACTIVE,
+        used_percent=99.0,
+        secondary_used_percent=99.0,
+        priority_used_percent=10.0,
+        priority_secondary_used_percent=10.0,
+    )
+
+    assert _state_above_sticky_budget_threshold(state, 95.0) is False
 
 
 def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_bucket():

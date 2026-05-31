@@ -83,6 +83,11 @@ class AccountState:
     plan_type: str | None = None
     capacity_credits: float | None = None
     health_tier: int = 0
+    priority_used_percent: float | None = None
+    priority_secondary_used_percent: float | None = None
+    priority_reset_at: int | None = None
+    priority_capacity_credits: float | None = None
+    limit_scoped_usage: bool = False
 
 
 @dataclass
@@ -92,23 +97,24 @@ class SelectionResult:
 
 
 def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-    primary_used = state.used_percent if state.used_percent is not None else 0.0
-    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    primary_used = _priority_primary_used(state)
+    secondary_used = _priority_secondary_used(state, primary_used)
     last_selected = state.last_selected_at or 0.0
     return secondary_used, primary_used, last_selected, state.account_id
 
 
 def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-    primary_used = state.used_percent if state.used_percent is not None else 0.0
-    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    primary_used = _priority_primary_used(state)
+    secondary_used = _priority_secondary_used(state, primary_used)
     last_selected = state.last_selected_at or 0.0
     return primary_used, secondary_used, last_selected, state.account_id
 
 
 def _reset_bucket_days(state: AccountState, current: float) -> int:
-    if state.secondary_reset_at is None:
+    reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
+    if reset_at is None:
         return UNKNOWN_RESET_BUCKET_DAYS
-    return max(0, int((state.secondary_reset_at - current) // SECONDS_PER_DAY))
+    return max(0, int((reset_at - current) // SECONDS_PER_DAY))
 
 
 def _prefer_earlier_reset_candidates(available: list[AccountState], current: float) -> list[AccountState]:
@@ -188,6 +194,7 @@ def select_account(
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
+        quota_bypass_applied = False
         if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
@@ -210,7 +217,7 @@ def select_account(
                 # Primary-window quota is exhausted but an additional
                 # independent quota (already verified upstream) is
                 # available — keep the account in the pool.
-                pass
+                quota_bypass_applied = True
             else:
                 continue
         if state.cooldown_until and current >= state.cooldown_until:
@@ -218,7 +225,8 @@ def select_account(
             state.last_error_at = None
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
-            continue
+            if not quota_bypass_applied:
+                continue
         if state.error_count >= 3:
             backoff = min(300, 30 * (2 ** (state.error_count - 3)))
             if state.last_error_at and current - state.last_error_at < backoff:
@@ -328,18 +336,32 @@ def select_account(
 
 def _remaining_secondary_credits(state: AccountState) -> float:
     """Return remaining absolute credits for the secondary (7-day) window."""
-    capacity = state.capacity_credits
+    capacity = (
+        state.priority_capacity_credits if state.priority_capacity_credits is not None else state.capacity_credits
+    )
     if capacity is None:
         capacity = _fallback_secondary_capacity_credits(state.plan_type)
     elif capacity <= 0:
         return 0.0
-    if state.secondary_used_percent is not None:
-        used_pct = state.secondary_used_percent
-    elif state.used_percent is not None:
-        used_pct = state.used_percent
-    else:
-        used_pct = 0.0
+    primary_used = _priority_primary_used(state)
+    used_pct = _priority_secondary_used(state, primary_used)
     return max(0.0, capacity * (1.0 - min(used_pct, 100.0) / 100.0))
+
+
+def _priority_primary_used(state: AccountState) -> float:
+    value = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    return value if value is not None else 0.0
+
+
+def _priority_secondary_used(state: AccountState, primary_used: float | None = None) -> float:
+    value = (
+        state.priority_secondary_used_percent
+        if state.priority_secondary_used_percent is not None
+        else state.secondary_used_percent
+    )
+    if value is not None:
+        return value
+    return primary_used if primary_used is not None else _priority_primary_used(state)
 
 
 def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:

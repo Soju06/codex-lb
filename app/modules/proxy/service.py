@@ -222,9 +222,12 @@ _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
 )
 _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
+_OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
 
 
 def _oversized_response_create_dump_dir() -> Path:
+    if _OVERSIZED_RESPONSE_CREATE_DUMP_DIR is not None:
+        return _OVERSIZED_RESPONSE_CREATE_DUMP_DIR
     data_dir = getattr(get_settings(), "data_dir", DEFAULT_HOME_DIR)
     return data_dir / "debug" / "response-create-dumps"
 

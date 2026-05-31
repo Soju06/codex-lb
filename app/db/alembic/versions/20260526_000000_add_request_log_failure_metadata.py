@@ -1,7 +1,7 @@
 """add request log failure metadata
 
 Revision ID: 20260526_000000_add_request_log_failure_metadata
-Revises: 20260513_000000_add_accounts_alias
+Revises: 20260525_000000_add_usage_raw_window_latest_index
 Create Date: 2026-05-26
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260526_000000_add_request_log_failure_metadata"
-down_revision = "20260513_000000_add_accounts_alias"
+down_revision = "20260525_000000_add_usage_raw_window_latest_index"
 branch_labels = None
 depends_on = None
 

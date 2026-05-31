@@ -1946,7 +1946,7 @@ def test_select_account_relative_availability_clamps_divisor_floor_to_five_minut
     assert result.account.account_id == "a"
 
 
-def test_select_account_fill_first_picks_highest_primary_used_percent():
+def test_select_account_fill_first_picks_lowest_primary_used_percent():
     now = 1_700_000_000.0
     states = [
         AccountState("a", AccountStatus.ACTIVE, used_percent=30.0),
@@ -1955,7 +1955,7 @@ def test_select_account_fill_first_picks_highest_primary_used_percent():
     ]
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "a"
+    assert result.account.account_id == "c"
 
 
 def test_select_account_fill_first_breaks_ties_by_account_id():
@@ -1978,7 +1978,7 @@ def test_select_account_fill_first_treats_none_used_percent_as_zero():
     ]
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "a"
+    assert result.account.account_id == "b"
 
 
 def test_select_account_fill_first_is_deterministic_across_calls():
@@ -1993,7 +1993,7 @@ def test_select_account_fill_first_is_deterministic_across_calls():
         result = select_account(states, now=now, routing_strategy="fill_first")
         assert result.account is not None
         selections.add(result.account.account_id)
-    assert selections == {"c"}
+    assert selections == {"b"}
 
 
 def test_select_account_fill_first_skips_rate_limited_account():
@@ -2005,7 +2005,7 @@ def test_select_account_fill_first_skips_rate_limited_account():
     ]
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "c"
+    assert result.account.account_id == "b"
 
 
 def test_select_account_fill_first_skips_quota_exceeded_account():
@@ -2023,7 +2023,7 @@ def test_select_account_fill_first_skips_quota_exceeded_account():
     ]
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "c"
+    assert result.account.account_id == "b"
 
 
 def test_select_account_fill_first_prefers_healthy_over_draining():
@@ -2065,7 +2065,7 @@ def test_select_account_fill_first_falls_back_to_draining_when_no_healthy():
     ]
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "draining-mid"
+    assert result.account.account_id == "draining-low"
 
 
 def test_select_account_fill_first_prefer_earlier_reset_filters_pool():
@@ -2095,7 +2095,7 @@ def test_select_account_fill_first_prefer_earlier_reset_filters_pool():
         routing_strategy="fill_first",
     )
     assert result.account is not None
-    assert result.account.account_id == "early-high"
+    assert result.account.account_id == "early-low"
 
 
 def test_select_account_fill_first_returns_no_available_when_pool_empty():
@@ -2123,21 +2123,21 @@ def test_select_account_fill_first_cycle_after_account_drops_out():
     a.used_percent = 50.0
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "a"
+    assert result.account.account_id == "b"
 
     a.status = AccountStatus.RATE_LIMITED
     a.reset_at = int(now + 600)
     b.used_percent = 60.0
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "b"
+    assert result.account.account_id == "c"
 
     a.status = AccountStatus.ACTIVE
     a.used_percent = 0.0
     a.reset_at = None
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "b"
+    assert result.account.account_id == "a"
 
 
 def test_select_account_relative_availability_top_k_limits_weighted_draw():
@@ -2329,4 +2329,4 @@ def test_select_account_fill_first_primary_dominates_over_secondary():
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
     # Primary still wins -- only ties break on secondary.
-    assert result.account.account_id == "high-secondary"
+    assert result.account.account_id == "low-primary"

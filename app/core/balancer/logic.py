@@ -520,11 +520,7 @@ def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
 def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:
     primary_used = state.used_percent if state.used_percent is not None else 0.0
     secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else 0.0
-    # Primary usage descending keeps traffic on the account currently being
-    # filled instead of switching away after the first refreshed usage tick.
-    # Secondary usage also descends to drain the most-saturated weekly pool
-    # first when primary usage ties.
-    return -primary_used, -secondary_used, state.account_id
+    return primary_used, -secondary_used, state.account_id
 
 
 def _select_fill_first(available: list[AccountState]) -> AccountState:
@@ -541,10 +537,10 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
     ``account_id`` ascending is the final stable tiebreaker.
 
     The "fill first" effect emerges from the existing pool gating: an
-    account stays selected while it remains the highest-primary-usage
+    account stays selected while it remains the lowest-primary-usage
     candidate; once its 5h primary window saturates and the upstream marks
     it rate-limited or quota-exceeded (or it transitions to ``DRAINING``),
-    it falls out of ``effective_pool`` and the next-most-filled account is
+    it falls out of ``effective_pool`` and the next-lowest-usage account is
     picked. By the time later accounts saturate, the first account's 5h
     window has typically reset and it re-enters the pool as an empty fallback
     again.

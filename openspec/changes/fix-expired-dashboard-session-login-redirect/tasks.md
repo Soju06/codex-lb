@@ -1,0 +1,3 @@
+- [x] Update the frontend 401 handler to clear stale pending-TOTP and password-session state.
+- [x] Add regression coverage for stale pending-TOTP state after a 401.
+- [ ] Validate OpenSpec specs and targeted frontend auth tests. Blocked locally: `openspec` and `bun` are not on PATH.

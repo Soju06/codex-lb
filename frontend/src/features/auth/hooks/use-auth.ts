@@ -124,10 +124,11 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
-  useAuthStore.setState((state) => ({
-    ...state,
+  useAuthStore.setState({
     authenticated: false,
+    totpRequiredOnLogin: false,
+    passwordSessionActive: false,
     initialized: true,
     error: null,
-  }));
+  });
 });

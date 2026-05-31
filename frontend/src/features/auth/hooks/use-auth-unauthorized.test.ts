@@ -42,4 +42,26 @@ describe("useAuthStore unauthorized handler", () => {
     expect(next.bootstrapRequired).toBe(true);
     expect(next.bootstrapTokenConfigured).toBe(true);
   });
+
+  it("clears stale pending totp state on 401 handling", async () => {
+    const { useAuthStore } = await import("@/features/auth/hooks/use-auth");
+
+    useAuthStore.setState({
+      authenticated: true,
+      initialized: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: true,
+      passwordSessionActive: true,
+    });
+
+    expect(registeredUnauthorizedHandler).not.toBeNull();
+    registeredUnauthorizedHandler?.();
+
+    const next = useAuthStore.getState();
+    expect(next.authenticated).toBe(false);
+    expect(next.totpRequiredOnLogin).toBe(false);
+    expect(next.passwordSessionActive).toBe(false);
+    expect(next.passwordRequired).toBe(true);
+    expect(next.initialized).toBe(true);
+  });
 });

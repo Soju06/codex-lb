@@ -2608,6 +2608,19 @@ class ProxyService:
                     ),
                 ) from refresh_exc
             except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    failover = await self._retry_previsible_unary_call_failover(
+                        exc,
+                        account,
+                        deadline=deadline,
+                        select_next_account=_select_goal_failover,
+                        call_next=_call_goal,
+                    )
+                    if failover is not None:
+                        account, response = failover
+                        account_id_value = account.id
+                        log_status = "success"
+                        return response
                 if exc.status_code == 401:
                     try:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -2620,14 +2633,20 @@ class ProxyService:
                                 account.id,
                             )
                             _raise_proxy_budget_exhausted()
-                        account = await self._ensure_previsible_unary_fresh_with_failover(
-                            account,
-                            deadline=deadline,
-                            request_id=request_id,
-                            kind=request_kind,
-                            select_next_account=_select_goal_failover,
-                            force=True,
-                        )
+                        try:
+                            account = await self._ensure_previsible_unary_fresh_with_failover(
+                                account,
+                                deadline=deadline,
+                                request_id=request_id,
+                                kind=request_kind,
+                                select_next_account=_select_goal_failover,
+                                force=True,
+                            )
+                        except ProxyResponseError as refresh_failover_exc:
+                            failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
+                            account_id_value = failed_account.id
+                            await self._handle_proxy_error(failed_account, refresh_failover_exc)
+                            raise
                         account_id_value = account.id
                         try:
                             response = await _call_goal(account)
@@ -2839,6 +2858,19 @@ class ProxyService:
                     ),
                 ) from refresh_exc
             except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    failover = await self._retry_previsible_unary_call_failover(
+                        exc,
+                        account,
+                        deadline=deadline,
+                        select_next_account=_select_control_failover,
+                        call_next=_call_control,
+                    )
+                    if failover is not None:
+                        account, response = failover
+                        account_id_value = account.id
+                        log_status = "success"
+                        return response
                 if exc.status_code == 401:
                     try:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -2851,14 +2883,20 @@ class ProxyService:
                                 account.id,
                             )
                             _raise_proxy_budget_exhausted()
-                        account = await self._ensure_previsible_unary_fresh_with_failover(
-                            account,
-                            deadline=deadline,
-                            request_id=request_id,
-                            kind=request_kind,
-                            select_next_account=_select_control_failover,
-                            force=True,
-                        )
+                        try:
+                            account = await self._ensure_previsible_unary_fresh_with_failover(
+                                account,
+                                deadline=deadline,
+                                request_id=request_id,
+                                kind=request_kind,
+                                select_next_account=_select_control_failover,
+                                force=True,
+                            )
+                        except ProxyResponseError as refresh_failover_exc:
+                            failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
+                            account_id_value = failed_account.id
+                            await self._handle_proxy_error(failed_account, refresh_failover_exc)
+                            raise
                         account_id_value = account.id
                         try:
                             response = await _call_control(account)
@@ -3054,6 +3092,18 @@ class ProxyService:
                 ) from refresh_exc
             except ProxyResponseError as exc:
                 if exc.status_code != 401:
+                    failover = await self._retry_previsible_unary_call_failover(
+                        exc,
+                        account,
+                        deadline=deadline,
+                        select_next_account=_select_transcribe_failover,
+                        call_next=_call_transcribe,
+                    )
+                    if failover is not None:
+                        account, result = failover
+                        account_id_value = account.id
+                        log_status = "success"
+                        return result
                     failed_account = _proxy_response_failed_account(exc, account)
                     account_id_value = failed_account.id
                     await self._handle_proxy_error(failed_account, exc)
@@ -3068,14 +3118,20 @@ class ProxyService:
                             account.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    account = await self._ensure_previsible_unary_fresh_with_failover(
-                        account,
-                        deadline=deadline,
-                        request_id=request_id,
-                        kind="transcribe",
-                        select_next_account=_select_transcribe_failover,
-                        force=True,
-                    )
+                    try:
+                        account = await self._ensure_previsible_unary_fresh_with_failover(
+                            account,
+                            deadline=deadline,
+                            request_id=request_id,
+                            kind="transcribe",
+                            select_next_account=_select_transcribe_failover,
+                            force=True,
+                        )
+                    except ProxyResponseError as refresh_failover_exc:
+                        failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
+                        account_id_value = failed_account.id
+                        await self._handle_proxy_error(failed_account, refresh_failover_exc)
+                        raise
                     account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
@@ -3518,6 +3574,19 @@ class ProxyService:
                 ) from refresh_exc
             except ProxyResponseError as exc:
                 if exc.status_code != 401:
+                    failover = await self._retry_previsible_unary_call_failover(
+                        exc,
+                        account,
+                        deadline=deadline,
+                        select_next_account=_select_files_failover,
+                        call_next=_call,
+                        strict_account_id=preferred_account_id,
+                    )
+                    if failover is not None:
+                        account, result = failover
+                        account_id_value = account.id
+                        log_status = "success"
+                        return result, account_id_value
                     failed_account = _proxy_response_failed_account(exc, account)
                     account_id_value = failed_account.id
                     await self._handle_proxy_error(failed_account, exc)
@@ -3532,15 +3601,21 @@ class ProxyService:
                             account.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    account = await self._ensure_previsible_unary_fresh_with_failover(
-                        account,
-                        deadline=deadline,
-                        request_id=request_id,
-                        kind=kind,
-                        select_next_account=_select_files_failover,
-                        strict_account_id=preferred_account_id,
-                        force=True,
-                    )
+                    try:
+                        account = await self._ensure_previsible_unary_fresh_with_failover(
+                            account,
+                            deadline=deadline,
+                            request_id=request_id,
+                            kind=kind,
+                            select_next_account=_select_files_failover,
+                            strict_account_id=preferred_account_id,
+                            force=True,
+                        )
+                    except ProxyResponseError as refresh_failover_exc:
+                        failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
+                        account_id_value = failed_account.id
+                        await self._handle_proxy_error(failed_account, refresh_failover_exc)
+                        raise
                     account_id_value = account.id
                 except RefreshError as refresh_exc:
                     if refresh_exc.is_permanent:
@@ -11933,6 +12008,39 @@ class ProxyService:
                 current = selection.account
                 force_current = False
 
+    async def _retry_previsible_unary_call_failover(
+        self,
+        exc: ProxyResponseError,
+        account: Account,
+        *,
+        deadline: float,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        call_next: Callable[[Account], Awaitable[Any]],
+        strict_account_id: str | None = None,
+    ) -> tuple[Account, Any] | None:
+        if hasattr(exc, _FAILED_ACCOUNT_ATTR):
+            return None
+        if not _should_failover_previsible_unary_proxy_error(exc):
+            return None
+        failed_account = _proxy_response_failed_account(exc, account)
+        if strict_account_id is not None and failed_account.id == strict_account_id:
+            return None
+        await self._handle_proxy_error(failed_account, exc)
+        selection = await select_next_account({failed_account.id})
+        if selection.account is None:
+            return None
+        next_account = await self._ensure_fresh_with_budget_or_auth_error(
+            selection.account,
+            timeout_seconds=_remaining_budget_seconds(deadline),
+        )
+        try:
+            result = await call_next(next_account)
+        except ProxyResponseError as failover_exc:
+            await self._handle_proxy_error(_proxy_response_failed_account(failover_exc, next_account), failover_exc)
+            raise
+        await self._load_balancer.record_success(next_account)
+        return next_account, result
+
     async def _ensure_fresh_with_budget_or_auth_error(
         self,
         account: Account,
@@ -14757,6 +14865,16 @@ def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoRe
 def _proxy_response_failed_account(exc: ProxyResponseError, fallback: Account) -> Account:
     account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
     return account if isinstance(account, Account) else fallback
+
+
+def _should_failover_previsible_unary_proxy_error(exc: ProxyResponseError) -> bool:
+    error = _parse_openai_error(exc.payload)
+    error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+    error_message = error.message if error else None
+    return error_code == "upstream_unavailable" and _should_retry_transient_stream_error(
+        "upstream_unavailable",
+        error_message,
+    )
 
 
 def _is_proxy_budget_exhausted_error(exc: ProxyResponseError) -> bool:

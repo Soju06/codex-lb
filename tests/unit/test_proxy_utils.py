@@ -16332,6 +16332,33 @@ async def test_inline_http_bridge_image_urls_rechecks_expanded_payload_size(monk
     assert "data:image/png;base64," in request_state.request_text
 
 
+def test_response_create_dump_uses_configured_data_dir(monkeypatch, tmp_path):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_dump_data_dir",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"too large"}',
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+
+    assert proxy_service._write_response_create_dump(
+        request_state,
+        account_id_value="acc-data-dir",
+        error_code="payload_too_large",
+        error_message="too large",
+        log_prefix="unit",
+    )
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    assert list(dump_dir.glob("*.response-create.json.gz"))
+    assert list(dump_dir.glob("*.meta.json"))
+
+
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)

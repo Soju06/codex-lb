@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -273,3 +273,62 @@ async def test_trends_by_bucket_uses_latest_sample_window_metadata(db_setup):
     assert trends[0].reset_at == 1111
     assert trends[0].window_minutes == 300
     assert trends[0].recorded_at == recorded_at + timedelta(minutes=5)
+
+
+@pytest.mark.asyncio
+async def test_trends_by_bucket_sqlite_avoids_window_function_for_latest_metadata(db_setup):
+    recorded_at = datetime(2026, 1, 1, 12, 0, 0)
+    statements: list[str] = []
+
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only SQL shape test")
+
+        bind = session.get_bind()
+        assert bind is not None
+
+        def _capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        event.listen(bind, "before_cursor_execute", _capture_sql)
+        try:
+            accounts_repo = AccountsRepository(session)
+            repo = UsageRepository(session)
+            await accounts_repo.upsert(_make_account("acc1"))
+
+            await repo.add_entry(
+                "acc1",
+                10.0,
+                window="secondary",
+                reset_at=9999,
+                window_minutes=10080,
+                recorded_at=recorded_at,
+            )
+            await repo.add_entry(
+                "acc1",
+                30.0,
+                window="secondary",
+                reset_at=1111,
+                window_minutes=300,
+                recorded_at=recorded_at + timedelta(minutes=5),
+            )
+
+            trends = await repo.trends_by_bucket(
+                since=recorded_at - timedelta(minutes=1),
+                bucket_seconds=86400,
+                window="secondary",
+                account_id="acc1",
+            )
+        finally:
+            event.remove(bind, "before_cursor_execute", _capture_sql)
+
+    assert len(trends) == 1
+    assert trends[0].samples == 2
+    assert trends[0].reset_at == 1111
+    assert trends[0].window_minutes == 300
+
+    trend_queries = [
+        statement for statement in statements if "usage_history" in statement and "bucket_epoch" in statement
+    ]
+    assert len(trend_queries) == 1
+    assert "row_number()" not in trend_queries[0].lower()

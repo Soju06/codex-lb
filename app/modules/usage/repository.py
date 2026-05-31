@@ -277,74 +277,153 @@ class UsageRepository:
             conditions.append(UsageHistory.account_id == account_id)
 
         window_expr = _normalized_window_expr()
-        base_rows = (
-            select(
-                bucket_col,
-                UsageHistory.id.label("usage_id"),
-                UsageHistory.account_id.label("account_id"),
-                window_expr.label("window"),
-                UsageHistory.used_percent.label("used_percent"),
-                UsageHistory.reset_at.label("reset_at"),
-                UsageHistory.window_minutes.label("window_minutes"),
-                UsageHistory.recorded_at.label("recorded_at"),
+        if dialect == "sqlite":
+            base_rows = (
+                select(
+                    bucket_col,
+                    UsageHistory.id.label("usage_id"),
+                    UsageHistory.account_id.label("account_id"),
+                    window_expr.label("window"),
+                    UsageHistory.used_percent.label("used_percent"),
+                    UsageHistory.recorded_at.label("recorded_at"),
+                )
+                .where(*conditions)
+                .subquery()
             )
-            .where(*conditions)
-            .subquery()
-        )
 
-        aggregate_rows = (
-            select(
+            aggregate_rows = (
+                select(
+                    base_rows.c.bucket_epoch,
+                    base_rows.c.account_id,
+                    base_rows.c.window,
+                    func.avg(base_rows.c.used_percent).label("avg_used_percent"),
+                    func.count(base_rows.c.usage_id).label("samples"),
+                    func.max(base_rows.c.recorded_at).label("max_recorded_at"),
+                )
+                .group_by(
+                    base_rows.c.bucket_epoch,
+                    base_rows.c.account_id,
+                    base_rows.c.window,
+                )
+                .subquery()
+            )
+
+            latest_ids = (
+                select(
+                    aggregate_rows.c.bucket_epoch,
+                    aggregate_rows.c.account_id,
+                    aggregate_rows.c.window,
+                    func.max(base_rows.c.usage_id).label("usage_id"),
+                )
+                .join(
+                    base_rows,
+                    and_(
+                        base_rows.c.bucket_epoch == aggregate_rows.c.bucket_epoch,
+                        base_rows.c.account_id == aggregate_rows.c.account_id,
+                        base_rows.c.window == aggregate_rows.c.window,
+                        base_rows.c.recorded_at == aggregate_rows.c.max_recorded_at,
+                    ),
+                )
+                .group_by(
+                    aggregate_rows.c.bucket_epoch,
+                    aggregate_rows.c.account_id,
+                    aggregate_rows.c.window,
+                )
+                .subquery()
+            )
+
+            stmt = (
+                select(
+                    aggregate_rows.c.bucket_epoch,
+                    aggregate_rows.c.account_id,
+                    aggregate_rows.c.window,
+                    aggregate_rows.c.avg_used_percent,
+                    aggregate_rows.c.samples,
+                    UsageHistory.reset_at,
+                    UsageHistory.window_minutes,
+                    UsageHistory.recorded_at,
+                )
+                .join(
+                    latest_ids,
+                    and_(
+                        latest_ids.c.bucket_epoch == aggregate_rows.c.bucket_epoch,
+                        latest_ids.c.account_id == aggregate_rows.c.account_id,
+                        latest_ids.c.window == aggregate_rows.c.window,
+                    ),
+                )
+                .join(UsageHistory, UsageHistory.id == latest_ids.c.usage_id)
+                .order_by(aggregate_rows.c.bucket_epoch)
+            )
+        else:
+            base_rows = (
+                select(
+                    bucket_col,
+                    UsageHistory.id.label("usage_id"),
+                    UsageHistory.account_id.label("account_id"),
+                    window_expr.label("window"),
+                    UsageHistory.used_percent.label("used_percent"),
+                    UsageHistory.reset_at.label("reset_at"),
+                    UsageHistory.window_minutes.label("window_minutes"),
+                    UsageHistory.recorded_at.label("recorded_at"),
+                )
+                .where(*conditions)
+                .subquery()
+            )
+
+            aggregate_rows = (
+                select(
+                    base_rows.c.bucket_epoch,
+                    base_rows.c.account_id,
+                    base_rows.c.window,
+                    func.avg(base_rows.c.used_percent).label("avg_used_percent"),
+                    func.count(base_rows.c.usage_id).label("samples"),
+                )
+                .group_by(
+                    base_rows.c.bucket_epoch,
+                    base_rows.c.account_id,
+                    base_rows.c.window,
+                )
+                .subquery()
+            )
+
+            latest_rows = select(
                 base_rows.c.bucket_epoch,
                 base_rows.c.account_id,
                 base_rows.c.window,
-                func.avg(base_rows.c.used_percent).label("avg_used_percent"),
-                func.count(base_rows.c.usage_id).label("samples"),
-            )
-            .group_by(
-                base_rows.c.bucket_epoch,
-                base_rows.c.account_id,
-                base_rows.c.window,
-            )
-            .subquery()
-        )
+                base_rows.c.reset_at,
+                base_rows.c.window_minutes,
+                base_rows.c.recorded_at,
+                func.row_number()
+                .over(
+                    partition_by=(base_rows.c.bucket_epoch, base_rows.c.account_id, base_rows.c.window),
+                    order_by=(base_rows.c.recorded_at.desc(), base_rows.c.usage_id.desc()),
+                )
+                .label("row_number"),
+            ).subquery()
 
-        latest_rows = select(
-            base_rows.c.bucket_epoch,
-            base_rows.c.account_id,
-            base_rows.c.window,
-            base_rows.c.reset_at,
-            base_rows.c.window_minutes,
-            base_rows.c.recorded_at,
-            func.row_number()
-            .over(
-                partition_by=(base_rows.c.bucket_epoch, base_rows.c.account_id, base_rows.c.window),
-                order_by=(base_rows.c.recorded_at.desc(), base_rows.c.usage_id.desc()),
+            stmt = (
+                select(
+                    aggregate_rows.c.bucket_epoch,
+                    aggregate_rows.c.account_id,
+                    aggregate_rows.c.window,
+                    aggregate_rows.c.avg_used_percent,
+                    aggregate_rows.c.samples,
+                    latest_rows.c.reset_at,
+                    latest_rows.c.window_minutes,
+                    latest_rows.c.recorded_at,
+                )
+                .join(
+                    latest_rows,
+                    and_(
+                        latest_rows.c.bucket_epoch == aggregate_rows.c.bucket_epoch,
+                        latest_rows.c.account_id == aggregate_rows.c.account_id,
+                        latest_rows.c.window == aggregate_rows.c.window,
+                        latest_rows.c.row_number == 1,
+                    ),
+                )
+                .order_by(aggregate_rows.c.bucket_epoch)
             )
-            .label("row_number"),
-        ).subquery()
 
-        stmt = (
-            select(
-                aggregate_rows.c.bucket_epoch,
-                aggregate_rows.c.account_id,
-                aggregate_rows.c.window,
-                aggregate_rows.c.avg_used_percent,
-                aggregate_rows.c.samples,
-                latest_rows.c.reset_at,
-                latest_rows.c.window_minutes,
-                latest_rows.c.recorded_at,
-            )
-            .join(
-                latest_rows,
-                and_(
-                    latest_rows.c.bucket_epoch == aggregate_rows.c.bucket_epoch,
-                    latest_rows.c.account_id == aggregate_rows.c.account_id,
-                    latest_rows.c.window == aggregate_rows.c.window,
-                    latest_rows.c.row_number == 1,
-                ),
-            )
-            .order_by(aggregate_rows.c.bucket_epoch)
-        )
         result = await self._session.execute(stmt)
         return [
             UsageTrendBucket(

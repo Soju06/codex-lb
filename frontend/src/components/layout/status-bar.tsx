@@ -10,8 +10,18 @@ import { formatTimeLong } from "@/utils/formatters";
 
 const GITHUB_REPOSITORY_URL = "https://github.com/soju06/codex-lb";
 
+type RoutingStrategy =
+  | "usage_weighted"
+  | "round_robin"
+  | "capacity_weighted"
+  | "relative_availability"
+  | "fill_first"
+  | "single_account"
+  | "sequential_drain"
+  | "reset_drain";
+
 function getRoutingLabel(
-  strategy: "usage_weighted" | "round_robin" | "capacity_weighted" | "relative_availability" | "fill_first",
+  strategy: RoutingStrategy,
   sticky: boolean,
   preferEarlier: boolean,
   preferEarlierWindow: "primary" | "secondary",
@@ -34,6 +44,15 @@ function getRoutingLabel(
     if (sticky) return "Fill first + Sticky threads";
     if (preferEarlier) return `Fill first + ${earlyResetLabel}`;
     return "Fill first";
+  }
+  if (strategy === "single_account") {
+    return "Single account";
+  }
+  if (strategy === "sequential_drain") {
+    return sticky ? "Sequential drain + Sticky threads" : "Sequential drain";
+  }
+  if (strategy === "reset_drain") {
+    return sticky ? "Reset drain + Sticky threads" : "Reset drain";
   }
   if (sticky && preferEarlier) return `Sticky + ${earlyResetLabel}`;
   if (sticky) return "Sticky threads";

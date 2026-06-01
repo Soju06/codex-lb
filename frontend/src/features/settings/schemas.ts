@@ -4,6 +4,9 @@ export const RoutingStrategySchema = z.enum([
   "usage_weighted",
   "round_robin",
   "capacity_weighted",
+  "sequential_drain",
+  "reset_drain",
+  "single_account",
   "relative_availability",
   "fill_first",
 ]);
@@ -43,6 +46,7 @@ export const DashboardSettingsSchema = z
       .max(20)
       .optional()
       .default(5),
+    singleAccountId: z.string().nullable().optional().default(null),
     openaiCacheAffinityMaxAgeSeconds: z
       .number()
       .int()
@@ -108,6 +112,7 @@ export const SettingsUpdateRequestSchema = z.object({
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
+  singleAccountId: z.string().nullable().optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
   stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),

@@ -5222,6 +5222,13 @@ class ProxyService:
             else None
         )
         settings = await get_settings_cache().get()
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if not selected_account_id:
+                return None
+            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                return None
+            scoped_account_ids = {selected_account_id}
         selection = await self._load_balancer.select_account(
             sticky_key=affinity.key,
             sticky_kind=affinity.kind,
@@ -5229,6 +5236,7 @@ class ProxyService:
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=_routing_strategy(settings),
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
@@ -11789,6 +11797,28 @@ class ProxyService:
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                if _routing_strategy(settings) == "single_account":
+                    selected_account_id = (settings.single_account_id or "").strip()
+                    if not selected_account_id:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Single account routing is enabled but no account is selected",
+                            error_code="single_account_not_configured",
+                        )
+                    if selected_account_id in excluded_account_ids_set:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is unavailable",
+                            error_code="single_account_unavailable",
+                        )
+                    if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is outside the API key account scope",
+                            error_code="single_account_scope_mismatch",
+                        )
+                    scoped_account_ids = {selected_account_id}
+                    routing_strategy = "single_account"
                 preferred_account_selectable = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
@@ -14342,6 +14372,12 @@ def _websocket_receive_timeout_for_pending_requests(
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
     value = settings.routing_strategy or "capacity_weighted"
+    if value == "single_account":
+        return "single_account"
+    if value == "sequential_drain":
+        return "sequential_drain"
+    if value == "reset_drain":
+        return "reset_drain"
     if value == "round_robin":
         return "round_robin"
     if value == "usage_weighted":

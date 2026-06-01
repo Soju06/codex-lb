@@ -302,6 +302,7 @@ class DashboardSettings(Base):
         server_default=text("5"),
         nullable=False,
     )
+    single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,

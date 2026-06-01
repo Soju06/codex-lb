@@ -4,6 +4,7 @@ import { Settings } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
@@ -24,6 +25,7 @@ const TotpSettings = lazy(() =>
 
 export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
+  const { accountsQuery } = useAccounts();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
@@ -77,6 +79,8 @@ export function SettingsPage() {
                 settings.limitWarmupCooldownSeconds,
               ].join(":")}
               settings={settings}
+              accounts={accountsQuery.data ?? []}
+              accountsLoading={accountsQuery.isLoading}
               busy={busy}
               onSave={handleSave}
             />

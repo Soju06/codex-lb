@@ -18,10 +18,11 @@ class DashboardSettingsResponse(DashboardModel):
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     routing_strategy: str = Field(
-        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first)$"
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$"
     )
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
+    single_account_id: str | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
@@ -29,7 +30,6 @@ class DashboardSettingsResponse(DashboardModel):
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
-    additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -54,10 +54,11 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(
         default=None,
-        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first)$",
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$",
     )
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
+    single_account_id: str | None = Field(default=None, max_length=255)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)

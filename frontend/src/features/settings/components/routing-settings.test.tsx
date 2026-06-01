@@ -4,6 +4,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import type { DashboardSettings } from "@/features/settings/schemas";
+import { createAccountSummary } from "@/test/mocks/factories";
+
+if (!HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = () => false;
+}
+if (!HTMLElement.prototype.setPointerCapture) {
+  HTMLElement.prototype.setPointerCapture = () => undefined;
+}
+if (!HTMLElement.prototype.releasePointerCapture) {
+  HTMLElement.prototype.releasePointerCapture = () => undefined;
+}
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = () => undefined;
+}
 
 const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupEnabled: false,
@@ -22,6 +36,7 @@ const BASE_SETTINGS: DashboardSettings = {
   routingStrategy: "usage_weighted",
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
+  singleAccountId: null,
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
   importWithoutOverwrite: false,
@@ -52,6 +67,7 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
+      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
       additionalQuotaRoutingPolicies: {},
@@ -80,6 +96,7 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
+      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
       additionalQuotaRoutingPolicies: {},
@@ -113,6 +130,7 @@ describe("RoutingSettings", () => {
       routingStrategy: "usage_weighted",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
+      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       additionalQuotaRoutingPolicies: {},
@@ -145,6 +163,7 @@ describe("RoutingSettings", () => {
       routingStrategy: "relative_availability",
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 5,
+      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       additionalQuotaRoutingPolicies: {},
@@ -224,6 +243,7 @@ describe("RoutingSettings", () => {
       routingStrategy: "relative_availability",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 6,
+      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       additionalQuotaRoutingPolicies: {},
@@ -239,6 +259,74 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
     expect(screen.getByText("Server default")).toBeInTheDocument();
+  });
+
+  it("shows account picker for single-account routing and saves the selected account", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "single_account" }}
+        accounts={[
+          createAccountSummary({ accountId: "acc-one", email: "one@example.com", displayName: "one@example.com" }),
+          createAccountSummary({ accountId: "acc-two", email: "two@example.com", displayName: "two@example.com" }),
+        ]}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    expect(screen.getByText("Selected account")).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Selected account" }));
+    await user.click(await screen.findByRole("option", { name: /two@example.com/i }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "single_account",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
+      singleAccountId: "acc-two",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
+  });
+
+  it("saves an account together with single-account routing", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "capacity_weighted", singleAccountId: null }}
+        accounts={[createAccountSummary({ accountId: "acc-one", email: "one@example.com", displayName: "one@example.com" })]}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("combobox")[1]);
+    await user.click(await screen.findByRole("option", { name: "Single account" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "single_account",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
+      singleAccountId: "acc-one",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
   });
 
   it("names limit warm-up controls for assistive technology", () => {

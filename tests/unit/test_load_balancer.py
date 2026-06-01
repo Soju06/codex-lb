@@ -533,6 +533,216 @@ def test_select_account_round_robin_prefers_never_selected():
     assert result.account.account_id == "b"
 
 
+def test_select_account_single_account_returns_selected_candidate():
+    states = [
+        AccountState("selected", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=20.0),
+    ]
+    result = select_account(states, routing_strategy="single_account")
+    assert result.account is not None
+    assert result.account.account_id == "selected"
+
+
+def test_select_account_single_account_rejects_exhausted_candidate():
+    states = [
+        AccountState("selected", AccountStatus.ACTIVE, used_percent=100.0, secondary_used_percent=20.0),
+    ]
+    result = select_account(states, routing_strategy="single_account")
+    assert result.account is None
+    assert result.error_message == "Selected account is exhausted or unavailable"
+
+
+def test_select_account_sequential_drain_uses_lowest_capacity_first_until_exhausted():
+    states = [
+        AccountState(
+            "pro", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=50_400.0
+        ),
+        AccountState(
+            "plus", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=7_560.0
+        ),
+        AccountState(
+            "free", AccountStatus.ACTIVE, used_percent=95.0, secondary_used_percent=95.0, capacity_credits=1_134.0
+        ),
+    ]
+    result = select_account(states, routing_strategy="sequential_drain")
+    assert result.account is not None
+    assert result.account.account_id == "free"
+
+
+def test_select_account_sequential_drain_skips_exhausted_lowest_capacity_account():
+    states = [
+        AccountState(
+            "free", AccountStatus.ACTIVE, used_percent=100.0, secondary_used_percent=99.0, capacity_credits=1_134.0
+        ),
+        AccountState(
+            "plus", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=7_560.0
+        ),
+        AccountState(
+            "pro", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=50_400.0
+        ),
+    ]
+    result = select_account(states, routing_strategy="sequential_drain")
+    assert result.account is not None
+    assert result.account.account_id == "plus"
+
+
+def test_select_account_sequential_drain_does_not_switch_on_draining_health_tier():
+    states = [
+        AccountState(
+            "free",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            health_tier=1,
+            capacity_credits=1_134.0,
+        ),
+        AccountState(
+            "plus",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            secondary_used_percent=0.0,
+            health_tier=0,
+            capacity_credits=7_560.0,
+        ),
+    ]
+    result = select_account(states, routing_strategy="sequential_drain")
+    assert result.account is not None
+    assert result.account.account_id == "free"
+
+
+def test_select_account_sequential_drain_stable_with_equal_capacity_accounts():
+    states = [
+        AccountState(
+            "plus-a", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=7_560.0
+        ),
+        AccountState(
+            "plus-b", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, capacity_credits=7_560.0
+        ),
+    ]
+    first = select_account(states, routing_strategy="sequential_drain")
+    second = select_account(list(reversed(states)), routing_strategy="sequential_drain")
+    assert first.account is not None
+    assert second.account is not None
+    assert first.account.account_id == second.account.account_id
+
+
+def test_select_account_reset_drain_prefers_nearest_weekly_reset_with_remaining_quota():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "soon-5h-late-weekly",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            reset_at=int(now + 300),
+            secondary_reset_at=int(now + 5 * 24 * 3600),
+        ),
+        AccountState(
+            "later-5h-soon-weekly",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            secondary_used_percent=20.0,
+            reset_at=int(now + 7200),
+            secondary_reset_at=int(now + 2 * 24 * 3600),
+        ),
+        AccountState(
+            "middle",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            secondary_used_percent=0.0,
+            reset_at=int(now + 1800),
+            secondary_reset_at=int(now + 3 * 24 * 3600),
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "later-5h-soon-weekly"
+
+
+def test_select_account_reset_drain_skips_exhausted_nearest_reset_account():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "soon-exhausted",
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 300),
+        ),
+        AccountState(
+            "next",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            secondary_used_percent=0.0,
+            secondary_reset_at=int(now + 1800),
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "next"
+
+
+def test_select_account_reset_drain_drains_highest_remaining_inside_same_reset_bucket():
+    now = 1_700_000_000.0
+    reset_at = int(now + 300)
+    states = [
+        AccountState(
+            "low-left",
+            AccountStatus.ACTIVE,
+            used_percent=90.0,
+            secondary_used_percent=90.0,
+            secondary_reset_at=reset_at,
+        ),
+        AccountState(
+            "high-left",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=reset_at,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "high-left"
+
+
+def test_select_account_reset_drain_uses_bucket_before_exact_reset_time():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "soon-low-left",
+            AccountStatus.ACTIVE,
+            used_percent=95.0,
+            secondary_used_percent=95.0,
+            secondary_reset_at=int(now + 300),
+        ),
+        AccountState(
+            "later-high-left",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 1800),
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "later-high-left"
+
+
+def test_select_account_reset_drain_falls_back_to_primary_reset_when_weekly_unknown():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "late-primary", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, reset_at=int(now + 1800)
+        ),
+        AccountState(
+            "soon-primary", AccountStatus.ACTIVE, used_percent=0.0, secondary_used_percent=0.0, reset_at=int(now + 300)
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "soon-primary"
+
+
 def test_handle_rate_limit_sets_reset_at_from_message(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)

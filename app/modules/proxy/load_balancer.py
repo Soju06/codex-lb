@@ -1155,6 +1155,7 @@ class LoadBalancer:
                         StickySessionKind.STICKY_THREAD,
                         StickySessionKind.CODEX_SESSION,
                     )
+                    and routing_strategy not in ("sequential_drain", "reset_drain", "single_account")
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(
                         pinned,
@@ -2146,6 +2147,20 @@ def _select_account_preferring_budget_safe(
     ignore_standard_quota: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
+    if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+        return select_account(
+            state_list,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+        )
+
     burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
     if burn_first_states:
         burn_first = select_account(

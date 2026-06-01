@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
 import time
@@ -37,7 +38,16 @@ RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS = 5 * 60
 RELATIVE_AVAILABILITY_MIN_WEIGHT_FRACTION = 0.1
 DEFAULT_RELATIVE_AVAILABILITY_POWER = 2.0
 DEFAULT_RELATIVE_AVAILABILITY_TOP_K = 5
-RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted", "relative_availability", "fill_first"]
+RoutingStrategy = Literal[
+    "usage_weighted",
+    "round_robin",
+    "capacity_weighted",
+    "relative_availability",
+    "fill_first",
+    "sequential_drain",
+    "reset_drain",
+    "single_account",
+]
 TrafficClass = Literal["foreground", "opportunistic"]
 UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 ResetPreferenceWindow = Literal["primary", "secondary"]
@@ -342,9 +352,9 @@ def select_account(
             with the other window used as fallback when the configured reset is
             unavailable.
         routing_strategy: Balancing strategy used to pick from the effective
-            pool (``"capacity_weighted"``, ``"round_robin"``,
-            ``"relative_availability"``, ``"fill_first"``, or
-            ``"usage_weighted"``).
+            pool (``"capacity_weighted"``, ``"sequential_drain"``,
+            ``"reset_drain"``, ``"single_account"``, ``"relative_availability"``,
+            ``"fill_first"``, ``"round_robin"``, or ``"usage_weighted"``).
         allow_backoff_fallback: Whether to allow a fallback attempt with the
             backoff account nearest to recovery when no fully available
             account exists.
@@ -494,6 +504,27 @@ def select_account(
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
+
+    if routing_strategy == "single_account":
+        candidate_pool = [state for state in available if not _usage_exhausted(state)]
+        if not candidate_pool:
+            return SelectionResult(None, "Selected account is exhausted or unavailable")
+        selected = min(candidate_pool, key=lambda state: state.account_id)
+        return SelectionResult(selected, None)
+
+    if routing_strategy == "sequential_drain":
+        candidate_pool = [state for state in available if not _usage_exhausted(state)]
+        if not candidate_pool:
+            return SelectionResult(None, "No available accounts")
+        selected = min(candidate_pool, key=_sequential_drain_sort_key)
+        return SelectionResult(selected, None)
+
+    if routing_strategy == "reset_drain":
+        candidate_pool = [state for state in available if not _usage_exhausted(state)]
+        if not candidate_pool:
+            return SelectionResult(None, "No available accounts")
+        selected = min(candidate_pool, key=lambda state: _reset_drain_sort_key(state, current))
+        return SelectionResult(selected, None)
 
     burn_first = [s for s in available if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
     normal = [s for s in available if _routing_policy(s) == ROUTING_POLICY_NORMAL]
@@ -756,6 +787,61 @@ def _select_relative_availability(
             _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
             break
     return winner
+
+
+def _stable_tie_breaker(account_id: str) -> str:
+    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+
+
+def _configured_capacity_credits(state: AccountState) -> float:
+    if state.capacity_credits is not None and state.capacity_credits > 0:
+        return state.capacity_credits
+    return _fallback_secondary_capacity_credits(state.plan_type)
+
+
+def _usage_exhausted(state: AccountState) -> bool:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    return primary_used >= 100.0 or secondary_used >= 100.0
+
+
+def _sequential_drain_sort_key(state: AccountState) -> tuple[float, str, str]:
+    return (
+        _configured_capacity_credits(state),
+        _stable_tie_breaker(state.account_id),
+        state.account_id,
+    )
+
+
+def _weekly_reset_timestamp(state: AccountState, current: float) -> float:
+    if state.secondary_reset_at is not None and float(state.secondary_reset_at) > current:
+        return float(state.secondary_reset_at)
+    if state.reset_at is not None and float(state.reset_at) > current:
+        return float(state.reset_at)
+    return float("inf")
+
+
+def _reset_drain_sort_key(state: AccountState, current: float) -> tuple[int, float, float, float, str, str]:
+    primary_remaining = 100.0 - (state.used_percent if state.used_percent is not None else 0.0)
+    secondary_remaining = 100.0 - (
+        state.secondary_used_percent
+        if state.secondary_used_percent is not None
+        else state.used_percent
+        if state.used_percent is not None
+        else 0.0
+    )
+    reset_at = _weekly_reset_timestamp(state, current)
+    reset_bucket_days = (
+        UNKNOWN_RESET_BUCKET_DAYS if reset_at == float("inf") else max(0, int((reset_at - current) // SECONDS_PER_DAY))
+    )
+    return (
+        reset_bucket_days,
+        -max(0.0, primary_remaining),
+        -max(0.0, secondary_remaining),
+        reset_at,
+        _stable_tie_breaker(state.account_id),
+        state.account_id,
+    )
 
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:

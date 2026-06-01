@@ -83,6 +83,7 @@ async def get_settings(
         routing_strategy=settings.routing_strategy,
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
+        single_account_id=settings.single_account_id,
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
@@ -151,6 +152,9 @@ async def update_settings(
             if payload.sticky_reallocation_budget_threshold_pct is not None
             else resolved_primary_threshold
         )
+        single_account_id = (
+            payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
+        )
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
@@ -168,6 +172,7 @@ async def update_settings(
                     if payload.relative_availability_top_k is not None
                     else current.relative_availability_top_k
                 ),
+                single_account_id=single_account_id,
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
@@ -249,6 +254,7 @@ async def update_settings(
             "routing_strategy",
             "relative_availability_power",
             "relative_availability_top_k",
+            "single_account_id",
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
@@ -282,6 +288,7 @@ async def update_settings(
         routing_strategy=updated.routing_strategy,
         relative_availability_power=updated.relative_availability_power,
         relative_availability_top_k=updated.relative_availability_top_k,
+        single_account_id=updated.single_account_id,
         openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,

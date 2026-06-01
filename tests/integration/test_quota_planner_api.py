@@ -479,9 +479,7 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
                 output_tokens=None,
                 cached_input_tokens=None,
             ):
-                failed_reservations.append(
-                    (reservation_id, model, input_tokens, output_tokens, cached_input_tokens)
-                )
+                failed_reservations.append((reservation_id, model, input_tokens, output_tokens, cached_input_tokens))
 
         async def cancel_probe(self, *, account, model, request_id):
             del self, account, model, request_id

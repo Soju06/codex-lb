@@ -13965,6 +13965,11 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(return_value=SimpleNamespace(accounts=[account_other, _make_account("acc_second_stream")])),
+    )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_other))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)

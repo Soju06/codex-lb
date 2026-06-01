@@ -8,6 +8,7 @@ The account lifecycle needs a stable identity rule for re-authentication: if the
 
 - Define re-authentication merge semantics for OAuth token persistence by upstream ChatGPT identity.
 - Reuse the existing local account row when a new OAuth token payload carries the same `chatgpt_account_id`.
+- If duplicate local rows already exist for that upstream identity, repoint dependent rows (usage history, request logs, sticky sessions, warmup state, API key assignments, HTTP bridge sessions, additional usage history) to the canonical row before deleting duplicates.
 - Keep import-without-overwrite behavior separate: duplicate imports can still create separate local rows, but reauth is an identity refresh of an already-known upstream account.
 - Preserve concurrent safety so simultaneous reauth completions for the same upstream identity cannot create duplicate rows.
 

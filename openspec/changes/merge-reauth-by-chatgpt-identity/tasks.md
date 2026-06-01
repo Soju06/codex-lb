@@ -7,6 +7,7 @@
 
 - [x] 2.1 Route OAuth token persistence through identity-based account upsert.
 - [x] 2.2 Serialize identity-merge persistence so concurrent completions cannot allocate duplicate local ids.
+- [x] 2.3 Ensure duplicate same-identity rows are reconciled by repointing dependent tables before deleting obsolete rows.
 
 ## 3. Verification
 

@@ -2538,7 +2538,10 @@ async def _opportunistic_admission_denial(
 ) -> JSONResponse | None:
     if api_key is None or api_key.traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
         return None
-    selection = await context.service.check_opportunistic_admission(api_key=api_key, model=model)
+    selection = await context.service.check_opportunistic_admission(
+        api_key=api_key,
+        model=_effective_optional_model_for_api_key(api_key, model),
+    )
     if selection.account is not None:
         return None
     message = selection.error_message or "opportunistic burn window closed"
@@ -2612,6 +2615,12 @@ async def _finalize_image_reservation(
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
+
+
+def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
     if api_key is None or api_key.enforced_model is None:
         return requested_model
     return api_key.enforced_model

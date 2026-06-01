@@ -4,6 +4,7 @@ import random
 import time
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,6 +20,8 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
     RuntimeState,
     _additional_quota_applies_to_plan,
+    _AdditionalLimitFilterResult,
+    _build_states,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -1582,6 +1585,60 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
     assert result.latest_primary == {}
     assert result.latest_secondary == {}
+
+
+@pytest.mark.asyncio
+async def test_load_selection_inputs_sets_burn_first_override_for_additional_quota():
+    from app.modules.proxy.load_balancer import ROUTING_POLICY_BURN_FIRST, LoadBalancer
+
+    async def _mocked_additional_filter(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        explicit_limit: bool,
+        repos,
+    ) -> _AdditionalLimitFilterResult:
+        return _AdditionalLimitFilterResult(
+            accounts=accounts,
+            latest_primary={},
+            latest_secondary={},
+        )
+
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(
+        return_value=[
+            _make_test_account(account_id="a", status=AccountStatus.ACTIVE)
+        ]
+    )
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.additional_usage = AsyncMock()
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+    with pytest.MonkeyPatch().context() as monkeypatch:
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
+            _mocked_additional_filter,
+        )
+        selection_inputs = await balancer._load_selection_inputs(
+            model=None, additional_limit_name="test-limit"
+        )
+
+    states, _ = _build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        runtime={},
+        routing_policy_override=selection_inputs.routing_policy_override,
+    )
+
+    assert selection_inputs.ignore_standard_quota_status is True
+    assert selection_inputs.routing_policy_override == ROUTING_POLICY_BURN_FIRST
+    assert states[0].routing_policy == ROUTING_POLICY_BURN_FIRST
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

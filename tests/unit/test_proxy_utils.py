@@ -825,6 +825,41 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
     assert "rate_limit_exceeded" in body
 
 
+@pytest.mark.asyncio
+async def test_opportunistic_admission_uses_api_key_enforced_model():
+    api_key = ApiKeyData(
+        id="key_opportunistic_enforced_model",
+        name="opportunistic enforced model",
+        key_prefix="sk-opportunistic",
+        allowed_models=None,
+        enforced_model="gpt-5.2",
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    selection = AccountSelection(account=_make_account("acc"), error_message=None)
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.1",
+    )
+
+    assert response is None
+    service.check_opportunistic_admission.assert_awaited_once_with(
+        api_key=api_key,
+        model="gpt-5.2",
+    )
+
+
 def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_cli_rs"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_exec"}) is True

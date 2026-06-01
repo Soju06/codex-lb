@@ -695,7 +695,9 @@ class LoadBalancer:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             ignore_standard_quota_status = effective_limit_name is not None
-            routing_policy_override: str | None = None
+            routing_policy_override: str | None = (
+                ROUTING_POLICY_BURN_FIRST if effective_limit_name is not None else None
+            )
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
@@ -1071,7 +1073,27 @@ class LoadBalancer:
                     and pinned.reset_at is not None
                     and pinned.reset_at - now >= 600  # 10 minutes
                 )
-                if not (budget_pressured or rate_limit_far_away):
+
+                burn_first_reallocate = pinned.routing_policy != ROUTING_POLICY_BURN_FIRST
+                if burn_first_reallocate:
+                    burn_first_candidates = [
+                        state for state in states if state.routing_policy == ROUTING_POLICY_BURN_FIRST
+                    ]
+                    if burn_first_candidates:
+                        burn_first = select_account(
+                            burn_first_candidates,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                            allow_backoff_fallback=False,
+                            deterministic_probe=True,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            traffic_class=traffic_class,
+                            ignore_standard_quota=ignore_standard_quota,
+                        )
+                        burn_first_reallocate = burn_first.account is not None
+
+                if not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
                     pinned_result = select_account(
                         [pinned],
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1087,6 +1109,9 @@ class LoadBalancer:
                             await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                         return pinned_result
                 else:
+                    # Reallocate only when a burn-first target exists and can
+                    # currently be selected, avoiding sticky churn to
+                    # ineligible targets.
                     # Before reallocating, check whether the pool has a
                     # meaningfully better candidate.  When every account
                     # is above the budget threshold, reallocating just

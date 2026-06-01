@@ -15,6 +15,7 @@ class DashboardSettingsData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -43,6 +44,7 @@ class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -75,6 +77,7 @@ class SettingsService:
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -110,6 +113,7 @@ class SettingsService:
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=payload.prefer_earlier_reset_window,
             routing_strategy=payload.routing_strategy,
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
@@ -139,6 +143,7 @@ class SettingsService:
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,

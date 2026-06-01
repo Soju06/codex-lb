@@ -12,6 +12,7 @@ describe("DashboardSettingsSchema", () => {
       upstreamStreamTransport: "default",
       preferEarlierResetAccounts: false,
       routingStrategy: "relative_availability",
+      preferEarlierResetWindow: "secondary",
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -34,6 +35,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.stickyThreadsEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("default");
     expect(parsed.routingStrategy).toBe("relative_availability");
+    expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.relativeAvailabilityPower).toBe(2);
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
@@ -116,6 +118,7 @@ describe("SettingsUpdateRequestSchema", () => {
       upstreamStreamTransport: "websocket",
       preferEarlierResetAccounts: true,
       routingStrategy: "relative_availability",
+      preferEarlierResetWindow: "secondary",
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 7,
       openaiCacheAffinityMaxAgeSeconds: 120,
@@ -139,6 +142,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
     expect(parsed.upstreamStreamTransport).toBe("websocket");
+    expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.routingStrategy).toBe("relative_availability");
     expect(parsed.relativeAvailabilityPower).toBe(1.5);

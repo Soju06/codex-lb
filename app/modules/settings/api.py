@@ -79,6 +79,7 @@ async def get_settings(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=settings.prefer_earlier_reset_window,
         routing_strategy=settings.routing_strategy,
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
@@ -155,6 +156,7 @@ async def update_settings(
                 sticky_threads_enabled=payload.sticky_threads_enabled,
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
                 prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=payload.prefer_earlier_reset_window or current.prefer_earlier_reset_window,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
                 relative_availability_power=(
                     payload.relative_availability_power
@@ -243,6 +245,7 @@ async def update_settings(
             "sticky_threads_enabled",
             "upstream_stream_transport",
             "prefer_earlier_reset_accounts",
+            "prefer_earlier_reset_window",
             "routing_strategy",
             "relative_availability_power",
             "relative_availability_top_k",
@@ -275,6 +278,7 @@ async def update_settings(
         sticky_threads_enabled=updated.sticky_threads_enabled,
         upstream_stream_transport=updated.upstream_stream_transport,
         prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=updated.prefer_earlier_reset_window,
         routing_strategy=updated.routing_strategy,
         relative_availability_power=updated.relative_availability_power,
         relative_availability_top_k=updated.relative_availability_top_k,

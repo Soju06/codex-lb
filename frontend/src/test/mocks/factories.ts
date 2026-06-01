@@ -393,6 +393,7 @@ export function createDashboardSettings(
 		stickyThreadsEnabled: true,
 		upstreamStreamTransport: "default",
 		preferEarlierResetAccounts: false,
+		preferEarlierResetWindow: "secondary",
 		routingStrategy: "usage_weighted",
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,

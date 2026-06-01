@@ -21,6 +21,7 @@ from app.core.balancer import (
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
+    ResetPreferenceWindow,
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
@@ -277,6 +278,7 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
@@ -365,6 +367,7 @@ class LoadBalancer:
                         result = _select_account_preferring_budget_safe(
                             selection_states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
@@ -392,7 +395,7 @@ class LoadBalancer:
                             error_message = result.error_message
                         else:
                             selected_reset_at = selected.reset_at
-                            for state in states:
+                            for state in selected_states:
                                 if state.account_id == result.account.account_id:
                                     state.status = result.account.status
                                     state.deactivation_reason = result.account.deactivation_reason
@@ -550,6 +553,7 @@ class LoadBalancer:
                             budget_threshold_pct=budget_threshold_pct,
                             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
@@ -1045,6 +1049,7 @@ class LoadBalancer:
         budget_threshold_pct: float = 95.0,
         secondary_budget_threshold_pct: float = 100.0,
         prefer_earlier_reset_accounts: bool,
+        prefer_earlier_reset_window: ResetPreferenceWindow,
         routing_strategy: RoutingStrategy,
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
@@ -1057,6 +1062,7 @@ class LoadBalancer:
             return _select_account_preferring_budget_safe(
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
@@ -1137,6 +1143,7 @@ class LoadBalancer:
                     pinned_result = select_account(
                         [pinned],
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
@@ -1162,6 +1169,7 @@ class LoadBalancer:
                         pool_best = _select_account_preferring_budget_safe(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
@@ -1184,6 +1192,7 @@ class LoadBalancer:
                             pinned_result = select_account(
                                 [pinned],
                                 prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                prefer_earlier_reset_window=prefer_earlier_reset_window,
                                 routing_strategy=routing_strategy,
                                 allow_backoff_fallback=False,
                                 relative_availability_power=relative_availability_power,
@@ -1212,6 +1221,7 @@ class LoadBalancer:
                         [grace_copy],
                         now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
@@ -1244,6 +1254,7 @@ class LoadBalancer:
         chosen = _select_account_preferring_budget_safe(
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
@@ -1328,6 +1339,7 @@ class LoadBalancer:
             status=account.status,
             used_percent=None,
             reset_at=runtime.reset_at,
+            primary_reset_at=None,
             blocked_at=float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at,
             cooldown_until=runtime.cooldown_until,
             secondary_used_percent=None,
@@ -1766,6 +1778,7 @@ def _state_from_account(
         status=status,
         used_percent=effective_used_percent,
         reset_at=reset_at,
+        primary_reset_at=primary_reset,
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=effective_secondary_used_percent,
@@ -2050,6 +2063,7 @@ def _select_account_preferring_budget_safe(
     states: Iterable[AccountState],
     *,
     prefer_earlier_reset: bool,
+    prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy,
     relative_availability_power: float = 2.0,
     relative_availability_top_k: int = 5,
@@ -2099,6 +2113,7 @@ def _select_account_preferring_budget_safe(
         preferred = select_account(
             selection_pool,
             prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
@@ -2115,6 +2130,7 @@ def _select_account_preferring_budget_safe(
         return select_account(
             state_list,
             prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
@@ -2125,6 +2141,7 @@ def _select_account_preferring_budget_safe(
     return select_account(
         state_list,
         prefer_earlier_reset=prefer_earlier_reset,
+        prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
         allow_backoff_fallback=allow_backoff_fallback,
         deterministic_probe=deterministic_probe,

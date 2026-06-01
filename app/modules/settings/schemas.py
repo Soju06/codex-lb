@@ -9,6 +9,7 @@ class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$")
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
@@ -39,6 +40,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         pattern=r"^(default|auto|http|websocket)$",
     )
     prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(
         default=None,
         pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$",

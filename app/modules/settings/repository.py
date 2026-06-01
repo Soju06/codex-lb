@@ -23,6 +23,7 @@ class SettingsRepository:
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
             prefer_earlier_reset_accounts=True,
+            prefer_earlier_reset_window="secondary",
             routing_strategy="capacity_weighted",
             relative_availability_power=2.0,
             relative_availability_top_k=5,
@@ -64,6 +65,7 @@ class SettingsRepository:
         sticky_threads_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
+        prefer_earlier_reset_window: str | None = None,
         routing_strategy: str | None = None,
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
@@ -92,6 +94,8 @@ class SettingsRepository:
             settings.upstream_stream_transport = upstream_stream_transport
         if prefer_earlier_reset_accounts is not None:
             settings.prefer_earlier_reset_accounts = prefer_earlier_reset_accounts
+        if prefer_earlier_reset_window is not None:
+            settings.prefer_earlier_reset_window = prefer_earlier_reset_window
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
         if relative_availability_power is not None:

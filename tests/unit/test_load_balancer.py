@@ -22,6 +22,7 @@ from app.modules.proxy.load_balancer import (
     _additional_quota_applies_to_plan,
     _AdditionalLimitFilterResult,
     _build_states,
+    _extract_credit_status,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -1326,6 +1327,7 @@ def _make_test_usage(
     used_percent: float = 10.0,
     reset_at: int | None = None,
     recorded_at: datetime | None = None,
+    window_minutes: int | None = None,
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
@@ -1337,7 +1339,7 @@ def _make_test_usage(
         window=window,
         used_percent=used_percent,
         reset_at=reset_at,
-        window_minutes=10080,
+        window_minutes=window_minutes if window_minutes is not None else (10080 if window == "secondary" else 300),
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
@@ -1474,6 +1476,85 @@ def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_
         runtime=RuntimeState(),
     )
     assert state.status == AccountStatus.QUOTA_EXCEEDED
+
+
+def test_state_from_account_preserves_credits_when_weekly_primary_replaces_secondary(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    weekly_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 7200),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=10080,
+    )
+    previous_secondary_with_credits = _make_test_usage(
+        window="secondary",
+        used_percent=95.0,
+        reset_at=int(now + 5400),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10080,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=1.0,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=weekly_primary,
+        secondary_entry=previous_secondary_with_credits,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+    assert state.secondary_used_percent == 100.0
+
+
+def test_state_from_account_uses_freshest_credit_snapshot(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    stale_primary_with_credits = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=10.0,
+    )
+    fresh_secondary_without_credits = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=stale_primary_with_credits,
+        secondary_entry=fresh_secondary_without_credits,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert _extract_credit_status(stale_primary_with_credits, fresh_secondary_without_credits) == (
+        False,
+        False,
+        0.0,
+    )
 
 
 def test_state_from_account_keeps_quota_exceeded_without_blocked_at_when_usage_stays_on_same_reset_window(
@@ -2929,6 +3010,126 @@ def test_select_account_capacity_weighted_with_prefer_falls_back_when_earliest_b
         )
         assert result.account is not None
         assert result.account.account_id == "earliest-lower-usage"
+
+
+def test_apply_usage_quota_allows_secondary_100_when_credits_exist():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=11.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 11.0
+    assert reset_at is None
+
+
+def test_apply_usage_quota_keeps_primary_100_rate_limited_with_credits():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 100.0
+    assert reset_at == 1_700_005_000
+
+
+def test_apply_usage_quota_keeps_primary_100_rate_limited_without_credits():
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=99.0,
+        secondary_reset=1_700_010_000,
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 100.0
+    assert reset_at == 1_700_005_000
+
+
+def test_apply_usage_quota_preserves_rate_limited_runtime_reset_when_credits_balance_positive(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=99.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=1.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 99.0
+    assert reset_at == future
+
+
+def test_apply_usage_quota_preserves_rate_limited_when_status_rate_limited_with_primary_100_and_credits(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    future = now + 120.0
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=None,
+        secondary_reset=None,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 100.0
+    assert reset_at == 1_700_005_000
+
+
+def test_apply_usage_quota_clears_quota_exceeded_when_credits_balance_positive(monkeypatch):
+    now = 1_700_000_000.0
+    future = now + 3600.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        primary_used=20.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=100.0,
+        secondary_reset=1_700_010_000,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=1.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 20.0
+    assert reset_at is None
 
 
 def test_select_account_relative_availability_prefers_more_urgent_weekly_capacity():

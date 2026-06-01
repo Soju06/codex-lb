@@ -645,6 +645,38 @@ async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_cl
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(hours=2)).timestamp())
+    account = _make_account("acc_credit_rate_limited", "credit-rate-limited@example.com")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+    account.blocked_at = int((utcnow() - timedelta(minutes=10)).timestamp())
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_credit_rate_limited",
+            100.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+            credits_has=True,
+            credits_unlimited=False,
+            credits_balance=5.0,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    assert accounts["acc_credit_rate_limited"]["status"] == "rate_limited"
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     stale_reset = 1735689600

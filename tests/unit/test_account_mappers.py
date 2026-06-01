@@ -1,7 +1,42 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.accounts import mappers
 from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
+
+
+def _usage(
+    *,
+    recorded_at: datetime,
+    credits_has: bool,
+    credits_balance: float,
+) -> UsageHistory:
+    return UsageHistory(
+        account_id="acc",
+        recorded_at=recorded_at,
+        window="secondary",
+        used_percent=100.0,
+        credits_has=credits_has,
+        credits_unlimited=False,
+        credits_balance=credits_balance,
+    )
+
+
+def test_extract_credit_status_uses_freshest_sample() -> None:
+    stale = _usage(
+        recorded_at=datetime(2026, 1, 1, 12, 0, 0),
+        credits_has=True,
+        credits_balance=10.0,
+    )
+    fresh = _usage(
+        recorded_at=datetime(2026, 1, 1, 12, 1, 0),
+        credits_has=False,
+        credits_balance=0.0,
+    )
+
+    assert mappers._extract_credit_status(stale, fresh) == (False, False, 0.0)
 
 
 def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:
@@ -79,7 +114,7 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
     )
 
 
-def test_effective_status_keeps_primary_rate_limit_precedence_with_usable_credits() -> None:
+def test_effective_status_keeps_primary_exhaustion_rate_limited_with_credits() -> None:
     account = _account(AccountStatus.ACTIVE)
     primary = _primary_usage(used_percent=100.0, reset_at=1_700_000_300, credits_balance=25.0)
     secondary = _secondary_usage(used_percent=100.0, credits_balance=25.0)

@@ -64,6 +64,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_UsageWindowEntry = UsageHistory | AdditionalUsageHistory
+
 _MAX_SELECTION_ATTEMPTS = 4
 
 _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
@@ -1727,12 +1729,17 @@ def _state_from_account(
     # both rows exist, prefer the newer weekly snapshot.
     if primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
         effective_secondary_entry = primary_entry
+        primary_used = None
+        primary_reset = None
+        primary_window_minutes = None
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
-    credits_has = _first_not_none(primary_entry, effective_secondary_entry, "credits_has")
-    credits_unlimited = _first_not_none(primary_entry, effective_secondary_entry, "credits_unlimited")
-    credits_balance = _first_not_none(primary_entry, effective_secondary_entry, "credits_balance")
+    credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+        primary_entry,
+        effective_secondary_entry,
+        secondary_entry,
+    )
 
     # If the usage window has reset (reset_at is in the past) but the last
     # recorded sample still shows 100 % usage, the data is stale.  Zero it
@@ -1964,6 +1971,26 @@ def _usage_entry_recorded_after_block(entry: UsageHistory | None, blocked_at: fl
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=timezone.utc)
     return recorded_at.timestamp() > blocked_at
+
+
+def _extract_credit_status(
+    *entries: _UsageWindowEntry | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    credit_entries: list[UsageHistory] = [
+        entry
+        for entry in entries
+        if isinstance(entry, UsageHistory)
+        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
+    ]
+    if not credit_entries:
+        return None, None, None
+    entry = max(
+        credit_entries,
+        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
+    )
+    if entry is not None:
+        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
+    return None, None, None
 
 
 def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:

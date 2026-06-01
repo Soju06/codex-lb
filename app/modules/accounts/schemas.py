@@ -89,6 +89,9 @@ class AccountSummary(DashboardModel):
     remaining_credits_secondary: float | None = None
     request_usage: AccountRequestUsage | None = None
     additional_quotas: list[AccountAdditionalQuota] = Field(default_factory=list)
+    credits_has: bool | None = None
+    credits_unlimited: bool | None = None
+    credits_balance: float | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False

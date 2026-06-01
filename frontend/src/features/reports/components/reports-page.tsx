@@ -8,20 +8,11 @@ import { CostPerDayChart } from "./cost-per-day-chart";
 import { TokensPerDayChart } from "./tokens-per-day-chart";
 import { ModelDistributionDonut } from "./model-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
-
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function daysAgoISO(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
-}
+import { daysAgoLocalISO, localDateISO } from "../date";
 
 const DEFAULT_FILTERS: ReportsFiltersState = {
-  startDate: daysAgoISO(7),
-  endDate: todayISO(),
+  startDate: daysAgoLocalISO(7),
+  endDate: localDateISO(),
   accountId: [],
   model: "",
 };

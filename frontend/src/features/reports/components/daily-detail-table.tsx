@@ -1,6 +1,7 @@
 import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { DailyReportRow } from "../schemas";
+import { formatReportBucketDate } from "../date";
 
 export type DailyDetailTableProps = {
   data: DailyReportRow[];
@@ -65,8 +66,7 @@ export function DailyDetailTable({ data }: DailyDetailTableProps) {
 }
 
 function formatDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00Z");
-  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  return formatReportBucketDate(iso);
 }
 
 function exportCSV(rows: DailyReportRow[]) {

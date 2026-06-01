@@ -3,6 +3,7 @@ import {
   MultiSelectFilter,
   type MultiSelectOption,
 } from "@/features/dashboard/components/filters/multi-select-filter";
+import { daysAgoLocalISO, localDateISO } from "../date";
 
 export type ReportsFiltersState = {
   startDate: string;
@@ -24,16 +25,6 @@ const PRESETS = [
   { label: "90d", days: 90 },
 ] as const;
 
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function daysAgoISO(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
-}
-
 export function ReportsFilters({
   filters,
   accountOptions,
@@ -50,8 +41,8 @@ export function ReportsFilters({
           onClick={() =>
             onFiltersChange({
               ...filters,
-              startDate: daysAgoISO(preset.days),
-              endDate: todayISO(),
+              startDate: daysAgoLocalISO(preset.days),
+              endDate: localDateISO(),
             })
           }
         >

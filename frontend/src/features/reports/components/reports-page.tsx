@@ -11,15 +11,27 @@ import { DailyDetailTable } from "./daily-detail-table";
 import { daysAgoLocalISO, localDateISO } from "../date";
 
 const DEFAULT_FILTERS: ReportsFiltersState = {
-  startDate: daysAgoLocalISO(7),
+  startDate: daysAgoLocalISO(6),
   endDate: localDateISO(),
   accountId: [],
   model: "",
 };
 
-export function ReportsPage() {
-  const [filters, setFilters] = useState<ReportsFiltersState>(DEFAULT_FILTERS);
+export type ReportsPageProps = {
+  initialFilters?: Partial<ReportsFiltersState>;
+};
+
+export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
+  const [filters, setFilters] = useState<ReportsFiltersState>({
+    ...DEFAULT_FILTERS,
+    ...initialFilters,
+  });
   const { data, isLoading } = useReports(filters);
+  const modelCatalogFilters = useMemo(
+    () => ({ ...filters, model: "" }),
+    [filters],
+  );
+  const { data: modelCatalogData } = useReports(modelCatalogFilters);
   const { data: accountsData } = useQuery({
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
@@ -37,11 +49,11 @@ export function ReportsPage() {
 
   const modelOptions = useMemo(
     () =>
-      (data?.byModel ?? []).map((entry) => ({
+      (modelCatalogData?.byModel ?? []).map((entry) => ({
         value: entry.model,
         label: entry.model,
       })),
-    [data],
+    [modelCatalogData],
   );
 
   return (

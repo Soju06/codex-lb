@@ -41,7 +41,7 @@ export function ReportsFilters({
           onClick={() =>
             onFiltersChange({
               ...filters,
-              startDate: daysAgoLocalISO(preset.days),
+              startDate: daysAgoLocalISO(preset.days - 1),
               endDate: localDateISO(),
             })
           }

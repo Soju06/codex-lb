@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 
@@ -12,6 +12,32 @@ const FILTERS: ReportsFiltersState = {
 };
 
 describe("ReportsFilters", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps preset ranges inclusive of the selected day count", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 7, 12, 0, 0));
+    const onFiltersChange = vi.fn();
+    render(
+      <ReportsFilters
+        filters={FILTERS}
+        accountOptions={[]}
+        modelOptions={[]}
+        onFiltersChange={onFiltersChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+
+    expect(onFiltersChange).toHaveBeenCalledWith({
+      ...FILTERS,
+      startDate: "2026-06-01",
+      endDate: "2026-06-07",
+    });
+  });
+
   it("updates account filters from the account selector", async () => {
     const user = userEvent.setup();
     const onFiltersChange = vi.fn();

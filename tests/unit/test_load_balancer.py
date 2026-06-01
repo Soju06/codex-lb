@@ -1920,7 +1920,7 @@ def test_apply_usage_quota_allows_secondary_100_when_credits_exist():
     assert reset_at is None
 
 
-def test_apply_usage_quota_keeps_primary_100_rate_limited_when_credits_balance_positive():
+def test_apply_usage_quota_keeps_primary_100_rate_limited_with_credits():
     status, used_percent, reset_at = apply_usage_quota(
         status=AccountStatus.ACTIVE,
         primary_used=100.0,
@@ -1956,7 +1956,7 @@ def test_apply_usage_quota_keeps_primary_100_rate_limited_without_credits():
     assert reset_at == 1_700_005_000
 
 
-def test_apply_usage_quota_clears_rate_limited_when_credits_balance_positive(monkeypatch):
+def test_apply_usage_quota_preserves_rate_limited_runtime_reset_when_credits_balance_positive(monkeypatch):
     now = 1_700_000_000.0
     future = now + 3600.0
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
@@ -1973,9 +1973,31 @@ def test_apply_usage_quota_clears_rate_limited_when_credits_balance_positive(mon
         credits_unlimited=None,
         credits_balance=1.0,
     )
-    assert status == AccountStatus.ACTIVE
+    assert status == AccountStatus.RATE_LIMITED
     assert used_percent == 99.0
-    assert reset_at is None
+    assert reset_at == future
+
+
+def test_apply_usage_quota_preserves_rate_limited_when_status_rate_limited_with_primary_100_and_credits(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    future = now + 120.0
+
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.RATE_LIMITED,
+        primary_used=100.0,
+        primary_reset=1_700_005_000,
+        primary_window_minutes=None,
+        runtime_reset=future,
+        secondary_used=None,
+        secondary_reset=None,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=959.0,
+    )
+    assert status == AccountStatus.RATE_LIMITED
+    assert used_percent == 100.0
+    assert reset_at == 1_700_005_000
 
 
 def test_apply_usage_quota_clears_quota_exceeded_when_credits_balance_positive(monkeypatch):

@@ -114,7 +114,7 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
     )
 
 
-def test_effective_status_keeps_primary_rate_limit_precedence_with_usable_credits() -> None:
+def test_effective_status_keeps_primary_exhaustion_rate_limited_with_credits() -> None:
     account = _account(AccountStatus.ACTIVE)
     primary = _primary_usage(used_percent=100.0, reset_at=1_700_000_300, credits_balance=25.0)
     secondary = _secondary_usage(used_percent=100.0, credits_balance=25.0)

@@ -51,7 +51,7 @@ def apply_usage_quota(
     elif status == AccountStatus.QUOTA_EXCEEDED and secondary_reset is not None:
         reset_at = secondary_reset
 
-    if has_credit_override and status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
+    if has_credit_override and status == AccountStatus.QUOTA_EXCEEDED:
         primary_exhausted = primary_used is not None and primary_used >= 100.0
         if not primary_exhausted:
             status = AccountStatus.ACTIVE

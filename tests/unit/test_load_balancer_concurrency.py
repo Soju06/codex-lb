@@ -5,10 +5,12 @@ import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -188,6 +190,58 @@ async def test_record_error_updates_are_atomic_with_per_account_lock() -> None:
     runtime = balancer._runtime[account.id]
     assert runtime.error_count == 50
     assert runtime.last_error_at is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_reclaim_keeps_active_stream_lease_within_stream_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        proxy_account_lease_ttl_seconds=1.0,
+        proxy_request_budget_seconds=10.0,
+        http_responses_stream_request_budget_seconds=7200.0,
+        http_responses_session_bridge_request_budget_seconds=7200.0,
+        proxy_account_stream_limit=2,
+        proxy_account_response_create_limit=2,
+    )
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: settings)
+    account = _make_account("acc-stale-stream-budget")
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+
+    stream_lease = await balancer.acquire_account_lease(account.id, kind="stream")
+    assert stream_lease is not None
+    object.__setattr__(stream_lease, "acquired_at", time.monotonic() - 2.0)
+
+    second_stream_lease = await balancer.acquire_account_lease(account.id, kind="stream")
+
+    assert second_stream_lease is not None
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 2, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_stale_reclaim_still_recovers_old_response_create_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        proxy_account_lease_ttl_seconds=1.0,
+        proxy_request_budget_seconds=10.0,
+        http_responses_stream_request_budget_seconds=7200.0,
+        http_responses_session_bridge_request_budget_seconds=7200.0,
+        proxy_account_stream_limit=2,
+        proxy_account_response_create_limit=2,
+    )
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: settings)
+    account = _make_account("acc-stale-response-create")
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+
+    response_lease = await balancer.acquire_account_lease(account.id, kind="response_create")
+    assert response_lease is not None
+    object.__setattr__(response_lease, "acquired_at", time.monotonic() - 2.0)
+
+    replacement_lease = await balancer.acquire_account_lease(account.id, kind="response_create")
+
+    assert replacement_lease is not None
+    assert await balancer.account_pressure_snapshot(account.id) == (1, 0, 0.0)
 
 
 @pytest.mark.asyncio

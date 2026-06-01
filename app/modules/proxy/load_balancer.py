@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_SELECTION_ATTEMPTS = 4
 
+_ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
 _STICKY_EXISTING_UNSET = object()
 _RECOVERABLE_STATUSES = frozenset(
@@ -233,12 +234,16 @@ class LoadBalancer:
         return True
 
     def _reclaim_stale_account_leases_locked(self) -> None:
-        ttl_seconds = getattr(get_settings(), "proxy_account_lease_ttl_seconds", 900.0)
+        settings = get_settings()
         now = time.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
                 continue
-            stale = [lease for lease in runtime.leases.values() if now - lease.acquired_at >= ttl_seconds]
+            stale = [
+                lease
+                for lease in runtime.leases.values()
+                if now - lease.acquired_at >= _account_lease_stale_ttl_seconds(lease.kind, settings)
+            ]
             for lease in stale:
                 self._release_account_lease_locked(lease, reason="stale")
 
@@ -1287,6 +1292,19 @@ def _build_states(
         states.append(state)
         account_map[account.id] = account
     return states, account_map
+
+
+def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:
+    ttl_seconds = float(getattr(settings, "proxy_account_lease_ttl_seconds", 900.0))
+    if kind != "stream":
+        return ttl_seconds
+    valid_stream_budget_seconds = max(
+        ttl_seconds,
+        float(getattr(settings, "proxy_request_budget_seconds", ttl_seconds)),
+        float(getattr(settings, "http_responses_stream_request_budget_seconds", ttl_seconds)),
+        float(getattr(settings, "http_responses_session_bridge_request_budget_seconds", ttl_seconds)),
+    )
+    return max(ttl_seconds, valid_stream_budget_seconds + _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS)
 
 
 def _filter_states_for_account_caps(

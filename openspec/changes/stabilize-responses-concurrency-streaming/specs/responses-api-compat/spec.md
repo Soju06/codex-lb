@@ -34,6 +34,14 @@ Every account-local lease acquired for a Responses request MUST be idempotently 
 - **THEN** the watchdog releases the stale lease
 - **AND** emits a low-cardinality warning/metric
 
+#### Scenario: Active stream lease is not reclaimed before valid stream budget
+
+- **GIVEN** a stream lease is older than the base lease TTL
+- **AND** the configured Responses stream or HTTP bridge request budget has not elapsed
+- **WHEN** account lease stale reclamation runs
+- **THEN** the stream lease still counts against account-local stream pressure
+- **AND** the proxy does not admit extra streams over the account stream cap by age alone
+
 ### Requirement: Public Responses streaming is proxy-timeout friendly
 
 Streaming `/v1/responses` responses MUST include anti-buffering/cache headers suitable for SSE through common front-door proxies and MUST emit an early flushable SSE comment or event before long upstream startup waits can appear idle. Periodic SSE keepalive behavior MUST continue while waiting for upstream events. These heartbeat comments MUST NOT violate the public Responses event contract: OpenAI-contract events still begin with `response.created` when event parsing ignores comments.

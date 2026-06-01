@@ -175,6 +175,7 @@ class AccountsRepository:
                 await self._reconcile_chatgpt_identity_duplicates(
                     canonical=canonical,
                     chatgpt_account_id=account.chatgpt_account_id,
+                    workspace_id=account.workspace_id,
                 )
                 await self._session.commit()
                 await self._session.refresh(canonical)
@@ -277,19 +278,17 @@ class AccountsRepository:
         self,
         canonical: Account,
         chatgpt_account_id: str,
+        workspace_id: str | None,
     ) -> None:
-        duplicate_accounts = (
-            (
-                await self._session.execute(
-                    select(Account.id).where(
-                        Account.chatgpt_account_id == chatgpt_account_id,
-                        Account.id != canonical.id,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        duplicate_stmt = select(Account.id).where(
+            Account.chatgpt_account_id == chatgpt_account_id,
+            Account.id != canonical.id,
         )
+        if workspace_id is None:
+            duplicate_stmt = duplicate_stmt.where(Account.workspace_id.is_(None))
+        else:
+            duplicate_stmt = duplicate_stmt.where(Account.workspace_id == workspace_id)
+        duplicate_accounts = (await self._session.execute(duplicate_stmt)).scalars().all()
         duplicate_ids = list(duplicate_accounts)
         if not duplicate_ids:
             return

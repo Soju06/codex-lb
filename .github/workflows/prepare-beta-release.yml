@@ -151,3 +151,17 @@ jobs:
           else
             gh pr create --base main --head "${BRANCH}" --title "chore: release ${TAG}" --body-file "${body_file}"
           fi
+
+      - name: Close superseded beta release PRs
+        if: steps.release_pr.outputs.found == 'true'
+        shell: bash
+        env:
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+          RELEASE_PR: ${{ steps.release_pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          python -m scripts.cleanup_superseded_beta_prs \
+            --current-branch "${BRANCH}" \
+            --current-tag "${TAG}" \
+            --release-pr "${RELEASE_PR}"

@@ -1493,6 +1493,24 @@ def test_compact_previous_response_not_found_preserves_original_upstream_metadat
     assert metadata.bridge_stage is None
 
 
+def test_request_log_failure_metadata_keeps_direct_previous_response_not_found_status() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            400,
+            openai_error(
+                "previous_response_not_found",
+                "Previous response with id resp_stale was not found",
+                error_type="invalid_request_error",
+            ),
+        )
+    )
+
+    assert metadata.failure_phase is None
+    assert metadata.upstream_status_code == 400
+    assert metadata.upstream_error_code == "previous_response_not_found"
+    assert metadata.bridge_stage is None
+
+
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_failures() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(

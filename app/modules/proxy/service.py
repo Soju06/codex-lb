@@ -9990,6 +9990,10 @@ class ProxyService:
                     surface="http_stream",
                 )
                 require_preferred_account = preferred_account_id is not None
+                # `previous_response_id` is a stored-object continuation, so it
+                # remains hard owner-bound even when the request also carries a
+                # soft prompt-cache affinity key. A different account may have a
+                # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
                     selection_inputs = await self._load_balancer._load_selection_inputs(
                         model=payload.model,

@@ -577,6 +577,27 @@ def test_bypass_quota_exceeded_still_recovers_expired_quota_state():
     assert state.reset_at is None
 
 
+def test_bypass_quota_exceeded_does_not_bypass_error_backoff_fallback():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "a",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        reset_at=int(now) + 3600,
+        error_count=3,
+        last_error_at=now - 1.0,
+    )
+
+    result = select_account(
+        [state],
+        now=now,
+        allow_backoff_fallback=True,
+        bypass_quota_exceeded=True,
+    )
+
+    assert result.account is None
+
+
 def test_bypass_quota_exceeded_can_be_scoped_to_account_ids():
     now = 1_700_000_000.0
     blocked = AccountState("blocked", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now) + 3600)

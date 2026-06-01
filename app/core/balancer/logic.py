@@ -192,6 +192,7 @@ def select_account(
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
+    bypassed_quota_account_ids: set[str] = set()
 
     for state in all_states:
         if state.status == AccountStatus.DEACTIVATED:
@@ -216,6 +217,7 @@ def select_account(
                 # Primary-window quota is exhausted but an additional
                 # independent quota (already verified upstream) is
                 # available — keep the account in the pool.
+                bypassed_quota_account_ids.add(state.account_id)
                 pass
             else:
                 continue
@@ -249,6 +251,7 @@ def select_account(
                 AccountStatus.RATE_LIMITED,
                 AccountStatus.QUOTA_EXCEEDED,
             )
+            and not (state.status == AccountStatus.QUOTA_EXCEEDED and state.account_id in bypassed_quota_account_ids)
             for state in all_states
         )
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):

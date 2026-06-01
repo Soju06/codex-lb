@@ -5215,7 +5215,8 @@ class ProxyService:
             reallocate_sticky=affinity.reallocate_sticky,
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
-            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+            secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
         )
         if selection.account is None:
@@ -11798,7 +11799,8 @@ class ProxyService:
                         model=model,
                         additional_limit_name=additional_limit_name,
                         account_ids={preferred_account_id},
-                        budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                        budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+                        secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                         lease_kind=lease_kind,
                         estimated_lease_tokens=estimated_lease_tokens,
                         traffic_class=effective_traffic_class,
@@ -11827,7 +11829,8 @@ class ProxyService:
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     exclude_account_ids=excluded_account_ids_set,
-                    budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+                    budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+                    secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
                     traffic_class=effective_traffic_class,
@@ -11896,7 +11899,8 @@ class ProxyService:
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
-            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+            secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
         )
 
@@ -14338,6 +14342,20 @@ def _relative_availability_top_k(settings: DashboardSettings) -> int:
     raw_value = getattr(settings, "relative_availability_top_k", None)
     value = int(raw_value) if raw_value is not None else 5
     return min(max(value, 1), 20)
+
+
+def _sticky_reallocation_primary_budget_threshold_pct(settings: DashboardSettings) -> float:
+    return float(
+        getattr(
+            settings,
+            "sticky_reallocation_primary_budget_threshold_pct",
+            settings.sticky_reallocation_budget_threshold_pct,
+        )
+    )
+
+
+def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSettings) -> float:
+    return float(getattr(settings, "sticky_reallocation_secondary_budget_threshold_pct", 100.0))
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:

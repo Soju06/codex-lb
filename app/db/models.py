@@ -341,6 +341,18 @@ class DashboardSettings(Base):
         server_default=text("95.0"),
         nullable=False,
     )
+    sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=95.0,
+        server_default=text("95.0"),
+        nullable=False,
+    )
+    sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
     additional_quota_routing_policies_json: Mapped[str] = mapped_column(
         Text,
         default="{}",

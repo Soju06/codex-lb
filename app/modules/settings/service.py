@@ -23,6 +23,8 @@ class DashboardSettingsData:
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
+    sticky_reallocation_primary_budget_threshold_pct: float
+    sticky_reallocation_secondary_budget_threshold_pct: float
     additional_quota_routing_policies: dict[str, str]
     import_without_overwrite: bool
     totp_required_on_login: bool
@@ -49,6 +51,8 @@ class DashboardSettingsUpdateData:
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
+    sticky_reallocation_primary_budget_threshold_pct: float
+    sticky_reallocation_secondary_budget_threshold_pct: float
     additional_quota_routing_policies: dict[str, str]
     import_without_overwrite: bool
     totp_required_on_login: bool
@@ -81,6 +85,8 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
+            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
             additional_quota_routing_policies=_parse_additional_quota_routing_policies(
                 row.additional_quota_routing_policies_json
             ),
@@ -114,6 +120,8 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=payload.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=payload.sticky_reallocation_budget_threshold_pct,
+            sticky_reallocation_primary_budget_threshold_pct=payload.sticky_reallocation_primary_budget_threshold_pct,
+            sticky_reallocation_secondary_budget_threshold_pct=payload.sticky_reallocation_secondary_budget_threshold_pct,
             additional_quota_routing_policies_json=_dump_additional_quota_routing_policies(
                 payload.additional_quota_routing_policies
             ),
@@ -141,6 +149,8 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
+            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
             additional_quota_routing_policies=_parse_additional_quota_routing_policies(
                 row.additional_quota_routing_policies_json
             ),

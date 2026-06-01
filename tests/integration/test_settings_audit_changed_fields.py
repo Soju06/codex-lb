@@ -139,4 +139,5 @@ async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
         "prefer_earlier_reset_accounts",
         "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
         "sticky_reallocation_budget_threshold_pct",
+        "sticky_reallocation_primary_budget_threshold_pct",
     }, f"unexpected changed_fields set: {changed!r}"

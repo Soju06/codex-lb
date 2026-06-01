@@ -285,6 +285,7 @@ class LoadBalancer:
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
+        secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
         estimated_lease_tokens: float = 0.0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
@@ -547,6 +548,7 @@ class LoadBalancer:
                             reallocate_sticky=reallocate_sticky,
                             sticky_max_age_seconds=sticky_max_age_seconds,
                             budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,
@@ -1038,6 +1040,7 @@ class LoadBalancer:
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
         budget_threshold_pct: float = 95.0,
+        secondary_budget_threshold_pct: float = 100.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         relative_availability_power: float = 2.0,
@@ -1076,6 +1079,7 @@ class LoadBalancer:
         # recovers.  Only reallocate_sticky=True opts in to permanent
         # reassignment.
         persist_fallback = True
+        apply_sticky_secondary_budget_threshold = False
 
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
@@ -1094,7 +1098,11 @@ class LoadBalancer:
                         StickySessionKind.CODEX_SESSION,
                     )
                     and pinned.status != AccountStatus.RATE_LIMITED
-                    and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
+                    and _state_above_sticky_budget_threshold(
+                        pinned,
+                        budget_threshold_pct,
+                        secondary_budget_threshold_pct,
+                    )
                 )
                 rate_limit_far_away = (
                     sticky_kind == StickySessionKind.PROMPT_CACHE
@@ -1147,6 +1155,7 @@ class LoadBalancer:
                     # wastes DB writes and destroys prompt-cache locality
                     # (thrashing).
                     if budget_pressured:
+                        apply_sticky_secondary_budget_threshold = True
                         pool_best = _select_account_preferring_budget_safe(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1155,17 +1164,18 @@ class LoadBalancer:
                             relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            apply_secondary_budget_threshold=True,
                             traffic_class=traffic_class,
                             ignore_standard_quota=ignore_standard_quota,
                         )
-                        pool_exhausted = (
-                            _state_above_budget_threshold
-                            if _state_above_budget_threshold(pinned, budget_threshold_pct)
-                            else _state_above_sticky_budget_threshold
-                        )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
-                            or pool_exhausted(pool_best.account, budget_threshold_pct)
+                            or _state_above_sticky_budget_threshold(
+                                pool_best.account,
+                                budget_threshold_pct,
+                                secondary_budget_threshold_pct,
+                            )
                         )
                         if pool_also_exhausted:
                             pinned_result = select_account(
@@ -1235,6 +1245,8 @@ class LoadBalancer:
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
         )
@@ -2018,9 +2030,13 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
     return state.used_percent is not None and state.used_percent > budget_threshold_pct
 
 
-def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
+def _state_above_sticky_budget_threshold(
+    state: AccountState,
+    budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float,
+) -> bool:
     return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
-        state.secondary_used_percent is not None and state.secondary_used_percent > budget_threshold_pct
+        state.secondary_used_percent is not None and state.secondary_used_percent > secondary_budget_threshold_pct
     )
 
 
@@ -2032,6 +2048,8 @@ def _select_account_preferring_budget_safe(
     relative_availability_power: float = 2.0,
     relative_availability_top_k: int = 5,
     budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float = 100.0,
+    apply_secondary_budget_threshold: bool = False,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
@@ -2054,11 +2072,22 @@ def _select_account_preferring_budget_safe(
         if burn_first.account is not None:
             return burn_first
 
+    state_budget_threshold = (
+        (
+            lambda state: _state_above_sticky_budget_threshold(
+                state,
+                budget_threshold_pct,
+                secondary_budget_threshold_pct,
+            )
+        )
+        if apply_secondary_budget_threshold
+        else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
+    )
     preferred_states = [
         state
         for state in state_list
         if state.routing_policy != ROUTING_POLICY_PRESERVE
-        and not _state_above_budget_threshold(state, budget_threshold_pct)
+        and not state_budget_threshold(state)
     ]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list

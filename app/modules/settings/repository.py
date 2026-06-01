@@ -36,6 +36,8 @@ class SettingsRepository:
             api_key_auth_enabled=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
+            sticky_reallocation_primary_budget_threshold_pct=95.0,
+            sticky_reallocation_secondary_budget_threshold_pct=100.0,
             additional_quota_routing_policies_json="{}",
             limit_warmup_enabled=False,
             limit_warmup_windows="both",
@@ -70,6 +72,8 @@ class SettingsRepository:
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
         http_responses_session_bridge_gateway_safe_mode: bool | None = None,
         sticky_reallocation_budget_threshold_pct: float | None = None,
+        sticky_reallocation_primary_budget_threshold_pct: float | None = None,
+        sticky_reallocation_secondary_budget_threshold_pct: float | None = None,
         additional_quota_routing_policies_json: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
@@ -106,6 +110,12 @@ class SettingsRepository:
             settings.http_responses_session_bridge_gateway_safe_mode = http_responses_session_bridge_gateway_safe_mode
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
+        if sticky_reallocation_primary_budget_threshold_pct is not None:
+            settings.sticky_reallocation_primary_budget_threshold_pct = sticky_reallocation_primary_budget_threshold_pct
+        if sticky_reallocation_secondary_budget_threshold_pct is not None:
+            settings.sticky_reallocation_secondary_budget_threshold_pct = (
+                sticky_reallocation_secondary_budget_threshold_pct
+            )
         if additional_quota_routing_policies_json is not None:
             settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if import_without_overwrite is not None:

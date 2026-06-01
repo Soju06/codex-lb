@@ -26,51 +26,77 @@ export const AdditionalQuotaRoutingPolicySchema = z.enum([
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
 
-export const DashboardSettingsSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
-  upstreamStreamTransport:
-    UpstreamStreamTransportSchema.optional().default("default"),
-  preferEarlierResetAccounts: z.boolean(),
-  routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
-  relativeAvailabilityPower: z.number().positive().optional().default(2),
-  relativeAvailabilityTopK: z
-    .number()
-    .int()
-    .min(1)
-    .max(20)
-    .optional()
-    .default(5),
-  openaiCacheAffinityMaxAgeSeconds: z
-    .number()
-    .int()
-    .positive()
-    .optional()
-    .default(300),
-  dashboardSessionTtlSeconds: z
-    .number()
-    .int()
-    .min(3600)
-    .optional()
-    .default(43200),
-  additionalQuotaRoutingPolicies: z
-    .record(z.string(), AdditionalQuotaRoutingPolicySchema)
-    .optional(),
-  importWithoutOverwrite: z.boolean(),
-  totpRequiredOnLogin: z.boolean(),
-  totpConfigured: z.boolean(),
-  apiKeyAuthEnabled: z.boolean(),
-  limitWarmupEnabled: z.boolean().optional().default(false),
-  limitWarmupWindows: LimitWarmupWindowsSchema.optional().default("both"),
-  limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
-  limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
-  limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
-  limitWarmupMinAvailablePercent: z
-    .number()
-    .positive()
-    .max(100)
-    .optional()
-    .default(100),
-});
+export const DashboardSettingsSchema = z
+  .object({
+    stickyThreadsEnabled: z.boolean(),
+    upstreamStreamTransport:
+      UpstreamStreamTransportSchema.optional().default("default"),
+    preferEarlierResetAccounts: z.boolean(),
+    routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
+    relativeAvailabilityPower: z.number().positive().optional().default(2),
+    relativeAvailabilityTopK: z
+      .number()
+      .int()
+      .min(1)
+      .max(20)
+      .optional()
+      .default(5),
+    openaiCacheAffinityMaxAgeSeconds: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .default(300),
+    dashboardSessionTtlSeconds: z
+      .number()
+      .int()
+      .min(3600)
+      .optional()
+      .default(43200),
+    stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    additionalQuotaRoutingPolicies: z
+      .record(z.string(), AdditionalQuotaRoutingPolicySchema)
+      .optional(),
+    importWithoutOverwrite: z.boolean(),
+    totpRequiredOnLogin: z.boolean(),
+    totpConfigured: z.boolean(),
+    apiKeyAuthEnabled: z.boolean(),
+    limitWarmupEnabled: z.boolean().optional().default(false),
+    limitWarmupWindows: LimitWarmupWindowsSchema.optional().default("both"),
+    limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
+    limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
+    limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
+    limitWarmupMinAvailablePercent: z
+      .number()
+      .positive()
+      .max(100)
+      .optional()
+      .default(100),
+  })
+  .transform((settings) => {
+    const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
+    const primaryProvided = settings.stickyReallocationPrimaryBudgetThresholdPct !== undefined;
+    const secondaryProvided = settings.stickyReallocationSecondaryBudgetThresholdPct !== undefined;
+    const primaryThreshold =
+      settings.stickyReallocationPrimaryBudgetThresholdPct ??
+      settings.stickyReallocationBudgetThresholdPct ??
+      95;
+    return {
+      ...settings,
+      stickyReallocationBudgetThresholdPct:
+        settings.stickyReallocationBudgetThresholdPct ?? primaryThreshold,
+      stickyReallocationPrimaryBudgetThresholdPct: primaryThreshold,
+      stickyReallocationSecondaryBudgetThresholdPct:
+        settings.stickyReallocationSecondaryBudgetThresholdPct ??
+        settings.stickyReallocationBudgetThresholdPct ??
+        100,
+      __stickyReallocationBudgetThresholdPctProvided: legacyProvided,
+      __stickyReallocationPrimaryBudgetThresholdPctProvided: primaryProvided,
+      __stickyReallocationSecondaryBudgetThresholdPctProvided: secondaryProvided,
+    };
+  });
 
 export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
@@ -81,6 +107,9 @@ export const SettingsUpdateRequestSchema = z.object({
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
+  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+  stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+  stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
   additionalQuotaRoutingPolicies: z
     .record(z.string(), AdditionalQuotaRoutingPolicySchema)
     .optional(),

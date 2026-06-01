@@ -7,7 +7,7 @@ export function buildSettingsUpdateRequest(
   settings: DashboardSettings,
   patch: Partial<SettingsUpdateRequest>,
 ): SettingsUpdateRequest {
-  return {
+  const payload: SettingsUpdateRequest = {
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
@@ -16,6 +16,9 @@ export function buildSettingsUpdateRequest(
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+    stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct,
+    stickyReallocationPrimaryBudgetThresholdPct: settings.stickyReallocationPrimaryBudgetThresholdPct,
+    stickyReallocationSecondaryBudgetThresholdPct: settings.stickyReallocationSecondaryBudgetThresholdPct,
     additionalQuotaRoutingPolicies: settings.additionalQuotaRoutingPolicies ?? {},
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
@@ -28,4 +31,30 @@ export function buildSettingsUpdateRequest(
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     ...patch,
   };
+  if (
+    settings.__stickyReallocationBudgetThresholdPctProvided === false &&
+    !("stickyReallocationBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationBudgetThresholdPct;
+  }
+  if (
+    settings.__stickyReallocationPrimaryBudgetThresholdPctProvided === false &&
+    !("stickyReallocationPrimaryBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationPrimaryBudgetThresholdPct;
+  }
+  if (
+    settings.__stickyReallocationSecondaryBudgetThresholdPctProvided === false &&
+    !("stickyReallocationSecondaryBudgetThresholdPct" in patch)
+  ) {
+    delete payload.stickyReallocationSecondaryBudgetThresholdPct;
+  }
+  if (
+    "stickyReallocationPrimaryBudgetThresholdPct" in patch &&
+    !("stickyReallocationBudgetThresholdPct" in patch) &&
+    settings.__stickyReallocationBudgetThresholdPctProvided !== false
+  ) {
+    payload.stickyReallocationBudgetThresholdPct = patch.stickyReallocationPrimaryBudgetThresholdPct;
+  }
+  return payload;
 }

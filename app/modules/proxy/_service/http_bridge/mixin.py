@@ -1599,10 +1599,12 @@ class _HTTPBridgeMixin(
                 await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
                 if session.upstream_reader is upstream_reader:
                     session.upstream_reader = None
-        try:
-            await session.upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+        if not session.upstream_close_attempted:
+            session.upstream_close_attempted = True
+            try:
+                await session.upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
         pending_requests = getattr(session, "pending_requests", None)
         pending_lock = getattr(session, "pending_lock", None)
         response_create_gate = getattr(session, "response_create_gate", None)

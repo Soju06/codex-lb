@@ -38,6 +38,7 @@ class _VersionCache:
 
 class _CodexResponse:
     status_code = 200
+    headers: dict[str, str] = {}
 
     def json(self) -> dict[str, object]:
         return {
@@ -54,13 +55,20 @@ class _CodexResponse:
         }
 
 
+class _CodexErrorResponse:
+    status_code = 403
+    headers = {"x-request-id": "req_model_fetch"}
+    text = "  Forbidden \n request   details  "
+
+
 class _CodexClient:
-    def __init__(self) -> None:
+    def __init__(self, response: object | None = None) -> None:
         self.calls: list[dict[str, object]] = []
+        self._response = response or _CodexResponse()
 
     async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: object) -> object:
         self.calls.append({"method": method, "url": url, "route": route, **kwargs})
-        return _CodexResponse()
+        return self._response
 
 
 async def test_fetch_models_for_plan_maps_read_timeout_to_model_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,6 +117,31 @@ async def test_fetch_models_for_plan_uses_resolved_codex_route(monkeypatch: pyte
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert str(client.calls[0]["url"]).endswith("/codex/models?client_version=0.128.0")
+
+
+async def test_fetch_models_for_plan_maps_routed_error_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.core.clients.model_fetcher.get_settings",
+        lambda: SimpleNamespace(upstream_base_url="https://upstream.example/backend-api"),
+    )
+    monkeypatch.setattr(
+        "app.core.clients.model_fetcher.get_codex_version_cache",
+        lambda: _VersionCache(),
+    )
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    client = _CodexClient(_CodexErrorResponse())
+
+    with pytest.raises(ModelFetchError) as exc_info:
+        await fetch_models_for_plan("access-token", "account-id", route=route, codex_client=cast(Any, client))
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.message == "HTTP 403: Forbidden request details"
+    assert exc_info.value.upstream_request_id == "req_model_fetch"
+    assert exc_info.value.response_preview == "Forbidden request details"
 
 
 def test_response_preview_normalizes_whitespace_and_bounds_length() -> None:

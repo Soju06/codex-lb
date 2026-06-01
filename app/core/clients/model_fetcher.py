@@ -173,7 +173,13 @@ async def fetch_models_for_plan(
             status = _codex_response_status(resp)
             if status >= 400:
                 text = await _codex_response_text(resp)
-                raise ModelFetchError(status, f"HTTP {status}: {text[:200]}")
+                preview = _response_preview(text)
+                raise ModelFetchError(
+                    status,
+                    f"HTTP {status}: {preview or ''}",
+                    upstream_request_id=_response_request_id(_codex_response_headers(resp)),
+                    response_preview=preview,
+                )
             data = await _codex_response_json(resp)
         else:
             timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
@@ -221,6 +227,13 @@ async def fetch_models_for_plan(
             continue
 
     return result
+
+
+def _codex_response_headers(response: object) -> Mapping[str, str]:
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, Mapping):
+        return {str(key): str(value) for key, value in headers.items()}
+    return {}
 
 
 def _codex_response_status(response: object) -> int:

@@ -43,8 +43,8 @@ from app.core.metrics.prometheus import (
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
+    drain_transitions_total,
 )
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, drain_transitions_total
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open

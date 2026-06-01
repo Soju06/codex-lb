@@ -439,10 +439,10 @@ class LoadBalancer:
                     async with self._repo_factory() as repos:
                         stale_account_ids = (
                             await self._persist_selection_state(
-                            repos.accounts,
-                            selected_account_map,
-                            selected_states,
-                        )
+                                repos.accounts,
+                                selected_account_map,
+                                selected_states,
+                            )
                             if selection_inputs.persist_standard_quota_status
                             else set()
                         )
@@ -620,10 +620,10 @@ class LoadBalancer:
                     async with self._repo_factory() as repos:
                         stale_account_ids = (
                             await self._persist_selection_state(
-                            repos.accounts,
-                            selected_account_map,
-                            selected_states,
-                        )
+                                repos.accounts,
+                                selected_account_map,
+                                selected_states,
+                            )
                             if selection_inputs.persist_standard_quota_status
                             else set()
                         )

@@ -9156,7 +9156,16 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
     session.previous_response_ids.add("resp_stale")
     session.durable_session_id = "durable-stale"
     session.durable_owner_epoch = 7
+    lease = proxy_service.AccountLease(
+        lease_id="lease-stale-cleanup",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = lease
     close = cast(Any, session.upstream).close
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     service._http_bridge_sessions[session.key] = session
     service._http_bridge_turn_state_index[
         proxy_service._http_bridge_turn_state_alias_key("http_turn_stale", session.key.api_key_id)
@@ -9184,6 +9193,8 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
         owner_epoch=7,
         draining=False,
     )
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
     close.assert_awaited_once()
 
 

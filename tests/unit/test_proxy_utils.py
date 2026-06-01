@@ -16314,6 +16314,55 @@ async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refre
 
 
 @pytest.mark.asyncio
+async def test_create_http_bridge_session_required_preferred_does_not_fall_back_after_retry(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_bridge_required_preferred_a")
+    account_b = _make_account("acc_bridge_required_preferred_b")
+    seen_excluded_account_ids: list[set[str]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if account_a.id in excluded_account_ids:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account_a))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError()]),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key-required-preferred", None),
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="bridge-key-required-preferred"),
+            api_key=None,
+            request_model="gpt-5.5",
+            idle_ttl_seconds=30.0,
+            preferred_account_id=account_a.id,
+            require_preferred_account=True,
+            fallback_on_preferred_account_unavailable=False,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "no_accounts"
+    assert seen_excluded_account_ids == [set(), set()]
+    assert release_account_lease.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_transcribe_fallback_refresh_error_surfaces_proxy_error_not_raw_refresh_error(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -17828,6 +17877,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         prewarmed=False,
         prewarm_lock=anyio.Lock(),
     )
+    service._http_bridge_sessions[session.key] = session
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
@@ -17842,6 +17892,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
+        bridge_session: proxy_service._HTTPBridgeSession | None = None,
     ) -> None:
         admission_observations.append(
             {
@@ -17856,6 +17907,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             compact=compact,
             account_id=account_id,
             surface=surface,
+            bridge_session=bridge_session,
         )
 
     async def fake_reconnect_http_bridge_session(

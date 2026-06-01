@@ -220,11 +220,24 @@ class AuthManager:
             account.plan_type = DEFAULT_PLAN
         if result.email:
             account.email = result.email
-        if result.workspace_id:
-            account.workspace_id = result.workspace_id
-        if result.workspace_label:
+        incoming_workspace_id = _clean_optional(result.workspace_id)
+        current_workspace_id = _clean_optional(account.workspace_id)
+        next_workspace_id = current_workspace_id
+        if incoming_workspace_id and current_workspace_id and current_workspace_id != incoming_workspace_id:
+            logger.warning(
+                "Refresh payload reported workspace_id=%s for account_id=%s while existing "
+                "workspace_id=%s is already set; keeping slot identity",
+                incoming_workspace_id,
+                account.id,
+                current_workspace_id,
+            )
+            next_workspace_id = current_workspace_id
+        elif not current_workspace_id and incoming_workspace_id:
+            next_workspace_id = incoming_workspace_id
+            account.workspace_id = next_workspace_id
+        if not current_workspace_id and result.workspace_label:
             account.workspace_label = result.workspace_label
-        if result.seat_type:
+        if not current_workspace_id and result.seat_type:
             account.seat_type = result.seat_type
 
         await self._repo.update_tokens(
@@ -236,7 +249,7 @@ class AuthManager:
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
-            workspace_id=account.workspace_id,
+            workspace_id=next_workspace_id,
             workspace_label=account.workspace_label,
             seat_type=account.seat_type,
         )
@@ -313,6 +326,13 @@ def _refresh_token_material_fingerprint(encryptor: TokenEncryptor, refresh_token
     except Exception:
         material = refresh_token_encrypted
     return sha256(material).hexdigest()
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _clear_refresh_singleflight_state() -> None:

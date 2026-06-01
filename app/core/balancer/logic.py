@@ -194,7 +194,6 @@ def select_account(
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
-        quota_bypass_applied = False
         if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
@@ -217,7 +216,7 @@ def select_account(
                 # Primary-window quota is exhausted but an additional
                 # independent quota (already verified upstream) is
                 # available — keep the account in the pool.
-                quota_bypass_applied = True
+                pass
             else:
                 continue
         if state.cooldown_until and current >= state.cooldown_until:
@@ -225,8 +224,7 @@ def select_account(
             state.last_error_at = None
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
-            if not quota_bypass_applied:
-                continue
+            continue
         if state.error_count >= 3:
             backoff = min(300, 30 * (2 ** (state.error_count - 3)))
             if state.last_error_at and current - state.last_error_at < backoff:
@@ -354,6 +352,8 @@ def _priority_primary_used(state: AccountState) -> float:
 
 
 def _priority_secondary_used(state: AccountState, primary_used: float | None = None) -> float:
+    if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+        return primary_used if primary_used is not None else _priority_primary_used(state)
     value = (
         state.priority_secondary_used_percent
         if state.priority_secondary_used_percent is not None

@@ -617,8 +617,7 @@ def test_scoped_quota_bypass_ignores_quota_cooldown_only_for_allowed_account():
         bypass_quota_exceeded_account_ids={"allowed"},
     )
 
-    assert result.account is not None
-    assert result.account.account_id == "allowed"
+    assert result.account is None
     assert allowed.cooldown_until == now + 120.0
 
 
@@ -634,6 +633,40 @@ def test_scoped_quota_bypass_does_not_ignore_active_account_cooldown():
     result = select_account([state], now=now, bypass_quota_exceeded_account_ids={"a"})
 
     assert result.account is None
+
+
+def test_requested_limit_relative_availability_uses_requested_secondary_only_when_available():
+    now = int(time.time())
+    states = [
+        AccountState(
+            "limited-high-second",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            secondary_used_percent=100.0,
+            secondary_reset_at=now + 3_600,
+            priority_used_percent=1.0,
+            priority_capacity_credits=100.0,
+            limit_scoped_usage=True,
+        ),
+        AccountState(
+            "not-limited",
+            AccountStatus.ACTIVE,
+            used_percent=80.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=now + 3_600,
+            priority_capacity_credits=100.0,
+        ),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+        now=now,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "limited-high-second"
 
 
 def test_bypass_quota_exceeded_does_not_affect_other_statuses():

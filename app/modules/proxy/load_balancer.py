@@ -102,6 +102,7 @@ class _SelectionInputs:
     runtime_accounts: list[Account] | None = None
     quota_exceeded_bypass_account_ids: frozenset[str] = frozenset()
     requested_limit_account_ids: frozenset[str] = frozenset()
+    requested_limit_secondary_account_ids: frozenset[str] = frozenset()
     error_message: str | None = None
     error_code: str | None = None
 
@@ -154,6 +155,7 @@ class LoadBalancer:
                     runtime_accounts=selection_inputs.runtime_accounts,
                     quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
                     requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
+                    requested_limit_secondary_account_ids=selection_inputs.requested_limit_secondary_account_ids,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
@@ -190,6 +192,7 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
                     requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
+                    requested_limit_secondary_account_ids=selection_inputs.requested_limit_secondary_account_ids,
                 )
 
                 result = _select_account_preferring_budget_safe(
@@ -326,6 +329,7 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     runtime=self._runtime,
                     requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
+                    requested_limit_secondary_account_ids=selection_inputs.requested_limit_secondary_account_ids,
                 )
                 async with self._repo_factory() as repos:
                     result = await self._select_with_stickiness(
@@ -557,6 +561,11 @@ class LoadBalancer:
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 quota_exceeded_bypass_account_ids=quota_exceeded_bypass_account_ids,
                 requested_limit_account_ids=frozenset(requested_limit_states),
+                requested_limit_secondary_account_ids=frozenset(
+                    account_id
+                    for account_id, requested in requested_limit_states.items()
+                    if requested.secondary is not None
+                ),
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -1125,10 +1134,12 @@ def _build_states(
     latest_secondary: dict[str, UsageHistory],
     runtime: dict[str, RuntimeState],
     requested_limit_account_ids: Collection[str] | None = None,
+    requested_limit_secondary_account_ids: Collection[str] | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
     requested_limit_ids = set(requested_limit_account_ids or ())
+    requested_limit_secondary_ids = set(requested_limit_secondary_account_ids or ())
 
     for account in accounts:
         state = _state_from_account(
@@ -1137,6 +1148,7 @@ def _build_states(
             secondary_entry=latest_secondary.get(account.id),
             runtime=runtime.setdefault(account.id, RuntimeState()),
             requested_limit_priority=account.id in requested_limit_ids,
+            requested_limit_secondary_priority=account.id in requested_limit_secondary_ids,
         )
         states.append(state)
         account_map[account.id] = account
@@ -1150,6 +1162,7 @@ def _state_from_account(
     secondary_entry: UsageHistory | None,
     runtime: RuntimeState,
     requested_limit_priority: bool = False,
+    requested_limit_secondary_priority: bool = False,
 ) -> AccountState:
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
@@ -1184,7 +1197,7 @@ def _state_from_account(
             secondary_reset = None
 
     priority_used = primary_used if requested_limit_priority else None
-    priority_secondary_used = secondary_used if requested_limit_priority else None
+    priority_secondary_used = secondary_used if requested_limit_secondary_priority else None
     priority_reset_at = (
         (secondary_reset if secondary_reset is not None else primary_reset) if requested_limit_priority else None
     )
@@ -1483,6 +1496,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         ),
         quota_exceeded_bypass_account_ids=selection_inputs.quota_exceeded_bypass_account_ids,
         requested_limit_account_ids=selection_inputs.requested_limit_account_ids,
+        requested_limit_secondary_account_ids=selection_inputs.requested_limit_secondary_account_ids,
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
     )
@@ -1593,11 +1607,14 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
 
 def _state_above_sticky_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
     used_percent = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
-    secondary_used_percent = (
-        state.priority_secondary_used_percent
-        if state.priority_secondary_used_percent is not None
-        else state.secondary_used_percent
-    )
+    if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+        secondary_used_percent = used_percent
+    else:
+        secondary_used_percent = (
+            state.priority_secondary_used_percent
+            if state.priority_secondary_used_percent is not None
+            else state.secondary_used_percent
+        )
     return (used_percent is not None and used_percent > budget_threshold_pct) or (
         secondary_used_percent is not None and secondary_used_percent > budget_threshold_pct
     )

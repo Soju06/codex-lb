@@ -279,11 +279,7 @@ class AccountsRepository:
         await self._session.execute(
             update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
-        await self._session.execute(
-            update(AccountLimitWarmup)
-            .where(AccountLimitWarmup.account_id.in_(duplicate_ids))
-            .values(account_id=canonical.id)
-        )
+        await self._reconcile_limit_warmups(canonical.id, duplicate_ids)
         await self._session.execute(
             update(StickySession).where(StickySession.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
@@ -293,6 +289,34 @@ class AccountsRepository:
             .values(account_id=canonical.id)
         )
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
+
+    async def _reconcile_limit_warmups(self, canonical_account_id: str, duplicate_ids: list[str]) -> None:
+        existing_keys = {
+            (window, reset_at)
+            for window, reset_at in (
+                await self._session.execute(
+                    select(AccountLimitWarmup.window, AccountLimitWarmup.reset_at).where(
+                        AccountLimitWarmup.account_id == canonical_account_id
+                    )
+                )
+            ).all()
+        }
+        duplicate_warmups = (
+            (
+                await self._session.execute(
+                    select(AccountLimitWarmup).where(AccountLimitWarmup.account_id.in_(duplicate_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for warmup in duplicate_warmups:
+            key = (warmup.window, warmup.reset_at)
+            if key in existing_keys:
+                await self._session.delete(warmup)
+            else:
+                warmup.account_id = canonical_account_id
+                existing_keys.add(key)
 
     async def update_status(
         self,

@@ -271,6 +271,16 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
         )
         session.add(
             AccountLimitWarmup(
+                account_id=canonical.id,
+                window="primary",
+                reset_at=123,
+                status="completed",
+                model="gpt-5.1",
+                attempted_at=utcnow() - timedelta(minutes=5),
+            )
+        )
+        session.add(
+            AccountLimitWarmup(
                 account_id=duplicate_row.id,
                 window="primary",
                 reset_at=123,
@@ -347,7 +357,7 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
             .all()
         )
         assert len(account_warmups) == 1
-        assert account_warmups[0].status == "pending"
+        assert account_warmups[0].status == "completed"
 
         sticky_sessions = (
             (await session.execute(select(StickySession).where(StickySession.account_id == "acc_merge_main")))

@@ -94,4 +94,30 @@ describe("buildSettingsUpdateRequest", () => {
     expect(payload.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
     expect(payload.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
   });
+
+  it("keeps the legacy sticky threshold aligned with primary edits", () => {
+    const settings = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    const payload = buildSettingsUpdateRequest(settings, {
+      stickyReallocationPrimaryBudgetThresholdPct: 80,
+    });
+
+    expect(payload.stickyReallocationBudgetThresholdPct).toBe(80);
+    expect(payload.stickyReallocationPrimaryBudgetThresholdPct).toBe(80);
+    expect(payload.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
+  });
 });

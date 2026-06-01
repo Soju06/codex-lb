@@ -45,5 +45,12 @@ export function buildSettingsUpdateRequest(
   ) {
     delete payload.stickyReallocationSecondaryBudgetThresholdPct;
   }
+  if (
+    "stickyReallocationPrimaryBudgetThresholdPct" in patch &&
+    !("stickyReallocationBudgetThresholdPct" in patch) &&
+    settings.__stickyReallocationBudgetThresholdPctProvided !== false
+  ) {
+    payload.stickyReallocationBudgetThresholdPct = patch.stickyReallocationPrimaryBudgetThresholdPct;
+  }
   return payload;
 }

@@ -267,7 +267,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
-      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationBudgetThresholdPct: 90,
       stickyReallocationPrimaryBudgetThresholdPct: 90,
       stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,

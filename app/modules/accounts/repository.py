@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -327,6 +327,24 @@ class AccountsRepository:
             update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
         )
         await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool:
+        predicates = [(Account.email == email) & (Account.workspace_id == workspace_id)]
+        if chatgpt_account_id:
+            predicates.append(
+                (Account.chatgpt_account_id == chatgpt_account_id) & (Account.workspace_id == workspace_id)
+            )
+        result = await self._session.execute(
+            select(Account.id).where(Account.id != account_id).where(or_(*predicates)).limit(1)
+        )
         return result.scalar_one_or_none() is not None
 
     async def _merge_by_email_enabled(self) -> bool:

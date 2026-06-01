@@ -46,6 +46,15 @@ class AccountsRepositoryPort(Protocol):
         seat_type: str | None = None,
     ) -> bool: ...
 
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool: ...
+
 
 class RefreshAdmissionLeasePort(Protocol):
     def release(self) -> None: ...
@@ -233,8 +242,22 @@ class AuthManager:
             )
             next_workspace_id = current_workspace_id
         elif not current_workspace_id and incoming_workspace_id:
-            next_workspace_id = incoming_workspace_id
-            account.workspace_id = next_workspace_id
+            slot_taken = await self._repo.workspace_slot_taken(
+                account_id=account.id,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                workspace_id=incoming_workspace_id,
+            )
+            if slot_taken:
+                logger.warning(
+                    "Refresh payload reported workspace_id=%s for legacy account_id=%s, but that slot "
+                    "is already owned by another account; keeping unknown workspace",
+                    incoming_workspace_id,
+                    account.id,
+                )
+            else:
+                next_workspace_id = incoming_workspace_id
+                account.workspace_id = next_workspace_id
         workspace_matches_current_slot = incoming_workspace_id is None or incoming_workspace_id == next_workspace_id
         if workspace_matches_current_slot and result.workspace_label:
             account.workspace_label = result.workspace_label

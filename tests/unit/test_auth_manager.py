@@ -29,6 +29,7 @@ class _DummyRepo:
         self.tokens_payload: dict[str, object] | None = None
         self.status_payload: dict[str, object] | None = None
         self.accounts_by_id: dict[str, Account] = {}
+        self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
@@ -76,6 +77,17 @@ class _DummyRepo:
             "seat_type": seat_type,
         }
         return True
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool:
+        del account_id
+        return (email, chatgpt_account_id, workspace_id) in self.taken_workspace_slots
 
 
 @pytest.mark.asyncio
@@ -326,6 +338,54 @@ async def test_refresh_account_populates_workspace_when_missing(monkeypatch):
     assert repo.tokens_payload["workspace_id"] == "ws_new"
     assert repo.tokens_payload["workspace_label"] == "New Workspace"
     assert repo.tokens_payload["seat_type"] == "pro"
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_does_not_promote_unknown_workspace_into_taken_slot(monkeypatch):
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id="chatgpt_shared",
+            plan_type="team",
+            email="shared@example.com",
+            workspace_id="ws_taken",
+            workspace_label="Taken Workspace",
+            seat_type="business",
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_unknown_slot",
+        email="shared@example.com",
+        chatgpt_account_id="chatgpt_shared",
+        plan_type="plus",
+        workspace_id=None,
+        workspace_label=None,
+        seat_type=None,
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.taken_workspace_slots.add(("shared@example.com", "chatgpt_shared", "ws_taken"))
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    updated = await manager.refresh_account(account)
+
+    assert updated.workspace_id is None
+    assert updated.workspace_label is None
+    assert updated.seat_type is None
+    assert repo.tokens_payload is not None
+    assert repo.tokens_payload["workspace_id"] is None
+    assert repo.tokens_payload["workspace_label"] is None
+    assert repo.tokens_payload["seat_type"] is None
 
 
 @pytest.mark.asyncio

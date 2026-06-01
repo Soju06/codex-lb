@@ -476,9 +476,27 @@ class UsageUpdater:
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> None:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
-        next_workspace_id = _clean_optional(payload.workspace_id) or account.workspace_id
+        payload_workspace_id = _clean_optional(payload.workspace_id)
+        next_workspace_id = payload_workspace_id or account.workspace_id
         next_workspace_label = _clean_optional(payload.workspace_label) or account.workspace_label
         next_seat_type = _clean_optional(payload.seat_type) or account.seat_type
+        if self._auth_manager and payload_workspace_id and not account.workspace_id:
+            slot_taken = await self._auth_manager._repo.workspace_slot_taken(
+                account_id=account.id,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                workspace_id=payload_workspace_id,
+            )
+            if slot_taken:
+                logger.warning(
+                    "Usage payload reported workspace_id=%s for legacy account_id=%s, but that slot "
+                    "is already owned by another account; keeping unknown workspace",
+                    payload_workspace_id,
+                    account.id,
+                )
+                next_workspace_id = account.workspace_id
+                next_workspace_label = account.workspace_label
+                next_seat_type = account.seat_type
         if (
             next_plan_type == account.plan_type
             and next_workspace_id == account.workspace_id

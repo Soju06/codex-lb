@@ -905,6 +905,54 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_does_not_promote_unknown_workspace_into_taken_slot(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "workspace_id": "ws_taken",
+                "workspace_label": "Taken Workspace",
+                "seat_type": "business",
+                "plan_type": "team",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+                "additional_rate_limits": [],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    account = _make_account("acc_unknown_taken", "chatgpt_shared", email="shared@example.com")
+    account.workspace_id = None
+    account.workspace_label = None
+    account.seat_type = None
+    accounts_repo.accounts_by_id[account.id] = account
+    accounts_repo.taken_workspace_slots.add(("shared@example.com", "chatgpt_shared", "ws_taken"))
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert account.workspace_id is None
+    assert account.workspace_label is None
+    assert account.seat_type is None
+    assert accounts_repo.token_updates[-1]["workspace_id"] is None
+    assert accounts_repo.token_updates[-1]["workspace_label"] is None
+    assert accounts_repo.token_updates[-1]["seat_type"] is None
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_skips_unknown_workspace_plan_mismatch(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
@@ -990,6 +1038,7 @@ class StubAccountsRepository:
         self.status_updates: list[dict[str, Any]] = []
         self.token_updates: list[dict[str, Any]] = []
         self.accounts_by_id: dict[str, Account] = {}
+        self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
@@ -1073,6 +1122,17 @@ class StubAccountsRepository:
                 account.seat_type = seat_type
         self.token_updates.append({"account_id": account_id, **kwargs})
         return True
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool:
+        del account_id
+        return (email, chatgpt_account_id, workspace_id) in self.taken_workspace_slots
 
 
 @pytest.mark.asyncio

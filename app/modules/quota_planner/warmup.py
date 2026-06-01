@@ -17,7 +17,13 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyRequestUsageBudget, ApiKeysService
+from app.modules.api_keys.service import (
+    ApiKeyInvalidError,
+    ApiKeyNotFoundError,
+    ApiKeyRateLimitExceededError,
+    ApiKeyRequestUsageBudget,
+    ApiKeysService,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -108,15 +114,45 @@ class QuotaWarmupService:
 
         reservation_id: str | None = None
         if api_key_id is not None:
-            reservation = await self._api_keys.enforce_limits_for_request(
-                api_key_id,
-                request_model=resolved_model,
-                request_usage_budget=ApiKeyRequestUsageBudget(
-                    input_tokens=WARMUP_DEFAULT_INPUT_BUDGET,
-                    output_tokens=WARMUP_DEFAULT_OUTPUT_BUDGET,
-                ),
-            )
-            reservation_id = reservation.reservation_id
+            try:
+                reservation = await self._api_keys.enforce_limits_for_request(
+                    api_key_id,
+                    request_model=resolved_model,
+                    request_usage_budget=ApiKeyRequestUsageBudget(
+                        input_tokens=WARMUP_DEFAULT_INPUT_BUDGET,
+                        output_tokens=WARMUP_DEFAULT_OUTPUT_BUDGET,
+                    ),
+                )
+                reservation_id = reservation.reservation_id
+            except ApiKeyNotFoundError:
+                row = await self._planner.update_decision_status(
+                    decision.id, status="skipped", reason="api_key_not_found"
+                )
+                return WarmupExecutionResult(
+                    decision_id=decision.id,
+                    status=row.status if row else "skipped",
+                    reason="api_key_not_found",
+                )
+            except ApiKeyInvalidError:
+                row = await self._planner.update_decision_status(
+                    decision.id, status="skipped", reason="api_key_invalid"
+                )
+                return WarmupExecutionResult(
+                    decision_id=decision.id,
+                    status=row.status if row else "skipped",
+                    reason="api_key_invalid",
+                )
+            except ApiKeyRateLimitExceededError as exc:
+                row = await self._planner.update_decision_status(
+                    decision.id,
+                    status="skipped",
+                    reason=f"api_key_rate_limit_exceeded:{exc.reset_at.isoformat()}Z",
+                )
+                return WarmupExecutionResult(
+                    decision_id=decision.id,
+                    status=row.status if row else "skipped",
+                    reason=f"api_key_rate_limit_exceeded:{exc.reset_at.isoformat()}Z",
+                )
 
         request_id = f"quota-warmup-{uuid4().hex}"
         started = time.monotonic()

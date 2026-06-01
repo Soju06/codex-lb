@@ -11,6 +11,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, QuotaWindowObservation, RequestLog, UsageHistory
 from app.db.session import SessionLocal
+from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage
@@ -497,3 +498,174 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
             )
 
     assert failed_reservations == [("reservation-cancelled", "gpt-5.4-mini", 0, 0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_api_key_not_found_is_skipped(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-key-not-found",
+            email="warm-key-not-found@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                raise ApiKeyNotFoundError("API key not found: not-existing")
+
+        async def fail_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            raise AssertionError("invalid API key should skip before sending warmup probe")
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-not-found",
+            force_probe=True,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason == "api_key_not_found"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_invalid_api_key_is_skipped(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-key-invalid",
+            email="warm-key-invalid@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                raise ApiKeyInvalidError("API key has expired")
+
+        async def fail_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            raise AssertionError("expired API key should skip before sending warmup probe")
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-expired",
+            force_probe=True,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason == "api_key_invalid"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_rate_limited_api_key_is_skipped(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-key-rate-limited",
+            email="warm-key-rate-limited@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                raise ApiKeyRateLimitExceededError(message="Too many requests", reset_at=utcnow())
+
+        async def fail_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            raise AssertionError("rate-limited API key should skip before sending warmup probe")
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-rate-limited",
+            force_probe=True,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason.startswith("api_key_rate_limit_exceeded:")

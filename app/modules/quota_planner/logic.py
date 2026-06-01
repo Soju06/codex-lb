@@ -256,19 +256,23 @@ def build_demand_forecast(
     current = _floor_datetime(now or datetime.now(timezone.utc), slot_seconds)
     history_by_weekday_slot: dict[tuple[int, int], list[float]] = {}
     history_by_work_hour: dict[int, list[float]] = {}
+    units_by_slot_epoch: dict[int, float] = {}
     recent_units = 0.0
     recent_cutoff = current.timestamp() - 24 * 60 * 60
     for row in bins:
         if row.request_kind != "real":
             continue
-        slot = datetime.fromtimestamp(row.slot_epoch, tz=timezone.utc)
+        slot_epoch = int(row.slot_epoch)
+        units_by_slot_epoch[slot_epoch] = units_by_slot_epoch.get(slot_epoch, 0.0) + _bin_demand_units(row)
+
+    for slot_epoch, units in units_by_slot_epoch.items():
+        slot = datetime.fromtimestamp(slot_epoch, tz=timezone.utc)
         local = _to_planner_tz(slot, settings.timezone)
         slot_index = local.hour * 3600 // slot_seconds + local.minute * 60 // slot_seconds
-        units = _bin_demand_units(row)
         history_by_weekday_slot.setdefault((local.weekday(), slot_index), []).append(units)
         if local.weekday() in settings.working_days:
             history_by_work_hour.setdefault(local.hour, []).append(units)
-        if row.slot_epoch >= recent_cutoff:
+        if slot_epoch >= recent_cutoff:
             recent_units += units
 
     recent_per_slot = recent_units / max(1, int(24 * 60 * 60 / slot_seconds))
@@ -318,43 +322,48 @@ def simulate_pool(
     current = now or demand_forecast.generated_at
     current_ts = current.timestamp()
     warmups = planned_warmups or []
-    active_windows: list[tuple[float, float]] = []
+    active_windows: list[tuple[float, float, float]] = []
     for state in states:
         if state.status not in {AccountStatus.ACTIVE, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED}:
             continue
         if _is_active_window(state, current_ts):
             remaining_pct = _remaining_percent(state)
-            active_windows.append((float(state.reset_at or 0), DEFAULT_ACCOUNT_WINDOW_CAPACITY * remaining_pct / 100.0))
+            active_windows.append(
+                (current_ts, float(state.reset_at or 0), DEFAULT_ACCOUNT_WINDOW_CAPACITY * remaining_pct / 100.0)
+            )
     for action in warmups:
         if action.scheduled_at is None:
             continue
         start = action.scheduled_at.timestamp()
-        active_windows.append((start + FIVE_HOUR_WINDOW_SECONDS, DEFAULT_ACCOUNT_WINDOW_CAPACITY))
+        active_windows.append((start, start + FIVE_HOUR_WINDOW_SECONDS, DEFAULT_ACCOUNT_WINDOW_CAPACITY))
 
     unmet = 0.0
     served = 0.0
     wasted_capacity = 0.0
-    remaining_by_reset: dict[float, float] = {}
-    for reset_at, capacity in active_windows:
-        remaining_by_reset[reset_at] = remaining_by_reset.get(reset_at, 0.0) + capacity
+    remaining_by_window: dict[tuple[float, float], float] = {}
+    for start_at, reset_at, capacity in active_windows:
+        if start_at >= reset_at:
+            continue
+        remaining_by_window[(start_at, reset_at)] = remaining_by_window.get((start_at, reset_at), 0.0) + capacity
     for slot in demand_forecast.slots:
         slot_ts = slot.slot_start.timestamp()
         demand = slot.demand_units
-        usable_resets = sorted(reset for reset in remaining_by_reset if reset > slot_ts)
-        for reset in usable_resets:
+        usable_windows = sorted((start, reset) for start, reset in remaining_by_window if start <= slot_ts < reset)
+        for start, reset in usable_windows:
             if demand <= 0:
                 break
-            take = min(demand, remaining_by_reset[reset])
-            remaining_by_reset[reset] -= take
+            key = (start, reset)
+            take = min(demand, remaining_by_window[key])
+            remaining_by_window[key] -= take
             demand -= take
             served += take
         unmet += max(0.0, demand)
 
-    for reset, remaining in remaining_by_reset.items():
+    for (_, reset), remaining in remaining_by_window.items():
         if reset <= (current + timedelta(hours=demand_forecast.horizon_hours)).timestamp():
             wasted_capacity += max(0.0, remaining) * 0.05
 
-    sync_penalty = _synchronization_penalty([reset for reset, _ in active_windows])
+    sync_penalty = _synchronization_penalty([reset for _, reset, _ in active_windows])
     cold_penalty = sum(
         2.0
         for action in warmups

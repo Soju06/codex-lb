@@ -8,6 +8,7 @@ from app.core.balancer import AccountState
 from app.db.models import AccountStatus
 from app.modules.quota_planner.logic import (
     DemandForecastSlot,
+    PlannerAction,
     PlannerForecast,
     PlannerSettings,
     build_demand_forecast,
@@ -141,6 +142,53 @@ def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
 
     assert simulation.served_units == pytest.approx(120.0)
     assert simulation.unmet_demand == pytest.approx(0.0)
+
+
+def test_simulate_pool_does_not_use_future_warmup_before_start() -> None:
+    settings = PlannerSettings()
+    now = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    planned = datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc)
+    forecast = PlannerForecast(
+        generated_at=now,
+        horizon_hours=1,
+        slot_seconds=15 * 60,
+        total_demand_units=120.0,
+        peak_slot_start=now,
+        peak_demand_units=120.0,
+        slots=(
+            DemandForecastSlot(
+                slot_start=now,
+                demand_units=60.0,
+                request_count=6.0,
+                source="test",
+            ),
+            DemandForecastSlot(
+                slot_start=now + timedelta(minutes=15),
+                demand_units=60.0,
+                request_count=6.0,
+                source="test",
+            ),
+        ),
+    )
+
+    simulation = simulate_pool(
+        settings=settings,
+        states=[],
+        demand_forecast=forecast,
+        planned_warmups=[
+            PlannerAction(
+                account_id="acc",
+                action="reserve",
+                scheduled_at=planned,
+                score=1.0,
+                reason="unit",
+            )
+        ],
+        now=now,
+    )
+
+    assert simulation.served_units == pytest.approx(0.0)
+    assert simulation.unmet_demand == pytest.approx(120.0)
 
 
 def test_plan_shadow_actions_reserves_cold_accounts_for_peak_aligned_staggered_windows() -> None:
@@ -289,3 +337,52 @@ def test_forecast_and_simulation_use_history_without_requiring_user_input() -> N
     assert actions
     assert actions[0].action == "reserve"
     assert simulation.forecast_units == forecast.total_demand_units
+
+
+def test_build_demand_forecast_aggregates_same_slot_rows_before_quantile() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        forecast_quantile="p50",
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    history_slot = int(datetime(2026, 5, 11, 10, 0, tzinfo=timezone.utc).timestamp())
+
+    bins = [
+        DemandBin(
+            slot_epoch=history_slot,
+            account_id="acc-one",
+            api_key_id="key-a",
+            model="gpt-5.4",
+            reasoning_effort=None,
+            request_kind="real",
+            status="ok",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            request_count=1,
+        ),
+        DemandBin(
+            slot_epoch=history_slot,
+            account_id="acc-two",
+            api_key_id="key-b",
+            model="gpt-5.4",
+            reasoning_effort=None,
+            request_kind="real",
+            status="ok",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            request_count=1,
+        ),
+    ]
+
+    forecast = build_demand_forecast(settings=settings, bins=bins, now=now, horizon_hours=6)
+    peak_slot = next(slot for slot in forecast.slots if slot.slot_start.hour == 10)
+
+    assert peak_slot.demand_units == pytest.approx(75.6)

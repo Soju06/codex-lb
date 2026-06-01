@@ -10070,7 +10070,7 @@ async def test_http_bridge_reader_crash_marks_session_closed_before_releasing_pe
 
     async def fail_pending_requests(**_kwargs: object) -> None:
         assert session.closed is True
-        proxy_service._release_websocket_response_create_gate(request_state, gate)
+        await proxy_service._release_websocket_response_create_gate(request_state, gate)
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_process_http_bridge_upstream_text", AsyncMock(side_effect=RuntimeError("boom")))

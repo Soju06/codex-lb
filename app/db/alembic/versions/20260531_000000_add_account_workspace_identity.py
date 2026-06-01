@@ -1,7 +1,7 @@
 """add account workspace identity metadata
 
 Revision ID: 20260531_000000_add_account_workspace_identity
-Revises: 20260525_000000_add_usage_raw_window_latest_index
+Revises: 20260601_000000_merge_relative_availability_and_usage_raw_heads
 Create Date: 2026-05-31 18:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy import inspect
 
 revision = "20260531_000000_add_account_workspace_identity"
-down_revision = "20260525_000000_add_usage_raw_window_latest_index"
+down_revision = "20260601_000000_merge_relative_availability_and_usage_raw_heads"
 branch_labels = None
 depends_on = None
 

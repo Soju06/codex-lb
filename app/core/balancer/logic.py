@@ -567,7 +567,7 @@ def _weekly_reset_timestamp(state: AccountState, current: float) -> float:
     return float("inf")
 
 
-def _reset_drain_sort_key(state: AccountState, current: float) -> tuple[float, float, float, str, str]:
+def _reset_drain_sort_key(state: AccountState, current: float) -> tuple[int, float, float, float, str, str]:
     primary_remaining = 100.0 - (state.used_percent if state.used_percent is not None else 0.0)
     secondary_remaining = 100.0 - (
         state.secondary_used_percent
@@ -576,10 +576,15 @@ def _reset_drain_sort_key(state: AccountState, current: float) -> tuple[float, f
         if state.used_percent is not None
         else 0.0
     )
+    reset_at = _weekly_reset_timestamp(state, current)
+    reset_bucket_days = (
+        UNKNOWN_RESET_BUCKET_DAYS if reset_at == float("inf") else max(0, int((reset_at - current) // SECONDS_PER_DAY))
+    )
     return (
-        _weekly_reset_timestamp(state, current),
+        reset_bucket_days,
         -max(0.0, primary_remaining),
         -max(0.0, secondary_remaining),
+        reset_at,
         _stable_tie_breaker(state.account_id),
         state.account_id,
     )

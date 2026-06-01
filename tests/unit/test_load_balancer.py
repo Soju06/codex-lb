@@ -359,6 +359,29 @@ def test_select_account_reset_drain_drains_highest_remaining_inside_same_reset_b
     assert result.account.account_id == "high-left"
 
 
+def test_select_account_reset_drain_uses_bucket_before_exact_reset_time():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "soon-low-left",
+            AccountStatus.ACTIVE,
+            used_percent=95.0,
+            secondary_used_percent=95.0,
+            secondary_reset_at=int(now + 300),
+        ),
+        AccountState(
+            "later-high-left",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 1800),
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="reset_drain")
+    assert result.account is not None
+    assert result.account.account_id == "later-high-left"
+
+
 def test_select_account_reset_drain_falls_back_to_primary_reset_when_weekly_unknown():
     now = 1_700_000_000.0
     states = [

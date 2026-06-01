@@ -13074,6 +13074,7 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "no_accounts",
         "payload_too_large",
         "previous_response_not_found",
+        "proxy_overloaded",
         "upstream_request_timeout",
         "upstream_unavailable",
     }

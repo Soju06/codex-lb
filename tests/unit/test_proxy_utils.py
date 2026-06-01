@@ -29,6 +29,7 @@ from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import CircuitState
+from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
@@ -1479,6 +1480,20 @@ def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_f
     assert metadata.failure_phase is None
     assert metadata.upstream_status_code is None
     assert metadata.upstream_error_code == "no_accounts"
+    assert metadata.bridge_stage is None
+
+
+def test_request_log_failure_metadata_does_not_use_status_code_for_local_overloads() -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            429,
+            local_overload_error("Proxy is overloaded"),
+        )
+    )
+
+    assert metadata.failure_phase is None
+    assert metadata.upstream_status_code is None
+    assert metadata.upstream_error_code == "proxy_overloaded"
     assert metadata.bridge_stage is None
 
 

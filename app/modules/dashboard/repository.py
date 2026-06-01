@@ -10,7 +10,7 @@ from app.db.models import Account, AccountLimitWarmup, AdditionalUsageHistory, R
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageHistorySnapshot, UsageRepository
 
 
 class DashboardRepository:
@@ -40,7 +40,7 @@ class DashboardRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
-    ) -> dict[str, list[UsageHistory]]:
+    ) -> dict[str, list[UsageHistorySnapshot]]:
         return await self._usage_repo.bulk_history_since(account_ids, window, since)
 
     async def latest_window_minutes(self, window: str) -> int | None:

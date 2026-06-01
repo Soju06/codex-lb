@@ -94,7 +94,7 @@ class WorkAdmissionController:
                 gate.wait_timeout_seconds,
                 message,
             )
-            raise ProxyResponseError(429, local_overload_error(message))
+            raise ProxyResponseError(429, local_overload_error(message, code="global_admission_timeout"))
         return AdmissionLease(gate.semaphore, stage=stage, request_id=get_request_id())
 
 

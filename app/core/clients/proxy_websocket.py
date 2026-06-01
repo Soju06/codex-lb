@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
 from websockets.asyncio.client import ClientConnection
@@ -24,6 +25,7 @@ from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
+from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
 
 _WEBSOCKET_HOP_BY_HOP_HEADERS = {
@@ -257,22 +259,26 @@ async def connect_responses_websocket(
     upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
+    proxy_env = (
+        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
+    )
+    proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
+    connect_kwargs: dict[str, Any] = {
+        "origin": origin,
+        "additional_headers": upstream_headers or None,
+        "user_agent_header": user_agent,
+        "open_timeout": settings.upstream_connect_timeout_seconds,
+        # Long Codex turns can spend minutes in upstream reasoning without
+        # sending application frames. Keep transport pings enabled so
+        # intermediaries still see liveness, but disable the library's pong
+        # watchdog so codex-lb's own request/idle budgets decide when a
+        # healthy long turn has stalled.
+        "ping_timeout": None,
+        "max_size": settings.max_sse_event_bytes,
+    }
+    connect_kwargs["proxy"] = proxy_url
     try:
-        response = await websocket_connect(
-            url,
-            origin=origin,
-            additional_headers=upstream_headers or None,
-            user_agent_header=user_agent,
-            proxy=True if settings.upstream_websocket_trust_env else None,
-            open_timeout=settings.upstream_connect_timeout_seconds,
-            # Long Codex turns can spend minutes in upstream reasoning without
-            # sending application frames. Keep transport pings enabled so
-            # intermediaries still see liveness, but disable the library's pong
-            # watchdog so codex-lb's own request/idle budgets decide when a
-            # healthy long turn has stalled.
-            ping_timeout=None,
-            max_size=settings.max_sse_event_bytes,
-        )
+        response = await websocket_connect(url, **connect_kwargs)
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
             502,

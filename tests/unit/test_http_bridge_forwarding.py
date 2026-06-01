@@ -252,6 +252,21 @@ def test_owner_forward_receive_timeout_uses_budget_when_equal_budget_is_sooner(
     assert timeout.error_code == "upstream_request_timeout"
 
 
+def test_owner_forward_receive_timeout_allows_bridge_budget_beyond_proxy_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 700.0)
+
+    timeout = _owner_forward_receive_timeout(
+        request_started_at=100.0,
+        proxy_request_budget_seconds=7200.0,
+        stream_idle_timeout_seconds=3600.0,
+    )
+
+    assert timeout.timeout_seconds == pytest.approx(3600.0)
+    assert timeout.error_code == "stream_idle_timeout"
+
+
 @pytest.mark.asyncio
 async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}

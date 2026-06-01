@@ -74,7 +74,10 @@ def _extract_first_raw_event(lines: list[str]) -> dict:
 def _iter_sse_events(lines: list[str]):
     for line in lines:
         if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-            yield json.loads(line[6:])
+            event = json.loads(line[6:])
+            if event.get("type") == "codex.keepalive":
+                continue
+            yield event
 
 
 class _FakeUpstreamWebSocket:
@@ -787,7 +790,7 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
         del self, kwargs
         return account
 
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 

@@ -2367,7 +2367,7 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
         event = {"type": "response.completed", "response": {"id": "resp_retry", "usage": usage}}
         yield f"data: {json.dumps(event)}\n\n"
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         if force:
             account.chatgpt_account_id = "acc_401_retry_refreshed"
         return account

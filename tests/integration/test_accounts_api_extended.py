@@ -334,6 +334,37 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_delete_account_with_delete_history_hard_deletes_request_logs(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_hard_delete", "hard-delete@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_hard_delete",
+            request_id="req_hard_delete_1",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=25,
+            status="success",
+            error_code=None,
+            requested_at=utcnow(),
+        )
+
+    delete = await async_client.delete("/api/accounts/acc_hard_delete?delete_history=true")
+    assert delete.status_code == 200
+    assert delete.json()["status"] == "deleted"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1"))
+        assert result.scalar_one_or_none() is None
+
+    request_logs = await async_client.get("/api/request-logs?limit=10")
+    assert request_logs.status_code == 200
+    assert request_logs.json()["total"] == 0
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_includes_per_account_reset_times(async_client, db_setup):
     primary_a = 1735689600
     primary_b = 1735693200

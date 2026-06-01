@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -71,6 +70,7 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -1953,14 +1953,27 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
+    if not enforce_openai_sdk_contract:
+        stream = _prepend_initial_sse_heartbeat(
+            stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses",
+        )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME,
+            keepalive_frame=keepalive_frame,
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            **turn_state_headers,
+            **rate_limit_headers,
+        },
     )
 
 
@@ -2252,6 +2265,23 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
         yield line
 
 
+async def _prepend_initial_sse_heartbeat(
+    stream: AsyncIterator[str],
+    keepalive_frame: str,
+    *,
+    request_id: str | None = None,
+    route_family: str = "responses",
+) -> AsyncIterator[str]:
+    logger.info(
+        "responses_stream_heartbeat request_id=%s route_family=%s stage=initial elapsed_seconds=0.000",
+        request_id,
+        route_family,
+    )
+    yield keepalive_frame
+    async for line in stream:
+        yield line
+
+
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
         yield line
@@ -2378,6 +2408,23 @@ def _error_details_from_content(
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 
+async def _validate_proxy_api_key_authorization_for_connection(
+    authorization: str | None,
+    connection: Request | WebSocket,
+) -> ApiKeyData | None:
+    try:
+        return await validate_proxy_api_key_authorization(authorization, request=connection)
+    except TypeError as exc:
+        if not _is_legacy_proxy_auth_override_type_error(exc):
+            raise
+    return await validate_proxy_api_key_authorization(authorization)
+
+
+def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
+    message = str(exc)
+    return "unexpected keyword argument 'request'" in message
+
+
 async def _validate_proxy_websocket_request(
     websocket: WebSocket,
 ) -> tuple[ApiKeyData | None, JSONResponse | None]:
@@ -2385,13 +2432,10 @@ async def _validate_proxy_websocket_request(
     if denial is not None:
         return None, denial
     try:
-        if "request" in inspect.signature(validate_proxy_api_key_authorization).parameters:
-            api_key = await validate_proxy_api_key_authorization(
-                websocket.headers.get("authorization"),
-                request=websocket,
-            )
-        else:
-            api_key = await validate_proxy_api_key_authorization(websocket.headers.get("authorization"))
+        api_key = await _validate_proxy_api_key_authorization_for_connection(
+            websocket.headers.get("authorization"),
+            websocket,
+        )
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,
@@ -2407,9 +2451,9 @@ async def _validate_internal_bridge_api_key(
     if not dashboard_settings.api_key_auth_enabled:
         return None, None
     try:
-        api_key = await validate_proxy_api_key_authorization(
+        api_key = await _validate_proxy_api_key_authorization_for_connection(
             request.headers.get("authorization"),
-            request=request,
+            request,
         )
     except ProxyAuthError as exc:
         return None, JSONResponse(

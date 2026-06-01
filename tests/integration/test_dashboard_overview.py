@@ -307,7 +307,7 @@ async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_weekly_credit_pace_excludes_inactive_and_stale_accounts(
+async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_stale_accounts(
     async_client,
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,7 +356,7 @@ async def test_dashboard_overview_weekly_credit_pace_excludes_inactive_and_stale
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
-    response = await async_client.get("/api/dashboard/overview")
+    response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
 
@@ -372,7 +372,7 @@ async def test_dashboard_overview_weekly_credit_pace_excludes_inactive_and_stale
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_weekly_credit_pace_forecast_uses_recent_slope_not_full_window_average(
+async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slope_not_full_window_average(
     async_client,
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -411,7 +411,7 @@ async def test_dashboard_overview_weekly_credit_pace_forecast_uses_recent_slope_
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
-    response = await async_client.get("/api/dashboard/overview")
+    response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
 
@@ -428,7 +428,7 @@ async def test_dashboard_overview_weekly_credit_pace_forecast_uses_recent_slope_
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_computes_depletion_from_recent_db_history(async_client, db_setup):
+async def test_dashboard_projections_compute_depletion_from_recent_db_history(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 
     async with SessionLocal() as session:
@@ -453,7 +453,7 @@ async def test_dashboard_overview_computes_depletion_from_recent_db_history(asyn
             recorded_at=now - timedelta(minutes=5),
         )
 
-    response = await async_client.get("/api/dashboard/overview")
+    response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
 
     payload = response.json()
@@ -463,7 +463,7 @@ async def test_dashboard_overview_computes_depletion_from_recent_db_history(asyn
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_weekly_only_depletion_uses_current_stream(async_client, db_setup):
+async def test_dashboard_projections_weekly_only_depletion_uses_current_stream(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
     reset_at = int(naive_utc_to_epoch(now + timedelta(minutes=30)))
 
@@ -506,7 +506,7 @@ async def test_dashboard_overview_weekly_only_depletion_uses_current_stream(asyn
             recorded_at=now - timedelta(minutes=1),
         )
 
-    response = await async_client.get("/api/dashboard/overview")
+    response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
 
     payload = response.json()

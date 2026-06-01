@@ -311,7 +311,7 @@ class TestContextGrowthScenarios:
     - Apr 13 (broken):   17 turns, 70K tok/turn, max 853K, 2 compactions
     """
 
-    def test_healthy_growth_rate_stays_within_budget(self):
+    async def test_healthy_growth_rate_stays_within_budget(self):
         """With previous_response_id preserved, each turn adds only new content."""
         system_prompt_tokens = 50_000
         content_per_turn = 2_300  # avg from Apr 11 sessions
@@ -330,7 +330,7 @@ class TestContextGrowthScenarios:
 
         assert context < context_window
 
-    def test_broken_growth_rate_fills_window_fast(self):
+    async def test_broken_growth_rate_fills_window_fast(self):
         """Without previous_response_id, context fills in <20 turns."""
         system_prompt_tokens = 50_000
         growth_per_turn = 70_000  # avg from Apr 13 sessions (broken)
@@ -347,7 +347,7 @@ class TestContextGrowthScenarios:
         assert compaction_turn is not None
         assert compaction_turn < 20
 
-    def test_error_code_determines_growth_rate(self):
+    async def test_error_code_determines_growth_rate(self):
         """502 -> CLI retries with previous_response_id -> healthy growth
         400 previous_response_not_found -> CLI drops it -> broken growth"""
         error_502 = ProxyResponseError(

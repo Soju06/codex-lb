@@ -5,7 +5,7 @@ import contextlib
 import importlib
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import AsyncIterator, Protocol, cast
 
 from app.core.config.settings import get_settings
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -113,7 +113,10 @@ class UsageRefreshScheduler:
                         warmup_service = LimitWarmupService(
                             warmup_repo,
                             request_logs_repo,
-                            sender=StreamingLimitWarmupSender(accounts_repo),
+                            sender=StreamingLimitWarmupSender(
+                                accounts_repo,
+                                accounts_repo_factory=_background_accounts_repo,
+                            ),
                         )
                         refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
                         await warmup_service.run_after_usage_refresh(
@@ -141,6 +144,12 @@ def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
         interval_seconds=settings.usage_refresh_interval_seconds,
         enabled=settings.usage_refresh_enabled,
     )
+
+
+@contextlib.asynccontextmanager
+async def _background_accounts_repo() -> AsyncIterator[AccountsRepository]:
+    async with get_background_session() as session:
+        yield AccountsRepository(session)
 
 
 async def reconcile_recoverable_account_statuses(

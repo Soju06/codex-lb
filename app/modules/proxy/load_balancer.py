@@ -855,7 +855,11 @@ class LoadBalancer:
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}
-        stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
+        stale_ids = [
+            account_id
+            for account_id, runtime in self._runtime.items()
+            if account_id not in account_ids and not runtime.leases
+        ]
         for account_id in stale_ids:
             self._runtime.pop(account_id, None)
 

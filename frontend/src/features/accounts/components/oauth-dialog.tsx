@@ -1,5 +1,6 @@
 import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { OAuthState } from "@/features/accounts/schemas";
 import { formatCountdown } from "@/utils/formatters";
+import { copyToClipboard } from "@/utils/clipboard";
 
 type Stage = "intro" | "browser" | "device" | "success" | "error";
 
@@ -27,10 +29,29 @@ function getStage(state: OAuthState): Stage {
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = useCallback(async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
+    const trigger = event.currentTarget;
+    const dialogContainer = trigger.closest("[role='dialog']");
+    const blurAfterCopy = event.detail > 0;
+
+    try {
+      const copiedToClipboard = await copyToClipboard(text, {
+        container: dialogContainer instanceof HTMLElement ? dialogContainer : undefined,
+      });
+      if (!copiedToClipboard) {
+        toast.error("Failed to copy");
+        return;
+      }
+
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Failed to copy");
+    } finally {
+      if (blurAfterCopy) {
+        trigger.blur();
+      }
+    }
   }, [text]);
 
   return (
@@ -39,7 +60,8 @@ function CopyButton({ text }: { text: string }) {
       size="sm"
       variant="ghost"
       className="h-7 cursor-pointer gap-1 px-2 text-xs disabled:cursor-not-allowed"
-      onClick={() => void handleCopy()}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={(event) => void handleCopy(event)}
     >
       {copied ? (
         <>

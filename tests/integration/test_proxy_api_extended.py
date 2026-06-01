@@ -666,6 +666,7 @@ async def test_codex_control_retry_failure_after_forced_refresh_updates_account_
     )
 
     assert response.status_code == 503
+    assert "X-App-Version" not in response.headers
     assert calls == 2
     assert len(handled) == 1
     assert handled[0][0].startswith("acc_codex_retry_error")

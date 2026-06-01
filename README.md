@@ -110,7 +110,7 @@ model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
-name = "OpenAI"  # required — enables remote /responses/compact
+name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
@@ -148,7 +148,7 @@ environment proxies and connect directly.
 
 ```toml
 [model_providers.codex-lb]
-name = "OpenAI"
+name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
@@ -178,16 +178,17 @@ Healthy websocket signals:
 If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
 
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
-old sessions won't appear until you re-tag them:
+old sessions won't appear until you re-tag them. Use the built-in retag command
+instead of editing Codex files by hand; see
+[Codex session retagging](openspec/specs/runtime-portability/context.md#codex-session-retagging) for backups, Docker, WSL,
+and rollback details.
 
 ```bash
-# JSONL session files (all versions)
-find ~/.codex/sessions -name '*.jsonl' \
-  -exec sed -i '' 's/"model_provider":"openai"/"model_provider":"codex-lb"/g' {} +
+# Preview what will change first.
+codex-lb codex-sessions retag --from openai --to codex-lb --dry-run
 
-# SQLite state DB (>= v0.105.0, creates ~/.codex/state_*.sqlite)
-sqlite3 ~/.codex/state_5.sqlite \
-  "UPDATE threads SET model_provider = 'codex-lb' WHERE model_provider = 'openai';"
+# Then close Codex/Codex CLI and apply the retag.
+codex-lb codex-sessions retag --from openai --to codex-lb --yes
 ```
 
 </details>
@@ -454,7 +455,7 @@ cd frontend && bun run dev                     # frontend :5173
 
 ## Contributors ✨
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/en/reference/emoji-key/)):
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable -->

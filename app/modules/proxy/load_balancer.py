@@ -117,6 +117,8 @@ class LoadBalancer:
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         routing_strategy: RoutingStrategy = "capacity_weighted",
+        relative_availability_power: float = 2.0,
+        relative_availability_top_k: int = 5,
         model: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
@@ -179,6 +181,8 @@ class LoadBalancer:
                     states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    relative_availability_power=relative_availability_power,
+                    relative_availability_top_k=relative_availability_top_k,
                     budget_threshold_pct=budget_threshold_pct,
                 )
 
@@ -315,6 +319,8 @@ class LoadBalancer:
                         budget_threshold_pct=budget_threshold_pct,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
                     )
                     selected_account_map = account_map
@@ -464,6 +470,7 @@ class LoadBalancer:
                     accounts,
                     model=model,
                     limit_name=effective_limit_name,
+                    explicit_limit=additional_limit_name is not None,
                     repos=repos,
                 )
                 if not accounts:
@@ -516,6 +523,7 @@ class LoadBalancer:
         *,
         model: str | None,
         limit_name: str,
+        explicit_limit: bool = False,
         repos: ProxyRepositories,
     ) -> tuple[list[Account], str | None, str | None]:
         if not accounts:
@@ -559,6 +567,7 @@ class LoadBalancer:
                 account_id=account.id,
                 account_plan_type=account.plan_type,
                 quota_key=limit_name,
+                explicit_limit=explicit_limit,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
@@ -650,6 +659,8 @@ class LoadBalancer:
         budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
+        relative_availability_power: float = 2.0,
+        relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
@@ -657,6 +668,8 @@ class LoadBalancer:
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 routing_strategy=routing_strategy,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
             )
         if sticky_kind is None:
@@ -707,6 +720,8 @@ class LoadBalancer:
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                     )
                     if pinned_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -723,6 +738,8 @@ class LoadBalancer:
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
                             budget_threshold_pct=budget_threshold_pct,
                         )
@@ -741,6 +758,8 @@ class LoadBalancer:
                                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                                 routing_strategy=routing_strategy,
                                 allow_backoff_fallback=False,
+                                relative_availability_power=relative_availability_power,
+                                relative_availability_top_k=relative_availability_top_k,
                             )
                             if pinned_result.account is not None:
                                 if sticky_max_age_seconds is not None:
@@ -765,6 +784,8 @@ class LoadBalancer:
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
                         allow_backoff_fallback=False,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
                     )
                     if grace_result.account is not None:
                         if sticky_max_age_seconds is not None:
@@ -792,6 +813,8 @@ class LoadBalancer:
             states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
@@ -1049,6 +1072,9 @@ def _state_from_account(
 
     secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
+    credits_has = _first_not_none(primary_entry, effective_secondary_entry, "credits_has")
+    credits_unlimited = _first_not_none(primary_entry, effective_secondary_entry, "credits_unlimited")
+    credits_balance = _first_not_none(primary_entry, effective_secondary_entry, "credits_balance")
 
     # If the usage window has reset (reset_at is in the past) but the last
     # recorded sample still shows 100 % usage, the data is stale.  Zero it
@@ -1120,6 +1146,9 @@ def _state_from_account(
         runtime_reset=effective_runtime_reset,
         secondary_used=secondary_used,
         secondary_reset=secondary_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
     if status == AccountStatus.QUOTA_EXCEEDED:
@@ -1291,21 +1320,25 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     if model is None:
         return False
     registry = get_model_registry()
-    get_snapshot = getattr(registry, "get_snapshot", None)
-    if not callable(get_snapshot):
+    plan_types_for_model = getattr(registry, "plan_types_for_model", None)
+    if not callable(plan_types_for_model):
         return False
-    snapshot = get_snapshot()
-    if snapshot is None:
-        return False
-    model_plans = getattr(snapshot, "model_plans", None)
-    if not isinstance(model_plans, dict):
-        return False
-    return model.strip().lower() in model_plans
+    return bool(plan_types_for_model(model))
 
 
 def _clone_account(account: Account) -> Account:
     data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
     return Account(**data)
+
+
+def _first_not_none(primary_entry: UsageHistory | None, secondary_entry: UsageHistory | None, field: str):
+    if primary_entry is not None:
+        value = getattr(primary_entry, field)
+        if value is not None:
+            return value
+    if secondary_entry is not None:
+        return getattr(secondary_entry, field)
+    return None
 
 
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
@@ -1367,6 +1400,7 @@ def _additional_quota_eligibility(
     account_id: str,
     account_plan_type: str | None,
     quota_key: str | None,
+    explicit_limit: bool = False,
     latest_primary: dict[str, AdditionalUsageHistory],
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
@@ -1377,7 +1411,7 @@ def _additional_quota_eligibility(
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
 
-    if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+    if not explicit_limit and not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
         return "eligible"
 
     if latest_primary_entry is None and latest_secondary_entry is None:
@@ -1429,6 +1463,8 @@ def _select_account_preferring_budget_safe(
     *,
     prefer_earlier_reset: bool,
     routing_strategy: RoutingStrategy,
+    relative_availability_power: float = 2.0,
+    relative_availability_top_k: int = 5,
     budget_threshold_pct: float,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
@@ -1443,6 +1479,8 @@ def _select_account_preferring_budget_safe(
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
         )
         if preferred.account is not None:
             return preferred
@@ -1463,6 +1501,8 @@ def _select_account_preferring_budget_safe(
         routing_strategy=routing_strategy,
         allow_backoff_fallback=allow_backoff_fallback,
         deterministic_probe=deterministic_probe,
+        relative_availability_power=relative_availability_power,
+        relative_availability_top_k=relative_availability_top_k,
     )
 
 

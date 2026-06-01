@@ -36,7 +36,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
 
   return (

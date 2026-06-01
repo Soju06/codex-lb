@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast, overload
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -213,12 +214,6 @@ logger = logging.getLogger(__name__)
 
 _UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
-# Use the deploy's resolved data directory so non-container installs
-# (notably macOS ``uv tool`` / LaunchAgent layouts that don't have
-# ``/var/lib/codex-lb`` writable) still get oversized-payload dumps.
-# The container image keeps writing to ``/var/lib/codex-lb`` because
-# ``DEFAULT_HOME_DIR`` resolves to that path inside the image.
-_OVERSIZED_RESPONSE_CREATE_DUMP_DIR = DEFAULT_HOME_DIR / "debug" / "response-create-dumps"
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
     "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
@@ -227,6 +222,15 @@ _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
 )
 _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
+_OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
+
+
+def _oversized_response_create_dump_dir() -> Path:
+    if _OVERSIZED_RESPONSE_CREATE_DUMP_DIR is not None:
+        return _OVERSIZED_RESPONSE_CREATE_DUMP_DIR
+    data_dir = getattr(get_settings(), "data_dir", DEFAULT_HOME_DIR)
+    return data_dir / "debug" / "response-create-dumps"
+
 
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
@@ -3651,6 +3655,7 @@ class ProxyService:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
+                        error_param = error.param if error else None
                         await self._release_websocket_request_state_reservation(request_state)
                         await self._write_websocket_connect_failure(
                             account_id=None,
@@ -3666,6 +3671,7 @@ class ProxyService:
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
                             error_type=error_type,
+                            error_param=error_param,
                             downstream_activity=downstream_activity,
                         )
                         request_state = None
@@ -3721,6 +3727,7 @@ class ProxyService:
                         )
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
+                        error_param = error.param if error else None
                         await self._release_websocket_request_state_reservation(request_state)
                         await self._write_websocket_connect_failure(
                             account_id=account.id if account else None,
@@ -3736,6 +3743,7 @@ class ProxyService:
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
                             error_type=error_type,
+                            error_param=error_param,
                             downstream_activity=downstream_activity,
                         )
                         _release_websocket_response_create_gate(request_state, response_create_gate)
@@ -6816,7 +6824,7 @@ class ProxyService:
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
-                    proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                    proxy_request_budget_seconds=runtime_settings.http_responses_session_bridge_request_budget_seconds,
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
                 try:
@@ -6951,6 +6959,7 @@ class ProxyService:
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
                 await session.upstream.send_text(retry_text_data)
+            _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = time.monotonic()
             return True
         except Exception:
@@ -8126,6 +8135,14 @@ class ProxyService:
     ) -> str:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
+        if payload is None:
+            try:
+                raw_payload = json.loads(text)
+            except json.JSONDecodeError:
+                raw_payload = None
+            if isinstance(raw_payload, dict):
+                payload = cast(dict[str, JsonValue], raw_payload)
+                event_block = format_sse_event(payload)
         event = parse_sse_event(event_block)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
@@ -8433,6 +8450,7 @@ class ProxyService:
                     request_state.replay_count += 1
                     request_state.awaiting_response_created = True
                     request_state.response_id = None
+                    _clear_websocket_request_error_overrides(request_state)
                     upstream_control.suppress_downstream_event = True
                     upstream_control.replay_request_state = request_state
             else:
@@ -8440,6 +8458,7 @@ class ProxyService:
                 request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
+                _clear_websocket_request_error_overrides(request_state)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
                 await self._handle_stream_error(
@@ -9479,7 +9498,10 @@ class ProxyService:
         start = time.monotonic()
         base_settings = get_settings()
         settings = await get_settings_cache().get()
-        deadline = start + base_settings.proxy_request_budget_seconds
+        deadline = start + _stream_request_budget_seconds(
+            base_settings,
+            request_transport=request_transport,
+        )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
@@ -9585,7 +9607,7 @@ class ProxyService:
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
-                    if error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted":
+                    if _is_proxy_budget_exhausted_error(exc):
                         await self._write_stream_preflight_error(
                             account_id=None,
                             api_key=api_key,
@@ -11207,6 +11229,8 @@ class ProxyService:
                         sticky_max_age_seconds=sticky_max_age_seconds,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         routing_strategy=routing_strategy,
+                        relative_availability_power=_relative_availability_power(settings),
+                        relative_availability_top_k=_relative_availability_top_k(settings),
                         model=model,
                         additional_limit_name=additional_limit_name,
                         account_ids={preferred_account_id},
@@ -11228,6 +11252,8 @@ class ProxyService:
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
+                    relative_availability_power=_relative_availability_power(settings),
+                    relative_availability_top_k=_relative_availability_top_k(settings),
                     model=model,
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
@@ -11410,6 +11436,14 @@ def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str
     return "upstream_unavailable", message
 
 
+def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestState) -> None:
+    request_state.error_code_override = None
+    request_state.error_message_override = None
+    request_state.error_type_override = None
+    request_state.error_param_override = None
+    request_state.error_http_status_override = None
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -11425,19 +11459,17 @@ def _websocket_request_can_replay_before_visible_output(request_state: "_WebSock
         return False
     if request_state.downstream_visible:
         return False
+    has_retry_safe_fresh_payload = (
+        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
+    )
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
+    if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
+        return False
     created_only_pending = (
         request_state.response_id is not None
         and not request_state.awaiting_response_created
         and request_state.response_event_count <= 1
-        and (
-            request_state.previous_response_id is None
-            or (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and bool(request_state.fresh_upstream_request_text)
-            )
-        )
+        and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
@@ -11450,11 +11482,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     downstream_response_id = None
     if request_state.response_id is not None and not request_state.awaiting_response_created:
         downstream_response_id = request_state.response_id
-    if (
-        request_state.proxy_injected_previous_response_id
-        and request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
-    ):
+    if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
         request_state.request_text = request_state.fresh_upstream_request_text
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
@@ -11469,6 +11497,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_event_count = 0
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
+    _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 
@@ -12270,6 +12299,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 
@@ -13373,7 +13403,7 @@ def _write_response_create_dump(
             ),
         )
     )
-    dump_dir = _OVERSIZED_RESPONSE_CREATE_DUMP_DIR
+    dump_dir = _oversized_response_create_dump_dir()
     dump_path = dump_dir / f"{dump_id}.response-create.json.gz"
     meta_path = dump_dir / f"{dump_id}.meta.json"
 
@@ -13648,7 +13678,21 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
         return "round_robin"
     if value == "usage_weighted":
         return "usage_weighted"
+    if value == "relative_availability":
+        return "relative_availability"
     return "capacity_weighted"
+
+
+def _relative_availability_power(settings: DashboardSettings) -> float:
+    raw_value = getattr(settings, "relative_availability_power", None)
+    value = float(raw_value) if raw_value is not None else 2.0
+    return value if value > 0.0 else 2.0
+
+
+def _relative_availability_top_k(settings: DashboardSettings) -> int:
+    raw_value = getattr(settings, "relative_availability_top_k", None)
+    value = int(raw_value) if raw_value is not None else 5
+    return min(max(value, 1), 20)
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
@@ -13744,6 +13788,14 @@ def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
+def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
+    if request_transport == _REQUEST_TRANSPORT_HTTP:
+        budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
+        if budget is not None:
+            return float(budget)
+    return float(getattr(settings, "proxy_request_budget_seconds"))
+
+
 def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:
     started_at = request_state.started_at if request_state.started_at > 0 else time.monotonic()
     return started_at + budget_seconds
@@ -13774,7 +13826,7 @@ def _should_retry_stream_error(code: str) -> bool:
 def _raise_proxy_budget_exhausted() -> NoReturn:
     raise ProxyResponseError(
         502,
-        openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+        openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
     )
 
 
@@ -13789,7 +13841,9 @@ def _is_proxy_budget_exhausted_error(exc: ProxyResponseError) -> bool:
     error = _parse_openai_error(exc.payload)
     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
     error_message = error.message if error else None
-    return error_code == "upstream_unavailable" and error_message == "Proxy request budget exhausted"
+    return error_code in {"upstream_request_timeout", "upstream_unavailable"} and (
+        error_message == "Proxy request budget exhausted"
+    )
 
 
 def _should_suppress_text_done_event(

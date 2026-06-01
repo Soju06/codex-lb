@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   deleteAccount,
   exportAccount,
+  exportAccountOpenCodeAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
@@ -16,6 +17,7 @@ import {
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
 }
 
 /**
@@ -72,7 +74,8 @@ export function useAccountMutations() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteAccount,
+    mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
+      deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
       invalidateAccountRelatedQueries(queryClient);
@@ -113,6 +116,16 @@ export function useAccountMutations() {
     },
   });
 
+  const exportOpenCodeAuthMutation = useMutation({
+    mutationFn: exportAccountOpenCodeAuth,
+    onSuccess: () => {
+      toast.success("OpenCode auth export generated");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -121,6 +134,7 @@ export function useAccountMutations() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    exportOpenCodeAuthMutation,
   };
 }
 

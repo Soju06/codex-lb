@@ -27,8 +27,8 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 pytestmark = pytest.mark.unit
 
 
-def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
-    return Settings(http_responses_session_bridge_enabled=bridge_enabled)
+def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
+    return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 
 
 def _make_bridge_session(
@@ -7319,6 +7319,9 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         started_at=1.0,
         previous_response_id="resp_prev_1",
         transport="http",
+        error_code_override="upstream_unavailable",
+        error_message_override="Proxy request budget exhausted",
+        error_http_status_override=502,
     )
     reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
@@ -7332,6 +7335,9 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
 
     assert recovered is True
     assert request_state.replay_count == 1
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert request_state.error_http_status_override is None
     reconnect.assert_awaited_once_with(
         session,
         request_state=request_state,
@@ -8501,6 +8507,70 @@ async def test_http_bridge_reader_unexpected_processing_error_fails_pending_requ
     assert session.closed is True
     assert list(session.pending_requests) == []
     write_request_log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_uses_bridge_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-http-reader-bridge-budget",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    gate = asyncio.Semaphore(1)
+    upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=SimpleNamespace(kind="text", text='{"type":"response.created"}')),
+            close=AsyncMock(),
+        ),
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=gate,
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=60.0,
+            http_responses_session_bridge_request_budget_seconds=2222.0,
+            stream_idle_timeout_seconds=300.0,
+        ),
+    )
+    original_next_timeout = service._next_websocket_receive_timeout
+    seen_budgets: list[float] = []
+
+    async def record_next_timeout(*args: Any, **kwargs: Any):
+        seen_budgets.append(kwargs["proxy_request_budget_seconds"])
+        return await original_next_timeout(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", record_next_timeout)
+    monkeypatch.setattr(service, "_process_http_bridge_upstream_text", AsyncMock(side_effect=RuntimeError("stop")))
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert seen_budgets == [2222.0]
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ export type ConfirmDialogProps = {
   cancelLabel?: string;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
+  children?: React.ReactNode;
 };
 
 export function ConfirmDialog({
@@ -27,6 +28,7 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   onConfirm,
   onOpenChange,
+  children,
 }: ConfirmDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -35,6 +37,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description ? <AlertDialogDescription>{description}</AlertDialogDescription> : null}
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter>
           <AlertDialogCancel>{cancelLabel}</AlertDialogCancel>
           <AlertDialogAction onClick={onConfirm}>{confirmLabel}</AlertDialogAction>

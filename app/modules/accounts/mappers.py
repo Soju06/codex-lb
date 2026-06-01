@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
+from app.core.auth import DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -178,6 +178,9 @@ def _effective_status_from_usage(
         runtime_reset=float(account.reset_at) if account.reset_at else None,
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+        credits_has=_first_not_none(primary_usage, secondary_usage, "credits_has"),
+        credits_unlimited=_first_not_none(primary_usage, secondary_usage, "credits_unlimited"),
+        credits_balance=_first_not_none(primary_usage, secondary_usage, "credits_balance"),
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
         if (
@@ -188,6 +191,16 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
+
+
+def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):
+    if primary_usage is not None:
+        value = getattr(primary_usage, field)
+        if value is not None:
+            return value
+    if secondary_usage is not None:
+        return getattr(secondary_usage, field)
+    return None
 
 
 def _effective_usage_windows(
@@ -239,12 +252,9 @@ def _decrypt_token(encryptor: TokenEncryptor, encrypted: bytes | None) -> str | 
 def _token_expiry(token: str | None) -> datetime | None:
     if not token:
         return None
-    claims = extract_id_token_claims(token)
-    exp = claims.exp
-    if isinstance(exp, (int, float)):
-        return datetime.fromtimestamp(exp, tz=timezone.utc)
-    if isinstance(exp, str) and exp.isdigit():
-        return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    expires_ms = token_expiry_epoch_ms(token)
+    if expires_ms is not None:
+        return datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
     return None
 
 

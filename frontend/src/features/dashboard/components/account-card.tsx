@@ -86,7 +86,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const warmupStatus = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupToggleLabel = `${account.limitWarmupEnabled ? "Disable" : "Enable"} limit warm-up for ${title}`;
   const warmupDetail = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
 
   return (

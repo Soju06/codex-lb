@@ -217,3 +217,18 @@ def test_build_log_config_uses_utc_access_formatter_when_text(monkeypatch):
     assert access_formatter.get("()") == "app.core.runtime_logging.UtcAccessFormatter"
     # Restore
     get_settings.cache_clear()
+
+
+def test_build_log_config_exposes_app_loggers_via_root_handler(monkeypatch):
+    from typing import cast
+
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "text")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    config = build_log_config()
+    root_logger = cast(dict, config.get("root", {}))
+
+    assert root_logger.get("handlers") == ["default"]
+    assert root_logger.get("level") == "INFO"
+    get_settings.cache_clear()

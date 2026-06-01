@@ -13,6 +13,7 @@ import {
 	createApiKeyUsage7Day,
 	createDashboardAuthSession,
 	createDashboardOverview,
+	createDashboardProjections,
 	createDashboardSettings,
 	createDefaultAccounts,
 	createDefaultApiKeys,
@@ -82,7 +83,11 @@ const SettingsPayloadSchema = z
 			.enum(["default", "auto", "http", "websocket"])
 			.optional(),
 		preferEarlierResetAccounts: z.boolean().optional(),
-		routingStrategy: z.enum(["usage_weighted", "round_robin", "capacity_weighted"]).optional(),
+		routingStrategy: z
+			.enum(["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"])
+			.optional(),
+		relativeAvailabilityPower: z.number().positive().optional(),
+		relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
 		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),
@@ -319,12 +324,27 @@ export const handlers = [
 		return HttpResponse.json({ status: "ok" });
 	}),
 
+	http.get("/api/runtime/version", () => {
+		return HttpResponse.json({
+			currentVersion: "1.19.0",
+			latestVersion: "1.19.0",
+			updateAvailable: false,
+			checkedAt: "2026-05-26T00:00:00Z",
+			source: "github",
+			releaseUrl: "https://github.com/Soju06/codex-lb/releases/latest",
+		});
+	}),
+
 	http.get("/api/dashboard/overview", () => {
 		return HttpResponse.json(
 			createDashboardOverview({
 				accounts: state.accounts,
 			}),
 		);
+	}),
+
+	http.get("/api/dashboard/projections", () => {
+		return HttpResponse.json(createDashboardProjections());
 	}),
 
 	http.get("/api/request-logs", ({ request }) => {

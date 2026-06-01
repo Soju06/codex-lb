@@ -29,9 +29,15 @@ def _in_container() -> bool:
 
 
 def _default_home_dir() -> Path:
+    env_dir = os.getenv("CODEX_LB_DATA_DIR")
+    if env_dir and env_dir.strip():
+        return Path(env_dir.strip())
+    home_dir = Path.home() / ".codex-lb"
+    if home_dir.exists():
+        return home_dir
     if _in_container():
         return DOCKER_DATA_DIR
-    return Path.home() / ".codex-lb"
+    return home_dir
 
 
 def _default_oauth_callback_host() -> str:
@@ -60,6 +66,8 @@ def _configured_outbound_proxy_env() -> dict[str, str | None]:
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+DEFAULT_CONVERSATION_ARCHIVE_DIR = DEFAULT_HOME_DIR / "conversation-archive"
+DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
 type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
@@ -132,7 +140,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    data_dir: Path = Field(default_factory=_default_home_dir)
+    database_url: str = DEFAULT_DATABASE_URL
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
     database_background_pool_size: int | None = Field(default=None, gt=0)
@@ -150,6 +159,7 @@ class Settings(BaseSettings):
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
+    http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
     stream_idle_timeout_seconds: float = 600.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
@@ -178,6 +188,7 @@ class Settings(BaseSettings):
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
+    http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
@@ -198,7 +209,7 @@ class Settings(BaseSettings):
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
     conversation_archive_enabled: bool = False
-    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
+    conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
@@ -292,6 +303,18 @@ class Settings(BaseSettings):
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
 
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def _expand_data_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return _default_home_dir()
+            return Path(stripped).expanduser()
+        raise TypeError("data_dir must be a path")
+
     @field_validator("database_url")
     @classmethod
     def _expand_database_url(cls, value: str) -> str:
@@ -310,6 +333,15 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("conversation_archive_dir", mode="before")
+    @classmethod
+    def _expand_conversation_archive_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            return Path(value).expanduser()
+        raise TypeError("conversation_archive_dir must be a path")
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
@@ -407,6 +439,22 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
+
+    @model_validator(mode="after")
+    def _apply_data_dir_defaults(self) -> "Settings":
+        if self.data_dir == DEFAULT_HOME_DIR:
+            return self
+        explicitly_set = self.model_fields_set
+        if "database_url" not in explicitly_set and self.database_url == DEFAULT_DATABASE_URL:
+            self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'store.db'}"
+        if "encryption_key_file" not in explicitly_set and self.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE:
+            self.encryption_key_file = self.data_dir / "encryption.key"
+        if (
+            "conversation_archive_dir" not in explicitly_set
+            and self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR
+        ):
+            self.conversation_archive_dir = self.data_dir / "conversation-archive"
+        return self
 
     @model_validator(mode="after")
     def _validate_http_bridge_instance_configuration(self) -> "Settings":

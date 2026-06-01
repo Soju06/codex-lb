@@ -41,6 +41,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "bcrypt>=4.3.0",
     "brotli>=1.2.0",
+    "certifi>=2026.4.22",
     "cryptography>=46.0.6",
     "fastapi[standard]>=0.128.0",
     "greenlet>=3.3.0",

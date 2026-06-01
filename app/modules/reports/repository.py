@@ -187,6 +187,30 @@ class ReportsRepository:
             for row in rows
         ]
 
+    async def count_active_accounts(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+    ) -> int:
+        conditions = [
+            RequestLog.requested_at >= start_date,
+            RequestLog.requested_at < end_date,
+            RequestLog.deleted_at.is_(None),
+            _normal_traffic_clause(),
+            RequestLog.account_id.is_not(None),
+        ]
+        if account_ids:
+            conditions.append(RequestLog.account_id.in_(account_ids))
+        if model:
+            conditions.append(RequestLog.model == model)
+
+        result = await self._session.execute(
+            select(func.count(func.distinct(RequestLog.account_id))).where(and_(*conditions))
+        )
+        return int(result.scalar_one() or 0)
+
 
 def _normal_traffic_clause():
     return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)

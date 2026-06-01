@@ -27,13 +27,12 @@ class ReportsService:
         if end_date is None:
             end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
         if start_date is None:
-            start_date = (end_date - timedelta(days=7)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            start_date = (end_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
 
         daily = await self._repository.aggregate_daily(start_date, end_date, account_ids, model)
         by_model = await self._repository.aggregate_by_model(start_date, end_date, account_ids, model)
         by_account = await self._repository.aggregate_by_account(start_date, end_date, account_ids, model)
+        active_accounts = await self._repository.count_active_accounts(start_date, end_date, account_ids, model)
 
         total_cost = sum(d.cost_usd for d in daily)
         total_input = sum(d.input_tokens for d in daily)
@@ -41,8 +40,7 @@ class ReportsService:
         total_cached = sum(d.cached_input_tokens for d in daily)
         total_requests = sum(d.request_count for d in daily)
         total_errors = sum(d.error_count for d in daily)
-        active_accounts = max((d.active_accounts for d in daily), default=0)
-        day_count = len(daily) or 1
+        day_count = max((end_date.date() - start_date.date()).days, 1)
 
         model_total = sum(m.cost_usd for m in by_model)
 

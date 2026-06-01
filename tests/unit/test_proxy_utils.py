@@ -16354,6 +16354,7 @@ async def test_thread_goal_upstream_connection_reset_fails_over_after_freshness(
             raise proxy_module.ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+                failure_phase="connect",
             )
         return {"goal": {"id": "goal-ok-after-call-failover"}}
 
@@ -16368,6 +16369,54 @@ async def test_thread_goal_upstream_connection_reset_fails_over_after_freshness(
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_body_read_connection_reset_does_not_fail_over(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_body_read_a")
+    account_b = _make_account("acc_thread_goal_body_read_b")
+    handle_proxy_error = AsyncMock()
+    record_success = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_accounts: list[str | None] = []
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service, "_handle_proxy_error", handle_proxy_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_a))
+
+    async def fake_thread_goal_request(
+        operation: str,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        method: str,
+        timeout_seconds: float,
+    ) -> dict[str, JsonValue]:
+        del operation, payload, headers, access_token, method, timeout_seconds
+        upstream_accounts.append(account_id)
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+            failure_phase="body_read",
+        )
+
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.thread_goal_request("post", {}, {"session_id": "sid-thread-goal"})
+
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert upstream_accounts == [account_a.chatgpt_account_id]
+    assert seen_excluded_account_ids == [set()]
+    handle_proxy_error.assert_awaited_once_with(account_a, exc_info.value)
+    record_success.assert_not_awaited()
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_a.id
 
 
 @pytest.mark.asyncio
@@ -16408,6 +16457,7 @@ async def test_thread_goal_failover_freshness_connection_reset_marks_failover_ac
         raise proxy_module.ProxyResponseError(
             502,
             openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+            failure_phase="connect",
         )
 
     monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
@@ -16530,6 +16580,7 @@ async def test_thread_goal_upstream_connection_reset_without_failover_records_on
         raise proxy_module.ProxyResponseError(
             502,
             openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+            failure_phase="connect",
         )
 
     monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
@@ -16686,6 +16737,51 @@ async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+
+
+@pytest.mark.asyncio
+async def test_files_create_body_read_connection_reset_does_not_fail_over(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_files_create_body_read_a")
+    account_b = _make_account("acc_files_create_body_read_b")
+    handle_proxy_error = AsyncMock()
+    record_success = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_accounts: list[str | None] = []
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service, "_handle_proxy_error", handle_proxy_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_a))
+
+    async def fake_create_file(
+        *,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+    ) -> dict[str, JsonValue]:
+        del payload, headers, access_token
+        upstream_accounts.append(account_id)
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", "Timeout on reading data from socket"),
+            failure_phase="body_read",
+        )
+
+    monkeypatch.setattr(proxy_service, "core_create_file", fake_create_file)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.create_file({"filename": "a.txt"}, {"session_id": "sid-files-create"})
+
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert upstream_accounts == [account_a.chatgpt_account_id]
+    assert seen_excluded_account_ids == [set()]
+    handle_proxy_error.assert_awaited_once_with(account_a, exc_info.value)
+    record_success.assert_not_awaited()
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_a.id
 
 
 @pytest.mark.asyncio

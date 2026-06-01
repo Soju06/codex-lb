@@ -3551,7 +3551,11 @@ class ProxyService:
                 try:
                     return await invoke(access_token, account_id, filtered)
                 except FileProxyError as files_exc:
-                    raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
+                    raise ProxyResponseError(
+                        files_exc.status_code,
+                        files_exc.payload,
+                        failure_phase=files_exc.failure_phase,
+                    ) from files_exc
                 finally:
                     pop_files_timeout_overrides(timeout_tokens)
 
@@ -14912,6 +14916,8 @@ def _refresh_error_failed_account(exc: RefreshError, fallback: Account) -> Accou
 
 
 def _should_failover_previsible_unary_proxy_error(exc: ProxyResponseError) -> bool:
+    if exc.failure_phase != "connect":
+        return False
     error = _parse_openai_error(exc.payload)
     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
     error_message = error.message if error else None

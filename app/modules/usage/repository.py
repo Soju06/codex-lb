@@ -96,9 +96,10 @@ def _query_bulk_history_since_sqlite(
     placeholders = ",".join("?" for _ in account_ids)
     since_param = since.isoformat(sep=" ")
     id_clause = ""
+    params: list[object]
     if window == "primary":
         window_clause = "coalesce(window, 'primary') = 'primary'"
-        params: list[object] = [*account_ids, since_param]
+        params = [*account_ids, since_param]
     else:
         window_clause = "window = ?"
         params = [*account_ids, window, since_param]

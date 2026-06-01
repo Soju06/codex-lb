@@ -11,7 +11,7 @@ import { formatTimeLong } from "@/utils/formatters";
 const GITHUB_REPOSITORY_URL = "https://github.com/soju06/codex-lb";
 
 function getRoutingLabel(
-  strategy: "usage_weighted" | "round_robin" | "capacity_weighted" | "relative_availability",
+  strategy: "usage_weighted" | "round_robin" | "capacity_weighted" | "relative_availability" | "fill_first",
   sticky: boolean,
   preferEarlier: boolean,
   preferEarlierWindow: "primary" | "secondary",
@@ -28,6 +28,12 @@ function getRoutingLabel(
   }
   if (strategy === "relative_availability") {
     return sticky ? "Relative availability + Sticky threads" : "Relative availability";
+  }
+  if (strategy === "fill_first") {
+    if (sticky && preferEarlier) return `Fill first + Sticky + ${earlyResetLabel}`;
+    if (sticky) return "Fill first + Sticky threads";
+    if (preferEarlier) return `Fill first + ${earlyResetLabel}`;
+    return "Fill first";
   }
   if (sticky && preferEarlier) return `Sticky + ${earlyResetLabel}`;
   if (sticky) return "Sticky threads";

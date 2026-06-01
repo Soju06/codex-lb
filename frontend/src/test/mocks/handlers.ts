@@ -90,7 +90,7 @@ const SettingsPayloadSchema = z
 			.optional(),
 		preferEarlierResetAccounts: z.boolean().optional(),
 		routingStrategy: z
-			.enum(["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"])
+			.enum(["usage_weighted", "round_robin", "capacity_weighted", "relative_availability", "fill_first"])
 			.optional(),
 		relativeAvailabilityPower: z.number().positive().optional(),
 		relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),

@@ -167,7 +167,7 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
             <div key={quota.quotaKey ?? quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
               <p className="text-xs font-medium">
                 <span>{quota.displayLabel ?? formatAdditionalLimitName(quota.limitName, quota.quotaKey)}</span>
-                {quota.routingPolicy !== "inherit" ? (
+                {quota.routingPolicy != null && quota.routingPolicy !== "inherit" ? (
                   <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-orange-200 bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 dark:border-orange-900/60 dark:bg-orange-950/40 dark:text-orange-300">
                     <Flame className="h-3 w-3" aria-hidden="true" />
                     {ADDITIONAL_ROUTING_POLICY_LABELS[quota.routingPolicy] ?? quota.routingPolicy}

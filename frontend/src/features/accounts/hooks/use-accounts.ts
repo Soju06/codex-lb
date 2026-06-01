@@ -147,18 +147,6 @@ export function useAccountMutations() {
     },
   });
 
-  const routingPolicyMutation = useMutation({
-    mutationFn: ({ accountId, routingPolicy }: { accountId: string; routingPolicy: AccountRoutingPolicy }) =>
-      updateAccountRoutingPolicy(accountId, { routingPolicy }),
-    onSuccess: () => {
-      toast.success("Routing policy updated");
-      invalidateAccountRelatedQueries(queryClient);
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || "Routing policy update failed");
-    },
-  });
-
   return {
     importMutation,
     pauseMutation,
@@ -169,7 +157,6 @@ export function useAccountMutations() {
     limitWarmupMutation,
     routingPolicyMutation,
     exportOpenCodeAuthMutation,
-    routingPolicyMutation,
   };
 }
 

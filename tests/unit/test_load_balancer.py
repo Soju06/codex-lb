@@ -2846,6 +2846,200 @@ def test_select_account_relative_availability_clamps_divisor_floor_to_five_minut
     assert result.account.account_id == "a"
 
 
+def test_select_account_fill_first_picks_highest_primary_used_percent():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=30.0),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=5.0),
+        AccountState("c", AccountStatus.ACTIVE, used_percent=0.0),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
+def test_select_account_fill_first_breaks_ties_by_account_id():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("zeta", AccountStatus.ACTIVE, used_percent=0.0),
+        AccountState("alpha", AccountStatus.ACTIVE, used_percent=0.0),
+        AccountState("mike", AccountStatus.ACTIVE, used_percent=0.0),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "alpha"
+
+
+def test_select_account_fill_first_treats_none_used_percent_as_zero():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=10.0),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=None),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
+def test_select_account_fill_first_is_deterministic_across_calls():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.ACTIVE, used_percent=12.0),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=4.0),
+        AccountState("c", AccountStatus.ACTIVE, used_percent=80.0),
+    ]
+    selections: set[str] = set()
+    for _ in range(50):
+        result = select_account(states, now=now, routing_strategy="fill_first")
+        assert result.account is not None
+        selections.add(result.account.account_id)
+    assert selections == {"c"}
+
+
+def test_select_account_fill_first_skips_rate_limited_account():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.RATE_LIMITED, used_percent=0.0, reset_at=int(now + 60)),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=5.0),
+        AccountState("c", AccountStatus.ACTIVE, used_percent=20.0),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "c"
+
+
+def test_select_account_fill_first_skips_quota_exceeded_account():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+            cooldown_until=now + 60,
+        ),
+        AccountState("b", AccountStatus.ACTIVE, used_percent=10.0),
+        AccountState("c", AccountStatus.ACTIVE, used_percent=70.0),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "c"
+
+
+def test_select_account_fill_first_prefers_healthy_over_draining():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "draining-low",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            health_tier=1,
+        ),
+        AccountState(
+            "healthy-mid",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            health_tier=0,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "healthy-mid"
+
+
+def test_select_account_fill_first_falls_back_to_draining_when_no_healthy():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "draining-low",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            health_tier=1,
+        ),
+        AccountState(
+            "draining-mid",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            health_tier=1,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "draining-mid"
+
+
+def test_select_account_fill_first_prefer_earlier_reset_filters_pool():
+    now = 1_700_000_000.0
+    early_high_usage = AccountState(
+        "early-high",
+        AccountStatus.ACTIVE,
+        used_percent=80.0,
+        secondary_reset_at=int(now + 2 * 3600),
+    )
+    early_low_usage = AccountState(
+        "early-low",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_reset_at=int(now + 3 * 3600),
+    )
+    late_zero_usage = AccountState(
+        "late-zero",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_reset_at=int(now + 5 * 24 * 3600),
+    )
+    result = select_account(
+        [early_high_usage, early_low_usage, late_zero_usage],
+        now=now,
+        prefer_earlier_reset=True,
+        routing_strategy="fill_first",
+    )
+    assert result.account is not None
+    assert result.account.account_id == "early-high"
+
+
+def test_select_account_fill_first_returns_no_available_when_pool_empty():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.PAUSED),
+        AccountState("b", AccountStatus.DEACTIVATED),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is None
+    assert result.error_message is not None
+
+
+def test_select_account_fill_first_cycle_after_account_drops_out():
+    now = 1_700_000_000.0
+    a = AccountState("a", AccountStatus.ACTIVE, used_percent=0.0)
+    b = AccountState("b", AccountStatus.ACTIVE, used_percent=0.0)
+    c = AccountState("c", AccountStatus.ACTIVE, used_percent=0.0)
+    states = [a, b, c]
+
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+    a.used_percent = 50.0
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+    a.status = AccountStatus.RATE_LIMITED
+    a.reset_at = int(now + 600)
+    b.used_percent = 60.0
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "b"
+
+    a.status = AccountStatus.ACTIVE
+    a.used_percent = 0.0
+    a.reset_at = None
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "b"
+
+
 def test_select_account_relative_availability_top_k_limits_weighted_draw():
     random.seed(202)
     now = time.time()
@@ -2936,3 +3130,103 @@ def test_select_account_relative_availability_power_sharpens_preference_for_the_
     leader_ratio_power_1 = counts_power_1["leader"] / 3000
     leader_ratio_power_4 = counts_power_4["leader"] / 3000
     assert leader_ratio_power_4 > leader_ratio_power_1 + 0.05
+
+
+def test_select_account_fill_first_secondary_used_breaks_primary_tie_high_first():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "alpha",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=29.0,
+        ),
+        AccountState(
+            "bravo",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=98.0,
+        ),
+        AccountState(
+            "charlie",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=93.0,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    # bravo has the highest secondary_used (98%), so least remaining weekly
+    # capacity, so it gets drained first.
+    assert result.account.account_id == "bravo"
+
+
+def test_select_account_fill_first_secondary_tie_falls_back_to_account_id():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "zeta",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=98.0,
+        ),
+        AccountState(
+            "alpha",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=98.0,
+        ),
+        AccountState(
+            "mike",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=98.0,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    assert result.account.account_id == "alpha"
+
+
+def test_select_account_fill_first_secondary_none_treated_as_zero():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            secondary_used_percent=None,
+        ),
+        AccountState(
+            "b",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            secondary_used_percent=10.0,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    # b has secondary 10% > a's None-as-0, so b drains first.
+    assert result.account.account_id == "b"
+
+
+def test_select_account_fill_first_primary_dominates_over_secondary():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "high-secondary",
+            AccountStatus.ACTIVE,
+            used_percent=80.0,
+            secondary_used_percent=99.0,
+        ),
+        AccountState(
+            "low-primary",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=5.0,
+        ),
+    ]
+    result = select_account(states, now=now, routing_strategy="fill_first")
+    assert result.account is not None
+    # Primary still wins -- only ties break on secondary.
+    assert result.account.account_id == "high-secondary"

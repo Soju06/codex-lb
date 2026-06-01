@@ -295,4 +295,16 @@ describe("RoutingSettings", () => {
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
+
+  it("offers Fill first as a routing strategy option", () => {
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "fill_first" }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
+  });
 });

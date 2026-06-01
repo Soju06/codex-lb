@@ -5,6 +5,7 @@ export const RoutingStrategySchema = z.enum([
   "round_robin",
   "capacity_weighted",
   "relative_availability",
+  "fill_first",
 ]);
 export const UpstreamStreamTransportSchema = z.enum([
   "default",
@@ -32,6 +33,7 @@ export const DashboardSettingsSchema = z
     upstreamStreamTransport:
       UpstreamStreamTransportSchema.optional().default("default"),
     preferEarlierResetAccounts: z.boolean(),
+    preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional().default("secondary"),
     routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
     relativeAvailabilityPower: z.number().positive().optional().default(2),
     relativeAvailabilityTopK: z
@@ -102,6 +104,7 @@ export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
   preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),

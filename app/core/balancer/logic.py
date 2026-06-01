@@ -37,7 +37,7 @@ RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS = 5 * 60
 RELATIVE_AVAILABILITY_MIN_WEIGHT_FRACTION = 0.1
 DEFAULT_RELATIVE_AVAILABILITY_POWER = 2.0
 DEFAULT_RELATIVE_AVAILABILITY_TOP_K = 5
-RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"]
+RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted", "relative_availability", "fill_first"]
 TrafficClass = Literal["foreground", "opportunistic"]
 UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 ResetPreferenceWindow = Literal["primary", "secondary"]
@@ -343,7 +343,8 @@ def select_account(
             unavailable.
         routing_strategy: Balancing strategy used to pick from the effective
             pool (``"capacity_weighted"``, ``"round_robin"``,
-            ``"relative_availability"``, or ``"usage_weighted"``).
+            ``"relative_availability"``, ``"fill_first"``, or
+            ``"usage_weighted"``).
         allow_backoff_fallback: Whether to allow a fallback attempt with the
             backoff account nearest to recovery when no fully available
             account exists.
@@ -525,6 +526,13 @@ def select_account(
             top_k=relative_availability_top_k,
             deterministic_probe=deterministic_probe,
         )
+    elif routing_strategy == "fill_first":
+        candidate_pool = (
+            _prefer_earlier_reset_candidates(effective_pool, current, prefer_earlier_reset_window)
+            if prefer_earlier_reset
+            else effective_pool
+        )
+        selected = _select_fill_first(candidate_pool)
     else:
         if usage_weighted_order == "primary_first":
             selected = min(
@@ -758,6 +766,32 @@ def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
         # All accounts exhausted — fall back to deterministic usage-weighted
         return min(available, key=_usage_sort_key)
     return random.choices(available, weights=weights, k=1)[0]
+
+
+def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:
+    primary_used = state.used_percent if state.used_percent is not None else 0.0
+    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else 0.0
+    return -primary_used, -secondary_used, state.account_id
+
+
+def _select_fill_first(available: list[AccountState]) -> AccountState:
+    """Pick the eligible account with the highest primary 5h ``used_percent``.
+
+    Deterministic. ``None`` ``used_percent`` is treated as ``0.0`` so a
+    freshly refreshed account ties with an unknown-usage account.
+
+    When two or more candidates share the same primary ``used_percent``,
+    the account with the **higher** secondary (weekly) ``used_percent`` is
+    preferred — i.e. the one with the least remaining weekly capacity.
+    This drains the most-saturated account first and preserves the freshest
+    one for later cycles, matching operator intent for "fill first" behavior.
+    ``account_id`` ascending is the final stable tiebreaker.
+
+    Drained accounts are only reachable here when no healthy or probing
+    account exists, via the existing ``effective_pool`` ladder; this helper
+    introduces no new bypass.
+    """
+    return min(available, key=_fill_first_sort_key)
 
 
 def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:

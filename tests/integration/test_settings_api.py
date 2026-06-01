@@ -123,6 +123,24 @@ async def test_settings_api_get_and_update(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_accepts_fill_first_routing_strategy(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "fill_first",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["routingStrategy"] == "fill_first"
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["routingStrategy"] == "fill_first"
+
+
+@pytest.mark.asyncio
 async def test_settings_legacy_sticky_threshold_updates_primary_threshold(async_client):
     response = await async_client.put(
         "/api/settings",
@@ -156,6 +174,19 @@ async def test_settings_primary_sticky_threshold_updates_legacy_threshold(async_
     assert updated["stickyReallocationBudgetThresholdPct"] == 87.0
     assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 87.0
     assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_unknown_routing_strategy(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "fill_last",
+        },
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

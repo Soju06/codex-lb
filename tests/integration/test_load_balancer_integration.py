@@ -560,3 +560,100 @@ async def test_load_balancer_selects_best_draining_account_when_all_are_draining
     assert selection.account.id == account_b.id
     assert balancer._runtime[account_a.id].health_tier == HEALTH_TIER_DRAINING
     assert balancer._runtime[account_b.id].health_tier == HEALTH_TIER_DRAINING
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_fill_first_cycles_through_accounts(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_reset = now_epoch + 3600
+    secondary_reset = now_epoch + 7 * 24 * 3600
+
+    accounts: list[Account] = []
+    for suffix in ("a", "b", "c"):
+        accounts.append(
+            Account(
+                id=f"acc_fill_first_{suffix}",
+                email=f"fill_first_{suffix}@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt(f"access-{suffix}"),
+                refresh_token_encrypted=encryptor.encrypt(f"refresh-{suffix}"),
+                id_token_encrypted=encryptor.encrypt(f"id-{suffix}"),
+                last_refresh=now,
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        for account in accounts:
+            await accounts_repo.upsert(account)
+        for account, primary, secondary in (
+            (accounts[0], 0.0, 0.0),
+            (accounts[1], 0.0, 0.0),
+            (accounts[2], 0.0, 0.0),
+        ):
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=primary,
+                window="primary",
+                reset_at=primary_reset,
+                window_minutes=300,
+                recorded_at=now,
+            )
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=secondary,
+                window="secondary",
+                reset_at=secondary_reset,
+                window_minutes=10080,
+                recorded_at=now,
+            )
+
+    balancer = LoadBalancer(_repo_factory)
+
+    first = await balancer.select_account(routing_strategy="fill_first")
+    assert first.account is not None
+    assert first.account.id == accounts[0].id
+
+    again = await balancer.select_account(routing_strategy="fill_first")
+    assert again.account is not None
+    assert again.account.id == accounts[0].id
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=accounts[0].id,
+            used_percent=60.0,
+            window="primary",
+            reset_at=primary_reset,
+            window_minutes=300,
+            recorded_at=now,
+        )
+
+    second = await balancer.select_account(routing_strategy="fill_first")
+    assert second.account is not None
+    assert second.account.id == accounts[0].id
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        accounts[0].status = AccountStatus.RATE_LIMITED
+        accounts[0].reset_at = primary_reset
+        await accounts_repo.upsert(accounts[0])
+        await usage_repo.add_entry(
+            account_id=accounts[1].id,
+            used_percent=70.0,
+            window="primary",
+            reset_at=primary_reset,
+            window_minutes=300,
+            recorded_at=now,
+        )
+    balancer._runtime.clear()
+
+    third = await balancer.select_account(routing_strategy="fill_first")
+    assert third.account is not None
+    assert third.account.id == accounts[1].id

@@ -80,7 +80,12 @@ async def _collect_sse_events(
     async with async_client.stream("POST", path, json=json_body, headers=headers) as response:
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
+    return [
+        event
+        for line in lines
+        if line[6:] != "[DONE]"
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ]
 
 
 async def _collect_sse_events_with_headers(
@@ -94,7 +99,12 @@ async def _collect_sse_events_with_headers(
         assert response.status_code == 200
         response_headers = dict(response.headers)
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
-    return [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"], response_headers
+    return [
+        event
+        for line in lines
+        if line[6:] != "[DONE]"
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ], response_headers
 
 
 def _assert_created_text_delta_completed(events: list[dict]) -> None:
@@ -6047,6 +6057,7 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6057,6 +6068,7 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.append(key.affinity_key)
         create_started_events[key.affinity_key].set()
@@ -6146,6 +6158,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6156,6 +6169,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.append(key.affinity_key)
         create_started_event.set()
@@ -6246,6 +6260,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6256,6 +6271,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_attempts.append(key.affinity_key)
         if key.affinity_key == "bridge-capacity-a":
@@ -6343,6 +6359,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6353,6 +6370,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_refreshes_session_
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.set()
         await _wait_for_event(release_create)
@@ -6453,6 +6471,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6463,6 +6482,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_calls.append(list(api_key.assigned_account_ids if api_key is not None else []))
         if len(create_calls) == 1:
@@ -6559,6 +6579,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6569,6 +6590,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.append(key.affinity_key)
         await asyncio.sleep(0.2)
@@ -6649,6 +6671,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6659,6 +6682,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         nonlocal create_attempts
         create_attempts += 1
@@ -6742,6 +6766,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6752,6 +6777,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         nonlocal create_attempts
         create_attempts += 1
@@ -6835,6 +6861,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6845,6 +6872,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.set()
         await _wait_for_event(release_create)
@@ -6930,6 +6958,7 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
         request_stage="first_turn",
         preferred_account_id=None,
         require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
     ):
         del (
             self,
@@ -6940,6 +6969,7 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
             request_stage,
             preferred_account_id,
             require_preferred_account,
+            fallback_on_preferred_account_unavailable,
         )
         create_started.append(key.affinity_key)
         return _make_dummy_bridge_session(key)

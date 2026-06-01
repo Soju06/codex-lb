@@ -82,6 +82,9 @@ class AccountState:
     plan_type: str | None = None
     capacity_credits: float | None = None
     health_tier: int = 0
+    inflight_response_creates: int = 0
+    inflight_streams: int = 0
+    leased_tokens: float = 0.0
 
 
 @dataclass

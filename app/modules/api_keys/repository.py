@@ -135,7 +135,7 @@ class ApiKeysRepository:
 
     @staticmethod
     def _exclude_warmup_clause():
-        return RequestLog.request_kind != "warmup"
+        return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
 
     def _select_api_key(self):
         return (

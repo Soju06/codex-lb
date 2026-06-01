@@ -30,7 +30,7 @@ class RequestLogsRepository:
 
     @staticmethod
     def _exclude_warmup_clause() -> ColumnElement[bool]:
-        return RequestLog.request_kind != RequestKind.WARMUP.value
+        return RequestLog.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(

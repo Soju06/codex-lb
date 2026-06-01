@@ -62,7 +62,7 @@ class AccountsRepository:
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             )
-            .where(RequestLog.request_kind != "warmup")
+            .where(RequestLog.request_kind.not_in(("warmup", "limit_warmup")))
             .group_by(RequestLog.account_id)
         )
         if account_ids:

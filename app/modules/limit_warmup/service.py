@@ -107,6 +107,13 @@ class LimitWarmupRequestLogRepository(Protocol):
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
+        source: str | None = None,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        bridge_stage: str | None = None,
         request_kind: str = "normal",
     ) -> object: ...
 

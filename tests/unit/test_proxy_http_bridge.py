@@ -7904,7 +7904,7 @@ async def test_submit_http_bridge_request_does_not_send_after_retirement_between
         pass
     finally:
         if request_state.response_create_gate_acquired:
-            proxy_service._release_websocket_response_create_gate(request_state, session.response_create_gate)
+            await proxy_service._release_websocket_response_create_gate(request_state, session.response_create_gate)
 
     assert stale_send_seen is False
 

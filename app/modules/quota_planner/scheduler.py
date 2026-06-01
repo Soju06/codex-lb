@@ -74,10 +74,8 @@ class QuotaPlannerScheduler:
             accounts_repo = AccountsRepository(session)
             usage_repo = UsageRepository(session)
             accounts = await accounts_repo.list_accounts()
-            latest_primary, latest_secondary = await asyncio.gather(
-                usage_repo.latest_by_account(),
-                usage_repo.latest_by_account(window="secondary"),
-            )
+            latest_primary = await usage_repo.latest_by_account()
+            latest_secondary = await usage_repo.latest_by_account(window="secondary")
             states, _ = _build_states(
                 accounts=accounts,
                 latest_primary=latest_primary,

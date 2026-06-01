@@ -124,6 +124,24 @@ export function RoutingSettings({
 
   const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
   const firstAccountId = accounts[0]?.accountId;
+  const additionalQuotaOverrides = settings.additionalQuotaRoutingPolicies ?? {};
+  const knownAdditionalQuotaKeys = new Set((settings.additionalQuotaPolicies ?? []).map((policy) => policy.quotaKey));
+  const additionalQuotaRows = [
+    ...(settings.additionalQuotaPolicies ?? []).map((policy) => ({
+      quotaKey: policy.quotaKey,
+      label: policy.displayLabel || policy.quotaKey,
+      policy: policy.routingPolicy,
+      hasOverride: Object.prototype.hasOwnProperty.call(additionalQuotaOverrides, policy.quotaKey),
+    })),
+    ...Object.entries(additionalQuotaOverrides)
+      .filter(([quotaKey]) => !knownAdditionalQuotaKeys.has(quotaKey))
+      .map(([quotaKey, policy]) => ({
+        quotaKey,
+        label: quotaKey,
+        policy,
+        hasOverride: true,
+      })),
+  ];
   const parsedStickyPrimaryThreshold = Number.parseFloat(stickyPrimaryThreshold);
   const stickyPrimaryThresholdValid =
     Number.isFinite(parsedStickyPrimaryThreshold) &&
@@ -231,10 +249,10 @@ export function RoutingSettings({
               <p className="text-xs text-muted-foreground">Override account routing for model-specific quota pools.</p>
             </div>
             <div className="space-y-2">
-              {Object.entries(settings.additionalQuotaRoutingPolicies ?? {}).map(([quotaKey, policy]) => (
+              {additionalQuotaRows.map(({ quotaKey, label, policy, hasOverride }) => (
                 <div key={quotaKey} className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <div className="min-w-0 flex-1 truncate rounded-md border bg-muted/20 px-2 py-1.5 text-xs">
-                    {quotaKey}
+                    {label}
                   </div>
                   <Select
                     value={policy}
@@ -256,16 +274,18 @@ export function RoutingSettings({
                       <SelectItem value="preserve">Preserve</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs sm:w-20"
-                    disabled={busy}
-                    onClick={() => removeAdditionalQuotaPolicy(quotaKey)}
-                  >
-                    Remove
-                  </Button>
+                  {hasOverride ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs sm:w-20"
+                      disabled={busy}
+                      onClick={() => removeAdditionalQuotaPolicy(quotaKey)}
+                    >
+                      Reset
+                    </Button>
+                  ) : null}
                 </div>
               ))}
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">

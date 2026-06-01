@@ -12,11 +12,16 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import (
+    AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
 )
 from app.modules.settings.service import DashboardSettingsUpdateData
+from app.modules.usage.additional_quota_keys import (
+    get_additional_quota_routing_policy,
+    list_additional_quota_definitions,
+)
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
@@ -70,11 +75,19 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=DashboardSettingsResponse)
-async def get_settings(
-    context: SettingsContext = Depends(get_settings_context),
-) -> DashboardSettingsResponse:
-    settings = await context.service.get_settings()
+def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+    additional_quota_policies = [
+        AdditionalQuotaPolicy(
+            quota_key=definition.quota_key,
+            display_label=definition.display_label,
+            routing_policy=get_additional_quota_routing_policy(
+                definition.quota_key,
+                overrides=settings.additional_quota_routing_policies,
+            ),
+            model_ids=sorted(definition.model_ids),
+        )
+        for definition in list_additional_quota_definitions()
+    ]
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
@@ -92,6 +105,7 @@ async def get_settings(
         sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
         additional_quota_routing_policies=settings.additional_quota_routing_policies,
+        additional_quota_policies=additional_quota_policies,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
@@ -103,6 +117,14 @@ async def get_settings(
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
     )
+
+
+@router.get("", response_model=DashboardSettingsResponse)
+async def get_settings(
+    context: SettingsContext = Depends(get_settings_context),
+) -> DashboardSettingsResponse:
+    settings = await context.service.get_settings()
+    return _dashboard_settings_response(settings)
 
 
 @router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
@@ -280,31 +302,4 @@ async def update_settings(
         actor_ip=request.client.host if request.client else None,
         details={"changed_fields": changed_fields},
     )
-    return DashboardSettingsResponse(
-        sticky_threads_enabled=updated.sticky_threads_enabled,
-        upstream_stream_transport=updated.upstream_stream_transport,
-        prefer_earlier_reset_accounts=updated.prefer_earlier_reset_accounts,
-        prefer_earlier_reset_window=updated.prefer_earlier_reset_window,
-        routing_strategy=updated.routing_strategy,
-        relative_availability_power=updated.relative_availability_power,
-        relative_availability_top_k=updated.relative_availability_top_k,
-        single_account_id=updated.single_account_id,
-        openai_cache_affinity_max_age_seconds=updated.openai_cache_affinity_max_age_seconds,
-        dashboard_session_ttl_seconds=updated.dashboard_session_ttl_seconds,
-        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=updated.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
-        http_responses_session_bridge_gateway_safe_mode=updated.http_responses_session_bridge_gateway_safe_mode,
-        sticky_reallocation_budget_threshold_pct=updated.sticky_reallocation_budget_threshold_pct,
-        sticky_reallocation_primary_budget_threshold_pct=updated.sticky_reallocation_primary_budget_threshold_pct,
-        sticky_reallocation_secondary_budget_threshold_pct=updated.sticky_reallocation_secondary_budget_threshold_pct,
-        additional_quota_routing_policies=updated.additional_quota_routing_policies,
-        import_without_overwrite=updated.import_without_overwrite,
-        totp_required_on_login=updated.totp_required_on_login,
-        totp_configured=updated.totp_configured,
-        api_key_auth_enabled=updated.api_key_auth_enabled,
-        limit_warmup_enabled=updated.limit_warmup_enabled,
-        limit_warmup_windows=updated.limit_warmup_windows,
-        limit_warmup_model=updated.limit_warmup_model,
-        limit_warmup_prompt=updated.limit_warmup_prompt,
-        limit_warmup_cooldown_seconds=updated.limit_warmup_cooldown_seconds,
-        limit_warmup_min_available_percent=updated.limit_warmup_min_available_percent,
-    )
+    return _dashboard_settings_response(updated)

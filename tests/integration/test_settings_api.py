@@ -145,6 +145,34 @@ async def test_settings_api_accepts_fill_first_routing_strategy(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_returns_known_additional_quota_policies(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["additionalQuotaRoutingPolicies"] == {}
+    assert payload["additionalQuotaPolicies"] == [
+        {
+            "quotaKey": "codex_spark",
+            "displayLabel": "GPT-5.3-Codex-Spark",
+            "routingPolicy": "burn_first",
+            "modelIds": ["gpt_5_3_codex_spark"],
+        }
+    ]
+
+    update_payload = {
+        "stickyThreadsEnabled": payload["stickyThreadsEnabled"],
+        "preferEarlierResetAccounts": payload["preferEarlierResetAccounts"],
+        "additionalQuotaRoutingPolicies": {"codex_spark": "preserve"},
+    }
+    response = await async_client.put("/api/settings", json=update_payload)
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["additionalQuotaRoutingPolicies"] == {"codex_spark": "preserve"}
+    assert updated["additionalQuotaPolicies"][0]["routingPolicy"] == "preserve"
+
+
+@pytest.mark.asyncio
 async def test_settings_legacy_sticky_threshold_updates_primary_threshold(async_client):
     response = await async_client.put(
         "/api/settings",

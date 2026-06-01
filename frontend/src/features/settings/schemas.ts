@@ -27,6 +27,12 @@ export const AdditionalQuotaRoutingPolicySchema = z.enum([
   "burn_first",
   "preserve",
 ]);
+export const AdditionalQuotaPolicySchema = z.object({
+  quotaKey: z.string(),
+  displayLabel: z.string(),
+  routingPolicy: AdditionalQuotaRoutingPolicySchema,
+  modelIds: z.array(z.string()).optional().default([]),
+});
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
 
@@ -65,6 +71,7 @@ export const DashboardSettingsSchema = z
     additionalQuotaRoutingPolicies: z
       .record(z.string(), AdditionalQuotaRoutingPolicySchema)
       .optional(),
+    additionalQuotaPolicies: z.array(AdditionalQuotaPolicySchema).optional().default([]),
     importWithoutOverwrite: z.boolean(),
     totpRequiredOnLogin: z.boolean(),
     totpConfigured: z.boolean(),

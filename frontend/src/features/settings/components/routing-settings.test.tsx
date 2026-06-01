@@ -43,6 +43,8 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
   ...LIMIT_WARMUP_DEFAULTS,
 };
 
@@ -212,6 +214,41 @@ describe("RoutingSettings", () => {
           "gpt-5.2-thinking": "inherit",
           "gpt-5.2-codex": "burn_first",
         },
+      }),
+    );
+  });
+
+  it("renders known additional quota policies without saved overrides", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          additionalQuotaRoutingPolicies: {},
+          additionalQuotaPolicies: [
+            {
+              quotaKey: "codex_spark",
+              displayLabel: "GPT-5.3-Codex-Spark",
+              routingPolicy: "burn_first",
+              modelIds: ["gpt_5_3_codex_spark"],
+            },
+          ],
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    expect(screen.getByText("GPT-5.3-Codex-Spark")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "codex_spark routing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Preserve" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        additionalQuotaRoutingPolicies: { codex_spark: "preserve" },
       }),
     );
   });

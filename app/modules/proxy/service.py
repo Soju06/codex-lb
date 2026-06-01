@@ -12439,6 +12439,16 @@ class ProxyService:
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
         )
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if selected_account_id:
+                scoped_account_ids = (
+                    {selected_account_id}
+                    if scoped_account_ids is None or selected_account_id in scoped_account_ids
+                    else set()
+                )
+            else:
+                scoped_account_ids = set()
         return await self._load_balancer.check_opportunistic_admission(
             model=model,
             account_ids=scoped_account_ids,

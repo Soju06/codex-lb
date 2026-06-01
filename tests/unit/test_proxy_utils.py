@@ -862,6 +862,80 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_admission_scopes_single_account_to_selected_account(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.routing_strategy = "single_account"
+    settings.single_account_id = "acc_selected"
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    admission_mock = AsyncMock(return_value=AccountSelection(account=_make_account("acc_selected"), error_message=None))
+    monkeypatch.setattr(service._load_balancer, "check_opportunistic_admission", admission_mock)
+    api_key = ApiKeyData(
+        id="key_opportunistic_scope",
+        name="opportunistic scope",
+        key_prefix="sk-opportunistic",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        account_assignment_scope_enabled=True,
+        assigned_account_ids=["acc_other", "acc_selected"],
+    )
+
+    await service.check_opportunistic_admission(api_key=api_key, model="gpt-5.1", lease_kind="stream")
+
+    admission_mock.assert_awaited_once()
+    await_args = admission_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["account_ids"] == {"acc_selected"}
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_empty_scope_when_single_account_is_outside_api_key_scope(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.routing_strategy = "single_account"
+    settings.single_account_id = "acc_selected"
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    admission_mock = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No active accounts available",
+            error_code="no_accounts",
+        )
+    )
+    monkeypatch.setattr(service._load_balancer, "check_opportunistic_admission", admission_mock)
+    api_key = ApiKeyData(
+        id="key_opportunistic_scope_mismatch",
+        name="opportunistic scope mismatch",
+        key_prefix="sk-opportunistic",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        account_assignment_scope_enabled=True,
+        assigned_account_ids=["acc_other"],
+    )
+
+    await service.check_opportunistic_admission(api_key=api_key, model="gpt-5.1", lease_kind="stream")
+
+    admission_mock.assert_awaited_once()
+    await_args = admission_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["account_ids"] == set()
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.proxy_account_stream_limit = 1

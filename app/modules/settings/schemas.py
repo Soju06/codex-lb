@@ -76,7 +76,6 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int | None = Field(default=None, ge=60)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
-    additional_quota_routing_policies: dict[str, str] | None = None
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

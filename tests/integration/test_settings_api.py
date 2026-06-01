@@ -1,8 +1,40 @@
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 
+from app.core.auth import generate_unique_account_id
+
 pytestmark = pytest.mark.integration
+
+
+def _encode_jwt(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"header.{body}.sig"
+
+
+async def _import_account(async_client, account_id: str, email: str) -> str:
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(
+                {
+                    "email": email,
+                    "chatgpt_account_id": account_id,
+                    "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                }
+            ),
+            "accessToken": "access-token",
+            "refreshToken": "refresh-token",
+            "accountId": account_id,
+        },
+    }
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    return generate_unique_account_id(account_id, email)
 
 
 @pytest.mark.asyncio
@@ -216,3 +248,33 @@ async def test_upstream_proxy_pool_member_rejects_missing_endpoint(async_client)
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "proxy_endpoint_not_found"
+
+
+@pytest.mark.asyncio
+async def test_settings_update_rejects_missing_default_proxy_pool(async_client):
+    settings = await async_client.get("/api/settings")
+    body = settings.json()
+    body["upstreamProxyDefaultPoolId"] = "missing-pool"
+
+    response = await async_client.put("/api/settings", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "proxy_pool_not_found"
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_rejects_missing_targets(async_client):
+    missing_account = await async_client.put(
+        "/api/settings/upstream-proxy/accounts/missing-account/binding",
+        json={"poolId": "missing-pool", "isActive": True},
+    )
+    assert missing_account.status_code == 400
+    assert missing_account.json()["error"]["code"] == "account_not_found"
+
+    account_id = await _import_account(async_client, "acc-settings-proxy-binding", "settings-proxy@example.com")
+    missing_pool = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": "missing-pool", "isActive": True},
+    )
+    assert missing_pool.status_code == 400
+    assert missing_pool.json()["error"]["code"] == "proxy_pool_not_found"

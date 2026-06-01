@@ -2535,6 +2535,18 @@ async def _stream_responses_with_session(
             response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
         )
         return
+    except CodexTransportError as exc:
+        error_code = "upstream_unavailable"
+        error_message = _codex_route_transport_error_message(
+            route=route,
+            route_trace=route_trace,
+            operation="stream",
+            exc=exc,
+        )
+        yield format_sse_event(
+            response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+        )
+        return
     except aiohttp.ClientError as exc:
         error_code = "upstream_unavailable"
         error_message = _codex_route_transport_error_message(

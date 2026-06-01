@@ -13,7 +13,7 @@ from app.core.auth.dependencies import set_dashboard_error_format, validate_dash
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
-from app.db.models import AccountProxyBinding, ProxyEndpoint, ProxyPool, ProxyPoolMember
+from app.db.models import Account, AccountProxyBinding, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
@@ -268,6 +268,18 @@ async def _validate_proxy_endpoint_ids(context: SettingsContext, endpoint_ids: l
         )
 
 
+async def _validate_proxy_pool_id(context: SettingsContext, pool_id: str | None) -> None:
+    if pool_id is None:
+        return
+    if await context.session.get(ProxyPool, pool_id) is None:
+        raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
+
+
+async def _validate_account_id(context: SettingsContext, account_id: str) -> None:
+    if await context.session.get(Account, account_id) is None:
+        raise DashboardBadRequestError("Account not found", code="account_not_found")
+
+
 def _is_missing_proxy_endpoint_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "foreign key" in message or "fk constraint" in message or "violates foreign key constraint" in message
@@ -279,6 +291,8 @@ async def put_account_proxy_binding(
     payload: AccountProxyBindingRequest,
     context: SettingsContext = Depends(get_settings_context),
 ) -> AccountProxyBindingResponse:
+    await _validate_account_id(context, account_id)
+    await _validate_proxy_pool_id(context, payload.pool_id)
     row = (
         (
             await context.session.execute(
@@ -318,6 +332,11 @@ async def update_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
+    if (
+        "upstream_proxy_default_pool_id" in payload.model_fields_set
+        and payload.upstream_proxy_default_pool_id is not None
+    ):
+        await _validate_proxy_pool_id(context, payload.upstream_proxy_default_pool_id)
     try:
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(

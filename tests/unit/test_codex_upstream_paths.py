@@ -98,6 +98,15 @@ class _StreamErrorResponse:
         yield b""
 
 
+class _TransportErrorCodexClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
+        self.calls.append({"method": method, "url": url, "route": route, **kwargs})
+        raise CodexTransportError("Codex upstream request failed via proxy endpoint ep_1: OSError")
+
+
 class _FakeCodexWebSocket:
     def __init__(self, *, fail_receive: bool = False, fail_send: bool = False) -> None:
         self.sent: list[str | bytes] = []
@@ -455,6 +464,30 @@ async def test_stream_responses_route_errors_do_not_expose_proxy_credentials(rou
     assert "OSError" in combined
     assert "user:pass" not in combined
     assert "proxy.test:8080" not in combined
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_routed_transport_errors_are_unavailable(route: ResolvedUpstreamRoute) -> None:
+    client = _TransportErrorCodexClient()
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, client),
+        )
+    ]
+
+    combined = "".join(events)
+    assert '"code":"upstream_unavailable"' in combined
+    assert "ep_1" in combined
 
 
 @pytest.mark.asyncio

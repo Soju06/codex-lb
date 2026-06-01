@@ -6754,7 +6754,7 @@ class ProxyService:
             logger.warning("Failed to renew durable HTTP bridge session lease", exc_info=True)
 
     async def _select_account_with_budget_for_stream(self, deadline: float, **kwargs: Any) -> AccountSelection:
-        selector = self._select_account_with_budget
+        selector = self._select_account_with_budget_compatible
         optional_kwargs = (
             "require_security_work_authorized",
             "lease_kind",
@@ -6817,6 +6817,7 @@ class ProxyService:
                 "reallocate_sticky": affinity.reallocate_sticky,
                 "sticky_max_age_seconds": affinity.max_age_seconds,
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
+                "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
                 "model": request_model,
                 "exclude_account_ids": excluded_account_ids,
@@ -14861,7 +14862,7 @@ def _websocket_receive_timeout_for_pending_requests(
 
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
-    value = settings.routing_strategy or "capacity_weighted"
+    value = getattr(settings, "routing_strategy", None) or "capacity_weighted"
     if value == "single_account":
         return "single_account"
     if value == "sequential_drain":
@@ -14896,17 +14897,15 @@ def _prefer_earlier_reset_window(settings: DashboardSettings) -> ResetPreference
 
 
 def _sticky_reallocation_primary_budget_threshold_pct(settings: DashboardSettings) -> float:
-    return float(
-        getattr(
-            settings,
-            "sticky_reallocation_primary_budget_threshold_pct",
-            settings.sticky_reallocation_budget_threshold_pct,
-        )
-    )
+    value = getattr(settings, "sticky_reallocation_primary_budget_threshold_pct", None)
+    if value is None:
+        value = getattr(settings, "sticky_reallocation_budget_threshold_pct", None)
+    return float(value if value is not None else 95.0)
 
 
 def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSettings) -> float:
-    return float(getattr(settings, "sticky_reallocation_secondary_budget_threshold_pct", 100.0))
+    value = getattr(settings, "sticky_reallocation_secondary_budget_threshold_pct", None)
+    return float(value if value is not None else 100.0)
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:

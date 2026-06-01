@@ -37,7 +37,10 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.usage.additional_quota_keys import (
+    get_additional_display_label_for_quota_key,
+    get_additional_quota_routing_policy,
+)
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
@@ -105,6 +108,7 @@ class AccountsService:
                             metered_feature=reference_entry.metered_feature,
                             display_label=get_additional_display_label_for_quota_key(quota_key)
                             or reference_entry.limit_name,
+                            routing_policy=get_additional_quota_routing_policy(quota_key),
                             primary_window=AccountAdditionalWindow(
                                 used_percent=primary_entry.used_percent,
                                 reset_at=primary_entry.reset_at,

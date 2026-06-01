@@ -54,10 +54,10 @@ export function RoutingSettings({
     String(settings.relativeAvailabilityTopK),
   );
   const [stickyPrimaryThreshold, setStickyPrimaryThreshold] = useState(
-    String(settings.stickyReallocationPrimaryBudgetThresholdPct),
+    String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
   );
   const [stickySecondaryThreshold, setStickySecondaryThreshold] = useState(
-    String(settings.stickyReallocationSecondaryBudgetThresholdPct),
+    String(settings.stickyReallocationSecondaryBudgetThresholdPct ?? 100),
   );
   const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
   const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
@@ -131,7 +131,7 @@ export function RoutingSettings({
     parsedStickyPrimaryThreshold <= 100;
   const stickyPrimaryThresholdChanged =
     stickyPrimaryThresholdValid &&
-    parsedStickyPrimaryThreshold !== settings.stickyReallocationPrimaryBudgetThresholdPct;
+    parsedStickyPrimaryThreshold !== (settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95);
   const parsedStickySecondaryThreshold = Number.parseFloat(stickySecondaryThreshold);
   const stickySecondaryThresholdValid =
     Number.isFinite(parsedStickySecondaryThreshold) &&
@@ -139,7 +139,7 @@ export function RoutingSettings({
     parsedStickySecondaryThreshold <= 100;
   const stickySecondaryThresholdChanged =
     stickySecondaryThresholdValid &&
-    parsedStickySecondaryThreshold !== settings.stickyReallocationSecondaryBudgetThresholdPct;
+    parsedStickySecondaryThreshold !== (settings.stickyReallocationSecondaryBudgetThresholdPct ?? 100);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -523,12 +523,30 @@ export function RoutingSettings({
               <p className="text-sm font-medium">Prefer earlier reset</p>
               <p className="text-xs text-muted-foreground">Bias traffic to accounts with earlier quota reset.</p>
             </div>
-            <Switch
-              aria-label="Prefer earlier reset accounts"
-              checked={settings.preferEarlierResetAccounts}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
-            />
+            <div className="flex items-center gap-3">
+              <Select
+                value={settings.preferEarlierResetWindow}
+                onValueChange={(value) => save({ preferEarlierResetWindow: value as "primary" | "secondary" })}
+              >
+                <SelectTrigger
+                  aria-label="Reset preference window"
+                  className="h-8 w-36 text-xs"
+                  disabled={busy || !settings.preferEarlierResetAccounts}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  <SelectItem value="secondary">Weekly quota</SelectItem>
+                  <SelectItem value="primary">5h quota</SelectItem>
+                </SelectContent>
+              </Select>
+              <Switch
+                aria-label="Prefer earlier reset accounts"
+                checked={settings.preferEarlierResetAccounts}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
+              />
+            </div>
           </div>
 
           <div className="space-y-3 p-3">

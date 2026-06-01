@@ -34,19 +34,22 @@ export function buildSettingsUpdateRequest(
     ...patch,
   };
   if (
-    settings.__stickyReallocationBudgetThresholdPctProvided === false &&
+    (payload.stickyReallocationBudgetThresholdPct === undefined ||
+      settings.__stickyReallocationBudgetThresholdPctProvided === false) &&
     !("stickyReallocationBudgetThresholdPct" in patch)
   ) {
     delete payload.stickyReallocationBudgetThresholdPct;
   }
   if (
-    settings.__stickyReallocationPrimaryBudgetThresholdPctProvided === false &&
+    (payload.stickyReallocationPrimaryBudgetThresholdPct === undefined ||
+      settings.__stickyReallocationPrimaryBudgetThresholdPctProvided === false) &&
     !("stickyReallocationPrimaryBudgetThresholdPct" in patch)
   ) {
     delete payload.stickyReallocationPrimaryBudgetThresholdPct;
   }
   if (
-    settings.__stickyReallocationSecondaryBudgetThresholdPctProvided === false &&
+    (payload.stickyReallocationSecondaryBudgetThresholdPct === undefined ||
+      settings.__stickyReallocationSecondaryBudgetThresholdPctProvided === false) &&
     !("stickyReallocationSecondaryBudgetThresholdPct" in patch)
   ) {
     delete payload.stickyReallocationSecondaryBudgetThresholdPct;

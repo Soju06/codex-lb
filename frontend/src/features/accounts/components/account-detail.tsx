@@ -1,13 +1,6 @@
 import { User } from "lucide-react";
 
 import { isEmailLabel } from "@/components/blur-email";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountAliasForm } from "@/features/accounts/components/account-alias-form";
 import { AccountActions } from "@/features/accounts/components/account-actions";
@@ -118,41 +111,6 @@ export function AccountDetail({
       </div>
 
       <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
-        <div>
-          <p className="text-xs font-medium text-foreground">Routing policy</p>
-          <p className="text-xs text-muted-foreground">
-            {account.routingPolicy === "burn_first"
-              ? "Prefer this account for opportunistic burn."
-              : account.routingPolicy === "preserve"
-                ? "Preserve this account from opportunistic burn."
-                : "Use normal routing for this account."}
-          </p>
-        </div>
-        <Select
-          value={account.routingPolicy ?? "normal"}
-          onValueChange={(value) =>
-            onRoutingPolicyChange(
-              account.accountId,
-              value as AccountRoutingPolicy,
-            )
-          }
-          disabled={busy}
-        >
-          <SelectTrigger
-            size="sm"
-            className="w-36 text-xs"
-            aria-label="Routing policy"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value="normal">Normal</SelectItem>
-            <SelectItem value="burn_first">Burn first</SelectItem>
-            <SelectItem value="preserve">Preserve</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
       <AccountActions

@@ -96,6 +96,7 @@ describe("AccountsPage", () => {
       exportOpenCodeAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 

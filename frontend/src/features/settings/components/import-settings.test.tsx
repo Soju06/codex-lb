@@ -71,6 +71,11 @@ describe("ImportSettings", () => {
       singleAccountId: settings.singleAccountId,
       openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
       dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+      stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct,
+      stickyReallocationPrimaryBudgetThresholdPct:
+        settings.stickyReallocationPrimaryBudgetThresholdPct,
+      stickyReallocationSecondaryBudgetThresholdPct:
+        settings.stickyReallocationSecondaryBudgetThresholdPct,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: true,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,

@@ -1736,6 +1736,39 @@ def test_all_primary_pressured_fallback_skips_unavailable_account():
     assert result.account.account_id == "available"
 
 
+def test_all_primary_pressured_fallback_honors_primary_reset_preference():
+    now = time.time()
+    states = [
+        AccountState(
+            "late",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=50.0,
+            primary_reset_at=int(now + 4 * 3600),
+            secondary_reset_at=int(now + 3600),
+        ),
+        AccountState(
+            "early",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=50.0,
+            primary_reset_at=int(now + 30 * 60),
+            secondary_reset_at=int(now + 7 * 24 * 3600),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "early"
+
+
 def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe():
     states = [
         AccountState("secondary-high", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=90.0),
@@ -1815,7 +1848,7 @@ def test_primary_pressured_fallback_ignores_unavailable_safe_accounts():
     assert result.account.account_id == "lower-primary"
 
 
-def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucket():
+def test_primary_pressured_fallback_honors_reset_bucket_before_primary_usage():
     now = time.time()
     states = [
         AccountState(
@@ -1842,7 +1875,7 @@ def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucke
     )
 
     assert result.account is not None
-    assert result.account.account_id == "later-reset-lower-primary"
+    assert result.account.account_id == "earlier-reset-higher-primary"
 
 
 def test_sticky_budget_threshold_still_counts_secondary_pressure():

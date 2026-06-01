@@ -9,7 +9,18 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
+from app.db.models import (
+    Account,
+    AccountLimitWarmup,
+    AccountStatus,
+    AdditionalUsageHistory,
+    ApiKeyAccountAssignment,
+    DashboardSettings,
+    HttpBridgeSessionRecord,
+    RequestLog,
+    StickySession,
+    UsageHistory,
+)
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
@@ -161,6 +172,10 @@ class AccountsRepository:
             canonical = await self._account_by_chatgpt_identity(account.chatgpt_account_id)
             if canonical is not None:
                 _apply_account_updates(canonical, account)
+                await self._reconcile_chatgpt_identity_duplicates(
+                    canonical=canonical,
+                    chatgpt_account_id=account.chatgpt_account_id,
+                )
                 await self._session.commit()
                 await self._session.refresh(canonical)
                 return canonical
@@ -205,6 +220,67 @@ class AccountsRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def _reconcile_chatgpt_identity_duplicates(
+        self,
+        canonical: Account,
+        chatgpt_account_id: str,
+    ) -> None:
+        duplicate_accounts = (
+            await self._session.execute(
+                select(Account.id).where(
+                    Account.chatgpt_account_id == chatgpt_account_id,
+                    Account.id != canonical.id,
+                )
+            )
+        ).scalars().all()
+        duplicate_ids = list(duplicate_accounts)
+        if not duplicate_ids:
+            return
+
+        duplicate_api_key_ids = (
+            await self._session.execute(
+                select(ApiKeyAccountAssignment.api_key_id).where(ApiKeyAccountAssignment.account_id == canonical.id)
+            )
+        ).scalars().all()
+        existing_api_key_ids = set(duplicate_api_key_ids)
+
+        duplicate_assignments = (
+            await self._session.execute(
+                select(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id.in_(duplicate_ids))
+            )
+        ).scalars().all()
+        for assignment in duplicate_assignments:
+            if assignment.api_key_id in existing_api_key_ids:
+                await self._session.delete(assignment)
+            else:
+                assignment.account_id = canonical.id
+
+        await self._session.execute(
+            update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+        )
+        await self._session.execute(
+            update(AdditionalUsageHistory).where(
+                AdditionalUsageHistory.account_id.in_(duplicate_ids)
+            ).values(account_id=canonical.id)
+        )
+        await self._session.execute(
+            update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+        )
+        await self._session.execute(
+            update(AccountLimitWarmup).where(AccountLimitWarmup.account_id.in_(duplicate_ids)).values(
+                account_id=canonical.id
+            )
+        )
+        await self._session.execute(
+            update(StickySession).where(StickySession.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
+        )
+        await self._session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.account_id.in_(duplicate_ids))
+            .values(account_id=canonical.id)
+        )
+        await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
 
     async def update_status(
         self,

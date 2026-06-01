@@ -7194,6 +7194,27 @@ class ProxyService:
                 bridge_session=session,
             )
             gate_acquired = True
+            async with self._http_bridge_lock:
+                current_session = self._http_bridge_sessions.get(session.key)
+                session_replaced = current_session is not None and current_session is not session
+                if session.closed or session_replaced:
+                    _log_http_bridge_event(
+                        "submit_on_closed",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        detail=(
+                            "session_retired_after_admission"
+                            if session.closed
+                            else "session_replaced_after_admission"
+                        ),
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                    )
             async with session.pending_lock:
                 session.pending_requests.append(request_state)
             request_enqueued = True
@@ -7316,6 +7337,32 @@ class ProxyService:
                     bridge_session=session,
                 )
                 gate_acquired = True
+                async with self._http_bridge_lock:
+                    current_session = self._http_bridge_sessions.get(session.key)
+                    session_replaced = current_session is not None and current_session is not session
+                    if session.closed or session_replaced:
+                        _log_http_bridge_event(
+                            "submit_on_closed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            detail=(
+                                "prewarm_session_retired_after_admission"
+                                if session.closed
+                                else "prewarm_session_replaced_after_admission"
+                            ),
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                        session.prewarmed = False
+                        await self._cleanup_http_bridge_submit_interruption(
+                            session,
+                            request_state=warmup_state,
+                            gate_acquired=gate_acquired,
+                            request_enqueued=request_enqueued,
+                        )
+                        gate_acquired = False
+                        return
                 async with session.pending_lock:
                     session.pending_requests.append(warmup_state)
                 request_enqueued = True
@@ -7529,6 +7576,7 @@ class ProxyService:
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         continue
+                    session.closed = True
                     async with session.pending_lock:
                         session.queued_request_count = 0
                     try:
@@ -7560,6 +7608,7 @@ class ProxyService:
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
+                session.closed = True
                 async with session.pending_lock:
                     session.queued_request_count = 0
                 try:

@@ -8,5 +8,6 @@
 - [x] Log timeout diagnostics without raw affinity keys.
 - [x] Retire HTTP bridge sessions whose precreated replay cannot make progress after upstream disconnect.
 - [x] Clear stale pending bridge state even when terminal request-log writing fails.
+- [x] Reject concurrent response-create gate and prewarm waiters before they can submit on a retired stale session.
 - [x] Add regression tests for timeout behavior.
 - [x] Validate OpenSpec and run targeted unit tests.

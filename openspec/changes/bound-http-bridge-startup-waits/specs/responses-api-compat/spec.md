@@ -32,3 +32,10 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** request-log writing fails
 - **THEN** the service still removes the stale bridge session from local reuse
 - **AND** the service releases any durable bridge ownership for that stale session
+
+#### Scenario: Concurrent waiter cannot submit on retired stale bridge
+
+- **WHEN** an HTTP bridge request is waiting on a session response-create gate
+- **AND** the upstream reader retires that same bridge session after a failed precreated replay
+- **THEN** the waiting request or prewarm is rejected before it is appended to pending requests or sent upstream
+- **AND** the retired bridge session remains closed and removed from local reuse

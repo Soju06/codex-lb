@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from threading import RLock
 
 from anyio import to_thread
@@ -52,6 +53,7 @@ class _BulkHistoryFingerprint:
     reset_at_total: float
     window_minutes_sum: int
     max_recorded_at: str
+    content_digest: str
 
 
 _BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryCacheEntry] = {}
@@ -95,7 +97,8 @@ def _fingerprint_grouped_history(grouped: dict[str, list[UsageHistorySnapshot]])
     reset_at_total = 0.0
     window_minutes_sum = 0
     max_recorded_at = ""
-    for rows in grouped.values():
+    digest = sha256()
+    for account_id, rows in sorted(grouped.items()):
         for row in rows:
             row_count += 1
             max_id = max(max_id, row.id)
@@ -103,7 +106,20 @@ def _fingerprint_grouped_history(grouped: dict[str, list[UsageHistorySnapshot]])
             used_percent_total += row.used_percent
             reset_at_total += row.reset_at or 0.0
             window_minutes_sum += row.window_minutes or 0
-            max_recorded_at = max(max_recorded_at, row.recorded_at.isoformat(sep=" "))
+            recorded_at = row.recorded_at.isoformat(sep=" ")
+            max_recorded_at = max(max_recorded_at, recorded_at)
+            digest.update(
+                repr(
+                    (
+                        account_id,
+                        row.id,
+                        row.used_percent,
+                        recorded_at,
+                        row.reset_at,
+                        row.window_minutes,
+                    )
+                ).encode("utf-8")
+            )
     return _BulkHistoryFingerprint(
         row_count=row_count,
         max_id=max_id,
@@ -112,6 +128,7 @@ def _fingerprint_grouped_history(grouped: dict[str, list[UsageHistorySnapshot]])
         reset_at_total=reset_at_total,
         window_minutes_sum=window_minutes_sum,
         max_recorded_at=max_recorded_at,
+        content_digest=digest.hexdigest(),
     )
 
 
@@ -149,28 +166,45 @@ def _bulk_history_fingerprint_sqlite(
         window_clause = "window = ?"
         params = [*account_ids, window, since_param]
     sql = f"""
-        select
-            count(*),
-            coalesce(max(id), 0),
-            coalesce(sum(id), 0),
-            coalesce(total(used_percent), 0.0),
-            coalesce(total(coalesce(reset_at, 0)), 0.0),
-            coalesce(sum(coalesce(window_minutes, 0)), 0),
-            coalesce(max(recorded_at), '')
+        select id, account_id, used_percent, recorded_at, reset_at, window_minutes
         from usage_history
         where account_id in ({placeholders})
           and {window_clause}
           and recorded_at >= ?
+        order by account_id, recorded_at asc, id asc
     """
-    row = conn.execute(sql, params).fetchone()
+    row_count = 0
+    max_id = 0
+    id_sum = 0
+    used_percent_total = 0.0
+    reset_at_total = 0.0
+    window_minutes_sum = 0
+    max_recorded_at = ""
+    digest = sha256()
+    for row in conn.execute(sql, params):
+        row_id = int(row[0])
+        account_id = str(row[1])
+        used_percent = float(row[2])
+        recorded_at = str(row[3])
+        reset_at = float(row[4]) if row[4] is not None else None
+        window_minutes = int(row[5]) if row[5] is not None else None
+        row_count += 1
+        max_id = max(max_id, row_id)
+        id_sum += row_id
+        used_percent_total += used_percent
+        reset_at_total += reset_at or 0.0
+        window_minutes_sum += window_minutes or 0
+        max_recorded_at = max(max_recorded_at, recorded_at)
+        digest.update(repr((account_id, row_id, used_percent, recorded_at, reset_at, window_minutes)).encode("utf-8"))
     return _BulkHistoryFingerprint(
-        row_count=int(row[0]),
-        max_id=int(row[1]),
-        id_sum=int(row[2]),
-        used_percent_total=float(row[3]),
-        reset_at_total=float(row[4]),
-        window_minutes_sum=int(row[5]),
-        max_recorded_at=str(row[6]),
+        row_count=row_count,
+        max_id=max_id,
+        id_sum=id_sum,
+        used_percent_total=used_percent_total,
+        reset_at_total=reset_at_total,
+        window_minutes_sum=window_minutes_sum,
+        max_recorded_at=max_recorded_at,
+        content_digest=digest.hexdigest(),
     )
 
 

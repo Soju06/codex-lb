@@ -41,7 +41,9 @@ describe("RoutingSettings", () => {
       <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
     );
 
-    const ttlInput = screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" });
+    const ttlInput = screen.getByRole("spinbutton", {
+      name: "Prompt-cache affinity TTL",
+    });
     await user.clear(ttlInput);
     await user.type(ttlInput, "180");
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
@@ -72,8 +74,13 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }));
-    await user.type(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }), "240{Enter}");
+    await user.clear(
+      screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }),
+    );
+    await user.type(
+      screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }),
+      "240{Enter}",
+    );
 
     expect(onSave).toHaveBeenLastCalledWith({
       stickyThreadsEnabled: false,
@@ -97,9 +104,13 @@ describe("RoutingSettings", () => {
   it("disables ttl save for invalid values and saves sticky-thread toggles", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
+    );
 
-    const ttlInput = screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" });
+    const ttlInput = screen.getByRole("spinbutton", {
+      name: "Prompt-cache affinity TTL",
+    });
     const saveButton = screen.getByRole("button", { name: "Save TTL" });
     expect(saveButton).toBeDisabled();
 
@@ -107,7 +118,9 @@ describe("RoutingSettings", () => {
     await user.type(ttlInput, "0");
     expect(saveButton).toBeDisabled();
 
-    await user.click(screen.getByRole("switch", { name: "Enable sticky threads" }));
+    await user.click(
+      screen.getByRole("switch", { name: "Enable sticky threads" }),
+    );
 
     expect(onSave).toHaveBeenCalledWith({
       stickyThreadsEnabled: true,
@@ -118,6 +131,9 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -129,14 +145,30 @@ describe("RoutingSettings", () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(
-      <RoutingSettings settings={{ ...BASE_SETTINGS, routingStrategy: "relative_availability" }} busy={false} onSave={onSave} />,
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          routingStrategy: "relative_availability",
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
     );
 
-    expect(screen.getByRole("spinbutton", { name: "Relative availability power" })).toBeInTheDocument();
-    expect(screen.getByRole("spinbutton", { name: "Relative availability top K" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("spinbutton", { name: "Relative availability power" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("spinbutton", { name: "Relative availability top K" }),
+    ).toBeInTheDocument();
 
-    await user.clear(screen.getByRole("spinbutton", { name: "Relative availability power" }));
-    await user.type(screen.getByRole("spinbutton", { name: "Relative availability power" }), "1.5");
+    await user.clear(
+      screen.getByRole("spinbutton", { name: "Relative availability power" }),
+    );
+    await user.type(
+      screen.getByRole("spinbutton", { name: "Relative availability power" }),
+      "1.5",
+    );
     await user.click(screen.getByRole("button", { name: "Save power" }));
 
     expect(onSave).toHaveBeenCalledWith({
@@ -148,25 +180,43 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
     });
 
-    rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
-    expect(screen.queryByRole("spinbutton", { name: "Relative availability power" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("spinbutton", { name: "Relative availability top K" })).not.toBeInTheDocument();
+    rerender(
+      <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
+    );
+    expect(
+      screen.queryByRole("spinbutton", { name: "Relative availability power" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "Relative availability top K" }),
+    ).not.toBeInTheDocument();
   });
 
   it("rejects decimal relative availability top K values", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(
-      <RoutingSettings settings={{ ...BASE_SETTINGS, routingStrategy: "relative_availability" }} busy={false} onSave={onSave} />,
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          routingStrategy: "relative_availability",
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
     );
 
-    const topKInput = screen.getByRole("spinbutton", { name: "Relative availability top K" });
+    const topKInput = screen.getByRole("spinbutton", {
+      name: "Relative availability top K",
+    });
     const saveTopK = screen.getByRole("button", { name: "Save top K" });
 
     await user.clear(topKInput);
@@ -198,25 +248,49 @@ describe("RoutingSettings", () => {
   });
 
   it("shows the configured upstream transport", () => {
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+    render(
+      <RoutingSettings
+        settings={BASE_SETTINGS}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
 
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
     expect(screen.getByText("Server default")).toBeInTheDocument();
   });
 
   it("names limit warm-up controls for assistive technology", () => {
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+    render(
+      <RoutingSettings
+        settings={BASE_SETTINGS}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
 
-    expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
-    expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
+    expect(
+      screen.getByRole("switch", { name: "Enable limit warm-up" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Prefer earlier reset accounts" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Warm-up model")).toHaveAttribute(
+      "maxLength",
+      "128",
+    );
+    expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute(
+      "maxLength",
+      "512",
+    );
   });
 
   it("does not silently truncate decimal warm-up cooldown values", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
+    );
 
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");

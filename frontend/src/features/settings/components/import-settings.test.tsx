@@ -16,7 +16,9 @@ describe("ImportSettings", () => {
     );
 
     expect(screen.getByText("Import")).toBeInTheDocument();
-    expect(screen.getByText("Allow import without overwrite")).toBeInTheDocument();
+    expect(
+      screen.getByText("Allow import without overwrite"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
         "Keep duplicate imports as separate accounts instead of replacing existing ones.",
@@ -67,8 +69,15 @@ describe("ImportSettings", () => {
       routingStrategy: settings.routingStrategy,
       relativeAvailabilityPower: settings.relativeAvailabilityPower,
       relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
-      openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
+      openaiCacheAffinityMaxAgeSeconds:
+        settings.openaiCacheAffinityMaxAgeSeconds,
       dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+      stickyReallocationBudgetThresholdPct:
+        settings.stickyReallocationBudgetThresholdPct,
+      stickyReallocationPrimaryBudgetThresholdPct:
+        settings.stickyReallocationPrimaryBudgetThresholdPct,
+      stickyReallocationSecondaryBudgetThresholdPct:
+        settings.stickyReallocationSecondaryBudgetThresholdPct,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

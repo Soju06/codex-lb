@@ -72,6 +72,7 @@ export function SettingsPage() {
             <RoutingSettings
               key={[
                 settings.openaiCacheAffinityMaxAgeSeconds,
+                settings.warmupModel,
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupCooldownSeconds,

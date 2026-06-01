@@ -52,11 +52,11 @@ An account SHALL be considered eligible for `normal` and `strict` only when:
 - **THEN** the system submits warmup requests for every target account regardless of usage state
 
 ### Requirement: Warmup sends minimal upstream responses request
-For each submitted account, the system SHALL send a minimal upstream Responses API request intended to warm transport/session/model path behavior using the configured warmup model. The configured `warmup_model` setting SHALL be used as the upstream `model` value for that warmup submission, and `warmup_model` SHALL NOT be sent as an upstream field. The warmup request SHALL remain small and deterministic. Submissions SHALL run in parallel with a maximum concurrency of 5 accounts per warmup execution.
+For each submitted account, the system SHALL send a minimal upstream Responses API request intended to warm transport/session/model path behavior. The model used SHALL be the configured warmup model unless the authenticated API key has `enforcedModel`, in which case that enforced model is used instead (consistent with normal request enforcement). `warmup_model` SHALL NOT be sent as an upstream field. The warmup request SHALL remain small and deterministic. Submissions SHALL run in parallel with a maximum concurrency of 5 accounts per warmup execution.
 
-#### Scenario: Warmup request uses configured warmup model
-- **WHEN** the warmup model setting is configured
-- **THEN** submitted warmup upstream requests set upstream `model` to that configured value and do not include a `warmup_model` upstream field
+#### Scenario: Warmup request uses enforced model precedence when present
+- **WHEN** an authenticated API key has `enforcedModel` configured
+- **THEN** warmup upstream requests use `enforcedModel` for model selection and do not include a `warmup_model` upstream field
 
 #### Scenario: Warmup fan-out is concurrency bounded
 - **WHEN** a warmup execution submits requests for more than five accounts

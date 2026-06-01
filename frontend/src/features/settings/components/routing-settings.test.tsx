@@ -189,6 +189,31 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("saves warmup model updates", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const warmupModelInput = screen.getByLabelText("Warmup model");
+    await user.clear(warmupModelInput);
+    await user.type(warmupModelInput, "gpt-5.4-pro");
+    await user.click(screen.getByRole("button", { name: "Save warmup model" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      warmupModel: "gpt-5.4-pro",
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
+  });
+
   it("shows the configured upstream transport", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
@@ -201,6 +226,7 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });

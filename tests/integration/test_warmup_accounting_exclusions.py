@@ -79,6 +79,20 @@ async def test_warmup_request_logs_are_excluded_from_dashboard_api_key_and_accou
             error_code="quota_exceeded",
             requested_at=now - timedelta(minutes=4),
         )
+        await logs_repo.add_log(
+            account_id="acc-warmup-exclusion",
+            api_key_id="key-warmup-exclusion",
+            request_id="req-limit-warmup",
+            request_kind="limit_warmup",
+            model="gpt-5.4-codex-mini",
+            input_tokens=1000,
+            output_tokens=500,
+            cached_input_tokens=250,
+            latency_ms=150,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=3),
+        )
 
         since = now - timedelta(hours=1)
         until = now + timedelta(hours=1)

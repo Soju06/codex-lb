@@ -12,7 +12,6 @@ from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
-import app.core.utils.proxy_env as proxy_env_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import connect_responses_websocket
 
@@ -421,7 +420,7 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(m
 
 
 @pytest.mark.asyncio
-async def test_connect_responses_websocket_normalizes_os_socks_proxy(monkeypatch):
+async def test_connect_responses_websocket_normalizes_http_socks_env_proxy(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}
 
@@ -444,16 +443,48 @@ async def test_connect_responses_websocket_normalizes_os_socks_proxy(monkeypatch
     )
     monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.delenv("NO_PROXY", raising=False)
-    monkeypatch.setattr(
-        proxy_env_module.urllib.request,
-        "getproxies",
-        lambda: {"socks": "http://127.0.0.1:7891"},
-    )
+    monkeypatch.setenv("socks_proxy", "http://127.0.0.1:7891")
+    monkeypatch.delenv("SOCKS_PROXY", raising=False)
 
     await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "socks5h://127.0.0.1:7891"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_uses_settings_proxy_env(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    class _Settings(SimpleNamespace):
+        def upstream_websocket_proxy_env(self):
+            return {"https_proxy": "http://127.0.0.1:7890"}
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: _Settings(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=True,
+        ),
+    )
+    for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+
+    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] == "http://127.0.0.1:7890"
 
 
 @pytest.mark.asyncio

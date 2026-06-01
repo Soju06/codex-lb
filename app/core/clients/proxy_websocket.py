@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse, urlunparse
@@ -258,7 +259,12 @@ async def connect_responses_websocket(
     upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
-    proxy_url = resolve_websocket_proxy_from_env(url) if settings.upstream_websocket_trust_env else None
+    proxy_env = (
+        settings.upstream_websocket_proxy_env()
+        if hasattr(settings, "upstream_websocket_proxy_env")
+        else os.environ
+    )
+    proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
     connect_kwargs: dict[str, Any] = {
         "origin": origin,
         "additional_headers": upstream_headers or None,

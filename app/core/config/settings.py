@@ -46,12 +46,15 @@ def _default_http_bridge_instance_id() -> str:
 
 
 def _default_upstream_websocket_trust_env() -> bool:
-    if outbound_proxy_env_configured():
-        return True
+    return outbound_proxy_env_configured(_configured_outbound_proxy_env())
+
+
+def _configured_outbound_proxy_env() -> dict[str, str | None]:
+    environ: dict[str, str | None] = {}
     for env_file in ENV_FILES:
-        if outbound_proxy_env_configured(dotenv_values(env_file)):
-            return True
-    return False
+        environ.update(dotenv_values(env_file))
+    environ.update(os.environ)
+    return environ
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -225,6 +228,9 @@ class Settings(BaseSettings):
     )
     firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+
+    def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
+        return _configured_outbound_proxy_env()
     dashboard_auth_proxy_header: str = "Remote-User"
 
     # --- Multi-replica & production settings ---

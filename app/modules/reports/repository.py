@@ -112,7 +112,7 @@ class ReportsRepository:
             RequestLog.requested_at < end_date,
             RequestLog.deleted_at.is_(None),
             _normal_traffic_clause(),
-            RequestLog.cost_usd.is_not(None),
+            RequestLog.model.is_not(None),
         ]
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
@@ -126,7 +126,7 @@ class ReportsRepository:
             )
             .where(and_(*conditions))
             .group_by(RequestLog.model)
-            .order_by(func.sum(RequestLog.cost_usd).desc())
+            .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
         return [

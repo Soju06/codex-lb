@@ -260,6 +260,52 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "percentage": 100.0}]
 
 
+async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
+    start_at = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_unpriced", "reports-unpriced@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_unpriced",
+                    request_id="report-priced-model",
+                    requested_at=start_at,
+                    model="gpt-priced",
+                    status="success",
+                    input_tokens=8,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.8,
+                ),
+                RequestLog(
+                    account_id="acc_reports_unpriced",
+                    request_id="report-unpriced-model",
+                    requested_at=start_at,
+                    model="gpt-unpriced",
+                    status="success",
+                    input_tokens=9,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=None,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["summary"]["totalRequests"] == 2
+    assert payload["byModel"] == [
+        {"model": "gpt-priced", "costUsd": 0.8, "percentage": 100.0},
+        {"model": "gpt-unpriced", "costUsd": 0.0, "percentage": 0.0},
+    ]
+
+
 async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async_client, db_setup):
     async with SessionLocal() as session:
         session.add_all(

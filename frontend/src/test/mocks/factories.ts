@@ -45,10 +45,23 @@ import {
 } from "@/features/dashboard/schemas";
 import type { DashboardSettings } from "@/features/settings/schemas";
 import { DashboardSettingsSchema } from "@/features/settings/schemas";
+import type {
+	QuotaPlannerDecision,
+	QuotaPlannerForecast,
+	QuotaPlannerSettings,
+} from "@/features/quota-planner/schemas";
+import {
+	QuotaPlannerDecisionSchema,
+	QuotaPlannerForecastSchema,
+	QuotaPlannerSettingsSchema,
+	QuotaPlannerWarmupActionResponseSchema,
+} from "@/features/quota-planner/schemas";
 
 // Backward-compatible type aliases
 export type RequestLogEntry = RequestLog;
 export type DashboardAuthSession = AuthSession;
+export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
+export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
 export type {
@@ -419,6 +432,84 @@ export function createDashboardSettings(
 		limitWarmupPrompt: "Say OK.",
 		limitWarmupCooldownSeconds: 3600,
 		limitWarmupMinAvailablePercent: 100,
+		...overrides,
+	});
+}
+
+export function createQuotaPlannerSettings(
+	overrides: Partial<QuotaPlannerSettings> = {},
+): QuotaPlannerSettings {
+	return QuotaPlannerSettingsSchema.parse({
+		mode: "shadow",
+		timezone: "UTC",
+		workingDays: [0, 1, 2, 3, 4],
+		workingHoursStart: "09:00",
+		workingHoursEnd: "18:00",
+		prewarmEnabled: true,
+		prewarmLeadMinutes: 300,
+		maxWarmupsPerDay: 3,
+		maxWarmupCreditsPerDay: 0,
+		minExpectedGain: 1,
+		forecastQuantile: "p75",
+		allowSyntheticTraffic: false,
+		warmupModelPreference: null,
+		dryRun: true,
+		...overrides,
+	});
+}
+
+export function createQuotaPlannerDecision(
+	overrides: Partial<QuotaPlannerDecision> = {},
+): QuotaPlannerDecision {
+	return QuotaPlannerDecisionSchema.parse({
+		id: "decision_1",
+		createdAt: new Date().toISOString(),
+		mode: "shadow",
+		accountId: "acc_primary",
+		action: "reserve",
+		scheduledAt: new Date().toISOString(),
+		executedAt: null,
+		score: 12.5,
+		reason: "forecast_phase_alignment",
+		status: "skipped",
+		idempotencyKey: "mock-decision-1",
+		...overrides,
+	});
+}
+
+export function createQuotaPlannerForecast(
+	overrides: Partial<QuotaPlannerForecast> = {},
+): QuotaPlannerForecast {
+	return QuotaPlannerForecastSchema.parse({
+		generatedAt: new Date().toISOString(),
+		horizonHours: 36,
+		slotSeconds: 900,
+		totalDemandUnits: 48,
+		peakSlotStart: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+		peakDemandUnits: 8,
+		simulation: {
+			loss: 4,
+			unmetDemand: 3,
+			wastedCapacity: 1,
+			coldStartPenalty: 0,
+			synchronizationPenalty: 0,
+			forecastUnits: 48,
+			servedUnits: 45,
+		},
+		slots: [],
+		...overrides,
+	});
+}
+
+export function createQuotaPlannerWarmupActionResponse(
+	overrides: Partial<QuotaPlannerWarmupActionResponse> = {},
+): QuotaPlannerWarmupActionResponse {
+	return QuotaPlannerWarmupActionResponseSchema.parse({
+		decisionId: "decision_1",
+		status: "skipped",
+		reason: "synthetic_traffic_disabled",
+		requestId: null,
+		executedAt: null,
 		...overrides,
 	});
 }

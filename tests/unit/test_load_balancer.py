@@ -10,6 +10,7 @@ import pytest
 
 from app.core.balancer import (
     AccountState,
+    RoutingCost,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -40,6 +41,38 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_applies_planner_cold_start_penalty():
+    states = [
+        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0),
+        AccountState("active", AccountStatus.ACTIVE, used_percent=20.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="usage_weighted",
+        routing_costs={"cold": RoutingCost(total=40.0, reason="cold_start_outside_work")},
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "active"
+
+
+def test_select_account_prefers_expiring_active_window_bonus():
+    states = [
+        AccountState("expiring", AccountStatus.ACTIVE, used_percent=60.0),
+        AccountState("fresh", AccountStatus.ACTIVE, used_percent=10.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="usage_weighted",
+        routing_costs={"expiring": RoutingCost(total=-20.0, reason="expiring_active_window")},
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "expiring"
 
 
 def test_select_account_prefers_earlier_secondary_reset_bucket():
@@ -2345,6 +2378,26 @@ async def test_load_selection_inputs_inherits_account_policy_for_additional_quot
     assert states[0].routing_policy == "preserve"
 
 
+@pytest.mark.asyncio
+async def test_load_selection_inputs_preserves_sync_quota_planner_settings():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.modules.proxy.load_balancer import LoadBalancer
+    from app.modules.quota_planner.logic import PlannerSettings
+
+    planner_settings = PlannerSettings(mode="enforce", timezone="Asia/Tbilisi")
+    mock_repos = MagicMock()
+    mock_repos.accounts.list_accounts = AsyncMock(return_value=[])
+    mock_repos.quota_planner.get_settings = lambda: planner_settings
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+
+    result = await balancer._load_selection_inputs(model="gpt-sync-planner-settings")
+
+    assert result.quota_planner_settings is planner_settings
+
+
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():
     random.seed(11)
     n = 2000
@@ -2989,6 +3042,76 @@ def test_select_account_capacity_weighted_prefers_capacity_within_same_reset_buc
     assert abs(pro_ratio - expected_pro_ratio) <= 0.05
 
 
+def test_select_account_capacity_weighted_preserves_sampling_with_equal_planner_costs():
+    random.seed(67)
+    n = 2000
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    plus = AccountState(
+        "plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts = {"pro": 0, "plus": 0}
+    for _ in range(n):
+        result = select_account(
+            [pro, plus],
+            routing_strategy="capacity_weighted",
+            routing_costs={
+                "pro": RoutingCost(total=1.0, reason="same_planner_cost"),
+                "plus": RoutingCost(total=1.0, reason="same_planner_cost"),
+            },
+        )
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    pro_ratio = counts["pro"] / n
+    expected_pro_ratio = 50400.0 / (50400.0 + 7560.0)
+    assert abs(pro_ratio - expected_pro_ratio) <= 0.05
+
+
+def test_select_account_capacity_weighted_filters_higher_planner_costs_before_sampling():
+    random.seed(68)
+    low_cost_plus = AccountState(
+        "low-cost-plus",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_cost_pro = AccountState(
+        "high-cost-pro",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    for _ in range(100):
+        result = select_account(
+            [low_cost_plus, high_cost_pro],
+            routing_strategy="capacity_weighted",
+            routing_costs={
+                "low-cost-plus": RoutingCost(total=1.0, reason="inside_work"),
+                "high-cost-pro": RoutingCost(total=5.0, reason="cold_start"),
+            },
+        )
+        assert result.account is not None
+        assert result.account.account_id == "low-cost-plus"
+
+
 def test_select_account_capacity_weighted_with_prefer_deprioritizes_missing_reset():
     random.seed(77)
     now = time.time()
@@ -3213,6 +3336,41 @@ def test_select_account_relative_availability_prefers_more_urgent_weekly_capacit
         counts[result.account.account_id] += 1
 
     assert counts["soon-plus"] > counts["later-pro"]
+
+
+def test_select_account_relative_availability_filters_higher_planner_costs():
+    now = time.time()
+    low_cost = AccountState(
+        "low-cost",
+        AccountStatus.ACTIVE,
+        used_percent=90.0,
+        secondary_used_percent=90.0,
+        secondary_reset_at=int(now + 24 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_cost_urgent = AccountState(
+        "high-cost-urgent",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    result = select_account(
+        [low_cost, high_cost_urgent],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+        routing_costs={
+            "low-cost": RoutingCost(total=1.0, reason="budget_safe"),
+            "high-cost-urgent": RoutingCost(total=9.0, reason="expensive"),
+        },
+    )
+    assert result.account is not None
+    assert result.account.account_id == "low-cost"
 
 
 def test_select_account_relative_availability_ignores_prefer_earlier_reset_bucket():

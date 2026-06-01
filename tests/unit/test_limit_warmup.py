@@ -166,6 +166,7 @@ class FakeRequestLogsRepo:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
+        request_kind: str | None = "real",
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
@@ -191,6 +192,7 @@ class FakeRequestLogsRepo:
                 "requested_service_tier": requested_service_tier,
                 "actual_service_tier": actual_service_tier,
                 "transport": transport,
+                "request_kind": request_kind,
                 "api_key_id": api_key_id,
                 "session_id": session_id,
                 "plan_type": plan_type,
@@ -302,6 +304,7 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["source"] == "limit_warmup"
+    assert logs.logs[0]["request_kind"] == "warmup"
 
 
 @pytest.mark.asyncio

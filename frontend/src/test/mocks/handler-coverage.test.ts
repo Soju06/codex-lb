@@ -63,6 +63,13 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/sticky-sessions/delete",
 	"POST /api/sticky-sessions/delete-filtered",
 	"POST /api/sticky-sessions/purge",
+	// quota planner
+	"GET /api/quota-planner/settings",
+	"PUT /api/quota-planner/settings",
+	"GET /api/quota-planner/decisions",
+	"GET /api/quota-planner/forecast",
+	"POST /api/quota-planner/warm-now",
+	"POST /api/quota-planner/decisions/:decisionId/cancel",
 	// firewall
 	"GET /api/firewall/ips",
 	"POST /api/firewall/ips",

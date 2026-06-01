@@ -25,10 +25,17 @@ import {
   createOauthCompleteResponse,
   createOauthStartResponse,
   createOauthStatusResponse,
+  createQuotaPlannerDecision,
+  createQuotaPlannerForecast,
+  createQuotaPlannerSettings,
+  createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
   createRequestLogsResponse,
   type DashboardAuthSession,
   type DashboardSettings,
+  type QuotaPlannerDecision,
+  type QuotaPlannerForecast,
+  type QuotaPlannerSettings,
   type RequestLogEntry,
 } from "@/test/mocks/factories";
 
@@ -127,6 +134,25 @@ const SettingsPayloadSchema = z
   })
   .passthrough();
 
+const QuotaPlannerSettingsPayloadSchema = z
+	.object({
+		mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
+		timezone: z.string().optional(),
+		workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+		workingHoursStart: z.string().optional(),
+		workingHoursEnd: z.string().optional(),
+		prewarmEnabled: z.boolean().optional(),
+		prewarmLeadMinutes: z.number().int().min(0).optional(),
+		maxWarmupsPerDay: z.number().int().min(0).optional(),
+		maxWarmupCreditsPerDay: z.number().min(0).optional(),
+		minExpectedGain: z.number().min(0).optional(),
+		forecastQuantile: z.enum(["p50", "p75", "p90"]).optional(),
+		allowSyntheticTraffic: z.boolean().optional(),
+		warmupModelPreference: z.string().nullable().optional(),
+		dryRun: z.boolean().optional(),
+	})
+	.passthrough();
+
 // ── Helpers ──
 
 async function parseJsonBody<T>(
@@ -147,6 +173,9 @@ type MockState = {
   requestLogs: RequestLogEntry[];
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
+  quotaPlannerSettings: QuotaPlannerSettings;
+  quotaPlannerDecisions: QuotaPlannerDecision[];
+  quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
@@ -166,6 +195,9 @@ function createInitialState(): MockState {
     requestLogs: createDefaultRequestLogs(),
     authSession: createDashboardAuthSession(),
     settings: createDashboardSettings(),
+    quotaPlannerSettings: createQuotaPlannerSettings(),
+    quotaPlannerDecisions: [createQuotaPlannerDecision()],
+    quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
     firewallEntries: [],
     stickySessions: [],
@@ -695,6 +727,78 @@ export const handlers = [
       (entry) => entry.ipAddress !== ipAddress,
     );
     return HttpResponse.json({ status: "deleted" });
+  }),
+
+  http.get("/api/quota-planner/settings", () =>
+    HttpResponse.json(state.quotaPlannerSettings),
+  ),
+
+  http.put("/api/quota-planner/settings", async ({ request }) => {
+    const payload = await parseJsonBody(
+      request,
+      QuotaPlannerSettingsPayloadSchema,
+    );
+    if (!payload) {
+      return HttpResponse.json(state.quotaPlannerSettings);
+    }
+    state.quotaPlannerSettings = createQuotaPlannerSettings({
+      ...state.quotaPlannerSettings,
+      ...payload,
+    });
+    return HttpResponse.json(state.quotaPlannerSettings);
+  }),
+
+  http.get("/api/quota-planner/decisions", ({ request }) => {
+    const url = new URL(request.url);
+    const limit = Number(url.searchParams.get("limit") ?? "50");
+    return HttpResponse.json(state.quotaPlannerDecisions.slice(0, limit));
+  }),
+
+  http.get("/api/quota-planner/forecast", () =>
+    HttpResponse.json(state.quotaPlannerForecast),
+  ),
+
+  http.post("/api/quota-planner/warm-now", async ({ request }) => {
+    const payload = await parseJsonBody(
+      request,
+      z.object({
+        accountId: z.string().min(1),
+        model: z.string().nullable().optional(),
+        apiKeyId: z.string().nullable().optional(),
+        forceProbe: z.boolean().optional(),
+      }),
+    );
+    const decision = createQuotaPlannerDecision({
+      id: `decision_${state.quotaPlannerDecisions.length + 1}`,
+      accountId: payload?.accountId ?? null,
+      action: "warmup",
+      status: "skipped",
+      reason: "synthetic_traffic_disabled",
+    });
+    state.quotaPlannerDecisions = [decision, ...state.quotaPlannerDecisions];
+    return HttpResponse.json(
+      createQuotaPlannerWarmupActionResponse({
+        decisionId: decision.id,
+        status: decision.status,
+        reason: decision.reason ?? "synthetic_traffic_disabled",
+      }),
+    );
+  }),
+
+  http.post("/api/quota-planner/decisions/:decisionId/cancel", ({ params }) => {
+    const decisionId = String(params.decisionId);
+    state.quotaPlannerDecisions = state.quotaPlannerDecisions.map((decision) =>
+      decision.id === decisionId
+        ? { ...decision, status: "canceled", reason: "admin_canceled" }
+        : decision,
+    );
+    return HttpResponse.json(
+      createQuotaPlannerWarmupActionResponse({
+        decisionId,
+        status: "canceled",
+        reason: "admin_canceled",
+      }),
+    );
   }),
 
   http.put("/api/settings", async ({ request }) => {

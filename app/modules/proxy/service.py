@@ -11588,7 +11588,7 @@ class ProxyService:
                             settlement.error,
                         )
                     if allow_retry and _should_retry_stream_error(code):
-                        raise _RetryableStreamError(code, settlement.error)
+                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
                     if allow_transient_retry and _should_retry_transient_stream_error(code, error_message):
                         raise _TransientStreamError(code, settlement.error)
                 terminal_stream_error = _TerminalStreamError(
@@ -11884,6 +11884,7 @@ class ProxyService:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         session_id: str | None = None,
+        request_kind: str = "real",
     ) -> None:
         task = asyncio.create_task(
             self._persist_request_log(
@@ -11906,6 +11907,7 @@ class ProxyService:
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
                 session_id=session_id,
+                request_kind=request_kind,
             ),
             name=f"proxy-request-log-{request_id}",
         )
@@ -11966,6 +11968,7 @@ class ProxyService:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         session_id: str | None = None,
+        request_kind: str = "real",
     ) -> None:
         try:
             async with self._repo_factory() as repos:
@@ -11981,6 +11984,7 @@ class ProxyService:
                     reasoning_tokens=reasoning_tokens,
                     reasoning_effort=reasoning_effort,
                     transport=transport,
+                    request_kind=request_kind,
                     service_tier=service_tier,
                     requested_service_tier=requested_service_tier,
                     actual_service_tier=actual_service_tier,

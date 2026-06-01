@@ -185,7 +185,7 @@ def _bulk_history_fingerprint_sqlite(
         row_id = int(row[0])
         account_id = str(row[1])
         used_percent = float(row[2])
-        recorded_at = str(row[3])
+        recorded_at = _parse_sqlite_datetime(row[3]).isoformat(sep=" ")
         reset_at = float(row[4]) if row[4] is not None else None
         window_minutes = int(row[5]) if row[5] is not None else None
         row_count += 1

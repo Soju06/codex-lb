@@ -14,9 +14,12 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import (
+    UsageHistorySnapshot,
     UsageRepository,
+    _bulk_history_fingerprint_sqlite,
     _bulk_history_since_sqlite,
     _clear_bulk_history_since_sqlite_cache,
+    _fingerprint_grouped_history,
 )
 
 pytestmark = pytest.mark.integration
@@ -419,6 +422,56 @@ def test_bulk_history_since_sqlite_cache_rebuilds_after_offsetting_row_correctio
     assert [row.used_percent for row in second["acc1"]] == [15.0, 15.0]
 
     _clear_bulk_history_since_sqlite_cache()
+
+
+def test_bulk_history_sqlite_fingerprint_normalizes_recorded_at_text(tmp_path):
+    db_path = tmp_path / "usage.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table usage_history (
+                id integer primary key,
+                account_id text not null,
+                used_percent real not null,
+                recorded_at text not null,
+                reset_at real,
+                window_minutes integer,
+                window text
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into usage_history
+                (id, account_id, used_percent, recorded_at, reset_at, window_minutes, window)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "acc1", 10.0, "2026-01-01 00:00:00.000000", 1000.0, 10080, "secondary"),
+        )
+        conn.commit()
+
+    grouped = {
+        "acc1": [
+            UsageHistorySnapshot(
+                id=1,
+                account_id="acc1",
+                used_percent=10.0,
+                recorded_at=datetime(2026, 1, 1, 0, 0, 0),
+                reset_at=1000.0,
+                window_minutes=10080,
+            )
+        ]
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        sqlite_fingerprint = _bulk_history_fingerprint_sqlite(
+            conn,
+            ["acc1"],
+            "secondary",
+            datetime(2026, 1, 1, 0, 0, 0),
+        )
+
+    assert sqlite_fingerprint == _fingerprint_grouped_history(grouped)
 
 
 @pytest.mark.asyncio

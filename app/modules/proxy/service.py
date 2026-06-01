@@ -13069,6 +13069,7 @@ def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
 _LOCAL_PROXY_ERROR_CODES = frozenset(
     {
         "bridge_owner_forward_failed",
+        "bridge_instance_mismatch",
         "bridge_owner_unreachable",
         "insufficient_image_quota",
         "ip_forbidden",

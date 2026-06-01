@@ -1531,6 +1531,7 @@ def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_f
         "no_plan_support_for_model",
         "additional_quota_data_unavailable",
         "no_additional_quota_eligible_accounts",
+        "bridge_instance_mismatch",
     ],
 )
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_selection_failures(

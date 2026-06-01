@@ -42,7 +42,7 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -825,6 +825,79 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
     assert "rate_limit_exceeded" in body
 
 
+@pytest.mark.asyncio
+async def test_opportunistic_admission_uses_api_key_enforced_model():
+    api_key = ApiKeyData(
+        id="key_opportunistic_enforced_model",
+        name="opportunistic enforced model",
+        key_prefix="sk-opportunistic",
+        allowed_models=None,
+        enforced_model="gpt-5.2",
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    selection = AccountSelection(account=_make_account("acc"), error_message=None)
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.1",
+    )
+
+    assert response is None
+    service.check_opportunistic_admission.assert_awaited_once_with(
+        api_key=api_key,
+        model="gpt-5.2",
+        lease_kind="stream",
+    )
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_account_stream_limit = 1
+    settings.proxy_account_response_create_limit = 64
+    settings.soft_drain_enabled = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_opportunistic_stream_cap")
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=SelectionInputs(
+                accounts=[account],
+                latest_primary={},
+                latest_secondary={},
+            )
+        ),
+    )
+    service._load_balancer._runtime[account.id] = RuntimeState(inflight_streams=1)
+
+    selection = await service._load_balancer.check_opportunistic_admission(
+        model="gpt-5.1",
+        account_ids=None,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "opportunistic_burn_window_closed"
+    assert selection.error_message == "opportunistic burn window closed: no account capacity available"
+
+
 def test_has_native_codex_transport_headers_requires_allowlisted_originator():
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_cli_rs"}) is True
     assert proxy_module._has_native_codex_transport_headers({"originator": "codex_exec"}) is True
@@ -1462,7 +1535,40 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         sticky_max_age_seconds=123,
         account_ids=None,
         budget_threshold_pct=95.0,
+        traffic_class=proxy_service.TRAFFIC_CLASS_FOREGROUND,
     )
+
+
+@pytest.mark.asyncio
+async def test_select_codex_control_account_without_budget_honors_traffic_class(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(return_value=AccountSelection(account=None, error_message="closed"))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    api_key = ApiKeyData(
+        id="key_opportunistic_control",
+        name="opportunistic control",
+        key_prefix="sk-opportunistic-control",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        traffic_class=proxy_service.TRAFFIC_CLASS_OPPORTUNISTIC,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    result = await service._select_codex_control_account_without_budget(
+        affinity=proxy_service._AffinityPolicy(key=None, kind=None),
+        api_key=api_key,
+        traffic_class=proxy_service.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert result is None
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["traffic_class"] == proxy_service.TRAFFIC_CLASS_OPPORTUNISTIC
 
 
 @pytest.fixture(autouse=True)

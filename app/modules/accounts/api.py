@@ -18,6 +18,8 @@ from app.modules.accounts.schemas import (
     AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
     AccountReactivateResponse,
+    AccountRoutingPolicyUpdateRequest,
+    AccountRoutingPolicyUpdateResponse,
     AccountsResponse,
     AccountTrendsResponse,
 )
@@ -162,6 +164,18 @@ async def update_account_limit_warmup(
         status="enabled" if payload.enabled else "disabled",
         enabled=payload.enabled,
     )
+
+
+@router.put("/{account_id}/routing-policy", response_model=AccountRoutingPolicyUpdateResponse)
+async def update_account_routing_policy(
+    account_id: str,
+    payload: AccountRoutingPolicyUpdateRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountRoutingPolicyUpdateResponse:
+    success = await context.service.set_routing_policy(account_id, payload.routing_policy)
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountRoutingPolicyUpdateResponse(account_id=account_id, routing_policy=payload.routing_policy)
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

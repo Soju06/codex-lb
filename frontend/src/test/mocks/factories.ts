@@ -82,6 +82,7 @@ export function createAccountSummary(
 		alias: null,
 		displayName: "primary@example.com",
 		planType: "plus",
+		routingPolicy: "normal",
 		status: "active",
 		usage: {
 			primaryRemainingPercent: 82,

@@ -1,4 +1,7 @@
-import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import type {
+  DashboardSettings,
+  SettingsUpdateRequest,
+} from "@/features/settings/schemas";
 
 export function buildSettingsUpdateRequest(
   settings: DashboardSettings,
@@ -13,6 +16,7 @@ export function buildSettingsUpdateRequest(
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+    additionalQuotaRoutingPolicies: settings.additionalQuotaRoutingPolicies ?? {},
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

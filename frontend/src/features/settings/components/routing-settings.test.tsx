@@ -52,6 +52,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -78,6 +79,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -109,6 +111,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -139,6 +142,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
@@ -148,6 +152,44 @@ describe("RoutingSettings", () => {
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
     expect(screen.queryByRole("spinbutton", { name: "Relative availability power" })).not.toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "Relative availability top K" })).not.toBeInTheDocument();
+  });
+
+  it("saves additional quota routing policy overrides", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          additionalQuotaRoutingPolicies: { "gpt-5.2-thinking": "inherit" },
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "gpt-5.2-thinking routing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Preserve" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        additionalQuotaRoutingPolicies: { "gpt-5.2-thinking": "preserve" },
+      }),
+    );
+
+    await user.type(screen.getByLabelText("Additional quota key"), "gpt-5.2-codex");
+    await user.click(screen.getByRole("combobox", { name: "Additional quota routing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Burn first" }));
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+
+    expect(onSave).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        additionalQuotaRoutingPolicies: {
+          "gpt-5.2-thinking": "inherit",
+          "gpt-5.2-codex": "burn_first",
+        },
+      }),
+    );
   });
 
   it("rejects decimal relative availability top K values", async () => {
@@ -178,6 +220,7 @@ describe("RoutingSettings", () => {
       relativeAvailabilityTopK: 6,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,

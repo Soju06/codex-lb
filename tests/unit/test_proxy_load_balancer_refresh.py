@@ -825,6 +825,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 window="primary",
                 used_percent=100.0,
                 recorded_at=now,
+                reset_at=now_epoch + 300,
             ),
             account_eligible.id: _additional_entry(
                 12,
@@ -832,6 +833,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 window="primary",
                 used_percent=35.0,
                 recorded_at=now,
+                reset_at=now_epoch + 300,
             ),
         }
     )

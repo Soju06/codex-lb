@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from fastapi import (
     APIRouter,
@@ -83,6 +83,7 @@ from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -211,6 +212,7 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4-mini": 128_000,
     "gpt-5.3-codex": 128_000,
 }
+_OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -483,6 +485,19 @@ async def responses(
         # compatibility route need the same SSE contract enforcement as /v1.
         enforce_openai_sdk_contract=openai_sdk_request,
     )
+
+
+@router.get("/opportunistic/admission")
+async def opportunistic_admission(
+    request: Request,
+    model: str | None = None,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    denial = await _opportunistic_admission_denial(request, context, api_key, model=model)
+    if denial is not None:
+        return denial
+    return JSONResponse({"admitted": True})
 
 
 @ws_router.websocket("/responses")
@@ -1792,6 +1807,9 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=responses_payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=responses_payload.model,
@@ -1876,6 +1894,9 @@ async def _stream_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     owns_reservation = api_key_reservation_override is None
     reservation = (
         api_key_reservation_override
@@ -1994,6 +2015,9 @@ async def _collect_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -2508,6 +2532,34 @@ async def _enforce_request_limits(
             raise ProxyAuthError(str(exc)) from exc
 
 
+async def _opportunistic_admission_denial(
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    model: str | None,
+    lease_kind: Literal["response_create", "stream"] | None = "stream",
+) -> JSONResponse | None:
+    if api_key is None or api_key.traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
+        return None
+    selection = await context.service.check_opportunistic_admission(
+        api_key=api_key,
+        model=_effective_optional_model_for_api_key(api_key, model),
+        lease_kind=lease_kind,
+    )
+    if selection.account is not None:
+        return None
+    message = selection.error_message or "opportunistic burn window closed"
+    if not message.startswith("opportunistic burn window closed"):
+        message = f"opportunistic burn window closed: {message}"
+    return _logged_error_json_response(
+        request,
+        429,
+        openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),
+        headers={"Retry-After": str(_OPPORTUNISTIC_RETRY_AFTER_SECONDS)},
+    )
+
+
 async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:
     if reservation is None:
         return
@@ -2568,6 +2620,12 @@ async def _finalize_image_reservation(
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
+
+
+def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
     if api_key is None or api_key.enforced_model is None:
         return requested_model
     return api_key.enforced_model

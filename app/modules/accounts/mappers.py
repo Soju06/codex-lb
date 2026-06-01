@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
+from app.core.balancer import ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -125,6 +126,7 @@ def _account_to_summary(
         alias=account.alias,
         display_name=account.alias or account.email,
         plan_type=plan_type,
+        routing_policy=_normalize_account_routing_policy(account.routing_policy),
         status=effective_status.value,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
@@ -146,6 +148,12 @@ def _account_to_summary(
         limit_warmup_enabled=account.limit_warmup_enabled,
         limit_warmup=_limit_warmup_to_status(limit_warmup),
     )
+
+
+def _normalize_account_routing_policy(value: str | None) -> str:
+    if value in {"normal", ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE}:
+        return value
+    return "normal"
 
 
 def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:

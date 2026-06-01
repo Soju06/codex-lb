@@ -10,6 +10,8 @@ import {
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
   AccountsResponseSchema,
+  AccountRoutingPolicyUpdateRequestSchema,
+  AccountRoutingPolicyUpdateResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
@@ -20,6 +22,7 @@ import {
   OauthStatusResponseSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
@@ -64,6 +67,18 @@ export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
     AccountLimitWarmupUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
+export function updateAccountRoutingPolicy(
+  accountId: string,
+  routingPolicy: AccountRoutingPolicy,
+) {
+  const payload = AccountRoutingPolicyUpdateRequestSchema.parse({ routingPolicy });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
+    AccountRoutingPolicyUpdateResponseSchema,
     { body: payload },
   );
 }

@@ -286,6 +286,46 @@ describe("ApiKeyEditDialog", () => {
 
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).toBeChecked();
   });
+
+  it("submits opportunistic traffic class", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: /traffic class/i }));
+    await user.click(await screen.findByRole("option", { name: /opportunistic/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
+  });
+
+  it("shows the stored traffic class value", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ trafficClass: "opportunistic" })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    const trafficClassSelect = screen.getByRole("combobox", { name: /traffic class/i });
+    expect(trafficClassSelect).toHaveTextContent("Opportunistic");
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

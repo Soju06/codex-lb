@@ -25,12 +25,14 @@ def _active(
     account_id: str,
     used_percent: float = 10.0,
     secondary_used_percent: float | None = None,
+    routing_policy: str = "normal",
 ) -> AccountState:
     return AccountState(
         account_id,
         AccountStatus.ACTIVE,
         used_percent=used_percent,
         secondary_used_percent=secondary_used_percent,
+        routing_policy=routing_policy,
     )
 
 
@@ -39,6 +41,7 @@ def _rate_limited(
     reset_at: float | None = None,
     cooldown_until: float | None = None,
     used_percent: float | None = None,
+    routing_policy: str = "normal",
 ) -> AccountState:
     return AccountState(
         account_id,
@@ -48,6 +51,7 @@ def _rate_limited(
         cooldown_until=cooldown_until,
         error_count=1,
         last_error_at=time.time(),
+        routing_policy=routing_policy,
     )
 
 
@@ -948,3 +952,27 @@ async def test_rate_limit_far_away_triggers_reallocation():
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_burn_first_reallocation_only_when_burn_first_is_selectable():
+    now = time.time()
+    pinned = _active("a", used_percent=96.0)
+    blocked_burn_first = _rate_limited(
+        "b",
+        reset_at=now + 1200,
+        routing_policy="burn_first",
+    )
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [pinned, blocked_burn_first],
+        "key1",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)

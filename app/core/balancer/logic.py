@@ -29,6 +29,8 @@ PERMANENT_FAILURE_CODES = {
 }
 
 SECONDS_PER_DAY = 60 * 60 * 24
+SECONDS_PER_HOUR = 60 * 60
+SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
 UNKNOWN_RESET_FALLBACK_SECONDS = 7 * SECONDS_PER_DAY
 RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS = 5 * 60
@@ -36,6 +38,8 @@ RELATIVE_AVAILABILITY_MIN_WEIGHT_FRACTION = 0.1
 DEFAULT_RELATIVE_AVAILABILITY_POWER = 2.0
 DEFAULT_RELATIVE_AVAILABILITY_TOP_K = 5
 RoutingStrategy = Literal["usage_weighted", "round_robin", "capacity_weighted", "relative_availability"]
+TrafficClass = Literal["foreground", "opportunistic"]
+UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 UNKNOWN_PLAN_FALLBACK = "free"
 CAPACITY_PLAN_ALIASES = {
     "education": "edu",
@@ -57,6 +61,15 @@ DRAIN_ERROR_WINDOW_SECONDS = 60.0
 DRAIN_ERROR_COUNT_THRESHOLD = 2
 PROBE_QUIET_SECONDS = 60.0
 PROBE_SUCCESS_STREAK_REQUIRED = 3
+ROUTING_POLICY_NORMAL = "normal"
+ROUTING_POLICY_BURN_FIRST = "burn_first"
+ROUTING_POLICY_PRESERVE = "preserve"
+TRAFFIC_CLASS_FOREGROUND = "foreground"
+TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
+PRESERVE_MIN_WEEKLY_FLOOR_PCT = 5.0
+PRESERVE_MIN_SHORT_WINDOW_FLOOR_PCT = 10.0
+NORMAL_LAST_ACCOUNT_EMERGENCY_FLOOR_PCT = 5.0
+RECENT_FOREGROUND_ACTIVITY_SECONDS = 30 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +98,7 @@ class AccountState:
     inflight_response_creates: int = 0
     inflight_streams: int = 0
     leased_tokens: float = 0.0
+    routing_policy: str = ROUTING_POLICY_NORMAL
 
 
 @dataclass
@@ -105,6 +119,149 @@ def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, s
     secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
     last_selected = state.last_selected_at or 0.0
     return primary_used, secondary_used, last_selected, state.account_id
+
+
+def _routing_policy(state: AccountState) -> str:
+    if state.routing_policy in {
+        ROUTING_POLICY_BURN_FIRST,
+        ROUTING_POLICY_NORMAL,
+        ROUTING_POLICY_PRESERVE,
+    }:
+        return state.routing_policy
+    return ROUTING_POLICY_NORMAL
+
+
+def _used_pct(state: AccountState, *, secondary: bool) -> float | None:
+    if secondary:
+        return state.secondary_used_percent if state.secondary_used_percent is not None else state.used_percent
+    return state.used_percent
+
+
+def _remaining_pct(state: AccountState, *, secondary: bool) -> float | None:
+    used_pct = _used_pct(state, secondary=secondary)
+    if used_pct is None:
+        return None
+    return max(0.0, 100.0 - min(100.0, used_pct))
+
+
+def _seconds_until(reset_at: int | float | None, current: float) -> float | None:
+    if reset_at is None:
+        return None
+    return max(0.0, float(reset_at) - current)
+
+
+def _recent_foreground_activity(state: AccountState, current: float) -> bool:
+    return state.last_selected_at is not None and current - state.last_selected_at <= RECENT_FOREGROUND_ACTIVITY_SECONDS
+
+
+def _weekly_pace_floor_pct(state: AccountState, current: float) -> float:
+    remaining_seconds = _seconds_until(state.secondary_reset_at, current)
+    used_pct = _used_pct(state, secondary=True)
+    if remaining_seconds is None or used_pct is None:
+        return 100.0
+
+    elapsed_seconds = max(0.0, SECONDS_PER_WEEK - remaining_seconds)
+    expected_used_pct = min(100.0, (elapsed_seconds / SECONDS_PER_WEEK) * 100.0)
+    behind_pace = used_pct + 5.0 < expected_used_pct
+
+    if remaining_seconds <= 6 * SECONDS_PER_HOUR and behind_pace:
+        pace_floor = 0.0
+    elif remaining_seconds <= SECONDS_PER_DAY and behind_pace:
+        pace_floor = 2.0
+    elif behind_pace:
+        pace_floor = 5.0
+    else:
+        pace_floor = 15.0
+
+    if _recent_foreground_activity(state, current):
+        pace_floor = max(pace_floor, 25.0)
+
+    return max(PRESERVE_MIN_WEEKLY_FLOOR_PCT, pace_floor)
+
+
+def _short_window_floor_pct(state: AccountState, current: float, *, preserve_count: int) -> float:
+    remaining_seconds = _seconds_until(state.reset_at, current)
+    floor = PRESERVE_MIN_SHORT_WINDOW_FLOOR_PCT
+    if remaining_seconds is None:
+        return 100.0
+    if remaining_seconds > SECONDS_PER_HOUR:
+        floor = max(floor, 20.0)
+    if _recent_foreground_activity(state, current):
+        floor = max(floor, 30.0)
+    if preserve_count <= 1:
+        floor = max(floor, 25.0)
+    return floor
+
+
+def _preserve_allows_opportunistic_burn(state: AccountState, current: float, *, preserve_count: int) -> bool:
+    if _remaining_pct(state, secondary=True) is None or _remaining_pct(state, secondary=False) is None:
+        return False
+    if state.secondary_reset_at is None or state.reset_at is None:
+        return False
+    weekly_floor = _weekly_pace_floor_pct(state, current)
+    short_floor = _short_window_floor_pct(state, current, preserve_count=preserve_count)
+    return (_remaining_pct(state, secondary=True) or 0.0) > weekly_floor and (
+        _remaining_pct(state, secondary=False) or 0.0
+    ) > short_floor
+
+
+def _has_other_usable_foreground_capacity(
+    candidate: AccountState,
+    available: list[AccountState],
+    current: float,
+) -> bool:
+    preserve_count = sum(1 for state in available if _routing_policy(state) == ROUTING_POLICY_PRESERVE)
+    for other in available:
+        if other.account_id == candidate.account_id:
+            continue
+        if other.status != AccountStatus.ACTIVE:
+            continue
+        if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
+            if _preserve_allows_opportunistic_burn(other, current, preserve_count=preserve_count):
+                return True
+            continue
+        return True
+    return False
+
+
+def _above_emergency_floor(state: AccountState) -> bool:
+    primary_remaining = _remaining_pct(state, secondary=False)
+    secondary_remaining = _remaining_pct(state, secondary=True)
+    if primary_remaining is None or secondary_remaining is None:
+        return False
+    return (
+        primary_remaining > NORMAL_LAST_ACCOUNT_EMERGENCY_FLOOR_PCT
+        and secondary_remaining > NORMAL_LAST_ACCOUNT_EMERGENCY_FLOOR_PCT
+    )
+
+
+def _filter_opportunistic_candidates(
+    available: list[AccountState],
+    current: float,
+) -> tuple[list[AccountState], str | None]:
+    burn_first: list[AccountState] = []
+    normal: list[AccountState] = []
+    preserve: list[AccountState] = []
+    preserve_count = sum(1 for state in available if _routing_policy(state) == ROUTING_POLICY_PRESERVE)
+
+    for state in available:
+        policy = _routing_policy(state)
+        if policy == ROUTING_POLICY_BURN_FIRST:
+            if _has_other_usable_foreground_capacity(state, available, current) or _above_emergency_floor(state):
+                burn_first.append(state)
+        elif policy == ROUTING_POLICY_PRESERVE:
+            if _preserve_allows_opportunistic_burn(state, current, preserve_count=preserve_count):
+                preserve.append(state)
+        else:
+            if _has_other_usable_foreground_capacity(state, available, current) or _above_emergency_floor(state):
+                normal.append(state)
+
+    if burn_first or normal or preserve:
+        return [*burn_first, *normal, *preserve], None
+
+    if any(_routing_policy(state) == ROUTING_POLICY_PRESERVE for state in available):
+        return [], "preserve floor or stale usage data blocks opportunistic burn"
+    return [], "no expendable account has emergency foreground reserve"
 
 
 def _reset_bucket_days(state: AccountState, current: float) -> int:
@@ -137,7 +294,9 @@ def select_account(
     deterministic_probe: bool = False,
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
-    primary_first_usage_weighted: bool = False,
+    usage_weighted_order: UsageWeightedOrder = "secondary_first",
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+    ignore_standard_quota: bool = False,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -164,8 +323,15 @@ def select_account(
             availability weights.
         relative_availability_top_k: Maximum number of highest-weight
             relative-availability candidates retained before weighted draw.
-        primary_first_usage_weighted: Whether usage-weighted routing should
-            rank by primary-window pressure before secondary-window pressure.
+        usage_weighted_order: Whether usage-weighted routing ranks secondary
+            window pressure first, or primary-window pressure first for
+            budget-safe fallback selection.
+        traffic_class: Whether the request is normal foreground traffic or
+            opportunistic traffic that may only use explicitly expendable
+            account capacity.
+        ignore_standard_quota: Whether to ignore the account's standard
+            primary/secondary quota status. This is only for models that are
+            gated by a separate additional quota pool.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -188,9 +354,9 @@ def select_account(
                 state.used_percent = 0.0
                 state.error_count = 0
                 state.reset_at = None
-            else:
+            elif not ignore_standard_quota:
                 continue
-        if state.status == AccountStatus.QUOTA_EXCEEDED:
+        if state.status == AccountStatus.QUOTA_EXCEEDED and not ignore_standard_quota:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
@@ -219,6 +385,12 @@ def select_account(
             state.last_error_at = None
         available.append(state)
 
+    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
+        opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
+        if not opportunistic_available:
+            return SelectionResult(None, f"opportunistic burn window closed: {reason}")
+        available = opportunistic_available
+
     if not available:
         hard_blocked_exists = any(
             state.status
@@ -237,6 +409,11 @@ def select_account(
                 return (s.last_error_at or 0.0) + backoff
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))
+            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+                opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
+                if not opportunistic_available:
+                    return SelectionResult(None, f"opportunistic burn window closed: {reason}")
+                available = opportunistic_available
         else:
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
@@ -265,19 +442,19 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return reset_bucket_days, secondary_used, primary_used, last_selected, account_id
 
-    def _primary_reset_first_sort_key(state: AccountState) -> tuple[int, float, float, float, str]:
-        reset_bucket_days = _reset_bucket_days(state, current)
-        primary_used, secondary_used, last_selected, account_id = _primary_usage_sort_key(state)
-        return reset_bucket_days, primary_used, secondary_used, last_selected, account_id
-
     def _round_robin_sort_key(state: AccountState) -> tuple[float, str]:
         # Pick the least recently selected account, then stabilize by account_id.
         return state.last_selected_at or 0.0, state.account_id
 
-    healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
-    probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
-    draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
-    effective_pool = healthy or probing or draining or available
+    burn_first = [s for s in available if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
+    normal = [s for s in available if _routing_policy(s) == ROUTING_POLICY_NORMAL]
+    preserve = [s for s in available if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
+    policy_pool = burn_first or normal or preserve or available
+
+    healthy = [s for s in policy_pool if s.health_tier == HEALTH_TIER_HEALTHY]
+    probing = [s for s in policy_pool if s.health_tier == HEALTH_TIER_PROBING]
+    draining = [s for s in policy_pool if s.health_tier == HEALTH_TIER_DRAINING]
+    effective_pool = healthy or probing or draining or policy_pool
     effective_prefer_earlier_reset = prefer_earlier_reset and routing_strategy != "relative_availability"
 
     if routing_strategy == "round_robin":
@@ -301,7 +478,7 @@ def select_account(
             deterministic_probe=deterministic_probe,
         )
     else:
-        if primary_first_usage_weighted:
+        if usage_weighted_order == "primary_first":
             selected = min(effective_pool, key=_primary_usage_sort_key)
         else:
             selected = min(

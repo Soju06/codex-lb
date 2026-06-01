@@ -6,20 +6,55 @@ export const RoutingStrategySchema = z.enum([
   "capacity_weighted",
   "relative_availability",
 ]);
-export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
-export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"]);
+export const UpstreamStreamTransportSchema = z.enum([
+  "default",
+  "auto",
+  "http",
+  "websocket",
+]);
+export const LimitWarmupWindowsSchema = z.enum([
+  "primary",
+  "secondary",
+  "both",
+]);
+export const AdditionalQuotaRoutingPolicySchema = z.enum([
+  "inherit",
+  "normal",
+  "burn_first",
+  "preserve",
+]);
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
 
 export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
-  upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
+  upstreamStreamTransport:
+    UpstreamStreamTransportSchema.optional().default("default"),
   preferEarlierResetAccounts: z.boolean(),
   routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
   relativeAvailabilityPower: z.number().positive().optional().default(2),
-  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
-  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
-  dashboardSessionTtlSeconds: z.number().int().min(3600).optional().default(43200),
+  relativeAvailabilityTopK: z
+    .number()
+    .int()
+    .min(1)
+    .max(20)
+    .optional()
+    .default(5),
+  openaiCacheAffinityMaxAgeSeconds: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(300),
+  dashboardSessionTtlSeconds: z
+    .number()
+    .int()
+    .min(3600)
+    .optional()
+    .default(43200),
+  additionalQuotaRoutingPolicies: z
+    .record(z.string(), AdditionalQuotaRoutingPolicySchema)
+    .optional(),
   importWithoutOverwrite: z.boolean(),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
@@ -29,7 +64,12 @@ export const DashboardSettingsSchema = z.object({
   limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
   limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
-  limitWarmupMinAvailablePercent: z.number().positive().max(100).optional().default(100),
+  limitWarmupMinAvailablePercent: z
+    .number()
+    .positive()
+    .max(100)
+    .optional()
+    .default(100),
 });
 
 export const SettingsUpdateRequestSchema = z.object({
@@ -41,6 +81,9 @@ export const SettingsUpdateRequestSchema = z.object({
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
+  additionalQuotaRoutingPolicies: z
+    .record(z.string(), AdditionalQuotaRoutingPolicySchema)
+    .optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
@@ -54,3 +97,4 @@ export const SettingsUpdateRequestSchema = z.object({
 
 export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;

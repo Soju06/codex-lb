@@ -4,7 +4,9 @@ import base64
 import json
 
 import pytest
+from starlette.responses import JSONResponse
 
+import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
 
 pytestmark = pytest.mark.integration
@@ -53,6 +55,52 @@ async def test_v1_chat_completions_stream(async_client, monkeypatch):
         lines = [line async for line in resp.aiter_lines() if line]
 
     assert any("chat.completion.chunk" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_opportunistic_denial_runs_before_api_key_reservation(async_client, monkeypatch):
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "opportunistic chat key", "trafficClass": "opportunistic"},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    observed: dict[str, str | None] = {}
+
+    async def fake_admission_denial(request, context, api_key, *, model):
+        observed["traffic_class"] = api_key.traffic_class if api_key is not None else None
+        observed["model"] = model
+        return JSONResponse(
+            {"error": {"code": "rate_limit_exceeded", "message": "opportunistic burn window closed"}},
+            status_code=429,
+            headers={"Retry-After": "60"},
+        )
+
+    async def fail_reservation(*_args, **_kwargs):
+        raise AssertionError("chat completions reserved API-key usage before opportunistic admission")
+
+    monkeypatch.setattr(proxy_api, "_opportunistic_admission_denial", fake_admission_denial)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", fail_reservation)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert observed == {"traffic_class": "opportunistic", "model": "gpt-5.2"}
 
 
 @pytest.mark.asyncio

@@ -124,6 +124,7 @@ describe("TotpSettings", () => {
       relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: true,

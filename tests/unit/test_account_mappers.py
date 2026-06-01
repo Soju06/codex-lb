@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.accounts.mappers import _effective_status_from_usage
+from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
 
 
 def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:
@@ -111,3 +111,11 @@ def test_effective_status_keeps_paused_account_paused_with_usable_credits() -> N
         )
         == AccountStatus.PAUSED
     )
+
+
+def test_normalize_account_routing_policy() -> None:
+    assert _normalize_account_routing_policy("normal") == "normal"
+    assert _normalize_account_routing_policy("burn_first") == "burn_first"
+    assert _normalize_account_routing_policy("preserve") == "preserve"
+    assert _normalize_account_routing_policy("legacy") == "normal"
+    assert _normalize_account_routing_policy(None) == "normal"

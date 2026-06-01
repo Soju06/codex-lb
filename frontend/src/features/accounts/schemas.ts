@@ -66,6 +66,7 @@ export const AccountSummarySchema = z.object({
   alias: z.string().nullable().optional(),
   displayName: z.string(),
   planType: z.string(),
+  routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -127,6 +128,8 @@ export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
 
+export const AccountRoutingPolicySchema = z.enum(["normal", "burn_first", "preserve"]);
+
 export const AccountAliasRequestSchema = z.object({
   alias: z.string().max(255).nullable(),
 });
@@ -143,6 +146,15 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
   status: z.string(),
   enabled: z.boolean(),
+});
+
+export const AccountRoutingPolicyUpdateRequestSchema = z.object({
+  routingPolicy: AccountRoutingPolicySchema,
+});
+
+export const AccountRoutingPolicyUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  routingPolicy: AccountRoutingPolicySchema,
 });
 
 export const AccountExportResponseSchema = z.object({
@@ -220,11 +232,18 @@ export const ImportStateSchema = z.object({
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type AccountRoutingPolicy = z.infer<typeof AccountRoutingPolicySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
-export type AccountLimitWarmupStatus = z.infer<typeof AccountLimitWarmupStatusSchema>;
+export type AccountLimitWarmupStatus = z.infer<
+  typeof AccountLimitWarmupStatusSchema
+>;
 export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
-export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
-export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
+export type AccountAdditionalWindow = z.infer<
+  typeof AccountAdditionalWindowSchema
+>;
+export type AccountAdditionalQuota = z.infer<
+  typeof AccountAdditionalQuotaSchema
+>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
 export type AccountOpenCodeAuthExportResponse = z.infer<
@@ -232,7 +251,9 @@ export type AccountOpenCodeAuthExportResponse = z.infer<
 >;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
-export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;
+export type ManualOauthCallbackResponse = z.infer<
+  typeof ManualOauthCallbackResponseSchema
+>;
 export type RuntimeConnectAddressResponse = z.infer<
   typeof RuntimeConnectAddressResponseSchema
 >;

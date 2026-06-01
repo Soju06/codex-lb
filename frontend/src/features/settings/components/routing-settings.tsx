@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
-import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import type {
+  AdditionalQuotaRoutingPolicy,
+  DashboardSettings,
+  SettingsUpdateRequest,
+} from "@/features/settings/schemas";
 
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
@@ -36,9 +40,32 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
   const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
   const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
+  const [additionalQuotaKey, setAdditionalQuotaKey] = useState("");
+  const [additionalQuotaPolicy, setAdditionalQuotaPolicy] =
+    useState<AdditionalQuotaRoutingPolicy>("inherit");
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
+  const saveAdditionalQuotaPolicy = (
+    quotaKey: string,
+    policy: AdditionalQuotaRoutingPolicy,
+  ) => {
+    const normalizedKey = quotaKey.trim();
+    if (!normalizedKey) {
+      return;
+    }
+    save({
+      additionalQuotaRoutingPolicies: {
+        ...(settings.additionalQuotaRoutingPolicies ?? {}),
+        [normalizedKey]: policy,
+      },
+    });
+  };
+  const removeAdditionalQuotaPolicy = (quotaKey: string) => {
+    const next = { ...(settings.additionalQuotaRoutingPolicies ?? {}) };
+    delete next[quotaKey];
+    save({ additionalQuotaRoutingPolicies: next });
+  };
 
   const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
@@ -139,6 +166,90 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="space-y-3 p-3">
+            <div>
+              <p className="text-sm font-medium">Additional quota routing policies</p>
+              <p className="text-xs text-muted-foreground">Override account routing for model-specific quota pools.</p>
+            </div>
+            <div className="space-y-2">
+              {Object.entries(settings.additionalQuotaRoutingPolicies ?? {}).map(([quotaKey, policy]) => (
+                <div key={quotaKey} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1 truncate rounded-md border bg-muted/20 px-2 py-1.5 text-xs">
+                    {quotaKey}
+                  </div>
+                  <Select
+                    value={policy}
+                    onValueChange={(value) =>
+                      saveAdditionalQuotaPolicy(quotaKey, value as AdditionalQuotaRoutingPolicy)
+                    }
+                  >
+                    <SelectTrigger
+                      className="h-8 w-full text-xs sm:w-36"
+                      disabled={busy}
+                      aria-label={`${quotaKey} routing policy`}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent align="end">
+                      <SelectItem value="inherit">Inherit</SelectItem>
+                      <SelectItem value="normal">Normal</SelectItem>
+                      <SelectItem value="burn_first">Burn first</SelectItem>
+                      <SelectItem value="preserve">Preserve</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs sm:w-20"
+                    disabled={busy}
+                    onClick={() => removeAdditionalQuotaPolicy(quotaKey)}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <Input
+                  value={additionalQuotaKey}
+                  disabled={busy}
+                  onChange={(event) => setAdditionalQuotaKey(event.target.value)}
+                  className="h-8 text-xs"
+                  aria-label="Additional quota key"
+                  placeholder="Quota key"
+                />
+                <Select
+                  value={additionalQuotaPolicy}
+                  onValueChange={(value) => setAdditionalQuotaPolicy(value as AdditionalQuotaRoutingPolicy)}
+                >
+                  <SelectTrigger
+                    className="h-8 w-full text-xs sm:w-36"
+                    disabled={busy}
+                    aria-label="Additional quota routing policy"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent align="end">
+                    <SelectItem value="inherit">Inherit</SelectItem>
+                    <SelectItem value="normal">Normal</SelectItem>
+                    <SelectItem value="burn_first">Burn first</SelectItem>
+                    <SelectItem value="preserve">Preserve</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs sm:w-24"
+                  disabled={busy || !additionalQuotaKey.trim()}
+                  onClick={() => saveAdditionalQuotaPolicy(additionalQuotaKey, additionalQuotaPolicy)}
+                >
+                  Save policy
+                </Button>
+              </div>
+            </div>
           </div>
 
           {relativeAvailabilitySelected ? (

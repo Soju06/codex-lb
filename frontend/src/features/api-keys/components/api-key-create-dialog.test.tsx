@@ -45,6 +45,31 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
   });
 
+  it("submits opportunistic traffic class", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Opportunistic key");
+    await user.click(screen.getByRole("combobox", { name: /traffic class/i }));
+    await user.click(await screen.findByRole("option", { name: /opportunistic/i }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
+  });
+
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

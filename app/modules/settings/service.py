@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from app.modules.settings.repository import SettingsRepository
+from app.modules.usage.additional_quota_keys import (
+    canonicalize_additional_quota_key,
+    get_additional_quota_definition,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +23,7 @@ class DashboardSettingsData:
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
+    additional_quota_routing_policies: dict[str, str]
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -43,6 +49,7 @@ class DashboardSettingsUpdateData:
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
+    additional_quota_routing_policies: dict[str, str]
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
@@ -74,6 +81,9 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
+                row.additional_quota_routing_policies_json
+            ),
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
@@ -104,6 +114,9 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=payload.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=payload.sticky_reallocation_budget_threshold_pct,
+            additional_quota_routing_policies_json=_dump_additional_quota_routing_policies(
+                payload.additional_quota_routing_policies
+            ),
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
@@ -128,6 +141,9 @@ class SettingsService:
             ),
             http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
             sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
+                row.additional_quota_routing_policies_json
+            ),
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
@@ -139,3 +155,47 @@ class SettingsService:
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
         )
+
+
+_ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
+
+
+def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:
+    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
+    if canonical_key is None:
+        return None
+    if get_additional_quota_definition(canonical_key) is None:
+        return None
+    return canonical_key
+
+
+def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    policies: dict[str, str] = {}
+    for quota_key, policy in parsed.items():
+        if not isinstance(quota_key, str) or not isinstance(policy, str):
+            continue
+        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        policy = policy.strip().lower()
+        if normalized_quota_key and policy in _ROUTING_POLICIES:
+            policies[normalized_quota_key] = policy
+    return policies
+
+
+def _dump_additional_quota_routing_policies(policies: dict[str, str]) -> str:
+    normalized = {}
+    for quota_key, policy in policies.items():
+        if not isinstance(quota_key, str) or not isinstance(policy, str):
+            continue
+        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        normalized_policy = policy.strip().lower()
+        if normalized_quota_key is not None and normalized_policy in _ROUTING_POLICIES:
+            normalized[normalized_quota_key] = normalized_policy
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))

@@ -319,6 +319,63 @@ async def test_validate_internal_bridge_api_key_preserves_local_request_exemptio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "expected_authorization"),
+    [
+        ([(b"x-api-key", b"valid-owner-forward-key")], None),
+        (
+            [(b"authorization", b"Bearer invalid-key"), (b"x-api-key", b"valid-owner-forward-key")],
+            "Bearer invalid-key",
+        ),
+    ],
+)
+async def test_validate_internal_bridge_api_key_allows_owner_forward_x_api_key(
+    monkeypatch,
+    headers: list[tuple[bytes, bytes]],
+    expected_authorization: str | None,
+) -> None:
+    async def fake_settings():
+        return SimpleNamespace(api_key_auth_enabled=True)
+
+    api_key = ApiKeyData(
+        id="key_owner_forward",
+        name="Owner Forward",
+        key_prefix="sk-owner",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 3, 10),
+        last_used_at=None,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": headers,
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+
+    async def pass_auth(authorization: str | None, *, request: Request | None = None):
+        assert authorization == expected_authorization
+        assert request is not None
+        assert request.headers["x-api-key"] == "valid-owner-forward-key"
+        return api_key
+
+    monkeypatch.setattr(proxy_api_module, "get_settings_cache", lambda: SimpleNamespace(get=fake_settings))
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", pass_auth)
+
+    resolved_api_key, response = await proxy_api_module._validate_internal_bridge_api_key(request)
+
+    assert response is None
+    assert resolved_api_key == api_key
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypatch):
     request = Request(
         {

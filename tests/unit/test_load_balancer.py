@@ -2119,11 +2119,12 @@ def test_select_account_fill_first_cycle_after_account_drops_out():
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
     assert result.account.account_id == "a"
+    result.account.last_selected_at = now
 
     a.used_percent = 50.0
     result = select_account(states, now=now, routing_strategy="fill_first")
     assert result.account is not None
-    assert result.account.account_id == "b"
+    assert result.account.account_id == "a"
 
     a.status = AccountStatus.RATE_LIMITED
     a.reset_at = int(now + 600)

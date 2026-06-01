@@ -580,11 +580,10 @@ async def test_load_balancer_fill_first_cycles_through_accounts(db_setup):
             window_minutes=300,
             recorded_at=now,
         )
-    balancer._runtime.clear()
 
     second = await balancer.select_account(routing_strategy="fill_first")
     assert second.account is not None
-    assert second.account.id == accounts[1].id
+    assert second.account.id == accounts[0].id
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

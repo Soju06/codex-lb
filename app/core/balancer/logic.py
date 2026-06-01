@@ -536,19 +536,25 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
     one for later cycles, matching operator intent for "fill first" behavior.
     ``account_id`` ascending is the final stable tiebreaker.
 
-    The "fill first" effect emerges from the existing pool gating: an
-    account stays selected while it remains the lowest-primary-usage
-    candidate; once its 5h primary window saturates and the upstream marks
-    it rate-limited or quota-exceeded (or it transitions to ``DRAINING``),
-    it falls out of ``effective_pool`` and the next-lowest-usage account is
-    picked. By the time later accounts saturate, the first account's 5h
-    window has typically reset and it re-enters the pool as an empty fallback
-    again.
+    The strategy stays on the currently selected healthy account while it remains
+    in the candidate pool, which keeps cache locality as long as it keeps
+    successfully serving traffic. Once that account leaves the pool (rate-limited,
+    quota-exceeded, in cooldown, or transitioned out of healthy), selection
+    falls back to the lowest-``used_percent`` candidate.
 
     Drained accounts are only reachable here when no healthy or probing
     account exists, via the existing ``effective_pool`` ladder; this helper
     introduces no new bypass.
     """
+    if available:
+        recent_healthy = [
+            state
+            for state in available
+            if state.health_tier == HEALTH_TIER_HEALTHY and state.last_selected_at is not None
+        ]
+        if recent_healthy:
+            return max(recent_healthy, key=lambda state: state.last_selected_at)
+
     return min(available, key=_fill_first_sort_key)
 
 

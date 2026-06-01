@@ -1525,6 +1525,30 @@ def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_f
     assert metadata.bridge_stage is None
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "no_plan_support_for_model",
+        "additional_quota_data_unavailable",
+        "no_additional_quota_eligible_accounts",
+    ],
+)
+def test_request_log_failure_metadata_does_not_use_status_code_for_local_selection_failures(
+    error_code: str,
+) -> None:
+    metadata = proxy_service._request_log_failure_metadata(
+        proxy_module.ProxyResponseError(
+            503,
+            openai_error(error_code, f"Local routing failure: {error_code}"),
+        )
+    )
+
+    assert metadata.failure_phase is None
+    assert metadata.upstream_status_code is None
+    assert metadata.upstream_error_code == error_code
+    assert metadata.bridge_stage is None
+
+
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_overloads() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(

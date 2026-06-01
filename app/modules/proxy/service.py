@@ -34,7 +34,14 @@ from app.core.auth.refresh import (
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
-from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    TRAFFIC_CLASS_FOREGROUND,
+    TRAFFIC_CLASS_OPPORTUNISTIC,
+    RoutingStrategy,
+    TrafficClass,
+    failover_decision,
+)
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
@@ -11735,6 +11742,7 @@ class ProxyService:
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -11746,6 +11754,11 @@ class ProxyService:
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
+        )
+        effective_traffic_class = (
+            TRAFFIC_CLASS_OPPORTUNISTIC
+            if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+            else traffic_class
         )
         excluded_account_ids_set = set(exclude_account_ids or ())
         try:
@@ -11780,6 +11793,7 @@ class ProxyService:
                         budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                         lease_kind=lease_kind,
                         estimated_lease_tokens=estimated_lease_tokens,
+                        traffic_class=effective_traffic_class,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -11808,6 +11822,7 @@ class ProxyService:
                     budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
+                    traffic_class=effective_traffic_class,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     return AccountSelection(
@@ -11853,6 +11868,26 @@ class ProxyService:
                 "Account response-create capacity is exhausted",
                 error_type="rate_limit_error",
             ),
+        )
+
+    async def check_opportunistic_admission(
+        self,
+        *,
+        api_key: ApiKeyData | None,
+        model: str | None,
+    ) -> AccountSelection:
+        settings = await get_settings_cache().get()
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        return await self._load_balancer.check_opportunistic_admission(
+            model=model,
+            account_ids=scoped_account_ids,
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            routing_strategy=_routing_strategy(settings),
+            budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

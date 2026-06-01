@@ -1276,7 +1276,7 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
 
 
 @pytest.mark.asyncio
-async def test_non_sticky_selection_applies_split_secondary_threshold(monkeypatch):
+async def test_non_sticky_selection_ignores_sticky_secondary_threshold(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
     secondary_over = _make_test_account("secondary-over")
@@ -1318,7 +1318,62 @@ async def test_non_sticky_selection_applies_split_secondary_threshold(monkeypatc
     )
 
     assert result.account is not None
+    assert result.account.id == "secondary-over"
+
+
+@pytest.mark.asyncio
+async def test_sticky_select_account_forwards_split_secondary_threshold(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    pinned = _make_test_account("pinned")
+    secondary_safe = _make_test_account("secondary-safe")
+
+    sticky_repo = MagicMock()
+    sticky_repo.get_account_id = AsyncMock(return_value="pinned")
+    sticky_repo.delete = AsyncMock()
+    sticky_repo.upsert = AsyncMock()
+
+    mock_repos = MagicMock()
+    mock_repos.accounts.update_status_if_current = AsyncMock(return_value=True)
+    mock_repos.sticky_sessions = sticky_repo
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+
+    async def load_selection_inputs(**kwargs):  # noqa: ARG001
+        return SelectionInputs(
+            accounts=[pinned, secondary_safe],
+            latest_primary={},
+            latest_secondary={},
+            runtime_accounts=None,
+        )
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_selection_inputs)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer._build_states",
+        lambda **_: (
+            [
+                AccountState("pinned", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=99.0),
+                AccountState("secondary-safe", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=10.0),
+            ],
+            {
+                pinned.id: pinned,
+                secondary_safe.id: secondary_safe,
+            },
+        ),
+    )
+
+    result = await balancer.select_account(
+        sticky_key="thread-1",
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+        routing_strategy="round_robin",
+    )
+
+    assert result.account is not None
     assert result.account.id == "secondary-safe"
+    sticky_repo.delete.assert_awaited_once_with("thread-1", kind=StickySessionKind.STICKY_THREAD)
 
 
 @pytest.mark.asyncio

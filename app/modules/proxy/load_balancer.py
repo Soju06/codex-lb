@@ -342,8 +342,6 @@ class LoadBalancer:
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
-                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-                            apply_secondary_budget_threshold=True,
                             budget_threshold_pct=budget_threshold_pct,
                         )
 
@@ -521,6 +519,7 @@ class LoadBalancer:
                             reallocate_sticky=reallocate_sticky,
                             sticky_max_age_seconds=sticky_max_age_seconds,
                             budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
                             relative_availability_power=relative_availability_power,

@@ -29,6 +29,7 @@ from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
     NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS,
     NO_PLAN_SUPPORT_FOR_MODEL,
+    AccountLease,
     LoadBalancer,
     RuntimeState,
 )
@@ -1060,6 +1061,64 @@ async def test_select_account_prunes_stale_runtime_for_removed_accounts() -> Non
     selection = await balancer.select_account()
     assert selection.account is not None
     assert selection.account.id == account_id
+
+
+@pytest.mark.asyncio
+async def test_select_account_preserves_leased_runtime_for_removed_accounts() -> None:
+    active = _make_account("acc-active", "active@example.com")
+    removed = _make_account("acc-removed", "removed@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    primary = {
+        active.id: UsageHistory(
+            id=1,
+            account_id=active.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        active.id: UsageHistory(
+            id=2,
+            account_id=active.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+
+    accounts_repo = StubAccountsRepository([active])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    lease = AccountLease(
+        lease_id="lease-removed",
+        account_id=removed.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+        estimated_tokens=42.0,
+    )
+    balancer._runtime[removed.id] = RuntimeState(
+        inflight_streams=1,
+        leased_tokens=42.0,
+        leases={lease.lease_id: lease},
+    )
+
+    selection = await balancer.select_account()
+
+    assert selection.account is not None
+    assert selection.account.id == active.id
+    assert removed.id in balancer._runtime
+    retained_runtime = balancer._runtime[removed.id]
+    assert retained_runtime.inflight_streams == 1
+    assert retained_runtime.leased_tokens == 42.0
+    assert retained_runtime.leases == {lease.lease_id: lease}
 
 
 @pytest.mark.asyncio

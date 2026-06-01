@@ -267,6 +267,7 @@ class AccountsRepository:
                 await self._session.delete(assignment)
             else:
                 assignment.account_id = canonical.id
+                existing_api_key_ids.add(assignment.api_key_id)
 
         await self._session.execute(
             update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical.id)

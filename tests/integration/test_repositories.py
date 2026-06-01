@@ -233,9 +233,14 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
 
         duplicate = _make_account_with_chatgpt_id("acc_merge_main__copy2", "merge@example.com", "chatgpt_merge")
         await repo.upsert(duplicate, merge_by_email=False)
+        duplicate_again = _make_account_with_chatgpt_id("acc_merge_main__copy3", "merge@example.com", "chatgpt_merge")
+        await repo.upsert(duplicate_again, merge_by_email=False)
 
         duplicate_row = (
             await session.execute(select(Account).where(Account.id == "acc_merge_main__copy2"))
+        ).scalar_one()
+        duplicate_again_row = (
+            await session.execute(select(Account).where(Account.id == "acc_merge_main__copy3"))
         ).scalar_one()
 
         api_key = ApiKey(
@@ -248,6 +253,7 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
         )
         session.add(api_key)
         session.add(ApiKeyAccountAssignment(api_key_id=api_key.id, account_id=duplicate_row.id))
+        session.add(ApiKeyAccountAssignment(api_key_id=api_key.id, account_id=duplicate_again_row.id))
         session.add(
             UsageHistory(
                 account_id=duplicate_row.id,

@@ -13348,6 +13348,55 @@ async def test_stream_early_route_failure_logs_resolved_route_metadata(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_transcribe_early_route_failure_logs_resolved_route_metadata(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_transcribe_early_route_failure")
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def fake_select_account_with_budget(*args: object, **kwargs: object) -> AccountSelection:
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_ensure_fresh(account: Account, **kwargs: object) -> Account:
+        return account
+
+    async def resolve_route(*args: object, **kwargs: object) -> ResolvedUpstreamRoute:
+        return route
+
+    async def fail_transcribe(*args: object, **kwargs: object) -> dict[str, JsonValue]:
+        raise proxy_module.ProxyResponseError(502, openai_error("upstream_unavailable", "proxy connect failed"))
+
+    monkeypatch.setattr(service, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", resolve_route)
+    monkeypatch.setattr(proxy_service, "core_transcribe_audio", fail_transcribe)
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service.transcribe(
+            audio_bytes=b"audio",
+            filename="audio.wav",
+            content_type="audio/wav",
+            prompt=None,
+            headers={},
+        )
+
+    log = request_logs.calls[-1]
+    assert log["upstream_proxy_route_mode"] == "account_bound"
+    assert log["upstream_proxy_pool_id"] == "pool_1"
+    assert log["upstream_proxy_endpoint_id"] == "ep_1"
+    assert log["upstream_proxy_fallback_used"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_refresh_route_fail_closed_surfaces_proxy_error(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

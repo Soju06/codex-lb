@@ -255,9 +255,7 @@ async def _validate_proxy_endpoint_ids(context: SettingsContext, endpoint_ids: l
     if not endpoint_ids:
         return
     existing_ids = set(
-        (
-            await context.session.execute(select(ProxyEndpoint.id).where(ProxyEndpoint.id.in_(endpoint_ids)))
-        )
+        (await context.session.execute(select(ProxyEndpoint.id).where(ProxyEndpoint.id.in_(endpoint_ids))))
         .scalars()
         .all()
     )

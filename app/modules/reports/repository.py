@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, select
+from sqlalchemy import Integer, and_, cast, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, RequestLog
@@ -29,7 +29,7 @@ class ModelAggregateRow:
 
 @dataclass(frozen=True)
 class AccountAggregateRow:
-    account_id: str
+    account_id: str | None
     alias: str | None
     cost_usd: float
     request_count: int
@@ -51,7 +51,7 @@ class ReportsRepository:
         if dialect == "postgresql":
             date_expr = func.date(RequestLog.requested_at)
         else:
-            date_expr = cast(RequestLog.requested_at, String).substring(0, 10)
+            date_expr = func.strftime("%Y-%m-%d", RequestLog.requested_at)
         date_col = date_expr.label("date")
 
         conditions = [
@@ -165,7 +165,7 @@ class ReportsRepository:
         rows = result.all()
 
         account_ids_found = [row.account_id for row in rows if row.account_id]
-        alias_map: dict[str, str | None] = {}
+        alias_map: dict[str | None, str | None] = {}
         if account_ids_found:
             alias_result = await self._session.execute(
                 select(Account.id, Account.alias).where(Account.id.in_(account_ids_found))

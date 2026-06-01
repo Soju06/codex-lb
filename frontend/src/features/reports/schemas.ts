@@ -18,7 +18,7 @@ export const ModelCostEntrySchema = z.object({
 });
 
 export const AccountCostEntrySchema = z.object({
-  accountId: z.string(),
+  accountId: z.string().nullable(),
   alias: z.string().nullable(),
   costUsd: z.number(),
   requests: z.number(),

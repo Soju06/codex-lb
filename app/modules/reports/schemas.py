@@ -23,7 +23,7 @@ class ModelCostEntry(DashboardModel):
 
 
 class AccountCostEntry(DashboardModel):
-    account_id: str
+    account_id: str | None
     alias: str | None = None
     cost_usd: float = 0.0
     requests: int = 0

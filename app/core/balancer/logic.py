@@ -327,8 +327,9 @@ def select_account(
             candidate_pool = _lowest_planner_cost_candidates(candidate_pool, routing_costs)
             selected = _select_capacity_weighted(candidate_pool)
     elif routing_strategy == "relative_availability":
+        candidate_pool = _lowest_planner_cost_candidates(effective_pool, routing_costs)
         selected = _select_relative_availability(
-            effective_pool,
+            candidate_pool,
             current=current,
             power=relative_availability_power,
             top_k=relative_availability_top_k,

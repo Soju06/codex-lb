@@ -1975,6 +1975,41 @@ def test_select_account_relative_availability_prefers_more_urgent_weekly_capacit
     assert counts["soon-plus"] > counts["later-pro"]
 
 
+def test_select_account_relative_availability_filters_higher_planner_costs():
+    now = time.time()
+    low_cost = AccountState(
+        "low-cost",
+        AccountStatus.ACTIVE,
+        used_percent=90.0,
+        secondary_used_percent=90.0,
+        secondary_reset_at=int(now + 24 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    high_cost_urgent = AccountState(
+        "high-cost-urgent",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    result = select_account(
+        [low_cost, high_cost_urgent],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+        routing_costs={
+            "low-cost": RoutingCost(total=1.0, reason="budget_safe"),
+            "high-cost-urgent": RoutingCost(total=9.0, reason="expensive"),
+        },
+    )
+    assert result.account is not None
+    assert result.account.account_id == "low-cost"
+
+
 def test_select_account_relative_availability_ignores_prefer_earlier_reset_bucket():
     now = time.time()
     early_low = AccountState(

@@ -926,7 +926,7 @@ class AdditionalUsageRepository:
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
-        """Returns the most recent entry per account for a given canonical quota key + window."""
+        """Returns the latest effective entry per account for a canonical quota key + window."""
         scope = _resolve_additional_quota_query_scope(
             quota_key=quota_key,
             limit_name=limit_name,
@@ -947,7 +947,11 @@ class AdditionalUsageRepository:
                 func.row_number()
                 .over(
                     partition_by=AdditionalUsageHistory.account_id,
-                    order_by=(AdditionalUsageHistory.recorded_at.desc(), AdditionalUsageHistory.id.desc()),
+                    order_by=(
+                        AdditionalUsageHistory.recorded_at.desc(),
+                        AdditionalUsageHistory.used_percent.desc(),
+                        AdditionalUsageHistory.id.desc(),
+                    ),
                 )
                 .label("row_number"),
             )

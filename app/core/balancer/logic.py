@@ -4,7 +4,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Collection, Iterable, Literal
 
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
@@ -97,6 +97,11 @@ class AccountState:
     plan_type: str | None = None
     capacity_credits: float | None = None
     health_tier: int = 0
+    priority_used_percent: float | None = None
+    priority_secondary_used_percent: float | None = None
+    priority_reset_at: int | None = None
+    priority_capacity_credits: float | None = None
+    limit_scoped_usage: bool = False
     inflight_response_creates: int = 0
     inflight_streams: int = 0
     leased_tokens: float = 0.0
@@ -111,15 +116,15 @@ class SelectionResult:
 
 
 def _usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-    primary_used = state.used_percent if state.used_percent is not None else 0.0
-    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    primary_used = _priority_primary_used(state)
+    secondary_used = _priority_secondary_used(state, primary_used)
     last_selected = state.last_selected_at or 0.0
     return secondary_used, primary_used, last_selected, state.account_id
 
 
 def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, str]:
-    primary_used = state.used_percent if state.used_percent is not None else 0.0
-    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
+    primary_used = _priority_primary_used(state)
+    secondary_used = _priority_secondary_used(state, primary_used)
     last_selected = state.last_selected_at or 0.0
     return primary_used, secondary_used, last_selected, state.account_id
 
@@ -271,9 +276,9 @@ def _reset_preference_bucket(state: AccountState, current: float, window: ResetP
     if window == "primary":
         reset_at = state.primary_reset_at
         if reset_at is None:
-            reset_at = state.secondary_reset_at
+            reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
     else:
-        reset_at = state.secondary_reset_at
+        reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
         if reset_at is None:
             reset_at = state.primary_reset_at
     if reset_at is None:
@@ -316,6 +321,8 @@ def select_account(
     usage_weighted_order: UsageWeightedOrder = "secondary_first",
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
+    bypass_quota_exceeded: bool = False,
+    bypass_quota_exceeded_account_ids: Collection[str] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -355,6 +362,10 @@ def select_account(
         ignore_standard_quota: Whether to ignore the account's standard
             primary/secondary quota status. This is only for models that are
             gated by a separate additional quota pool.
+        bypass_quota_exceeded: Backward-compatible alias for ignoring standard
+            quota status for gated quota selection.
+        bypass_quota_exceeded_account_ids: Optional narrower account-id scope
+            for the same bypass.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -365,8 +376,15 @@ def select_account(
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
+    bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
+        bypass_standard_quota = (
+            ignore_standard_quota
+            or state.ignore_standard_quota
+            or bypass_quota_exceeded
+            or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
+        )
         if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
@@ -377,15 +395,15 @@ def select_account(
                 state.used_percent = 0.0
                 state.error_count = 0
                 state.reset_at = None
-            elif not (ignore_standard_quota or state.ignore_standard_quota):
+            elif not bypass_standard_quota:
                 continue
-        if state.status == AccountStatus.QUOTA_EXCEEDED and not (ignore_standard_quota or state.ignore_standard_quota):
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
             if state.reset_at and current >= state.reset_at:
                 state.status = AccountStatus.ACTIVE
                 state.used_percent = 0.0
                 state.secondary_used_percent = 0.0
                 state.reset_at = None
-            else:
+            elif not bypass_standard_quota:
                 continue
         if state.cooldown_until and current >= state.cooldown_until:
             state.cooldown_until = None
@@ -415,6 +433,7 @@ def select_account(
         available = opportunistic_available
 
     if not available:
+        in_error_backoff_ids = {state.account_id for state in in_error_backoff}
         hard_blocked_exists = any(
             state.status
             in (
@@ -423,6 +442,7 @@ def select_account(
                 AccountStatus.RATE_LIMITED,
                 AccountStatus.QUOTA_EXCEEDED,
             )
+            and state.account_id not in in_error_backoff_ids
             for state in all_states
         )
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
@@ -521,18 +541,34 @@ def select_account(
 
 def _remaining_secondary_credits(state: AccountState) -> float:
     """Return remaining absolute credits for the secondary (7-day) window."""
-    capacity = state.capacity_credits
+    capacity = (
+        state.priority_capacity_credits if state.priority_capacity_credits is not None else state.capacity_credits
+    )
     if capacity is None:
         capacity = _fallback_secondary_capacity_credits(state.plan_type)
     elif capacity <= 0:
         return 0.0
-    if state.secondary_used_percent is not None:
-        used_pct = state.secondary_used_percent
-    elif state.used_percent is not None:
-        used_pct = state.used_percent
-    else:
-        used_pct = 0.0
+    primary_used = _priority_primary_used(state)
+    used_pct = _priority_secondary_used(state, primary_used)
     return max(0.0, capacity * (1.0 - min(used_pct, 100.0) / 100.0))
+
+
+def _priority_primary_used(state: AccountState) -> float:
+    value = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    return value if value is not None else 0.0
+
+
+def _priority_secondary_used(state: AccountState, primary_used: float | None = None) -> float:
+    if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+        return primary_used if primary_used is not None else _priority_primary_used(state)
+    value = (
+        state.priority_secondary_used_percent
+        if state.priority_secondary_used_percent is not None
+        else state.secondary_used_percent
+    )
+    if value is not None:
+        return value
+    return primary_used if primary_used is not None else _priority_primary_used(state)
 
 
 def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
@@ -541,17 +577,19 @@ def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, 
 
 
 def _relative_availability_divisor_seconds(state: AccountState, current: float) -> float:
-    if state.secondary_reset_at is None:
+    reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
+    if reset_at is None:
         remaining_seconds = float(UNKNOWN_RESET_FALLBACK_SECONDS)
     else:
-        remaining_seconds = max(0.0, float(state.secondary_reset_at) - current)
+        remaining_seconds = max(0.0, float(reset_at) - current)
     return max(remaining_seconds, float(RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS))
 
 
 def _relative_availability_remaining_seconds(state: AccountState, current: float) -> float:
-    if state.secondary_reset_at is None:
+    reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
+    if reset_at is None:
         return float(UNKNOWN_RESET_FALLBACK_SECONDS)
-    return max(0.0, float(state.secondary_reset_at) - current)
+    return max(0.0, float(reset_at) - current)
 
 
 def _relative_availability_raw_score(state: AccountState, current: float) -> float:

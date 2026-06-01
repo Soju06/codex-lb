@@ -79,8 +79,9 @@ _RECOVERABLE_STATUSES = frozenset(
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
+ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
-_ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
+_ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus", "edu"})
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
@@ -311,7 +312,9 @@ class LoadBalancer:
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
+                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                     ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
                     routing_policy_override=selection_inputs.routing_policy_override,
                 )
             return selection_inputs
@@ -973,6 +976,7 @@ class LoadBalancer:
 
         eligible_accounts: list[Account] = []
         blocked_by_data = False
+        blocked_by_exhaustion = False
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
@@ -989,14 +993,19 @@ class LoadBalancer:
                 continue
             if eligibility == "data_unavailable":
                 blocked_by_data = True
+            elif eligibility == "quota_exhausted":
+                blocked_by_exhaustion = True
 
         if not eligible_accounts:
-            error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE if blocked_by_data else NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
-            error_message = (
-                f"No fresh additional quota data available for model '{model}'"
-                if blocked_by_data
-                else f"No accounts with available additional quota for model '{model}'"
-            )
+            if blocked_by_data:
+                error_code = ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+                error_message = f"No fresh additional quota data available for model '{model}'"
+            elif blocked_by_exhaustion:
+                error_code = ADDITIONAL_QUOTA_EXHAUSTED
+                error_message = f"Additional quota exhausted for model '{model}'"
+            else:
+                error_code = NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+                error_message = f"No accounts with available additional quota for model '{model}'"
             logger.warning(
                 (
                     "Blocked gated model routing model=%s limit_name=%s reason=%s "
@@ -2094,7 +2103,8 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
 
 
 def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: float) -> bool:
-    return state.used_percent is not None and state.used_percent > budget_threshold_pct
+    used_percent = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    return used_percent is not None and used_percent > budget_threshold_pct
 
 
 def _state_above_sticky_budget_threshold(
@@ -2105,8 +2115,17 @@ def _state_above_sticky_budget_threshold(
     secondary_threshold = (
         budget_threshold_pct if secondary_budget_threshold_pct is None else secondary_budget_threshold_pct
     )
-    return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
-        state.secondary_used_percent is not None and state.secondary_used_percent > secondary_threshold
+    used_percent = state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+    if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+        secondary_used_percent = used_percent
+    else:
+        secondary_used_percent = (
+            state.priority_secondary_used_percent
+            if state.priority_secondary_used_percent is not None
+            else state.secondary_used_percent
+        )
+    return (used_percent is not None and used_percent > budget_threshold_pct) or (
+        secondary_used_percent is not None and secondary_used_percent > secondary_threshold
     )
 
 

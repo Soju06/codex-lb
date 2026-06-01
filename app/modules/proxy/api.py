@@ -200,6 +200,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
     "no_plan_support_for_model",
     "additional_quota_data_unavailable",
+    "quota_exhausted",
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05

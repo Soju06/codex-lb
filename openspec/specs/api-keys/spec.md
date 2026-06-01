@@ -377,7 +377,7 @@ The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_
 When updating API key limits, the system SHALL preserve existing usage state (`current_value`, `reset_at`) for unchanged limit rules. Limit comparison key is `(limit_type, limit_window, model_filter)`.
 
 - Matching existing rule: `current_value` and `reset_at` SHALL be preserved; only `max_value` is updated
-- New rule (no match): `current_value=0` and fresh `reset_at`
+- New rule (no match): when `resetUsage` is false, `current_value` is initialized from successful request-log usage in the new rule's current window; when `resetUsage` is true, `current_value=0`; always with a fresh `reset_at`
 - Removed rule (in existing but not in update): row is deleted
 
 Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedicated endpoint), never as a side-effect of metadata or policy edits.

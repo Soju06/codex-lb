@@ -42,6 +42,7 @@ class SettingsRepository:
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
             limit_warmup_min_available_percent=100.0,
+            additional_quota_routing_policies_json="{}",
         )
         self._session.add(row)
         try:
@@ -78,6 +79,7 @@ class SettingsRepository:
         limit_warmup_prompt: str | None = None,
         limit_warmup_cooldown_seconds: int | None = None,
         limit_warmup_min_available_percent: float | None = None,
+        additional_quota_routing_policies_json: str | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -122,6 +124,8 @@ class SettingsRepository:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
+        if additional_quota_routing_policies_json is not None:
+            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         await self.commit_refresh(settings)
         return settings
 

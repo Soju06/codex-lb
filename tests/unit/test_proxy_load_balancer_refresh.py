@@ -43,6 +43,18 @@ pytestmark = pytest.mark.unit
 _UNSET = object()
 
 
+@pytest.fixture(autouse=True)
+def _stub_additional_quota_routing_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _load_empty_overrides() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_load_dashboard_additional_quota_routing_overrides",
+        _load_empty_overrides,
+    )
+
+
 def _make_account(account_id: str, email: str = "a@example.com") -> Account:
     encryptor = TokenEncryptor()
     return Account(
@@ -252,9 +264,12 @@ def _additional_entry(
     recorded_at: datetime | None = None,
     limit_name: str = "GPT-5.3-Codex-Spark",
     quota_key: str = "codex_spark",
-    reset_at: int = 1741500000,
+    reset_at: int | None = None,
 ) -> AdditionalUsageHistory:
     now = recorded_at or utcnow()
+    effective_reset_at = reset_at
+    if effective_reset_at is None:
+        effective_reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 300
     return AdditionalUsageHistory(
         id=entry_id,
         account_id=account_id,
@@ -263,7 +278,7 @@ def _additional_entry(
         metered_feature="codex_bengalfox",
         window=window,
         used_percent=used_percent,
-        reset_at=reset_at,
+        reset_at=effective_reset_at,
         window_minutes=5 if window == "primary" else 10080,
         recorded_at=now,
     )
@@ -851,6 +866,74 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
 
     assert selection.account is not None
     assert selection.account.id == account_eligible.id
+
+
+@pytest.mark.asyncio
+async def test_additional_quota_selection_does_not_persist_canonical_account_status() -> None:
+    account = _make_account("acc-additional-canonical", email="canonical@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = now_epoch + 100
+    account.blocked_at = now_epoch - 3600
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=21,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                22,
+                account_id=account.id,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={
+            account.id: _additional_entry(
+                23,
+                account_id=account.id,
+                window="secondary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+
+    selection = await balancer.select_account(
+        additional_limit_name="codex_spark",
+        exclude_account_ids={"unrelated-account"},
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.account.status == AccountStatus.ACTIVE
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.reset_at == now_epoch + 100
+    assert accounts_repo.status_updates == []
 
 
 @pytest.mark.asyncio

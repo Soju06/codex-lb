@@ -23,6 +23,8 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
+_ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+
 
 def build_account_summaries(
     *,
@@ -126,6 +128,7 @@ def _account_to_summary(
         display_name=account.alias or account.email,
         plan_type=plan_type,
         status=effective_status.value,
+        routing_policy=_normalize_account_routing_policy(account.routing_policy),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
@@ -143,7 +146,7 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
-        limit_warmup_enabled=account.limit_warmup_enabled,
+        limit_warmup_enabled=bool(account.limit_warmup_enabled),
         limit_warmup=_limit_warmup_to_status(limit_warmup),
     )
 
@@ -191,6 +194,12 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
+
+
+def _normalize_account_routing_policy(value: str | None) -> str:
+    if value in _ACCOUNT_ROUTING_POLICIES:
+        return value
+    return "normal"
 
 
 def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):

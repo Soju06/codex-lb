@@ -78,6 +78,31 @@ async def test_accounts_upsert_with_merge_disabled_keeps_duplicate_identity(db_s
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_reauthorized_heals_deactivated_identity_even_when_merge_disabled(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("acc_reauth", "reauth@example.com")
+        existing.status = AccountStatus.DEACTIVATED
+        existing.deactivation_reason = "refresh_failed"
+        existing.routing_policy = "preserve"
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account("acc_reauth", "reauth@example.com")
+        incoming.plan_type = "team"
+        saved = await repo.upsert_reauthorized(incoming)
+
+        assert saved.id == "acc_reauth"
+        assert saved.status == AccountStatus.ACTIVE
+        assert saved.deactivation_reason is None
+        assert saved.plan_type == "team"
+        assert saved.routing_policy == "preserve"
+
+        result = await session.execute(select(Account).where(Account.email == "reauth@example.com"))
+        rows = list(result.scalars().all())
+        assert len(rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_email(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

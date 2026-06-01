@@ -15,10 +15,12 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.usage.quota import apply_usage_quota
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, UsageHistory
 from app.modules.proxy.load_balancer import (
+    LoadBalancer,
     RuntimeState,
     _additional_quota_applies_to_plan,
+    _build_states,
     _select_account_preferring_budget_safe,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -151,6 +153,265 @@ def test_select_account_ignores_reset_when_disabled():
     result = select_account(states, now=now, prefer_earlier_reset=False, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "a"
+
+
+def test_select_account_prefers_burn_first_policy_before_usage():
+    states = [
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
+        AccountState("temp", AccountStatus.ACTIVE, used_percent=80.0, routing_policy="burn_first"),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "temp"
+
+
+def test_select_account_preserves_accounts_until_no_others_are_available():
+    states = [
+        AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=95.0, routing_policy="normal"),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
+def test_select_account_falls_back_to_preserve_policy_when_needed():
+    states = [
+        AccountState("review", AccountStatus.ACTIVE, used_percent=70.0, routing_policy="preserve"),
+        AccountState("normal", AccountStatus.RATE_LIMITED, used_percent=1.0, reset_at=int(time.time() + 60)),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "review"
+
+
+def test_select_account_treats_unknown_routing_policy_as_normal():
+    states = [
+        AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),
+        AccountState("legacy", AccountStatus.ACTIVE, used_percent=95.0, routing_policy="unexpected"),
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "legacy"
+
+
+def test_select_account_can_ignore_standard_quota_for_additional_pool():
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(time.time() + 3600),
+        )
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "spark"
+
+
+def test_select_account_can_ignore_active_standard_rate_limit_for_additional_pool():
+    now = time.time()
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+        )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "spark"
+
+
+def test_select_account_uses_per_account_standard_quota_bypass():
+    now = time.time()
+    states = [
+        AccountState(
+            "gated-pro",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+            ignore_standard_quota=True,
+        ),
+        AccountState(
+            "exempt-plus",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+            ignore_standard_quota=False,
+        ),
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.account_id == "gated-pro"
+
+
+def test_build_states_marks_only_gated_accounts_for_standard_quota_bypass():
+    pro = _make_test_account("gated-pro", status=AccountStatus.RATE_LIMITED, reset_at=1_700_003_600)
+    pro.plan_type = "pro"
+    plus = _make_test_account("exempt-plus", status=AccountStatus.RATE_LIMITED, reset_at=1_700_003_600)
+    plus.plan_type = "plus"
+
+    states, _ = _build_states(
+        accounts=[pro, plus],
+        latest_primary={},
+        latest_secondary={},
+        runtime={},
+        ignore_standard_quota_account_ids=frozenset({pro.id}),
+    )
+
+    flags = {state.account_id: state.ignore_standard_quota for state in states}
+    assert flags == {"gated-pro": True, "exempt-plus": False}
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_standard_quota_bypass_stays_per_account_for_gated_models():
+    from unittest.mock import AsyncMock, MagicMock
+
+    future_reset = int(time.time() + 3600)
+    pro = _make_test_account("gated-pro", status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    pro.plan_type = "pro"
+    plus = _make_test_account("exempt-plus", status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    plus.plan_type = "plus"
+
+    primary = _make_test_additional_usage(
+        "gated-pro",
+        window="primary",
+        used_percent=90.0,
+        reset_at=future_reset,
+    )
+    secondary = _make_test_additional_usage(
+        "gated-pro",
+        window="secondary",
+        used_percent=90.0,
+        reset_at=future_reset,
+    )
+
+    async def latest_by_quota_key(quota_key, window, *, account_ids=None, since=None):
+        assert quota_key == "codex_spark"
+        assert account_ids == ["gated-pro", "exempt-plus"]
+        return {"gated-pro": primary if window == "primary" else secondary}
+
+    mock_repos = MagicMock()
+    mock_repos.accounts.list_accounts = AsyncMock(return_value=[pro, plus])
+    mock_repos.additional_usage.latest_by_quota_key = AsyncMock(side_effect=latest_by_quota_key)
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(
+        repo_factory=lambda: mock_repos,
+        additional_quota_routing_overrides_provider=AsyncMock(return_value={}),
+    )
+
+    result = await balancer.select_account(model="gpt-5.3-codex-spark", routing_strategy="usage_weighted")
+
+    assert result.account is not None
+    assert result.account.id == "gated-pro"
+
+
+def test_select_account_can_ignore_standard_rate_limit_without_active_reset_for_additional_pool():
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=None,
+        )
+    ]
+
+    result = select_account(states, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "spark"
+
+
+def test_select_account_does_not_ignore_live_cooldown_for_additional_pool():
+    now = time.time()
+    states = [
+        AccountState(
+            "spark",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            cooldown_until=now + 60,
+        )
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", ignore_standard_quota=True)
+
+    assert result.account is None
+
+
+def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
+    states = [
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
+        AccountState("temp", AccountStatus.ACTIVE, used_percent=99.0, routing_policy="burn_first"),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "temp"
+
+
+def test_budget_safe_selection_falls_back_when_burn_first_unavailable():
+    states = [
+        AccountState(
+            "temp",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(time.time() + 300_000),
+            routing_policy="burn_first",
+        ),
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
+        AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
+def test_budget_safe_selection_keeps_preserve_behind_over_budget_normal():
+    states = [
+        AccountState("review", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="preserve"),
+        AccountState("normal", AccountStatus.ACTIVE, used_percent=99.0, routing_policy="normal"),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
 
 
 def test_select_account_skips_rate_limited_until_reset():
@@ -580,6 +841,28 @@ def _make_test_usage(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+    )
+
+
+def _make_test_additional_usage(
+    account_id: str,
+    *,
+    window: str,
+    used_percent: float = 10.0,
+    reset_at: int | None = None,
+    recorded_at: datetime | None = None,
+) -> AdditionalUsageHistory:
+    return AdditionalUsageHistory(
+        id=1,
+        account_id=account_id,
+        quota_key="codex_spark",
+        limit_name="codex_spark",
+        metered_feature="codex_bengalfox",
+        window=window,
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_minutes=10080,
+        recorded_at=recorded_at or datetime(2025, 1, 1),
     )
 
 
@@ -1654,6 +1937,29 @@ def test_primary_pressured_fallback_ignores_unavailable_safe_accounts():
 
     assert result.account is not None
     assert result.account.account_id == "lower-primary"
+
+
+def test_primary_pressured_fallback_preserves_additional_quota_standard_ignore():
+    states = [
+        AccountState(
+            "additional-quota-available",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=96.0,
+            secondary_used_percent=97.0,
+            reset_at=int(time.time() + 3600),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        ignore_standard_quota=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "additional-quota-available"
 
 
 def test_primary_pressured_fallback_prioritizes_primary_usage_before_reset_bucket():

@@ -26,6 +26,15 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
       limitWarmupMinAvailablePercent: 100,
+      additionalQuotaRoutingPolicies: { codex_spark: "burn_first" },
+      additionalQuotaPolicies: [
+        {
+          quotaKey: "codex_spark",
+          displayLabel: "GPT-5.3-Codex-Spark",
+          routingPolicy: "burn_first",
+          modelIds: ["gpt_5_3_codex_spark"],
+        },
+      ],
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -39,6 +48,36 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupModel).toBe("auto");
+    expect(parsed.limitWarmupPrompt).toBe("Say OK.");
+    expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
+    expect(parsed.additionalQuotaRoutingPolicies.codex_spark).toBe("burn_first");
+    expect(parsed.additionalQuotaPolicies[0]?.routingPolicy).toBe("burn_first");
+  });
+
+  it("defaults optional additional quota and limit warm-up fields", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    expect(parsed.limitWarmupEnabled).toBe(false);
+    expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupModel).toBe("auto");
+    expect(parsed.limitWarmupPrompt).toBe("Say OK.");
+    expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
+    expect(parsed.additionalQuotaRoutingPolicies).toEqual({});
+    expect(parsed.additionalQuotaPolicies).toEqual([]);
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
@@ -60,6 +99,8 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupPrompt).toBe("Say OK.");
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
+    expect(parsed.additionalQuotaRoutingPolicies).toEqual({});
+    expect(parsed.additionalQuotaPolicies).toEqual([]);
   });
 });
 
@@ -83,6 +124,7 @@ describe("SettingsUpdateRequestSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 7200,
       limitWarmupMinAvailablePercent: 99,
+      additionalQuotaRoutingPolicies: { codex_spark: "inherit" },
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
@@ -96,6 +138,11 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.apiKeyAuthEnabled).toBe(false);
     expect(parsed.limitWarmupEnabled).toBe(true);
     expect(parsed.limitWarmupWindows).toBe("primary");
+    expect(parsed.limitWarmupModel).toBe("gpt-5.1-codex-mini");
+    expect(parsed.limitWarmupPrompt).toBe("Say OK.");
+    expect(parsed.limitWarmupCooldownSeconds).toBe(7200);
+    expect(parsed.limitWarmupMinAvailablePercent).toBe(99);
+    expect(parsed.additionalQuotaRoutingPolicies?.codex_spark).toBe("inherit");
   });
 
   it("accepts long session lifetimes above 30 days", () => {

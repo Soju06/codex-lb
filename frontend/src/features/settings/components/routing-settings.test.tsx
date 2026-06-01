@@ -2,6 +2,10 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import {
+  currentAdditionalQuotaRoutingPolicies,
+  mergeAdditionalQuotaRoutingPolicy,
+} from "@/features/settings/additional-quota-routing";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import type { DashboardSettings } from "@/features/settings/schemas";
 
@@ -12,6 +16,10 @@ const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupPrompt: "Say OK.",
   limitWarmupCooldownSeconds: 3600,
   limitWarmupMinAvailablePercent: 100,
+};
+const ADDITIONAL_QUOTA_DEFAULTS = {
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
 };
 
 const BASE_SETTINGS: DashboardSettings = {
@@ -28,6 +36,7 @@ const BASE_SETTINGS: DashboardSettings = {
   totpConfigured: false,
   apiKeyAuthEnabled: true,
   ...LIMIT_WARMUP_DEFAULTS,
+  ...ADDITIONAL_QUOTA_DEFAULTS,
 };
 
 describe("RoutingSettings", () => {
@@ -211,5 +220,33 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("merges quick additional quota routing edits from current client state", () => {
+    const firstEdit = mergeAdditionalQuotaRoutingPolicy(
+      {
+        codex: "inherit",
+        deep_research: "inherit",
+      },
+      "codex",
+      "burn_first",
+    );
+    const secondEdit = mergeAdditionalQuotaRoutingPolicy(firstEdit, "deep_research", "preserve");
+
+    expect(secondEdit).toEqual({
+      codex: "burn_first",
+      deep_research: "preserve",
+    });
+  });
+
+  it("uses refreshed settings policies when local quota routing state is based on older props", () => {
+    const originalPolicies = { codex: "inherit" as const };
+    const refreshedPolicies = { codex: "preserve" as const, deep_research: "normal" as const };
+    const localState = {
+      base: originalPolicies,
+      policies: { codex: "burn_first" as const },
+    };
+
+    expect(currentAdditionalQuotaRoutingPolicies(localState, refreshedPolicies)).toBe(refreshedPolicies);
   });
 });

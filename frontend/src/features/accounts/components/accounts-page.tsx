@@ -37,6 +37,7 @@ export function AccountsPage() {
     exportMutation,
     limitWarmupMutation,
     exportOpenCodeAuthMutation,
+    routingPolicyMutation,
   } = useAccounts();
   const oauth = useOauth();
 
@@ -101,7 +102,8 @@ export function AccountsPage() {
     deleteMutation.isPending ||
     exportMutation.isPending ||
     limitWarmupMutation.isPending ||
-    exportOpenCodeAuthMutation.isPending;
+    exportOpenCodeAuthMutation.isPending ||
+    routingPolicyMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -111,7 +113,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(exportMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
-    getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
+    getErrorMessageOrNull(exportOpenCodeAuthMutation.error) ||
+    getErrorMessageOrNull(routingPolicyMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -165,6 +168,9 @@ export function AccountsPage() {
             }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
+            }
+            onRoutingPolicyChange={(accountId, routingPolicy) =>
+              void routingPolicyMutation.mutateAsync({ accountId, routingPolicy })
             }
           />
         </div>

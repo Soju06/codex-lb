@@ -11,6 +11,15 @@ export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"])
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
 
+export const AdditionalQuotaRoutingPolicySchema = z.enum(["inherit", "burn_first", "normal", "preserve"]);
+
+export const AdditionalQuotaPolicySchema = z.object({
+  quotaKey: z.string(),
+  displayLabel: z.string(),
+  routingPolicy: AdditionalQuotaRoutingPolicySchema,
+  modelIds: z.array(z.string()).default([]),
+});
+
 export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
@@ -30,6 +39,8 @@ export const DashboardSettingsSchema = z.object({
   limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional().default(100),
+  additionalQuotaRoutingPolicies: z.record(z.string(), AdditionalQuotaRoutingPolicySchema).default({}),
+  additionalQuotaPolicies: z.array(AdditionalQuotaPolicySchema).default([]),
 });
 
 export const SettingsUpdateRequestSchema = z.object({
@@ -50,7 +61,9 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
+  additionalQuotaRoutingPolicies: z.record(z.string(), AdditionalQuotaRoutingPolicySchema).optional(),
 });
 
 export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;

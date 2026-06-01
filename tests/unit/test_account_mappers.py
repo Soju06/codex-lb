@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+import pytest
+
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.accounts.mappers import _effective_status_from_usage
+from app.modules.accounts.mappers import _effective_status_from_usage, build_account_summaries
+
+pytestmark = pytest.mark.unit
 
 
 def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:
@@ -14,6 +21,7 @@ def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:
         id_token_encrypted=b"",
         status=status,
         reset_at=1_700_003_600,
+        routing_policy="normal",
     )
 
 
@@ -111,3 +119,42 @@ def test_effective_status_keeps_paused_account_paused_with_usable_credits() -> N
         )
         == AccountStatus.PAUSED
     )
+
+
+def _make_account(*, routing_policy: str | None) -> Account:
+    return Account(
+        id="acc-1",
+        chatgpt_account_id="chatgpt-acc-1",
+        email="account@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"",
+        refresh_token_encrypted=b"",
+        id_token_encrypted=b"",
+        last_refresh=datetime(2025, 1, 1),
+        status=AccountStatus.ACTIVE,
+        routing_policy=routing_policy,
+    )
+
+
+def test_account_summary_normalizes_unknown_routing_policy_to_normal() -> None:
+    summaries = build_account_summaries(
+        accounts=[_make_account(routing_policy="legacy")],
+        primary_usage={},
+        secondary_usage={},
+        encryptor=TokenEncryptor(),
+        include_auth=False,
+    )
+
+    assert summaries[0].routing_policy == "normal"
+
+
+def test_account_summary_preserves_known_routing_policy() -> None:
+    summaries = build_account_summaries(
+        accounts=[_make_account(routing_policy="preserve")],
+        primary_usage={},
+        secondary_usage={},
+        encryptor=TokenEncryptor(),
+        include_auth=False,
+    )
+
+    assert summaries[0].routing_policy == "preserve"

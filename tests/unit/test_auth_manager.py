@@ -237,6 +237,52 @@ async def test_refresh_account_does_not_overwrite_workspace_fields_when_already_
 
 
 @pytest.mark.asyncio
+async def test_refresh_account_updates_same_workspace_display_metadata(monkeypatch):
+    async def _fake_refresh(_: str) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id="acc_1",
+            plan_type="pro",
+            email="refreshed@example.com",
+            workspace_id="ws_same",
+            workspace_label="Renamed Workspace",
+            seat_type="business",
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_1",
+        email="user@example.com",
+        plan_type="pro",
+        workspace_id="ws_same",
+        workspace_label="Old Workspace",
+        seat_type="legacy",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    updated = await manager.refresh_account(account)
+
+    assert updated.workspace_id == "ws_same"
+    assert updated.workspace_label == "Renamed Workspace"
+    assert updated.seat_type == "business"
+    assert repo.tokens_payload is not None
+    assert repo.tokens_payload["workspace_id"] == "ws_same"
+    assert repo.tokens_payload["workspace_label"] == "Renamed Workspace"
+    assert repo.tokens_payload["seat_type"] == "business"
+
+
+@pytest.mark.asyncio
 async def test_refresh_account_populates_workspace_when_missing(monkeypatch):
     async def _fake_refresh(_: str) -> TokenRefreshResult:
         return TokenRefreshResult(

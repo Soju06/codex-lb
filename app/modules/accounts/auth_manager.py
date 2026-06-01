@@ -235,9 +235,10 @@ class AuthManager:
         elif not current_workspace_id and incoming_workspace_id:
             next_workspace_id = incoming_workspace_id
             account.workspace_id = next_workspace_id
-        if not current_workspace_id and result.workspace_label:
+        workspace_matches_current_slot = incoming_workspace_id is None or incoming_workspace_id == next_workspace_id
+        if workspace_matches_current_slot and result.workspace_label:
             account.workspace_label = result.workspace_label
-        if not current_workspace_id and result.seat_type:
+        if workspace_matches_current_slot and result.seat_type:
             account.seat_type = result.seat_type
 
         await self._repo.update_tokens(

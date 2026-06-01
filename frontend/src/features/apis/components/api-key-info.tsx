@@ -42,6 +42,7 @@ export function ApiKeyInfo({
 	const models = apiKey.allowedModels?.join(", ") || "All models";
 	const enforcedModel = apiKey.enforcedModel || null;
 	const enforcedEffort = apiKey.enforcedReasoningEffort || null;
+	const trafficClass = apiKey.trafficClass === "opportunistic" ? "Opportunistic" : "Foreground";
 	const usage = allowUsageSummaryFallback
 		? (usageSummary ?? apiKey.usageSummary)
 		: (usageSummary ?? null);
@@ -60,6 +61,10 @@ export function ApiKeyInfo({
 				<div className="flex items-center justify-between gap-2">
 					<dt className="text-muted-foreground">Models</dt>
 					<dd className="text-right font-medium">{models}</dd>
+				</div>
+				<div className="flex items-center justify-between gap-2">
+					<dt className="text-muted-foreground">Traffic class</dt>
+					<dd className="font-medium">{trafficClass}</dd>
 				</div>
 				{enforcedModel ? (
 					<div className="flex items-center justify-between gap-2">

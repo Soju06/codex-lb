@@ -12,7 +12,9 @@ import {
   reactivateAccount,
   setAccountAlias,
   updateAccountLimitWarmup,
+  updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
+import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
@@ -116,6 +118,25 @@ export function useAccountMutations() {
     },
   });
 
+  const routingPolicyMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      routingPolicy,
+    }: {
+      accountId: string;
+      routingPolicy: AccountRoutingPolicy;
+    }) => updateAccountRoutingPolicy(accountId, routingPolicy),
+    onSuccess: (data) => {
+      const label =
+        data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
+      toast.success(`Account routing policy set to ${label}`);
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Routing policy update failed");
+    },
+  });
+
   const exportOpenCodeAuthMutation = useMutation({
     mutationFn: exportAccountOpenCodeAuth,
     onSuccess: () => {
@@ -134,6 +155,7 @@ export function useAccountMutations() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    routingPolicyMutation,
     exportOpenCodeAuthMutation,
   };
 }

@@ -382,6 +382,37 @@ def test_opportunistic_last_normal_keeps_emergency_floor():
     )
 
 
+def test_opportunistic_backoff_fallback_rechecks_emergency_floor():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "normal-a",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=99.0,
+            routing_policy="normal",
+            error_count=3,
+            last_error_at=now - 1,
+        ),
+        AccountState(
+            "normal-b",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=99.0,
+            routing_policy="normal",
+            error_count=3,
+            last_error_at=now - 2,
+        ),
+    ]
+
+    result = select_account(states, now=now, routing_strategy="usage_weighted", traffic_class="opportunistic")
+
+    assert result.account is None
+    assert result.error_message == (
+        "opportunistic burn window closed: no expendable account has emergency foreground reserve"
+    )
+
+
 def test_opportunistic_preserve_skips_when_weekly_floor_would_be_crossed():
     now = 1_700_000_000.0
     states = [
@@ -1608,9 +1639,7 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
 
     mock_accounts_repo = AsyncMock()
     mock_accounts_repo.list_accounts = AsyncMock(
-        return_value=[
-            _make_test_account(account_id="a", status=AccountStatus.ACTIVE)
-        ]
+        return_value=[_make_test_account(account_id="a", status=AccountStatus.ACTIVE)]
     )
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
@@ -1624,8 +1653,75 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
             "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
             _mocked_additional_filter,
         )
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.get_settings_cache",
+            lambda: SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"burn_first"}')
+                )
+            ),
+        )
+        selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="codex-spark")
+
+    states, _ = _build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        runtime={},
+        routing_policy_override=selection_inputs.routing_policy_override,
+    )
+
+    assert selection_inputs.ignore_standard_quota_status is True
+    assert selection_inputs.routing_policy_override == ROUTING_POLICY_BURN_FIRST
+    assert states[0].routing_policy == ROUTING_POLICY_BURN_FIRST
+
+
+@pytest.mark.asyncio
+async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_key():
+    from app.modules.proxy.load_balancer import ROUTING_POLICY_BURN_FIRST, LoadBalancer
+
+    async def _mocked_additional_filter(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        explicit_limit: bool,
+        repos,
+    ) -> _AdditionalLimitFilterResult:
+        return _AdditionalLimitFilterResult(
+            accounts=accounts,
+            latest_primary={},
+            latest_secondary={},
+        )
+
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(
+        return_value=[_make_test_account(account_id="a", status=AccountStatus.ACTIVE)]
+    )
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.additional_usage = AsyncMock()
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+    with pytest.MonkeyPatch().context() as monkeypatch:
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
+            _mocked_additional_filter,
+        )
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.get_settings_cache",
+            lambda: SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"burn_first"}')
+                )
+            ),
+        )
         selection_inputs = await balancer._load_selection_inputs(
-            model=None, additional_limit_name="test-limit"
+            model=None,
+            additional_limit_name="gpt-5.3-codex-spark",
         )
 
     states, _ = _build_states(
@@ -1639,6 +1735,61 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
     assert selection_inputs.ignore_standard_quota_status is True
     assert selection_inputs.routing_policy_override == ROUTING_POLICY_BURN_FIRST
     assert states[0].routing_policy == ROUTING_POLICY_BURN_FIRST
+
+
+@pytest.mark.asyncio
+async def test_load_selection_inputs_inherits_account_policy_for_additional_quota_by_default():
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    async def _mocked_additional_filter(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        explicit_limit: bool,
+        repos,
+    ) -> _AdditionalLimitFilterResult:
+        return _AdditionalLimitFilterResult(
+            accounts=accounts,
+            latest_primary={},
+            latest_secondary={},
+        )
+
+    account = _make_test_account(account_id="a", status=AccountStatus.ACTIVE)
+    account.routing_policy = "preserve"
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(return_value=[account])
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.additional_usage = AsyncMock()
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+    with pytest.MonkeyPatch().context() as monkeypatch:
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
+            _mocked_additional_filter,
+        )
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.get_settings_cache",
+            lambda: SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+            ),
+        )
+        selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="test-limit")
+
+    states, _ = _build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        runtime={},
+        routing_policy_override=selection_inputs.routing_policy_override,
+    )
+
+    assert selection_inputs.routing_policy_override is None
+    assert states[0].routing_policy == "preserve"
 
 
 def test_select_account_capacity_weighted_pro_plus_same_usage_prefers_pro_by_capacity():

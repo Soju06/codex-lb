@@ -36,6 +36,11 @@ describe("useAccounts", () => {
 
     await result.current.pauseMutation.mutateAsync(firstAccountId as string);
     await result.current.resumeMutation.mutateAsync(firstAccountId as string);
+    const routingPolicyResult = await result.current.routingPolicyMutation.mutateAsync({
+      accountId: firstAccountId as string,
+      routingPolicy: "preserve",
+    });
+    expect(routingPolicyResult.routingPolicy).toBe("preserve");
 
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),

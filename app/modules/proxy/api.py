@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from fastapi import (
     APIRouter,
@@ -1807,6 +1807,9 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=responses_payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=responses_payload.model,
@@ -2535,12 +2538,14 @@ async def _opportunistic_admission_denial(
     api_key: ApiKeyData | None,
     *,
     model: str | None,
+    lease_kind: Literal["response_create", "stream"] | None = "stream",
 ) -> JSONResponse | None:
     if api_key is None or api_key.traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
         return None
     selection = await context.service.check_opportunistic_admission(
         api_key=api_key,
         model=_effective_optional_model_for_api_key(api_key, model),
+        lease_kind=lease_kind,
     )
     if selection.account is not None:
         return None

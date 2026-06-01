@@ -234,6 +234,12 @@ class AccountsService:
     async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
         return await self._repo.update_limit_warmup_enabled(account_id, enabled)
 
+    async def set_routing_policy(self, account_id: str, routing_policy: str) -> bool:
+        result = await self._repo.update_routing_policy(account_id, routing_policy)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
+
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         result = await self._repo.delete(account_id, delete_history=delete_history)
         if result:

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -517,11 +518,17 @@ async def test_same_model_reuses_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_different_limit_names_get_different_cache_entries() -> None:
+async def test_different_limit_names_get_different_cache_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Queries with different additional_limit_name must each get their own cache slot."""
     from app.modules.proxy.account_cache import AccountSelectionCache
 
     cache = AccountSelectionCache(ttl_seconds=5)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+        ),
+    )
 
     class _AccountsRepo:
         def __init__(self) -> None:

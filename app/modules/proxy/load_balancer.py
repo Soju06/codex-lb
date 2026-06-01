@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Collection
@@ -31,6 +32,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
@@ -78,6 +80,9 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
+_ROUTING_POLICY_NORMAL = "normal"
+_ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
+_ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 
 AccountLeaseKind = Literal["response_create", "stream"]
@@ -680,9 +685,15 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
+        effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
+        additional_quota_routing_policies_json = ""
+        if effective_limit_name is not None:
+            dashboard_settings = await get_settings_cache().get()
+            additional_quota_routing_policies_json = dashboard_settings.additional_quota_routing_policies_json
         cache_key = (
             model,
             additional_limit_name,
+            additional_quota_routing_policies_json,
             None if account_ids is None else tuple(sorted(set(account_ids))),
         )
         cached = await self._selection_inputs_cache.get(cache_key)
@@ -693,10 +704,10 @@ class LoadBalancer:
 
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
-            effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             ignore_standard_quota_status = effective_limit_name is not None
-            routing_policy_override: str | None = (
-                ROUTING_POLICY_BURN_FIRST if effective_limit_name is not None else None
+            routing_policy_override = _additional_quota_routing_policy_override(
+                effective_limit_name,
+                additional_quota_routing_policies_json,
             )
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
@@ -808,6 +819,7 @@ class LoadBalancer:
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         budget_threshold_pct: float,
+        lease_kind: AccountLeaseKind | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
@@ -819,15 +831,32 @@ class LoadBalancer:
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
             )
-        states, account_map = _build_states(
-            accounts=selection_inputs.accounts,
-            latest_primary=selection_inputs.latest_primary,
-            latest_secondary=selection_inputs.latest_secondary,
-            runtime=self._runtime,
-            routing_policy_override=selection_inputs.routing_policy_override,
-        )
+        async with self._runtime_lock:
+            self._reclaim_stale_account_leases_locked()
+            self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+            states, account_map = _build_states(
+                accounts=selection_inputs.accounts,
+                latest_primary=selection_inputs.latest_primary,
+                latest_secondary=selection_inputs.latest_secondary,
+                runtime=self._runtime,
+                routing_policy_override=selection_inputs.routing_policy_override,
+            )
+            selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
+            if not selection_states and states:
+                logger.warning(
+                    "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
+                    lease_kind,
+                    _account_cap_error_code(lease_kind),
+                    len(states),
+                )
+                _record_account_cap_rejection(lease_kind)
+                return AccountSelection(
+                    account=None,
+                    error_message="opportunistic burn window closed: no account capacity available",
+                    error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+                )
         result = _select_account_preferring_budget_safe(
-            states,
+            selection_states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
             budget_threshold_pct=budget_threshold_pct,
@@ -1278,7 +1307,7 @@ class LoadBalancer:
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
-        routing_policy = getattr(account, "routing_policy", "normal")
+        routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
         return AccountState(
             account_id=account.id,
             status=account.status,
@@ -1513,6 +1542,54 @@ def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
         account_cap_rejections_total.labels(kind=kind).inc()
 
 
+def _normalize_account_routing_policy(value: str | None) -> str:
+    if value in _ACCOUNT_ROUTING_POLICIES:
+        return value
+    return _ROUTING_POLICY_NORMAL
+
+
+def _additional_quota_routing_policy_override(limit_name: str | None, raw_policies: str) -> str | None:
+    if limit_name is None:
+        return None
+    policies = _parse_additional_quota_routing_policies(raw_policies)
+    normalized_limit_name = canonicalize_additional_quota_key(limit_name=limit_name)
+    if normalized_limit_name is None:
+        return None
+    policy = policies.get(normalized_limit_name)
+    if policy is None or policy == "inherit":
+        return None
+    return policy
+
+
+def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:
+    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
+    if canonical_key is None:
+        return None
+    if get_additional_quota_definition(canonical_key) is None:
+        return None
+    return canonical_key
+
+
+def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str]:
+    if not raw_policies:
+        return {}
+    try:
+        parsed = json.loads(raw_policies)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    policies: dict[str, str] = {}
+    for quota_key, policy in parsed.items():
+        if not isinstance(quota_key, str) or not isinstance(policy, str):
+            continue
+        normalized_key = _normalize_additional_quota_key(quota_key)
+        normalized_policy = policy.strip().lower()
+        if normalized_key and normalized_policy in _ADDITIONAL_QUOTA_ROUTING_POLICIES:
+            policies[normalized_key] = normalized_policy
+    return policies
+
+
 def _state_from_account(
     *,
     account: Account,
@@ -1520,7 +1597,7 @@ def _state_from_account(
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
     runtime: RuntimeState,
 ) -> AccountState:
-    routing_policy = getattr(account, "routing_policy", "normal")
+    routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None

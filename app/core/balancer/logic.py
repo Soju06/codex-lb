@@ -409,6 +409,11 @@ def select_account(
                 return (s.last_error_at or 0.0) + backoff
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))
+            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+                opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
+                if not opportunistic_available:
+                    return SelectionResult(None, f"opportunistic burn window closed: {reason}")
+                available = opportunistic_available
         else:
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]

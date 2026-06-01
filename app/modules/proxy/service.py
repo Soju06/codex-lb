@@ -186,7 +186,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeOwnerClient,
     OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import AccountLease, AccountLeaseKind, AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
@@ -2505,6 +2505,9 @@ class ProxyService:
                 account = await self._select_codex_control_account_without_budget(
                     affinity=affinity,
                     api_key=api_key,
+                    traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC
+                    if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                    else TRAFFIC_CLASS_FOREGROUND,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -2716,6 +2719,9 @@ class ProxyService:
                 account = await self._select_codex_control_account_without_budget(
                     affinity=affinity,
                     api_key=api_key,
+                    traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC
+                    if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                    else TRAFFIC_CLASS_FOREGROUND,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -5195,6 +5201,7 @@ class ProxyService:
         *,
         affinity: _AffinityPolicy,
         api_key: ApiKeyData | None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> Account | None:
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
@@ -5209,6 +5216,7 @@ class ProxyService:
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
             budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            traffic_class=traffic_class,
         )
         if selection.account is None:
             return None
@@ -11875,6 +11883,7 @@ class ProxyService:
         *,
         api_key: ApiKeyData | None,
         model: str | None,
+        lease_kind: AccountLeaseKind | None = None,
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
         scoped_account_ids = (
@@ -11888,6 +11897,7 @@ class ProxyService:
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             routing_strategy=_routing_strategy(settings),
             budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
+            lease_kind=lease_kind,
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

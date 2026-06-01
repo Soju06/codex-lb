@@ -74,6 +74,7 @@ class AccountSummary(DashboardModel):
     alias: str | None = None
     display_name: str
     plan_type: str
+    routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     status: str
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
@@ -143,6 +144,15 @@ class AccountLimitWarmupUpdateRequest(DashboardModel):
 class AccountLimitWarmupUpdateResponse(DashboardModel):
     status: str
     enabled: bool
+
+
+class AccountRoutingPolicyUpdateRequest(DashboardModel):
+    routing_policy: str = Field(pattern=r"^(normal|burn_first|preserve)$")
+
+
+class AccountRoutingPolicyUpdateResponse(DashboardModel):
+    account_id: str
+    routing_policy: str
 
 
 class AccountDeleteResponse(DashboardModel):

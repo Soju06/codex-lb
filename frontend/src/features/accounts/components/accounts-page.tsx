@@ -36,6 +36,7 @@ export function AccountsPage() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    routingPolicyMutation,
     exportOpenCodeAuthMutation,
   } = useAccounts();
   const oauth = useOauth();
@@ -101,6 +102,7 @@ export function AccountsPage() {
     deleteMutation.isPending ||
     exportMutation.isPending ||
     limitWarmupMutation.isPending ||
+    routingPolicyMutation.isPending ||
     exportOpenCodeAuthMutation.isPending;
 
   const mutationError =
@@ -111,6 +113,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(exportMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
+    getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
 
   return (
@@ -165,6 +168,9 @@ export function AccountsPage() {
             }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
+            }
+            onRoutingPolicyChange={(accountId, routingPolicy) =>
+              void routingPolicyMutation.mutateAsync({ accountId, routingPolicy })
             }
           />
         </div>

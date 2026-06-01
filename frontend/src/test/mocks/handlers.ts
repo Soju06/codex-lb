@@ -1,7 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
-import { LIMIT_TYPES, LIMIT_WINDOWS } from "@/features/api-keys/schemas";
+import { LIMIT_TYPES, LIMIT_WINDOWS, TRAFFIC_CLASSES } from "@/features/api-keys/schemas";
 import {
 	type AccountSummary,
 	type ApiKey,
@@ -42,6 +42,7 @@ const OauthStartPayloadSchema = z
 const ApiKeyCreatePayloadSchema = z
 	.object({
 		name: z.string().optional(),
+		trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
 		assignedAccountIds: z.array(z.string()).optional(),
 	})
 	.passthrough();
@@ -56,6 +57,7 @@ const ApiKeyUpdatePayloadSchema = z
 	.object({
 		name: z.string().optional(),
 		allowedModels: z.array(z.string()).nullable().optional(),
+		trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
 		isActive: z.boolean().optional(),
 		assignedAccountIds: z.array(z.string()).optional(),
 		resetUsage: z.boolean().optional(),
@@ -74,6 +76,10 @@ const ApiKeyUpdatePayloadSchema = z
 
 const AccountAliasPayloadSchema = z.object({
 	alias: z.string().max(255).nullable(),
+});
+
+const AccountRoutingPolicyPayloadSchema = z.object({
+	routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
 
 const SettingsPayloadSchema = z
@@ -459,6 +465,26 @@ export const handlers = [
 			: false;
 		account.limitWarmupEnabled = enabled;
 		return HttpResponse.json({ status: enabled ? "enabled" : "disabled", enabled });
+	}),
+
+	http.put("/api/accounts/:accountId/routing-policy", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await parseJsonBody(request, AccountRoutingPolicyPayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid routing policy payload" } },
+				{ status: 422 },
+			);
+		}
+		account.routingPolicy = payload.routingPolicy;
+		return HttpResponse.json({ accountId, routingPolicy: account.routingPolicy });
 	}),
 
 	http.get("/api/accounts/:accountId/trends", ({ params }) => {
@@ -853,6 +879,7 @@ export const handlers = [
 				name: payload?.name ?? `API Key ${sequence}`,
 				accountAssignmentScopeEnabled: (payload?.assignedAccountIds?.length ?? 0) > 0,
 				assignedAccountIds: payload?.assignedAccountIds ?? [],
+				trafficClass: payload?.trafficClass ?? "foreground",
 			}),
 			key: `sk-test-generated-${sequence}`,
 		});
@@ -881,6 +908,9 @@ export const handlers = [
 				? { allowedModels: payload.allowedModels }
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+			...(payload.trafficClass !== undefined
+				? { trafficClass: payload.trafficClass }
+				: {}),
 			...(payload.assignedAccountIds !== undefined
 				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
 				: {}),

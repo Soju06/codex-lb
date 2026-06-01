@@ -10,11 +10,16 @@
 - [x] 2.2 Return the home path when it already exists, regardless of container
   detection.
 
-## 3. Verification
+## 3. OpenSpec
 
-- [x] 3.1 Add unit tests covering all precedence combinations:
+- [x] 3.1 Add a parsed OpenSpec requirement delta for data directory precedence,
+  related default paths, and explicit related-path overrides.
+
+## 4. Verification
+
+- [x] 4.1 Add unit tests covering all precedence combinations:
   - `CODEX_LB_DATA_DIR` set → used.
   - `CODEX_LB_DATA_DIR` unset, `~/.codex-lb` exists → used.
   - Neither set, in container → `/var/lib/codex-lb`.
   - Neither set, not in container → `~/.codex-lb` (even if absent).
-- [x] 3.2 Run focused tests and lint.
+- [x] 4.2 Run focused tests and lint.

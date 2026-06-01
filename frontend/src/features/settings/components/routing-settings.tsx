@@ -90,6 +90,7 @@ export function RoutingSettings({
     relativeAvailabilityTopKValid && parsedRelativeAvailabilityTopK !== settings.relativeAvailabilityTopK;
 
   const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
+  const firstAccountId = accounts[0]?.accountId;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -139,11 +140,23 @@ export function RoutingSettings({
             </div>
             <Select
               value={settings.routingStrategy}
-              onValueChange={(value) =>
+              onValueChange={(value) => {
+                const routingStrategy = value as DashboardSettings["routingStrategy"];
+                if (routingStrategy === "single_account") {
+                  const selectedAccountId = settings.singleAccountId ?? firstAccountId;
+                  if (!selectedAccountId) {
+                    return;
+                  }
+                  save({
+                    routingStrategy,
+                    singleAccountId: selectedAccountId,
+                  });
+                  return;
+                }
                 save({
-                  routingStrategy: value as DashboardSettings["routingStrategy"],
-                })
-              }
+                  routingStrategy,
+                });
+              }}
             >
               <SelectTrigger className="h-8 w-48 text-xs" disabled={busy}>
                 <SelectValue />
@@ -153,7 +166,9 @@ export function RoutingSettings({
                 <SelectItem value="relative_availability">Relative availability</SelectItem>
                 <SelectItem value="sequential_drain">Sequential drain</SelectItem>
                 <SelectItem value="reset_drain">Reset drain</SelectItem>
-                <SelectItem value="single_account">Single account</SelectItem>
+                <SelectItem value="single_account" disabled={!settings.singleAccountId && !firstAccountId}>
+                  Single account
+                </SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>

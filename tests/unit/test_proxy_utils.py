@@ -1535,6 +1535,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         sticky_max_age_seconds=123,
         account_ids=None,
         budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=100.0,
         traffic_class=proxy_service.TRAFFIC_CLASS_FOREGROUND,
     )
 

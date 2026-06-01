@@ -821,6 +821,7 @@ class LoadBalancer:
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         budget_threshold_pct: float,
+        secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
@@ -862,6 +863,8 @@ class LoadBalancer:
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             routing_strategy=routing_strategy,
             budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=True,
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=selection_inputs.ignore_standard_quota_status,
@@ -2033,10 +2036,13 @@ def _state_above_budget_threshold(state: AccountState, budget_threshold_pct: flo
 def _state_above_sticky_budget_threshold(
     state: AccountState,
     budget_threshold_pct: float,
-    secondary_budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float | None = None,
 ) -> bool:
+    secondary_threshold = (
+        budget_threshold_pct if secondary_budget_threshold_pct is None else secondary_budget_threshold_pct
+    )
     return (state.used_percent is not None and state.used_percent > budget_threshold_pct) or (
-        state.secondary_used_percent is not None and state.secondary_used_percent > secondary_budget_threshold_pct
+        state.secondary_used_percent is not None and state.secondary_used_percent > secondary_threshold
     )
 
 
@@ -2086,8 +2092,7 @@ def _select_account_preferring_budget_safe(
     preferred_states = [
         state
         for state in state_list
-        if state.routing_policy != ROUTING_POLICY_PRESERVE
-        and not state_budget_threshold(state)
+        if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
     ]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list

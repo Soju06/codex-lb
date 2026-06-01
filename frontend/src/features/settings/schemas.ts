@@ -124,6 +124,25 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
 });
 
-export type DashboardSettings = z.infer<typeof DashboardSettingsSchema>;
+type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;
+type StickyThresholdPresenceFlags = Pick<
+  ParsedDashboardSettings,
+  | "__stickyReallocationBudgetThresholdPctProvided"
+  | "__stickyReallocationPrimaryBudgetThresholdPctProvided"
+  | "__stickyReallocationSecondaryBudgetThresholdPctProvided"
+>;
+type StickyThresholdValues = Pick<
+  ParsedDashboardSettings,
+  | "stickyReallocationBudgetThresholdPct"
+  | "stickyReallocationPrimaryBudgetThresholdPct"
+  | "stickyReallocationSecondaryBudgetThresholdPct"
+>;
+
+export type DashboardSettings = Omit<
+  ParsedDashboardSettings,
+  keyof StickyThresholdPresenceFlags | keyof StickyThresholdValues
+> &
+  Partial<StickyThresholdPresenceFlags> &
+  Partial<StickyThresholdValues>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
 export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;

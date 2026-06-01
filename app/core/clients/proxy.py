@@ -39,6 +39,7 @@ from multidict import CIMultiDict
 
 from app.core.clients.codex import (
     CodexClient,
+    CodexTransportError,
     codex_transport_error_message,
     create_codex_session,
     require_route_or_direct_egress_opt_in,
@@ -1177,7 +1178,11 @@ def _should_fallback_to_http_after_websocket_handshake_error(
     transport_mode: str,
     exc: aiohttp.WSServerHandshakeError,
 ) -> bool:
-    return transport_mode == "auto" and exc.status in _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES
+    return _should_fallback_to_http_after_websocket_status(transport_mode, exc.status)
+
+
+def _should_fallback_to_http_after_websocket_status(transport_mode: str, status: int | None) -> bool:
+    return transport_mode == "auto" and status in _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES
 
 
 async def _open_upstream_websocket(
@@ -2377,6 +2382,66 @@ async def _stream_responses_with_session(
             url=url,
             headers=upstream_headers,
         )
+
+    async def _stream_via_http_after_websocket_rejection(
+        *,
+        rejection_status: int | None,
+        rejection_message: str,
+    ) -> AsyncIterator[str]:
+        nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at
+
+        logger.warning(
+            "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
+            get_request_id(),
+            rejection_status,
+            _summarize_upstream_target(url),
+        )
+        _maybe_log_upstream_request_complete(
+            kind="responses",
+            url=url,
+            headers=upstream_headers,
+            method=method,
+            started_at=started_at,
+            status_code=rejection_status,
+            error_code="upstream_websocket_handshake_rejected",
+            error_message=rejection_message,
+        )
+
+        transport = "http"
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        method = "POST"
+        remaining_request_timeout = _remaining_total_timeout(
+            request_total_timeout,
+            pre_request_started_at,
+            time.monotonic(),
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=remaining_request_timeout,
+            sock_connect=effective_connect_timeout,
+            sock_read=None,
+        )
+        started_at = time.monotonic()
+        _maybe_log_upstream_request_start(
+            kind="responses",
+            url=url,
+            headers=upstream_headers,
+            method=method,
+            payload_summary=_summarize_json_payload(payload_dict),
+            payload_json=payload_json if settings.log_upstream_request_payload else None,
+        )
+        archive_json(
+            direction="codex_to_server",
+            kind="responses",
+            transport="http",
+            payload=payload_dict,
+            account_id=account_id,
+            method=method,
+            url=url,
+            headers=upstream_headers,
+        )
+        async for event_block in _stream_via_http(upstream_headers, timeout):
+            yield event_block
+
     try:
         if transport == "websocket":
             try:
@@ -2421,56 +2486,18 @@ async def _stream_responses_with_session(
                     )
                     return
 
-                logger.warning(
-                    "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
-                    get_request_id(),
-                    exc.status,
-                    _summarize_upstream_target(url),
-                )
-                _maybe_log_upstream_request_complete(
-                    kind="responses",
-                    url=url,
-                    headers=upstream_headers,
-                    method=method,
-                    started_at=started_at,
-                    status_code=exc.status,
-                    error_code="upstream_websocket_handshake_rejected",
-                    error_message=str(exc),
-                )
-
-                transport = "http"
-                upstream_headers = _build_upstream_headers(headers, access_token, account_id)
-                method = "POST"
-                remaining_request_timeout = _remaining_total_timeout(
-                    request_total_timeout,
-                    pre_request_started_at,
-                    time.monotonic(),
-                )
-                timeout = aiohttp.ClientTimeout(
-                    total=remaining_request_timeout,
-                    sock_connect=effective_connect_timeout,
-                    sock_read=None,
-                )
-                started_at = time.monotonic()
-                _maybe_log_upstream_request_start(
-                    kind="responses",
-                    url=url,
-                    headers=upstream_headers,
-                    method=method,
-                    payload_summary=_summarize_json_payload(payload_dict),
-                    payload_json=payload_json if settings.log_upstream_request_payload else None,
-                )
-                archive_json(
-                    direction="codex_to_server",
-                    kind="responses",
-                    transport="http",
-                    payload=payload_dict,
-                    account_id=account_id,
-                    method=method,
-                    url=url,
-                    headers=upstream_headers,
-                )
-                async for event_block in _stream_via_http(upstream_headers, timeout):
+                async for event_block in _stream_via_http_after_websocket_rejection(
+                    rejection_status=exc.status,
+                    rejection_message=str(exc),
+                ):
+                    yield event_block
+            except CodexTransportError as exc:
+                if not _should_fallback_to_http_after_websocket_status(transport_mode, exc.status_code):
+                    raise
+                async for event_block in _stream_via_http_after_websocket_rejection(
+                    rejection_status=exc.status_code,
+                    rejection_message=str(exc),
+                ):
                     yield event_block
         else:
             async for event_block in _stream_via_http(upstream_headers, timeout):

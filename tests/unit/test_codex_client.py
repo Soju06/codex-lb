@@ -41,6 +41,19 @@ class _Session:
         return object()
 
 
+class _HandshakeFailure(Exception):
+    status = 426
+
+
+class _WsFailSession:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def ws_connect(self, url: str, **kwargs: Any) -> object:
+        self.calls.append({"url": url, **kwargs})
+        raise _HandshakeFailure("Upgrade Required")
+
+
 @pytest.fixture
 def route() -> ResolvedUpstreamRoute:
     return ResolvedUpstreamRoute(
@@ -137,3 +150,13 @@ async def test_transport_errors_do_not_expose_proxy_credentials(route: ResolvedU
     assert "OSError" in message
     assert "u:p" not in message
     assert "proxy.test:8080" not in message
+
+
+@pytest.mark.asyncio
+async def test_websocket_transport_error_preserves_handshake_status(route: ResolvedUpstreamRoute) -> None:
+    client = CodexClient(_WsFailSession())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
+
+    assert getattr(exc_info.value, "status_code") == 426

@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+from app.core.clients.proxy import UpstreamProxyRouteTrace
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
@@ -179,6 +180,11 @@ class FakeRequestLogsRepo:
         upstream_error_code: str | None = None,
         bridge_stage: str | None = None,
         request_kind: str = "normal",
+        upstream_proxy_route_mode: str | None = None,
+        upstream_proxy_pool_id: str | None = None,
+        upstream_proxy_endpoint_id: str | None = None,
+        upstream_proxy_fallback_used: bool | None = None,
+        upstream_proxy_fail_closed_reason: str | None = None,
     ) -> None:
         self.logs.append(
             {
@@ -211,6 +217,11 @@ class FakeRequestLogsRepo:
                 "upstream_error_code": upstream_error_code,
                 "bridge_stage": bridge_stage,
                 "request_kind": request_kind,
+                "upstream_proxy_route_mode": upstream_proxy_route_mode,
+                "upstream_proxy_pool_id": upstream_proxy_pool_id,
+                "upstream_proxy_endpoint_id": upstream_proxy_endpoint_id,
+                "upstream_proxy_fallback_used": upstream_proxy_fallback_used,
+                "upstream_proxy_fail_closed_reason": upstream_proxy_fail_closed_reason,
             }
         )
 
@@ -326,6 +337,44 @@ async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: 
     assert calls["resolve_kwargs"]["account_id"] == account.id
     assert calls["resolve_kwargs"]["operation"] == "limit_warmup"
     assert calls["stream_kwargs"]["route"] is route
+    assert calls["stream_kwargs"]["route_trace"].endpoint_id is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_returns_route_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def resolve_route(*args: object, **kwargs: object) -> ResolvedUpstreamRoute:
+        return route
+
+    async def stream(*args: object, **kwargs: object):
+        route_trace = cast(UpstreamProxyRouteTrace, kwargs["route_trace"])
+        route_trace.record(route=route, fallback_used=True)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(sender, "_ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
+    monkeypatch.setattr(limit_warmup_service, "resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.success is True
+    assert result.upstream_proxy_route_mode == "account_bound"
+    assert result.upstream_proxy_pool_id == "pool_1"
+    assert result.upstream_proxy_endpoint_id == "ep_1"
+    assert result.upstream_proxy_fallback_used is True
 
 
 @pytest.mark.asyncio
@@ -355,6 +404,7 @@ async def test_streaming_limit_warmup_sender_fails_closed_when_route_unavailable
     assert result.success is False
     assert result.error_code == "upstream_proxy_unavailable"
     assert "default_pool_unconfigured" in (result.error_message or "")
+    assert result.upstream_proxy_fail_closed_reason == "default_pool_unconfigured"
 
 
 @pytest.mark.asyncio
@@ -386,6 +436,42 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["request_kind"] == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_warmup_request_log_persists_route_metadata() -> None:
+    repo = FakeWarmupRepo()
+    logs = FakeRequestLogsRepo()
+
+    class RouteMetadataSender:
+        async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+            del account, model, prompt
+            return LimitWarmupSendResult(
+                request_id="warmup-route",
+                success=True,
+                latency_ms=12,
+                upstream_proxy_route_mode="account_bound",
+                upstream_proxy_pool_id="pool_1",
+                upstream_proxy_endpoint_id="ep_1",
+                upstream_proxy_fallback_used=True,
+            )
+
+    service = LimitWarmupService(repo, logs, sender=RouteMetadataSender())
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert logs.logs[0]["upstream_proxy_route_mode"] == "account_bound"
+    assert logs.logs[0]["upstream_proxy_pool_id"] == "pool_1"
+    assert logs.logs[0]["upstream_proxy_endpoint_id"] == "ep_1"
+    assert logs.logs[0]["upstream_proxy_fallback_used"] is True
 
 
 @pytest.mark.asyncio

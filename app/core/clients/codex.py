@@ -18,6 +18,10 @@ class CodexTransportError(RuntimeError):
     instead of the original transport message.
     """
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def require_route_or_direct_egress_opt_in(
     *,
@@ -141,7 +145,25 @@ def _is_idempotent_method(method: str) -> bool:
 
 
 def _transport_error(operation: str, endpoint_id: str, exc: Exception) -> CodexTransportError:
-    return CodexTransportError(codex_transport_error_message(operation, endpoint_id, exc))
+    return CodexTransportError(
+        codex_transport_error_message(operation, endpoint_id, exc),
+        status_code=_transport_error_status_code(exc),
+    )
+
+
+def _transport_error_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    for source in (response, exc):
+        if source is None:
+            continue
+        value = getattr(source, "status_code", getattr(source, "status", None))
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def codex_transport_error_message(operation: str, endpoint_id: str | None, exc: Exception) -> str:

@@ -5,6 +5,8 @@ from typing import Any, cast
 import pytest
 from curl_cffi.const import CurlWsFlag
 
+import app.core.clients.proxy as proxy_module
+from app.core.clients.codex import CodexTransportError
 from app.core.clients.files import create_file, finalize_file
 from app.core.clients.proxy import (
     UpstreamProxyRouteTrace,
@@ -133,6 +135,19 @@ class _WsCodexClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _AutoFallbackCodexClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def open_ws_with_route_metadata(self, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
+        self.calls.append({"transport": "websocket", "url": url, "route": route, **kwargs})
+        raise CodexTransportError("websocket handshake rejected", status_code=426)
+
+    async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
+        self.calls.append({"transport": "http", "method": method, "url": url, "route": route, **kwargs})
+        return _StreamResponse()
 
 
 @pytest.fixture
@@ -333,6 +348,43 @@ async def test_stream_responses_websocket_transport_uses_codex_client_when_route
     assert client.calls[0]["route"] is route
     assert '"type":"response.create"' in str(client.websocket.sent[0])
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_routed_auto_websocket_426_falls_back_to_http(
+    route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _AutoFallbackCodexClient()
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: type(
+            "_Registry",
+            (),
+            {"prefers_websockets": lambda self, model: True},
+        )(),
+    )
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="auto",
+            route=route,
+            codex_client=cast(Any, client),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    assert [call["transport"] for call in client.calls] == ["websocket", "http"]
+    assert client.calls[1]["method"] == "POST"
 
 
 @pytest.mark.asyncio

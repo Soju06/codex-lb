@@ -7832,13 +7832,7 @@ class ProxyService:
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
                     and terminal_request_state.preferred_account_id != session.account.id
-                    and (
-                        terminal_request_state.previous_response_id is None
-                        or (
-                            terminal_request_state.fresh_upstream_request_text is not None
-                            and terminal_request_state.fresh_upstream_request_is_retry_safe
-                        )
-                    )
+                    and terminal_request_state.previous_response_id is None
                 )
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(
@@ -8755,13 +8749,7 @@ class ProxyService:
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
                     and request_state.preferred_account_id != account.id
-                    and (
-                        request_state.previous_response_id is None
-                        or (
-                            request_state.fresh_upstream_request_text is not None
-                            and request_state.fresh_upstream_request_is_retry_safe
-                        )
-                    )
+                    and request_state.previous_response_id is None
                 )
                 if can_retry_security_work:
                     retry_text = request_state.request_text
@@ -9872,6 +9860,7 @@ class ProxyService:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
+        stream_payload = payload
         try:
             if payload.previous_response_id is not None:
                 preferred_account_id = await self._resolve_websocket_previous_response_owner(
@@ -9892,6 +9881,11 @@ class ProxyService:
             if preferred_account_id is None:
                 file_preferred_account_id = await self._resolve_file_account_for_responses(payload, headers)
                 preferred_account_id = file_preferred_account_id
+            allow_security_work_retry = _websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=payload.previous_response_id,
+                input_value=payload.input,
+                continuity_state=None,
+            )
             for attempt in range(max_attempts):
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
@@ -10216,7 +10210,7 @@ class ProxyService:
                             settlement = _StreamSettlement()
                             async for line in self._stream_once(
                                 account,
-                                payload,
+                                stream_payload,
                                 headers,
                                 request_id,
                                 allow_retry_flag,
@@ -10303,6 +10297,7 @@ class ProxyService:
                                         account.security_work_authorized
                                         or account.id == file_preferred_account_id
                                         or require_preferred_account
+                                        or not allow_security_work_retry
                                         or attempt >= max_attempts - 1
                                     ):
                                         raise
@@ -10322,6 +10317,10 @@ class ProxyService:
                                     )
                                     excluded_account_ids.add(account.id)
                                     require_security_work_authorized = True
+                                    if stream_payload.previous_response_id is not None:
+                                        stream_payload = stream_payload.model_copy(
+                                            update={"previous_response_id": None}
+                                        )
                                     last_transient_exc = tex
                                     break
                                 if _is_account_neutral_error_code(code):
@@ -10421,6 +10420,7 @@ class ProxyService:
                             account.security_work_authorized
                             or account.id == file_preferred_account_id
                             or require_preferred_account
+                            or not allow_security_work_retry
                             or attempt >= max_attempts - 1
                         ):
                             event = response_failed_event(
@@ -10446,6 +10446,8 @@ class ProxyService:
                         )
                         excluded_account_ids.add(account.id)
                         require_security_work_authorized = True
+                        if stream_payload.previous_response_id is not None:
+                            stream_payload = stream_payload.model_copy(update={"previous_response_id": None})
                         last_security_work_retry_error = exc
                         continue
                     await self._handle_stream_error(account, exc.error, exc.code)
@@ -10548,7 +10550,7 @@ class ProxyService:
                         try:
                             async for line in self._stream_once(
                                 account,
-                                payload,
+                                stream_payload,
                                 headers,
                                 request_id,
                                 False,
@@ -10683,6 +10685,7 @@ class ProxyService:
                             not account.security_work_authorized
                             and account.id != file_preferred_account_id
                             and not require_preferred_account
+                            and allow_security_work_retry
                             and attempt < max_attempts - 1
                         ):
                             logger.info(
@@ -10701,6 +10704,8 @@ class ProxyService:
                             )
                             excluded_account_ids.add(account.id)
                             require_security_work_authorized = True
+                            if stream_payload.previous_response_id is not None:
+                                stream_payload = stream_payload.model_copy(update={"previous_response_id": None})
                             continue
                     if _should_penalize_stream_error(error_code):
                         await self._handle_stream_error(

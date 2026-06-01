@@ -69,6 +69,7 @@ describe("ImportSettings", () => {
       relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
       openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
       dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+      warmupModel: settings.warmupModel,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

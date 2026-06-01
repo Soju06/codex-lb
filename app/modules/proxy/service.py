@@ -12126,8 +12126,13 @@ class ProxyService:
         try:
             return await self._ensure_fresh_with_budget(account, timeout_seconds=timeout_seconds)
         except RefreshError as refresh_exc:
+            failed_account = _refresh_error_failed_account(refresh_exc, account)
+            if refresh_exc.transport_error:
+                _raise_proxy_unavailable_for_account(
+                    refresh_exc.message or str(refresh_exc) or "Request to upstream timed out",
+                    failed_account,
+                )
             if refresh_exc.is_permanent:
-                failed_account = _refresh_error_failed_account(refresh_exc, account)
                 await self._load_balancer.mark_permanent_failure(failed_account, refresh_exc.code)
             raise ProxyResponseError(
                 401,

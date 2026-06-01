@@ -15141,6 +15141,74 @@ async def test_transcribe_selection_budget_exhaustion_returns_request_timeout(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "invoke"),
+    [
+        (
+            "thread_goal",
+            lambda service: service.thread_goal_request("get", {}, {"session_id": "sid-thread"}),
+        ),
+        (
+            "codex_control",
+            lambda service: service.codex_control_request(
+                "/conversation",
+                method="GET",
+                payload=None,
+                query_params={},
+                headers={"session_id": "sid-control"},
+            ),
+        ),
+        (
+            "transcribe",
+            lambda service: service.transcribe(
+                audio_bytes=b"\x01\x02",
+                filename="sample.wav",
+                content_type="audio/wav",
+                prompt=None,
+                headers={"session_id": "sid-transcribe"},
+            ),
+        ),
+        (
+            "files",
+            lambda service: service._proxy_files_call(
+                log_model="files-create",
+                kind="files-create",
+                api_key=None,
+                headers={"session_id": "sid-files"},
+                invoke=AsyncMock(return_value={}),
+            ),
+        ),
+    ],
+)
+async def test_auxiliary_proxy_routes_log_local_selection_failure_metadata(monkeypatch, route, invoke):
+    del route
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            )
+        ),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await invoke(service)
+
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
+    assert request_logs.calls[0]["upstream_error_code"] == "no_accounts"
+    assert request_logs.calls[0]["upstream_status_code"] is None
+
+
+@pytest.mark.asyncio
 async def test_transcribe_records_transient_error_for_generic_upstream_failure(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

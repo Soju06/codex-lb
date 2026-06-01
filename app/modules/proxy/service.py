@@ -2491,6 +2491,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
+        failure_metadata = _RequestLogFailureMetadata()
         request_kind = f"thread_goal_{operation}"
 
         try:
@@ -2655,6 +2656,7 @@ class ProxyService:
                 await self._handle_proxy_error(account, exc)
                 raise
         except ProxyResponseError as exc:
+            failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
                 error.code if error else None,
@@ -2673,6 +2675,12 @@ class ProxyService:
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                failure_phase=failure_metadata.failure_phase,
+                failure_detail=failure_metadata.failure_detail,
+                failure_exception_type=failure_metadata.failure_exception_type,
+                upstream_status_code=failure_metadata.upstream_status_code,
+                upstream_error_code=failure_metadata.upstream_error_code,
+                bridge_stage=failure_metadata.bridge_stage,
             )
 
     async def codex_control_request(
@@ -2702,6 +2710,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
+        failure_metadata = _RequestLogFailureMetadata()
         request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
 
         try:
@@ -2863,6 +2872,7 @@ class ProxyService:
                 await self._handle_proxy_error(account, exc)
                 raise
         except ProxyResponseError as exc:
+            failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
                 error.code if error else None,
@@ -2881,6 +2891,12 @@ class ProxyService:
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                failure_phase=failure_metadata.failure_phase,
+                failure_detail=failure_metadata.failure_detail,
+                failure_exception_type=failure_metadata.failure_exception_type,
+                upstream_status_code=failure_metadata.upstream_status_code,
+                upstream_error_code=failure_metadata.upstream_error_code,
+                bridge_stage=failure_metadata.bridge_stage,
             )
 
     async def transcribe(
@@ -2902,6 +2918,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
+        failure_metadata = _RequestLogFailureMetadata()
         transcribe_model = "gpt-4o-transcribe"
 
         settings = await get_settings_cache().get()
@@ -3051,6 +3068,7 @@ class ProxyService:
                                 raise
                     raise
         except ProxyResponseError as exc:
+            failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
                 error.code if error else None,
@@ -3069,6 +3087,12 @@ class ProxyService:
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                failure_phase=failure_metadata.failure_phase,
+                failure_detail=failure_metadata.failure_detail,
+                failure_exception_type=failure_metadata.failure_exception_type,
+                upstream_status_code=failure_metadata.upstream_status_code,
+                upstream_error_code=failure_metadata.upstream_error_code,
+                bridge_stage=failure_metadata.bridge_stage,
             )
 
     # File-account pin TTL: long enough to cover a slow client-side
@@ -3344,6 +3368,7 @@ class ProxyService:
         log_status = "error"
         log_error_code: str | None = None
         log_error_message: str | None = None
+        failure_metadata = _RequestLogFailureMetadata()
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -3502,6 +3527,7 @@ class ProxyService:
                                 raise
                     raise
         except ProxyResponseError as exc:
+            failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
                 error.code if error else None,
@@ -3520,6 +3546,12 @@ class ProxyService:
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                failure_phase=failure_metadata.failure_phase,
+                failure_detail=failure_metadata.failure_detail,
+                failure_exception_type=failure_metadata.failure_exception_type,
+                upstream_status_code=failure_metadata.upstream_status_code,
+                upstream_error_code=failure_metadata.upstream_error_code,
+                bridge_stage=failure_metadata.bridge_stage,
             )
 
     async def proxy_responses_websocket(

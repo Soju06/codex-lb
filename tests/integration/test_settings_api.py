@@ -188,3 +188,31 @@ async def test_upstream_proxy_admin_controls(async_client):
     assert admin_payload["defaultPoolId"] == pool_payload["id"]
     assert admin_payload["endpoints"][0]["id"] == endpoint_payload["id"]
     assert admin_payload["pools"][0]["endpointIds"] == [endpoint_payload["id"]]
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_pool_rejects_missing_endpoint(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Broken Pool", "endpointIds": ["missing-endpoint"]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "proxy_endpoint_not_found"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_pool_member_rejects_missing_endpoint(async_client):
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Pool A", "endpointIds": []},
+    )
+    assert pool.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/pools/{pool.json()['id']}/members",
+        json={"endpointId": "missing-endpoint"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "proxy_endpoint_not_found"

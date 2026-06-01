@@ -183,6 +183,7 @@ async def create_upstream_proxy_pool(
     payload: UpstreamProxyPoolCreateRequest,
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyPoolResponse:
+    await _validate_proxy_endpoint_ids(context, payload.endpoint_ids)
     pool = ProxyPool(name=payload.name, is_active=payload.is_active)
     context.session.add(pool)
     await context.session.flush()
@@ -207,6 +208,7 @@ async def add_upstream_proxy_pool_member(
     pool = await context.session.get(ProxyPool, pool_id)
     if pool is None:
         raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
+    await _validate_proxy_endpoint_ids(context, [payload.endpoint_id])
     context.session.add(
         ProxyPoolMember(
             pool_id=pool_id,
@@ -234,6 +236,24 @@ async def add_upstream_proxy_pool_member(
         is_active=pool.is_active,
         endpoint_ids=list(endpoint_ids),
     )
+
+
+async def _validate_proxy_endpoint_ids(context: SettingsContext, endpoint_ids: list[str]) -> None:
+    if not endpoint_ids:
+        return
+    existing_ids = set(
+        (
+            await context.session.execute(select(ProxyEndpoint.id).where(ProxyEndpoint.id.in_(endpoint_ids)))
+        )
+        .scalars()
+        .all()
+    )
+    missing_ids = [endpoint_id for endpoint_id in endpoint_ids if endpoint_id not in existing_ids]
+    if missing_ids:
+        raise DashboardBadRequestError(
+            f"Proxy endpoint not found: {', '.join(missing_ids)}",
+            code="proxy_endpoint_not_found",
+        )
 
 
 @router.put("/upstream-proxy/accounts/{account_id}/binding", response_model=AccountProxyBindingResponse)

@@ -110,6 +110,10 @@ describe("AuthExportDialog", () => {
   it("copies auth.json in default codex mode", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -185,6 +189,10 @@ describe("AuthExportDialog", () => {
   it("copies the full codex id token from the preview row", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },

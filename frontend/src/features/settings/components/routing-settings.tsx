@@ -33,6 +33,12 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [relativeAvailabilityTopK, setRelativeAvailabilityTopK] = useState(
     String(settings.relativeAvailabilityTopK),
   );
+  const [stickyPrimaryThreshold, setStickyPrimaryThreshold] = useState(
+    String(settings.stickyReallocationPrimaryBudgetThresholdPct),
+  );
+  const [stickySecondaryThreshold, setStickySecondaryThreshold] = useState(
+    String(settings.stickyReallocationSecondaryBudgetThresholdPct),
+  );
   const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
   const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
   const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
@@ -74,6 +80,22 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     relativeAvailabilityTopKValid && parsedRelativeAvailabilityTopK !== settings.relativeAvailabilityTopK;
 
   const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
+  const parsedStickyPrimaryThreshold = Number.parseFloat(stickyPrimaryThreshold);
+  const stickyPrimaryThresholdValid =
+    Number.isFinite(parsedStickyPrimaryThreshold) &&
+    parsedStickyPrimaryThreshold >= 0 &&
+    parsedStickyPrimaryThreshold <= 100;
+  const stickyPrimaryThresholdChanged =
+    stickyPrimaryThresholdValid &&
+    parsedStickyPrimaryThreshold !== settings.stickyReallocationPrimaryBudgetThresholdPct;
+  const parsedStickySecondaryThreshold = Number.parseFloat(stickySecondaryThreshold);
+  const stickySecondaryThresholdValid =
+    Number.isFinite(parsedStickySecondaryThreshold) &&
+    parsedStickySecondaryThreshold >= 0 &&
+    parsedStickySecondaryThreshold <= 100;
+  const stickySecondaryThresholdChanged =
+    stickySecondaryThresholdValid &&
+    parsedStickySecondaryThreshold !== settings.stickyReallocationSecondaryBudgetThresholdPct;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -231,6 +253,90 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               disabled={busy}
               onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
             />
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Sticky primary threshold</p>
+              <p className="text-xs text-muted-foreground">Reallocate sticky sessions above this primary usage percent.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="Sticky primary threshold"
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                inputMode="decimal"
+                value={stickyPrimaryThreshold}
+                disabled={busy}
+                onChange={(event) => setStickyPrimaryThreshold(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && stickyPrimaryThresholdChanged) {
+                    void save({
+                      stickyReallocationPrimaryBudgetThresholdPct: parsedStickyPrimaryThreshold,
+                    });
+                  }
+                }}
+                className="h-8 w-28 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={busy || !stickyPrimaryThresholdChanged}
+                onClick={() =>
+                  void save({
+                    stickyReallocationPrimaryBudgetThresholdPct: parsedStickyPrimaryThreshold,
+                  })
+                }
+              >
+                Save primary
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Sticky secondary threshold</p>
+              <p className="text-xs text-muted-foreground">Reallocate sticky sessions above this secondary usage percent.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="Sticky secondary threshold"
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                inputMode="decimal"
+                value={stickySecondaryThreshold}
+                disabled={busy}
+                onChange={(event) => setStickySecondaryThreshold(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && stickySecondaryThresholdChanged) {
+                    void save({
+                      stickyReallocationSecondaryBudgetThresholdPct: parsedStickySecondaryThreshold,
+                    });
+                  }
+                }}
+                className="h-8 w-28 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={busy || !stickySecondaryThresholdChanged}
+                onClick={() =>
+                  void save({
+                    stickyReallocationSecondaryBudgetThresholdPct: parsedStickySecondaryThreshold,
+                  })
+                }
+              >
+                Save secondary
+              </Button>
+            </div>
           </div>
 
           <div className="flex items-center justify-between p-3">

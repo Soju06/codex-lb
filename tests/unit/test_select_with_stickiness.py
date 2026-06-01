@@ -931,6 +931,29 @@ async def test_sticky_thread_below_threshold_does_not_reallocate():
 
 
 @pytest.mark.asyncio
+async def test_fresh_sticky_mapping_uses_normal_budget_gate():
+    acc_a = _active("a", used_percent=10.0, secondary_used_percent=99.0)
+    acc_b = _active("b", used_percent=20.0, secondary_used_percent=10.0)
+    repo = _make_sticky_repo(existing_account_id=None)
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "new-codex-session",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=98.0,
+        routing_strategy="round_robin",
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("new-codex-session", "a", kind=StickySessionKind.CODEX_SESSION)
+
+
+@pytest.mark.asyncio
 async def test_secondary_budget_threshold_controls_sticky_reallocation():
     acc_a = _active("a", used_percent=10.0, secondary_used_percent=99.0)
     acc_b = _active("b", used_percent=20.0, secondary_used_percent=10.0)

@@ -938,6 +938,7 @@ class LoadBalancer:
         # recovers.  Only reallocate_sticky=True opts in to permanent
         # reassignment.
         persist_fallback = True
+        apply_sticky_secondary_budget_threshold = False
 
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
@@ -988,6 +989,7 @@ class LoadBalancer:
                     # wastes DB writes and destroys prompt-cache locality
                     # (thrashing).
                     if budget_pressured:
+                        apply_sticky_secondary_budget_threshold = True
                         pool_best = _select_account_preferring_budget_safe(
                             states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1072,7 +1074,7 @@ class LoadBalancer:
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-            apply_secondary_budget_threshold=True,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)

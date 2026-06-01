@@ -247,6 +247,76 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("saves split sticky reallocation thresholds", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
+    );
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Sticky primary threshold" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Sticky primary threshold" }), "90");
+    await user.click(screen.getByRole("button", { name: "Save primary" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 90,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Sticky secondary threshold" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Sticky secondary threshold" }), "98.5{Enter}");
+
+    expect(onSave).toHaveBeenLastCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      routingStrategy: "usage_weighted",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 98.5,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
+  });
+
+  it("rejects sticky reallocation thresholds outside percent range", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />,
+    );
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Sticky primary threshold" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Sticky primary threshold" }), "101");
+
+    expect(screen.getByRole("button", { name: "Save primary" })).toBeDisabled();
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Sticky secondary threshold" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Sticky secondary threshold" }), "-1");
+
+    expect(screen.getByRole("button", { name: "Save secondary" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("shows the configured upstream transport", () => {
     render(
       <RoutingSettings

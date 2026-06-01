@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { listAccounts } from "@/features/accounts/api";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
@@ -27,6 +29,29 @@ const DEFAULT_FILTERS: ReportsFiltersState = {
 export function ReportsPage() {
   const [filters, setFilters] = useState<ReportsFiltersState>(DEFAULT_FILTERS);
   const { data, isLoading } = useReports(filters);
+  const { data: accountsData } = useQuery({
+    queryKey: ["accounts", "reports-filter"],
+    queryFn: listAccounts,
+  });
+
+  const accountOptions = useMemo(
+    () =>
+      (accountsData?.accounts ?? []).map((account) => ({
+        value: account.accountId,
+        label: account.alias || account.displayName || account.email || account.accountId,
+        isEmail: !account.alias,
+      })),
+    [accountsData],
+  );
+
+  const modelOptions = useMemo(
+    () =>
+      (data?.byModel ?? []).map((entry) => ({
+        value: entry.model,
+        label: entry.model,
+      })),
+    [data],
+  );
 
   return (
     <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-6 px-4 py-8 sm:px-6">
@@ -39,7 +64,12 @@ export function ReportsPage() {
         </p>
       </div>
 
-      <ReportsFilters filters={filters} onFiltersChange={setFilters} />
+      <ReportsFilters
+        filters={filters}
+        accountOptions={accountOptions}
+        modelOptions={modelOptions}
+        onFiltersChange={setFilters}
+      />
 
       {isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">

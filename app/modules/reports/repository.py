@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Integer, and_, cast, func, literal_column, select
+from sqlalchemy import Integer, and_, cast, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, RequestLog
+
+_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class ReportsRepository:
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
             RequestLog.deleted_at.is_(None),
+            _normal_traffic_clause(),
         ]
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
@@ -108,6 +111,7 @@ class ReportsRepository:
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
             RequestLog.deleted_at.is_(None),
+            _normal_traffic_clause(),
             RequestLog.cost_usd.is_not(None),
         ]
         if account_ids:
@@ -144,6 +148,7 @@ class ReportsRepository:
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
             RequestLog.deleted_at.is_(None),
+            _normal_traffic_clause(),
             RequestLog.cost_usd.is_not(None),
         ]
         if account_ids:
@@ -181,3 +186,7 @@ class ReportsRepository:
             )
             for row in rows
         ]
+
+
+def _normal_traffic_clause():
+    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)

@@ -1,4 +1,8 @@
 import { Button } from "@/components/ui/button";
+import {
+  MultiSelectFilter,
+  type MultiSelectOption,
+} from "@/features/dashboard/components/filters/multi-select-filter";
 
 export type ReportsFiltersState = {
   startDate: string;
@@ -9,6 +13,8 @@ export type ReportsFiltersState = {
 
 export type ReportsFiltersProps = {
   filters: ReportsFiltersState;
+  accountOptions: MultiSelectOption[];
+  modelOptions: MultiSelectOption[];
   onFiltersChange: (filters: ReportsFiltersState) => void;
 };
 
@@ -28,7 +34,12 @@ function daysAgoISO(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-export function ReportsFilters({ filters, onFiltersChange }: ReportsFiltersProps) {
+export function ReportsFilters({
+  filters,
+  accountOptions,
+  modelOptions,
+  onFiltersChange,
+}: ReportsFiltersProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
       {PRESETS.map((preset) => (
@@ -47,6 +58,21 @@ export function ReportsFilters({ filters, onFiltersChange }: ReportsFiltersProps
           {preset.label}
         </Button>
       ))}
+
+      <MultiSelectFilter
+        label="Accounts"
+        values={filters.accountId}
+        options={accountOptions}
+        onChange={(accountId) => onFiltersChange({ ...filters, accountId })}
+      />
+      <MultiSelectFilter
+        label="Model"
+        values={filters.model ? [filters.model] : []}
+        options={modelOptions}
+        onChange={(models) =>
+          onFiltersChange({ ...filters, model: models.at(-1) ?? "" })
+        }
+      />
 
       <div className="ml-auto flex items-center gap-2">
         <input

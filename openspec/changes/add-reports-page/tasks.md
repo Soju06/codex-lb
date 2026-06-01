@@ -10,8 +10,9 @@
 
 ## 3. Frontend
 - [x] 3.1 Allow nullable `accountId` in frontend reports schema.
+- [x] 3.2 Expose account and model controls in the reports filter bar.
 
 ## 4. Verification
-- [ ] 4.1 Run focused integration test for `/api/reports` with SQLite date aggregation.
-- [ ] 4.2 Run `ruff check` on report modules.
-- [ ] 4.3 Run `ty` check for report modules.
+- [x] 4.1 Run focused integration test for `/api/reports` with SQLite date aggregation.
+- [x] 4.2 Run `ruff check` on report modules.
+- [x] 4.3 Run `ty` check for report modules.

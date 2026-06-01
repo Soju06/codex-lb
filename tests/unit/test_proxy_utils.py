@@ -30,6 +30,7 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import CircuitState
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
@@ -13296,6 +13297,54 @@ async def test_stream_route_fail_closed_does_not_mark_account_unhealthy(monkeypa
     assert request_logs.calls[-1]["upstream_proxy_fail_closed_reason"] == "pool_unavailable"
     handle_stream_error.assert_not_awaited()
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_early_route_failure_logs_resolved_route_metadata(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_early_route_failure")
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def fake_select_account_with_budget(*args: object, **kwargs: object) -> AccountSelection:
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_ensure_fresh(account: Account, **kwargs: object) -> Account:
+        return account
+
+    async def resolve_route(*args: object, **kwargs: object) -> ResolvedUpstreamRoute:
+        return route
+
+    async def stream_without_route_trace(*args: object, **kwargs: object):
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_fail",'
+            '"error":{"code":"upstream_unavailable","message":"proxy connect failed"}}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", resolve_route)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", stream_without_route_trace)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert chunks
+    log = request_logs.calls[-1]
+    assert log["upstream_proxy_route_mode"] == "account_bound"
+    assert log["upstream_proxy_pool_id"] == "pool_1"
+    assert log["upstream_proxy_endpoint_id"] == "ep_1"
+    assert log["upstream_proxy_fallback_used"] is False
 
 
 @pytest.mark.asyncio

@@ -11523,6 +11523,14 @@ class ProxyService:
             settlement.cached_input_tokens = cached_input_tokens
             settlement.error_code = error_code
             settlement.error_message = error_message
+            upstream_proxy_route_mode = route_trace.mode or (route.mode if route is not None else None)
+            upstream_proxy_pool_id = route_trace.pool_id or (route.pool_id if route is not None else None)
+            upstream_proxy_endpoint_id = route_trace.endpoint_id or (route.endpoint_id if route is not None else None)
+            upstream_proxy_fallback_used = (
+                route_trace.fallback_used
+                if route_trace.endpoint_id is not None
+                else (False if route is not None else None)
+            )
             await self._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
@@ -11543,10 +11551,10 @@ class ProxyService:
                 actual_service_tier=actual_service_tier,
                 latency_first_token_ms=latency_first_token_ms,
                 session_id=session_id,
-                upstream_proxy_route_mode=route_trace.mode,
-                upstream_proxy_pool_id=route_trace.pool_id,
-                upstream_proxy_endpoint_id=route_trace.endpoint_id,
-                upstream_proxy_fallback_used=route_trace.fallback_used if route_trace.endpoint_id else None,
+                upstream_proxy_route_mode=upstream_proxy_route_mode,
+                upstream_proxy_pool_id=upstream_proxy_pool_id,
+                upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
+                upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
             )
             _maybe_log_proxy_service_tier_trace(

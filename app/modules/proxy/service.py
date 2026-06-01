@@ -6800,6 +6800,17 @@ class ProxyService:
                         await self._load_balancer.release_account_lease(selected_account_lease)
                         selected_account_lease = None
                         continue
+                    if require_preferred_account:
+                        await self._load_balancer.release_account_lease(selected_account_lease)
+                        selected_account_lease = None
+                        raise ProxyResponseError(
+                            503,
+                            openai_error(
+                                "no_accounts",
+                                "Preferred account is unavailable; retry later.",
+                                error_type="server_error",
+                            ),
+                        ) from exc
                     excluded_account_ids.add(account.id)
                     preferred_candidate_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
@@ -6828,6 +6839,17 @@ class ProxyService:
                         await self._load_balancer.release_account_lease(selected_account_lease)
                         selected_account_lease = None
                         continue
+                    if require_preferred_account:
+                        await self._load_balancer.release_account_lease(selected_account_lease)
+                        selected_account_lease = None
+                        raise ProxyResponseError(
+                            503,
+                            openai_error(
+                                "no_accounts",
+                                "Preferred account is unavailable; retry later.",
+                                error_type="server_error",
+                            ),
+                        ) from exc
                     excluded_account_ids.add(account.id)
                     preferred_candidate_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
@@ -7365,6 +7387,8 @@ class ProxyService:
                 session.durable_session_id = durable_session_id
                 session.durable_owner_epoch = durable_owner_epoch
                 logger.warning("Failed to release stale pending HTTP bridge session lease", exc_info=True)
+        await self._load_balancer.release_account_lease(session.account_lease)
+        session.account_lease = None
         if not session.upstream_close_attempted:
             session.upstream_close_attempted = True
             try:

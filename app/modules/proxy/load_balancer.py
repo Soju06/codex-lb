@@ -82,6 +82,7 @@ class RequestedLimitState:
     primary: AdditionalUsageHistory | None = None
     secondary: AdditionalUsageHistory | None = None
 
+
 AccountLeaseKind = Literal["response_create", "stream"]
 
 
@@ -795,8 +796,12 @@ class LoadBalancer:
             for credential_slot_id, requested_limit in requested_limit_states.items():
                 if requested_limit.primary is not None:
                     latest_primary[credential_slot_id] = _additional_usage_to_usage_history(requested_limit.primary)
+                else:
+                    latest_primary.pop(credential_slot_id, None)
                 if requested_limit.secondary is not None:
                     latest_secondary[credential_slot_id] = _additional_usage_to_usage_history(requested_limit.secondary)
+                else:
+                    latest_secondary.pop(credential_slot_id, None)
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary=latest_primary,

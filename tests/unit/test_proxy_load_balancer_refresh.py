@@ -2262,6 +2262,65 @@ async def test_select_account_bypasses_primary_quota_for_model_derived_gated_lim
 
 
 @pytest.mark.asyncio
+async def test_select_account_ignores_ordinary_primary_usage_for_secondary_only_gated_limit(monkeypatch) -> None:
+    account = _make_account("acc-gated-secondary-only", "gated-secondary-only@example.com")
+    account.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+                window_minutes=60,
+            )
+        },
+        secondary={},
+    )
+    accounts_repo = StubAccountsRepository([account])
+    sticky_repo = StubStickySessionsRepository()
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={},
+        secondary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="secondary",
+                used_percent=20.0,
+                reset_at=now_epoch + 3600,
+                recorded_at=now,
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(model_plans={}),
+            plan_types_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            sticky_repo,
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_prioritizes_requested_limit_usage_for_gated_model(monkeypatch) -> None:
     base_hot_limit_cool = _make_account("acc-base-hot-limit-cool", "base-hot@example.com")
     base_cool_limit_hot = _make_account("acc-base-cool-limit-hot", "base-cool@example.com")

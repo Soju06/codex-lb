@@ -12,6 +12,10 @@ const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupCooldownSeconds: 3600,
   limitWarmupMinAvailablePercent: 100,
 };
+const ADDITIONAL_QUOTA_DEFAULTS = {
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
+};
 
 const baseSettings = {
   stickyThreadsEnabled: true,
@@ -28,6 +32,7 @@ const baseSettings = {
   totpConfigured: true,
   apiKeyAuthEnabled: true,
   ...LIMIT_WARMUP_DEFAULTS,
+  ...ADDITIONAL_QUOTA_DEFAULTS,
 };
 
 describe("SessionSettings", () => {

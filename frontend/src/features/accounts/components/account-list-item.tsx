@@ -1,10 +1,13 @@
+import { Flame, Shield } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
@@ -33,7 +36,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const hasSecondaryWindow = account.windowMinutesSecondary != null || secondary !== null || account.resetAtSecondary != null;
   const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
-  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
+
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
@@ -59,9 +62,10 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
           </p>
         </div>
+        <RoutingPolicyBadge policy={account.routingPolicy as AccountRoutingPolicy | undefined} />
         <StatusBadge status={status} />
       </div>
-      <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
+      <div className={cn("mt-2 grid gap-2", showPrimaryRow && showSecondaryRow ? "grid-cols-2" : "grid-cols-1")}>
         {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
         {showSecondaryRow ? <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} /> : null}
       </div>
@@ -70,6 +74,36 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
         <span className="truncate">{warmupMeta}</span>
       </div>
     </button>
+  );
+}
+
+function RoutingPolicyBadge({ policy }: { policy: AccountRoutingPolicy | undefined }) {
+  if (policy === "burn_first") {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700"
+      >
+        <Flame className="h-3 w-3" aria-hidden="true" />
+        Burn first
+      </Badge>
+    );
+  }
+  if (policy === "preserve") {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700"
+      >
+        <Shield className="h-3 w-3" aria-hidden="true" />
+        Preserve
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="shrink-0 px-1.5 text-[11px] text-muted-foreground">
+      Normal
+    </Badge>
   );
 }
 

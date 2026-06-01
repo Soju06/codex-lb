@@ -143,6 +143,7 @@ async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
     assert quota["quotaKey"] == "codex_spark"
     assert isinstance(quota["limitName"], str)
     assert quota["displayLabel"] == "GPT-5.3-Codex-Spark"
+    assert quota["routingPolicy"] == "burn_first"
     assert quota["meteredFeature"] == "codex_bengalfox"
     assert quota["primaryWindow"] is not None
     assert quota["primaryWindow"]["usedPercent"] == pytest.approx(55.0)

@@ -1,4 +1,4 @@
-import { Clock } from "lucide-react";
+import { Clock, Flame } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { AccountTrendChart } from "@/features/accounts/components/account-trend-chart";
@@ -122,15 +122,23 @@ function AdditionalQuotaRow({
   );
 }
 
+const ADDITIONAL_ROUTING_POLICY_LABELS: Record<string, string> = {
+  burn_first: "Burn first",
+  normal: "Normal",
+  preserve: "Preserve",
+};
+
 export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const primaryTrendPoints = trends?.primary ?? [];
+  const secondaryTrendPoints = trends?.secondary ?? [];
+  const secondaryScheduledTrendPoints = trends?.secondaryScheduled ?? [];
   const hasTrends =
-    trends &&
-    (trends.primary.length > 0 || trends.secondary.length > 0 || trends.secondaryScheduled.length > 0);
+    primaryTrendPoints.length > 0 || secondaryTrendPoints.length > 0 || secondaryScheduledTrendPoints.length > 0;
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
@@ -158,7 +166,13 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
           {account.additionalQuotas.map((quota) => (
             <div key={quota.quotaKey ?? quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
               <p className="text-xs font-medium">
-                {quota.displayLabel ?? formatAdditionalLimitName(quota.limitName, quota.quotaKey)}
+                <span>{quota.displayLabel ?? formatAdditionalLimitName(quota.limitName, quota.quotaKey)}</span>
+                {quota.routingPolicy !== "inherit" ? (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-orange-200 bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 dark:border-orange-900/60 dark:bg-orange-950/40 dark:text-orange-300">
+                    <Flame className="h-3 w-3" aria-hidden="true" />
+                    {ADDITIONAL_ROUTING_POLICY_LABELS[quota.routingPolicy] ?? quota.routingPolicy}
+                  </span>
+                ) : null}
               </p>
               {quota.primaryWindow != null ? (
                 <AdditionalQuotaRow
@@ -191,7 +205,7 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
                 Weekly
               </span>
-              {trends.secondaryScheduled.length > 0 ? (
+              {secondaryScheduledTrendPoints.length > 0 ? (
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
                   Weekly plan
@@ -200,9 +214,9 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
             </div>
           </div>
           <AccountTrendChart
-            primary={trends.primary}
-            secondary={trends.secondary}
-            secondaryScheduled={trends.secondaryScheduled}
+            primary={primaryTrendPoints}
+            secondary={secondaryTrendPoints}
+            secondaryScheduled={secondaryScheduledTrendPoints}
           />
         </div>
       )}

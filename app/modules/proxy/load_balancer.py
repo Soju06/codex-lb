@@ -141,7 +141,9 @@ class _SelectionInputs:
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
     error_code: str | None = None
+    ignore_standard_quota_account_ids: frozenset[str] = frozenset()
     ignore_standard_quota_status: bool = False
+    persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
 
 
@@ -349,6 +351,7 @@ class LoadBalancer:
                         latest_secondary=selection_inputs.latest_secondary,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
+                        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                     )
                     selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
                     if not selection_states and states:
@@ -373,7 +376,7 @@ class LoadBalancer:
                             relative_availability_top_k=relative_availability_top_k,
                             budget_threshold_pct=budget_threshold_pct,
                             traffic_class=traffic_class,
-                            ignore_standard_quota=selection_inputs.ignore_standard_quota_status,
+                            ignore_standard_quota=False,
                         )
 
                     selected_account_map = account_map
@@ -516,6 +519,7 @@ class LoadBalancer:
                         latest_secondary=selection_inputs.latest_secondary,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
+                        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                     )
                 if sticky_key and sticky_kind == StickySessionKind.CODEX_SESSION:
                     async with self._repo_factory() as repos:
@@ -560,7 +564,7 @@ class LoadBalancer:
                             sticky_repo=repos.sticky_sessions,
                             sticky_existing_account_id=sticky_existing_account_id,
                             traffic_class=traffic_class,
-                            ignore_standard_quota=selection_inputs.ignore_standard_quota_status,
+                            ignore_standard_quota=False,
                         )
                 selected_account_map = account_map
                 selected_states = []
@@ -692,14 +696,18 @@ class LoadBalancer:
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
         effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
-        additional_quota_routing_policies_json = ""
+        additional_quota_routing_policies: dict[str, str] = {}
         if effective_limit_name is not None:
-            dashboard_settings = await get_settings_cache().get()
-            additional_quota_routing_policies_json = dashboard_settings.additional_quota_routing_policies_json
+            additional_quota_routing_policies = await _load_dashboard_additional_quota_routing_overrides()
+        additional_quota_routing_policies_cache_key = json.dumps(
+            additional_quota_routing_policies,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         cache_key = (
             model,
             additional_limit_name,
-            additional_quota_routing_policies_json,
+            additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
         )
         cached = await self._selection_inputs_cache.get(cache_key)
@@ -713,7 +721,7 @@ class LoadBalancer:
             ignore_standard_quota_status = effective_limit_name is not None
             routing_policy_override = _additional_quota_routing_policy_override(
                 effective_limit_name,
-                additional_quota_routing_policies_json,
+                additional_quota_routing_policies,
             )
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
@@ -792,14 +800,41 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
+            standard_latest_primary, standard_latest_secondary = await asyncio.gather(
+                repos.usage.latest_by_account(),
+                repos.usage.latest_by_account(window="secondary"),
+            )
             if effective_limit_name:
+                model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
                 latest_primary = additional_filter.latest_primary
                 latest_secondary = additional_filter.latest_secondary
-            else:
-                latest_primary, latest_secondary = await asyncio.gather(
-                    repos.usage.latest_by_account(),
-                    repos.usage.latest_by_account(window="secondary"),
+                quota_scoped_account_ids = frozenset(
+                    account.id
+                    for account in accounts
+                    if additional_limit_name is not None
+                    or (
+                        model_allowed_plans is not None
+                        and normalize_account_plan_type(account.plan_type) not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
+                        and account_plan_matches_allowed(
+                            account.plan_type,
+                            model_allowed_plans,
+                        )
+                    )
                 )
+                latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = dict(standard_latest_primary)
+                latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory] = dict(standard_latest_secondary)
+                for account_id in quota_scoped_account_ids:
+                    latest_primary.pop(account_id, None)
+                    latest_secondary.pop(account_id, None)
+                    if account_id in additional_filter.latest_primary:
+                        latest_primary[account_id] = additional_filter.latest_primary[account_id]
+                    if account_id in additional_filter.latest_secondary:
+                        latest_secondary[account_id] = additional_filter.latest_secondary[account_id]
+                ignore_standard_quota_account_ids = quota_scoped_account_ids
+            else:
+                latest_primary = standard_latest_primary
+                latest_secondary = standard_latest_secondary
+                ignore_standard_quota_account_ids = frozenset()
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={
@@ -809,7 +844,9 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
+                ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
                 ignore_standard_quota_status=ignore_standard_quota_status,
+                persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
             )
             await self._selection_inputs_cache.set(
@@ -825,6 +862,7 @@ class LoadBalancer:
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         budget_threshold_pct: float,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
     ) -> AccountSelection:
@@ -847,6 +885,7 @@ class LoadBalancer:
                 latest_secondary=selection_inputs.latest_secondary,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
+                ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             )
             selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
             if not selection_states and states:
@@ -865,13 +904,14 @@ class LoadBalancer:
         result = _select_account_preferring_budget_safe(
             selection_states,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             budget_threshold_pct=budget_threshold_pct,
             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
             apply_secondary_budget_threshold=True,
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
-            ignore_standard_quota=selection_inputs.ignore_standard_quota_status,
+            ignore_standard_quota=False,
         )
         if result.account is None:
             return AccountSelection(
@@ -1351,6 +1391,7 @@ class LoadBalancer:
             plan_type=account.plan_type,
             capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
             routing_policy=routing_policy,
+            ignore_standard_quota=False,
         )
 
     def _sync_runtime_state(
@@ -1403,6 +1444,8 @@ class LoadBalancer:
     ) -> set[str]:
         stale_account_ids: set[str] = set()
         for state in states:
+            if state.ignore_standard_quota:
+                continue
             account = account_map.get(state.account_id)
             if account is not None:
                 persisted = await self._persist_state_if_current(accounts_repo, account, state)
@@ -1486,6 +1529,7 @@ def _build_states(
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory],
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
+    ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
@@ -1497,8 +1541,9 @@ def _build_states(
             secondary_entry=latest_secondary.get(account.id),
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
-        if routing_policy_override is not None:
+        if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
+        state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)
         account_map[account.id] = account
     return states, account_map
@@ -1575,10 +1620,14 @@ def _normalize_account_routing_policy(value: str | None) -> str:
     return _ROUTING_POLICY_NORMAL
 
 
-def _additional_quota_routing_policy_override(limit_name: str | None, raw_policies: str) -> str | None:
+async def _load_dashboard_additional_quota_routing_overrides() -> dict[str, str]:
+    dashboard_settings = await get_settings_cache().get()
+    return _parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
+
+
+def _additional_quota_routing_policy_override(limit_name: str | None, policies: dict[str, str]) -> str | None:
     if limit_name is None:
         return None
-    policies = _parse_additional_quota_routing_policies(raw_policies)
     normalized_limit_name = canonicalize_additional_quota_key(limit_name=limit_name)
     if normalized_limit_name is None:
         return None
@@ -1954,7 +2003,9 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         ),
         error_message=selection_inputs.error_message,
         error_code=selection_inputs.error_code,
+        ignore_standard_quota_account_ids=frozenset(selection_inputs.ignore_standard_quota_account_ids),
         ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+        persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
         routing_policy_override=selection_inputs.routing_policy_override,
     )
 

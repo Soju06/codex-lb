@@ -140,6 +140,8 @@ class SettingsRepository:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
+        if additional_quota_routing_policies_json is not None:
+            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         await self.commit_refresh(settings)
         return settings
 

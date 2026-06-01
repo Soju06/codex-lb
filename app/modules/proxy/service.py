@@ -38,6 +38,7 @@ from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
+    ResetPreferenceWindow,
     RoutingStrategy,
     TrafficClass,
     failover_decision,
@@ -2497,6 +2498,7 @@ class ProxyService:
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=selection_model,
             )
@@ -2508,6 +2510,7 @@ class ProxyService:
                     traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC
                     if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
                     else TRAFFIC_CLASS_FOREGROUND,
+                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -2612,6 +2615,7 @@ class ProxyService:
                                     reallocate_sticky=affinity.reallocate_sticky,
                                     sticky_max_age_seconds=affinity.max_age_seconds,
                                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                                     routing_strategy=routing_strategy,
                                     model=selection_model,
                                     exclude_account_ids={account.id},
@@ -2711,6 +2715,7 @@ class ProxyService:
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=selection_model,
             )
@@ -2722,6 +2727,7 @@ class ProxyService:
                     traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC
                     if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
                     else TRAFFIC_CLASS_FOREGROUND,
+                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -2826,6 +2832,7 @@ class ProxyService:
                                     reallocate_sticky=affinity.reallocate_sticky,
                                     sticky_max_age_seconds=affinity.max_age_seconds,
                                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                                     routing_strategy=routing_strategy,
                                     model=selection_model,
                                     exclude_account_ids={account.id},
@@ -3967,6 +3974,7 @@ class ProxyService:
                         reallocate_sticky=request_affinity.reallocate_sticky,
                         sticky_max_age_seconds=request_affinity.max_age_seconds,
                         prefer_earlier_reset=prefer_earlier_reset,
+                        prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                         routing_strategy=routing_strategy,
                         model=request_state.model,
                         request_state=request_state,
@@ -4637,6 +4645,7 @@ class ProxyService:
         sticky_kind: StickySessionKind | None,
         prefer_earlier_reset: bool,
         routing_strategy: RoutingStrategy,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         model: str | None,
         request_state: _WebSocketRequestState,
         api_key: ApiKeyData | None,
@@ -4664,6 +4673,7 @@ class ProxyService:
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     prefer_earlier_reset=prefer_earlier_reset,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
                     model=model,
                     request_state=request_state,
@@ -4782,6 +4792,7 @@ class ProxyService:
         sticky_kind: StickySessionKind | None,
         prefer_earlier_reset: bool,
         routing_strategy: RoutingStrategy,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         model: str | None,
         request_state: _WebSocketRequestState,
         api_key: ApiKeyData | None,
@@ -4805,6 +4816,7 @@ class ProxyService:
                 reallocate_sticky=reallocate_sticky,
                 sticky_max_age_seconds=sticky_max_age_seconds,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
                 model=model,
                 exclude_account_ids=exclude_account_ids,
@@ -5202,6 +5214,7 @@ class ProxyService:
         affinity: _AffinityPolicy,
         api_key: ApiKeyData | None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     ) -> Account | None:
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
@@ -5215,6 +5228,7 @@ class ProxyService:
             reallocate_sticky=affinity.reallocate_sticky,
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
@@ -7485,6 +7499,7 @@ class ProxyService:
                 reallocate_sticky=session.affinity.reallocate_sticky,
                 sticky_max_age_seconds=session.affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,
                 exclude_account_ids=excluded_account_ids,
@@ -11743,6 +11758,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
@@ -11793,6 +11809,7 @@ class ProxyService:
                         reallocate_sticky=reallocate_sticky,
                         sticky_max_age_seconds=sticky_max_age_seconds,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
                         relative_availability_power=_relative_availability_power(settings),
                         relative_availability_top_k=_relative_availability_top_k(settings),
@@ -11822,6 +11839,7 @@ class ProxyService:
                     reallocate_sticky=reallocate_sticky,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
                     relative_availability_power=_relative_availability_power(settings),
                     relative_availability_top_k=_relative_availability_top_k(settings),
@@ -11898,6 +11916,7 @@ class ProxyService:
             model=model,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
             routing_strategy=_routing_strategy(settings),
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
@@ -14342,6 +14361,10 @@ def _relative_availability_top_k(settings: DashboardSettings) -> int:
     raw_value = getattr(settings, "relative_availability_top_k", None)
     value = int(raw_value) if raw_value is not None else 5
     return min(max(value, 1), 20)
+
+
+def _prefer_earlier_reset_window(settings: DashboardSettings) -> ResetPreferenceWindow:
+    return "primary" if getattr(settings, "prefer_earlier_reset_window", None) == "primary" else "secondary"
 
 
 def _sticky_reallocation_primary_budget_threshold_pct(settings: DashboardSettings) -> float:

@@ -1643,6 +1643,7 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
     )
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
     mock_repos.additional_usage = AsyncMock()
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)
@@ -1669,6 +1670,7 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
         latest_secondary=selection_inputs.latest_secondary,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
     )
 
     assert selection_inputs.ignore_standard_quota_status is True
@@ -1701,6 +1703,7 @@ async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_k
     )
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
     mock_repos.additional_usage = AsyncMock()
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)
@@ -1730,6 +1733,7 @@ async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_k
         latest_secondary=selection_inputs.latest_secondary,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
     )
 
     assert selection_inputs.ignore_standard_quota_status is True
@@ -1762,6 +1766,7 @@ async def test_load_selection_inputs_inherits_account_policy_for_additional_quot
     mock_accounts_repo.list_accounts = AsyncMock(return_value=[account])
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
     mock_repos.additional_usage = AsyncMock()
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)

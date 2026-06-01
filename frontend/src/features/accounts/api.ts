@@ -1,4 +1,4 @@
-import { del, get, post, put } from "@/lib/api-client";
+import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
@@ -9,6 +9,8 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountRoutingPolicyResponseSchema,
+  AccountRoutingPolicyUpdateSchema,
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
@@ -58,6 +60,15 @@ export function setAccountAlias(accountId: string, alias: string | null) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
     AccountAliasResponseSchema,
+    { body: validated },
+  );
+}
+
+export function updateAccountRoutingPolicy(accountId: string, payload: unknown) {
+  const validated = AccountRoutingPolicyUpdateSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
+    AccountRoutingPolicyResponseSchema,
     { body: validated },
   );
 }
@@ -131,6 +142,7 @@ export function completeOauth(payload?: unknown) {
     body: validated,
   });
 }
+
 export function submitManualOauthCallback(payload: unknown) {
   const validated = ManualOauthCallbackRequestSchema.parse(payload);
   return post(`${OAUTH_BASE_PATH}/manual-callback`, ManualOauthCallbackResponseSchema, {

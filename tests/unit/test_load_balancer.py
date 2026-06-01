@@ -2175,6 +2175,58 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
 
 
 @pytest.mark.asyncio
+async def test_security_work_filter_preserves_additional_quota_metadata():
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    account = _make_test_account(account_id="acc-security", status=AccountStatus.QUOTA_EXCEEDED)
+    account.security_work_authorized = True
+
+    async def _mocked_additional_filter(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        explicit_limit: bool,
+        repos,
+    ) -> _AdditionalLimitFilterResult:
+        return _AdditionalLimitFilterResult(
+            accounts=accounts,
+            latest_primary={},
+            latest_secondary={},
+        )
+
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(return_value=[account])
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+    with pytest.MonkeyPatch().context() as monkeypatch:
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
+            _mocked_additional_filter,
+        )
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.get_settings_cache",
+            lambda: SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+            ),
+        )
+
+        selection = await balancer.select_account(
+            additional_limit_name="codex-spark",
+            require_security_work_authorized=True,
+        )
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
 async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_key():
     from app.modules.proxy.load_balancer import ROUTING_POLICY_BURN_FIRST, LoadBalancer
 

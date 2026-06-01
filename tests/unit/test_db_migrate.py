@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -757,3 +758,18 @@ def test_max_revision_id_length_exceeds_alembic_default(tmp_path: Path) -> None:
     config = _build_alembic_config(_db_url(db_path))
 
     assert _max_revision_id_length(config) > 32
+
+
+def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260601_010000_add_routing_policy_persistence")
+
+    class _OpMustNotAlter:
+        def batch_alter_table(self, table_name: str):  # pragma: no cover - assertion helper
+            raise AssertionError(f"unexpected schema alteration for {table_name}")
+
+        def get_bind(self):  # pragma: no cover - assertion helper
+            raise AssertionError("downgrade should not inspect a bind")
+
+    monkeypatch.setattr(migration, "op", _OpMustNotAlter())
+
+    migration.downgrade()

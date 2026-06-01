@@ -37,14 +37,6 @@ def _add_column_if_missing(
         batch_op.add_column(column)
 
 
-def _drop_column_if_present(connection: Connection, table_name: str, column_name: str) -> None:
-    columns = _columns(connection, table_name)
-    if not columns or column_name not in columns:
-        return
-    with op.batch_alter_table(table_name) as batch_op:
-        batch_op.drop_column(column_name)
-
-
 def upgrade() -> None:
     bind = op.get_bind()
     _add_column_if_missing(
@@ -67,6 +59,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    _drop_column_if_present(bind, "dashboard_settings", "additional_quota_routing_policies_json")
-    _drop_column_if_present(bind, "accounts", "routing_policy")
+    # The columns are owned by earlier active revisions in the merged graph:
+    # 20260506_000000_add_account_routing_policy and
+    # 20260509_010000_add_additional_quota_routing_policies. This revision only
+    # keeps upgrade idempotent for branches that replayed the fields, so its
+    # downgrade must not remove schema required by those earlier revisions.
+    return

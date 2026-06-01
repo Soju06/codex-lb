@@ -327,6 +327,10 @@ class LoadBalancer:
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
+                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
+                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
+                    routing_policy_override=selection_inputs.routing_policy_override,
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]

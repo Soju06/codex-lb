@@ -12014,6 +12014,35 @@ class ProxyService:
                     timeout_seconds=remaining_budget,
                 )
             except RefreshError as exc:
+                if exc.transport_error:
+                    message = exc.message or str(exc) or "Request to upstream timed out"
+                    logger.warning(
+                        "%s refresh transport failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        current.id,
+                        exc_info=True,
+                    )
+                    if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                        _raise_proxy_unavailable_for_account(message, current)
+                    if (
+                        strict_account_id is not None and current.id == strict_account_id
+                    ) or attempt >= max_account_attempts:
+                        _raise_proxy_unavailable_for_account(message, current)
+                    excluded_account_ids.add(current.id)
+                    selection = await select_next_account(excluded_account_ids)
+                    selected_account = selection.account
+                    if selected_account is None:
+                        _raise_proxy_unavailable_for_account(message, current)
+                    assert selected_account is not None
+                    await self._handle_stream_error(
+                        current,
+                        {"message": message},
+                        "upstream_unavailable",
+                    )
+                    current = selected_account
+                    force_current = False
+                    continue
                 setattr(exc, _FAILED_ACCOUNT_ATTR, current)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -12033,14 +12062,16 @@ class ProxyService:
                     _raise_proxy_unavailable_for_account(message, current)
                 excluded_account_ids.add(current.id)
                 selection = await select_next_account(excluded_account_ids)
-                if selection.account is None:
+                selected_account = selection.account
+                if selected_account is None:
                     _raise_proxy_unavailable_for_account(message, current)
+                assert selected_account is not None
                 await self._handle_stream_error(
                     current,
                     {"message": message},
                     "upstream_unavailable",
                 )
-                current = selection.account
+                current = selected_account
                 force_current = False
 
     async def _retry_previsible_unary_call_failover(

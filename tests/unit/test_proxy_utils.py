@@ -16408,6 +16408,61 @@ async def test_thread_goal_refresh_connection_reset_fails_over(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_refresh_transport_error_fails_over(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_refresh_transport_a")
+    account_b = _make_account("acc_thread_goal_refresh_transport_b")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh",
+        AsyncMock(
+            side_effect=[
+                proxy_service.RefreshError(
+                    "transport_error",
+                    "[Errno 104] Connection reset by peer",
+                    False,
+                    transport_error=True,
+                ),
+                account_b,
+            ]
+        ),
+    )
+
+    async def fake_thread_goal_request(
+        operation: str,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        method: str,
+        timeout_seconds: float,
+    ) -> dict[str, JsonValue]:
+        del operation, payload, headers, access_token, method, timeout_seconds
+        assert account_id == account_b.chatgpt_account_id
+        return {"goal": {"id": "goal-ok"}}
+
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
+
+    response = await service.thread_goal_request("get", {}, {"session_id": "sid-thread-goal"})
+
+    assert response == {"goal": {"id": "goal-ok"}}
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    record_error.assert_awaited_once_with(account_a)
+    record_success.assert_awaited_once_with(account_b)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["account_id"] == account_b.id
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_upstream_connection_reset_fails_over_after_freshness(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

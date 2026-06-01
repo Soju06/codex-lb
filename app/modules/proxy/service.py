@@ -598,6 +598,7 @@ class ProxyService:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
+        proxy_api_x_api_key = _header_value_case_insensitive(headers, "x-api-key")
         filtered = filter_inbound_headers(headers)
         return self._stream_http_bridge_or_retry(
             payload,
@@ -611,6 +612,7 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             proxy_api_authorization=proxy_api_authorization,
+            proxy_api_x_api_key=proxy_api_x_api_key,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
@@ -629,6 +631,7 @@ class ProxyService:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         proxy_api_authorization: str | None = None,
+        proxy_api_x_api_key: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
     ) -> AsyncIterator[str]:
@@ -682,6 +685,7 @@ class ProxyService:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             proxy_api_authorization=proxy_api_authorization,
+            proxy_api_x_api_key=proxy_api_x_api_key,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
             rewritten_file_account_id=rewritten_file_account_id,
@@ -707,6 +711,7 @@ class ProxyService:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         proxy_api_authorization: str | None = None,
+        proxy_api_x_api_key: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         rewritten_file_account_id: str | None = None,
@@ -1023,6 +1028,7 @@ class ProxyService:
                     downstream_turn_state=downstream_turn_state,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
+                    proxy_api_x_api_key=proxy_api_x_api_key,
                 ):
                     forwarded_any = True
                     yield line
@@ -1778,6 +1784,7 @@ class ProxyService:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        proxy_api_x_api_key: str | None = None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(get_settings())
         forwarded_turn_state = _header_value_case_insensitive(headers, "x-codex-turn-state") or downstream_turn_state
@@ -1791,6 +1798,8 @@ class ProxyService:
             original_affinity_key=owner_forward.key.affinity_key,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
+        if proxy_api_x_api_key is not None and _header_value_case_insensitive(forward_headers, "x-api-key") is None:
+            forward_headers["x-api-key"] = proxy_api_x_api_key
         start = time.monotonic()
         _log_http_bridge_event(
             "owner_forward_start",

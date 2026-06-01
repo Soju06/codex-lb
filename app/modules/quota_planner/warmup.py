@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -167,6 +168,16 @@ class QuotaWarmupService:
                 request_id=request_id,
                 executed_at=row.executed_at if row else utcnow(),
             )
+        except asyncio.CancelledError:
+            if reservation_id is not None:
+                await self._api_keys.fail_usage_reservation(
+                    reservation_id,
+                    model=resolved_model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cached_input_tokens=0,
+                )
+            raise
         except Exception as exc:
             if reservation_id is not None:
                 await self._api_keys.fail_usage_reservation(
@@ -326,12 +337,25 @@ class QuotaWarmupService:
         latest_before_by_account = {account.id: latest_before} if latest_before else {}
         await UsageUpdater(self._usage, self._accounts).refresh_accounts([account], latest_before_by_account)
         latest_after = (await self._usage.latest_by_account()).get(account.id)
-        effective_confidence = confidence if latest_after is not None else "unknown"
+        observed_after = latest_after if _usage_history_is_fresh(latest_before, latest_after) else None
+        effective_confidence = confidence if observed_after is not None else "unknown"
         await self._planner.add_window_observation(
             account_id=account.id,
             model=model,
             source=source,
-            primary_remaining_percent=(100.0 - latest_after.used_percent) if latest_after else None,
-            primary_reset_at=latest_after.reset_at if latest_after else None,
+            primary_remaining_percent=(100.0 - observed_after.used_percent) if observed_after else None,
+            primary_reset_at=observed_after.reset_at if observed_after else None,
             confidence=effective_confidence,
         )
+
+
+def _usage_history_is_fresh(before: object | None, after: object | None) -> bool:
+    if after is None:
+        return False
+    if before is None:
+        return True
+    before_id = getattr(before, "id", None)
+    after_id = getattr(after, "id", None)
+    if before_id is not None and after_id is not None:
+        return after_id != before_id
+    return getattr(after, "recorded_at", None) != getattr(before, "recorded_at", None)

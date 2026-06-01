@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, QuotaWindowObservation, RequestLog
+from app.db.models import Account, AccountStatus, QuotaWindowObservation, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
@@ -374,3 +376,126 @@ async def test_quota_planner_warmup_effect_without_usage_row_is_not_observed(mon
     assert observation.confidence == "unknown"
     assert observation.primary_remaining_percent is None
     assert observation.primary_reset_at is None
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_effect_with_only_stale_usage_is_not_observed(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-stale-usage-row",
+            email="warm-stale-usage-row@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        session.add(
+            UsageHistory(
+                account_id=account.id,
+                used_percent=10.0,
+                reset_at=1234,
+                window="primary",
+                recorded_at=utcnow() - timedelta(minutes=30),
+            )
+        )
+        await session.commit()
+
+        async def refresh_without_new_usage_row(self, accounts, latest_before_by_account):
+            del self, accounts, latest_before_by_account
+
+        monkeypatch.setattr(
+            "app.modules.quota_planner.warmup.UsageUpdater.refresh_accounts",
+            refresh_without_new_usage_row,
+        )
+
+        await QuotaWarmupService(session)._record_warmup_effect(
+            account,
+            "gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+
+        result = await session.execute(
+            select(QuotaWindowObservation).where(QuotaWindowObservation.account_id == account.id)
+        )
+        observation = result.scalar_one()
+
+    assert observation.confidence == "unknown"
+    assert observation.primary_remaining_percent is None
+    assert observation.primary_reset_at is None
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-cancel-reservation",
+            email="warm-cancel-reservation@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+        failed_reservations: list[tuple[str, str, int | None, int | None, int | None]] = []
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(reservation_id="reservation-cancelled")
+
+            async def fail_usage_reservation(
+                self,
+                reservation_id,
+                *,
+                model,
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+            ):
+                failed_reservations.append(
+                    (reservation_id, model, input_tokens, output_tokens, cached_input_tokens)
+                )
+
+        async def cancel_probe(self, *, account, model, request_id):
+            del self, account, model, request_id
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", cancel_probe)
+
+        with pytest.raises(asyncio.CancelledError):
+            await service.warm_now(
+                account_id=account.id,
+                model="gpt-5.4-mini",
+                api_key_id="api-key-cancel",
+                force_probe=True,
+            )
+
+    assert failed_reservations == [("reservation-cancelled", "gpt-5.4-mini", 0, 0, 0)]

@@ -4,25 +4,5 @@ export function buildSettingsUpdateRequest(
   settings: DashboardSettings,
   patch: Partial<SettingsUpdateRequest>,
 ): SettingsUpdateRequest {
-  return {
-    stickyThreadsEnabled: settings.stickyThreadsEnabled,
-    upstreamStreamTransport: settings.upstreamStreamTransport,
-    preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
-    routingStrategy: settings.routingStrategy,
-    relativeAvailabilityPower: settings.relativeAvailabilityPower,
-    relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
-    openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
-    dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
-    warmupModel: settings.warmupModel,
-    importWithoutOverwrite: settings.importWithoutOverwrite,
-    totpRequiredOnLogin: settings.totpRequiredOnLogin,
-    apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
-    limitWarmupEnabled: settings.limitWarmupEnabled,
-    limitWarmupWindows: settings.limitWarmupWindows,
-    limitWarmupModel: settings.limitWarmupModel,
-    limitWarmupPrompt: settings.limitWarmupPrompt,
-    limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
-    limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
-    ...patch,
-  };
+  return Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as SettingsUpdateRequest;
 }

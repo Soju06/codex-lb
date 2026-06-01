@@ -31,12 +31,12 @@ class DashboardSettingsResponse(DashboardModel):
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
-    sticky_threads_enabled: bool
+    sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
     )
-    prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_accounts: bool | None = None
     routing_strategy: str | None = Field(
         default=None,
         pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$",

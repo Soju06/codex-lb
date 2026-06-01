@@ -260,9 +260,7 @@ async def connect_responses_websocket(
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
     proxy_env = (
-        settings.upstream_websocket_proxy_env()
-        if hasattr(settings, "upstream_websocket_proxy_env")
-        else os.environ
+        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
     )
     proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
     connect_kwargs: dict[str, Any] = {

@@ -231,6 +231,7 @@ class Settings(BaseSettings):
 
     def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
         return _configured_outbound_proxy_env()
+
     dashboard_auth_proxy_header: str = "Remote-User"
 
     # --- Multi-replica & production settings ---

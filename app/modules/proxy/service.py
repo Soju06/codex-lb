@@ -12285,7 +12285,10 @@ class ProxyService:
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
-                if _routing_strategy(settings) == "single_account":
+                required_preferred_account = (
+                    preferred_account_id is not None and not fallback_on_preferred_account_unavailable
+                )
+                if _routing_strategy(settings) == "single_account" and not required_preferred_account:
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
                         return AccountSelection(

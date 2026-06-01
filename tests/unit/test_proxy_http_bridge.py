@@ -1246,6 +1246,52 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_required_file_pin_overrides_single_account_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=cast(Any, SimpleNamespace(id="acc-file-owner")),
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-single-account",
+        kind="stream",
+        request_stage="first_turn",
+        prefer_earlier_reset_window="secondary",
+        preferred_account_id="acc-file-owner",
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == "acc-file-owner"
+    assert select_account.await_count == 1
+    first_call = select_account.await_args_list[0]
+    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
+    assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+
+
+@pytest.mark.asyncio
 async def test_select_account_with_budget_soft_preference_can_fallback_after_account_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

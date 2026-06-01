@@ -12078,7 +12078,9 @@ class ProxyService:
         try:
             result = await call_next(next_account)
         except ProxyResponseError as failover_exc:
-            await self._handle_proxy_error(_proxy_response_failed_account(failover_exc, next_account), failover_exc)
+            failover_failed_account = _proxy_response_failed_account(failover_exc, next_account)
+            setattr(failover_exc, _FAILED_ACCOUNT_ATTR, failover_failed_account)
+            await self._handle_proxy_error(failover_failed_account, failover_exc)
             raise
         await self._load_balancer.record_success(next_account)
         return next_account, result

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta
 
 import pytest
@@ -12,7 +13,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import (
+    UsageRepository,
+    _bulk_history_since_sqlite,
+    _clear_bulk_history_since_sqlite_cache,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -234,6 +239,68 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
     plan_json = json.dumps(plan)
     assert "idx_usage_window_account_latest" in plan_json or "idx_usage_window_account_time" in plan_json
     assert "Seq Scan" not in plan_json
+
+
+def test_bulk_history_since_sqlite_cache_reuses_superset_and_picks_up_appends(tmp_path):
+    db_path = tmp_path / "usage.db"
+    _clear_bulk_history_since_sqlite_cache()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table usage_history (
+                id integer primary key,
+                account_id text not null,
+                used_percent real not null,
+                recorded_at text not null,
+                reset_at real,
+                window_minutes integer,
+                window text
+            )
+            """
+        )
+        conn.executemany(
+            """
+            insert into usage_history
+                (id, account_id, used_percent, recorded_at, reset_at, window_minutes, window)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "acc1", 10.0, "2026-01-01 00:00:00", 1000.0, 10080, "secondary"),
+                (2, "acc1", 20.0, "2026-01-01 00:01:00", 1000.0, 10080, "secondary"),
+                (3, "acc2", 30.0, "2026-01-01 00:01:00", 1000.0, 10080, "secondary"),
+            ],
+        )
+        conn.commit()
+
+    first = _bulk_history_since_sqlite(
+        str(db_path),
+        ["acc1", "acc2"],
+        "secondary",
+        datetime(2026, 1, 1, 0, 0, 0),
+    )
+    assert [row.id for row in first["acc1"]] == [1, 2]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into usage_history
+                (id, account_id, used_percent, recorded_at, reset_at, window_minutes, window)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (4, "acc1", 40.0, "2026-01-01 00:02:00", 1000.0, 10080, "secondary"),
+        )
+        conn.commit()
+
+    second = _bulk_history_since_sqlite(
+        str(db_path),
+        ["acc1", "acc2"],
+        "secondary",
+        datetime(2026, 1, 1, 0, 1, 0),
+    )
+    assert [row.id for row in second["acc1"]] == [2, 4]
+    assert [row.id for row in second["acc2"]] == [3]
+
+    _clear_bulk_history_since_sqlite_cache()
 
 
 @pytest.mark.asyncio

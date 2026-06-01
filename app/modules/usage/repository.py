@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
+from threading import RLock
 
 from anyio import to_thread
 from sqlalchemy import Integer, and_, cast, delete, func, literal_column, or_, select, true
@@ -32,6 +33,100 @@ class UsageHistorySnapshot:
     recorded_at: datetime
     reset_at: float | None
     window_minutes: int | None
+
+
+@dataclass(slots=True)
+class _BulkHistoryCacheEntry:
+    since: datetime
+    max_id: int
+    rows_by_account: dict[str, list[UsageHistorySnapshot]]
+
+
+_BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryCacheEntry] = {}
+_BULK_HISTORY_SQLITE_CACHE_LOCK = RLock()
+
+
+def _clear_bulk_history_since_sqlite_cache() -> None:
+    with _BULK_HISTORY_SQLITE_CACHE_LOCK:
+        _BULK_HISTORY_SQLITE_CACHE.clear()
+
+
+def _bulk_history_cache_key(
+    db_path: str,
+    account_ids: list[str],
+    window: str,
+) -> tuple[str, tuple[str, ...], str]:
+    return (db_path, tuple(sorted(account_ids)), window)
+
+
+def _clone_filtered_history(
+    grouped: dict[str, list[UsageHistorySnapshot]],
+    since: datetime,
+) -> dict[str, list[UsageHistorySnapshot]]:
+    filtered_grouped: dict[str, list[UsageHistorySnapshot]] = {}
+    for account_id, rows in grouped.items():
+        filtered = [row for row in rows if row.recorded_at >= since]
+        if filtered:
+            filtered_grouped[account_id] = filtered
+    return filtered_grouped
+
+
+def _max_snapshot_id(grouped: dict[str, list[UsageHistorySnapshot]]) -> int:
+    return max((row.id for rows in grouped.values() for row in rows), default=0)
+
+
+def _append_grouped_history(
+    target: dict[str, list[UsageHistorySnapshot]],
+    source: dict[str, list[UsageHistorySnapshot]],
+) -> None:
+    for account_id, rows in source.items():
+        bucket = target.setdefault(account_id, [])
+        bucket.extend(rows)
+        bucket.sort(key=lambda row: (row.recorded_at, row.id))
+
+
+def _query_bulk_history_since_sqlite(
+    conn: sqlite3.Connection,
+    account_ids: list[str],
+    window: str,
+    since: datetime,
+    *,
+    after_id: int | None = None,
+) -> dict[str, list[UsageHistorySnapshot]]:
+    placeholders = ",".join("?" for _ in account_ids)
+    since_param = since.isoformat(sep=" ")
+    id_clause = ""
+    if window == "primary":
+        window_clause = "coalesce(window, 'primary') = 'primary'"
+        params: list[object] = [*account_ids, since_param]
+    else:
+        window_clause = "window = ?"
+        params = [*account_ids, window, since_param]
+    if after_id is not None:
+        id_clause = "and id > ?"
+        params.append(after_id)
+    sql = f"""
+        select id, account_id, used_percent, recorded_at, reset_at, window_minutes
+        from usage_history
+        where account_id in ({placeholders})
+          and {window_clause}
+          and recorded_at >= ?
+          {id_clause}
+        order by account_id, recorded_at asc
+    """
+    grouped: dict[str, list[UsageHistorySnapshot]] = {}
+    rows = conn.execute(sql, params)
+    for row in rows:
+        snapshot = UsageHistorySnapshot(
+            id=int(row[0]),
+            account_id=str(row[1]),
+            used_percent=float(row[2]),
+            recorded_at=_parse_sqlite_datetime(row[3]),
+            reset_at=float(row[4]) if row[4] is not None else None,
+            window_minutes=int(row[5]) if row[5] is not None else None,
+        )
+        grouped.setdefault(snapshot.account_id, []).append(snapshot)
+    return grouped
 
 
 def _normalized_window_expr():
@@ -118,38 +213,32 @@ def _bulk_history_since_sqlite(
     window: str,
     since: datetime,
 ) -> dict[str, list[UsageHistorySnapshot]]:
-    placeholders = ",".join("?" for _ in account_ids)
-    since_param = since.isoformat(sep=" ")
-    if window == "primary":
-        window_clause = "coalesce(window, 'primary') = 'primary'"
-        params: list[object] = [*account_ids, since_param]
-    else:
-        window_clause = "window = ?"
-        params = [*account_ids, window, since_param]
-    sql = f"""
-        select id, account_id, used_percent, recorded_at, reset_at, window_minutes
-        from usage_history
-        where account_id in ({placeholders})
-          and {window_clause}
-          and recorded_at >= ?
-        order by account_id, recorded_at asc
-    """
-    grouped: dict[str, list[UsageHistorySnapshot]] = {}
+    cache_key = _bulk_history_cache_key(db_path, account_ids, window)
     with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
-        rows = conn.execute(sql, params)
-        for row in rows:
-            snapshot = UsageHistorySnapshot(
-                id=int(row[0]),
-                account_id=str(row[1]),
-                used_percent=float(row[2]),
-                recorded_at=_parse_sqlite_datetime(row[3]),
-                reset_at=float(row[4]) if row[4] is not None else None,
-                window_minutes=int(row[5]) if row[5] is not None else None,
+        with _BULK_HISTORY_SQLITE_CACHE_LOCK:
+            cached = _BULK_HISTORY_SQLITE_CACHE.get(cache_key)
+            if cached is not None and cached.since <= since:
+                new_rows = _query_bulk_history_since_sqlite(
+                    conn,
+                    account_ids,
+                    window,
+                    cached.since,
+                    after_id=cached.max_id,
+                )
+                if new_rows:
+                    _append_grouped_history(cached.rows_by_account, new_rows)
+                    cached.max_id = max(cached.max_id, _max_snapshot_id(new_rows))
+                return _clone_filtered_history(cached.rows_by_account, since)
+
+            grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, since)
+            _BULK_HISTORY_SQLITE_CACHE[cache_key] = _BulkHistoryCacheEntry(
+                since=since,
+                max_id=_max_snapshot_id(grouped),
+                rows_by_account=grouped,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
-    return grouped
+            return _clone_filtered_history(grouped, since)
 
 
 def _resolve_additional_quota_key(

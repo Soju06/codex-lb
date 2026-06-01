@@ -172,6 +172,17 @@ def test_slot_lock_key_serializes_email_workspace_slot_when_account_id_appears_l
     }
 
 
+def test_slot_lock_key_serializes_legacy_unknown_workspace_upgrade():
+    legacy = _make_account("acc_legacy", "legacy-workspace@example.com")
+    upgraded = _make_account("acc_upgraded", "legacy-workspace@example.com")
+    upgraded.chatgpt_account_id = "raw_account_id"
+    upgraded.workspace_id = "ws_late"
+
+    assert set(_slot_lock_keys(legacy, preserve_unknown_workspace_duplicates=False)) & set(
+        _slot_lock_keys(upgraded, preserve_unknown_workspace_duplicates=False)
+    ) == {"slot-email-unknown:legacy-workspace@example.com"}
+
+
 def test_slot_lock_key_serializes_account_workspace_slot_when_email_changes():
     old_email = _make_account("acc_generated_old", "old-email@example.com")
     old_email.chatgpt_account_id = "raw_account_id"
@@ -183,6 +194,46 @@ def test_slot_lock_key_serializes_account_workspace_slot_when_email_changes():
     assert set(_slot_lock_keys(old_email)) & set(_slot_lock_keys(new_email)) == {
         "slot:raw_account_id:ws_late",
     }
+
+
+@pytest.mark.asyncio
+async def test_account_slot_upgrades_single_legacy_unknown_workspace_row(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        legacy = await repo.upsert_account_slot(
+            _make_account("acc_legacy_workspace", "legacy-workspace-row@example.com"),
+            preserve_unknown_workspace_duplicates=False,
+        )
+        await RequestLogsRepository(session).add_log(
+            account_id=legacy.id,
+            request_id="req_legacy_workspace",
+            model="gpt-5.1",
+            input_tokens=7,
+            output_tokens=11,
+            latency_ms=50,
+            status="ok",
+            error_code=None,
+        )
+
+        upgraded = _make_account("acc_raw_workspace", "legacy-workspace-row@example.com")
+        upgraded.chatgpt_account_id = "raw_workspace_account"
+        upgraded.workspace_id = "ws_legacy_team"
+        upgraded.workspace_label = "Legacy Team"
+        upgraded.plan_type = "team"
+
+        stored = await repo.upsert_account_slot(upgraded, preserve_unknown_workspace_duplicates=False)
+
+        assert stored.id == legacy.id
+        assert stored.chatgpt_account_id == "raw_workspace_account"
+        assert stored.workspace_id == "ws_legacy_team"
+        assert stored.workspace_label == "Legacy Team"
+        assert stored.plan_type == "team"
+
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert [account.id for account in accounts] == [legacy.id]
+
+        usage = await repo.list_request_usage_summary_by_account([stored.id])
+        assert usage[stored.id].request_count == 1
 
 
 @pytest.mark.asyncio

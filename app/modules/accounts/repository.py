@@ -180,8 +180,12 @@ class AccountsRepository:
                 await self._session.refresh(existing_by_id)
                 return existing_by_id
             account.id = await self._next_available_account_id(account.id)
-        elif not account.workspace_id and not preserve_unknown_workspace_duplicates:
-            existing_by_email = await self._single_account_by_email(account.email)
+        elif not preserve_unknown_workspace_duplicates:
+            existing_by_email = (
+                await self._single_unknown_workspace_account_by_email(account.email)
+                if account.workspace_id
+                else await self._single_account_by_email(account.email)
+            )
             if existing_by_email:
                 _apply_account_updates(existing_by_email, account)
                 await self._session.commit()
@@ -350,6 +354,21 @@ class AccountsRepository:
             raise AccountIdentityConflictError(email)
         return matches[0]
 
+    async def _single_unknown_workspace_account_by_email(self, email: str) -> Account | None:
+        result = await self._session.execute(
+            select(Account)
+            .where(Account.email == email)
+            .where(Account.workspace_id.is_(None))
+            .order_by(Account.created_at.asc(), Account.id.asc())
+            .limit(2)
+        )
+        matches = list(result.scalars().all())
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise AccountIdentityConflictError(email)
+        return matches[0]
+
     async def _account_by_slot_identity(self, account: Account) -> Account | None:
         if account.chatgpt_account_id and account.workspace_id:
             result = await self._session.execute(
@@ -431,6 +450,8 @@ def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: 
         keys.append(f"slot:{account.chatgpt_account_id}:{account.workspace_id}")
     if account.email and account.workspace_id:
         keys.append(f"slot-email:{account.email}:{account.workspace_id}")
+        if not preserve_unknown_workspace_duplicates:
+            keys.append(f"slot-email-unknown:{account.email}")
     if keys:
         return tuple(keys)
     if account.email and not preserve_unknown_workspace_duplicates:

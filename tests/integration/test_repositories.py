@@ -8,7 +8,19 @@ from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import (
+    Account,
+    AccountLimitWarmup,
+    AccountStatus,
+    AdditionalUsageHistory,
+    ApiKey,
+    ApiKeyAccountAssignment,
+    HttpBridgeSessionRecord,
+    RequestLog,
+    StickySession,
+    StickySessionKind,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import (
     AccountIdentityConflictError,
@@ -299,6 +311,163 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_picks_oldest_canonical(
         # row, so the long-term usage history stays attached.
         assert saved.id == "acc_first"
         assert saved.plan_type == "team"
+        rows = list(
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_dup"))).scalars().all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id == "acc_first"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_rows(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        canonical = _make_account_with_chatgpt_id("acc_merge_main", "merge@example.com", "chatgpt_merge")
+        await repo.upsert(canonical, merge_by_email=False)
+
+        duplicate = _make_account_with_chatgpt_id("acc_merge_main__copy2", "merge@example.com", "chatgpt_merge")
+        await repo.upsert(duplicate, merge_by_email=False)
+
+        duplicate_row = (
+            await session.execute(select(Account).where(Account.id == "acc_merge_main__copy2"))
+        ).scalar_one()
+
+        api_key = ApiKey(
+            id="api_merge_dupe",
+            name="Merge Test",
+            key_hash="merge-key-hash",
+            key_prefix="mrg",
+            apply_to_codex_model=False,
+            account_assignment_scope_enabled=False,
+        )
+        session.add(api_key)
+        session.add(ApiKeyAccountAssignment(api_key_id=api_key.id, account_id=duplicate_row.id))
+        session.add(
+            UsageHistory(
+                account_id=duplicate_row.id,
+                window="primary",
+                used_percent=55.0,
+                input_tokens=42,
+                output_tokens=17,
+                reset_at=1,
+                window_minutes=300,
+            )
+        )
+        session.add(
+            AdditionalUsageHistory(
+                account_id=duplicate_row.id,
+                quota_key="gpt-5.1",
+                limit_name="gpt-5.1",
+                metered_feature="model",
+                window="7d",
+                used_percent=15.0,
+            )
+        )
+        session.add(
+            AccountLimitWarmup(
+                account_id=duplicate_row.id,
+                window="primary",
+                reset_at=123,
+                status="pending",
+                model="gpt-5.1",
+                attempted_at=utcnow(),
+            )
+        )
+        session.add(
+            StickySession(
+                account_id=duplicate_row.id,
+                key="sticky-dup",
+                kind=StickySessionKind.STICKY_THREAD,
+            )
+        )
+        session.add(
+            HttpBridgeSessionRecord(
+                account_id=duplicate_row.id,
+                session_key_kind="http",
+                session_key_value="turn:merge",
+                session_key_hash="turn-merge-hash",
+                api_key_scope="merge-scope",
+            )
+        )
+        session.add(
+            RequestLog(
+                request_id="req_merge_dupe",
+                account_id=duplicate_row.id,
+                model="gpt-5",
+                status="success",
+                requested_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+        reauth = _make_account_with_chatgpt_id("acc_merge_main", "merge@example.com", "chatgpt_merge")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_merge_main"
+        assert saved.plan_type == "team"
+
+        rows = list(
+            (
+                await session.execute(
+                    select(Account).where(Account.chatgpt_account_id == "chatgpt_merge")
+                )
+            ).scalars().all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id == "acc_merge_main"
+
+        account_histories = (
+            await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_merge_main"))
+        ).scalars().all()
+        assert len(account_histories) == 1
+        assert account_histories[0].used_percent == 55.0
+
+        additional_histories = (
+            await session.execute(
+                select(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == "acc_merge_main")
+            )
+        ).scalars().all()
+        assert len(additional_histories) == 1
+        assert additional_histories[0].quota_key == "gpt-5.1"
+
+        account_warmups = (
+            await session.execute(select(AccountLimitWarmup).where(AccountLimitWarmup.account_id == "acc_merge_main"))
+        ).scalars().all()
+        assert len(account_warmups) == 1
+        assert account_warmups[0].status == "pending"
+
+        sticky_sessions = (
+            await session.execute(select(StickySession).where(StickySession.account_id == "acc_merge_main"))
+        ).scalars().all()
+        assert len(sticky_sessions) == 1
+        assert sticky_sessions[0].key == "sticky-dup"
+
+        bridge_sessions = (
+            await session.execute(
+                select(HttpBridgeSessionRecord).where(
+                    HttpBridgeSessionRecord.account_id == "acc_merge_main"
+                )
+            )
+        ).scalars().all()
+        assert len(bridge_sessions) == 1
+        assert bridge_sessions[0].session_key_value == "turn:merge"
+
+        assignments = (
+            await session.execute(
+                select(ApiKeyAccountAssignment).where(
+                    ApiKeyAccountAssignment.account_id == "acc_merge_main"
+                )
+            )
+        ).scalars().all()
+        assert len(assignments) == 1
+        assert assignments[0].api_key_id == api_key.id
+
+        duplicate_request_logs = (
+            await session.execute(select(RequestLog).where(RequestLog.account_id == "acc_merge_main__copy2"))
+        ).scalars().all()
+        assert len(duplicate_request_logs) == 0
 
 
 @pytest.mark.asyncio

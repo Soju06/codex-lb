@@ -1243,9 +1243,16 @@ class _DummyResponse(proxy_module.SSEResponseProtocol):
 
 
 class _TranscribeResponse:
-    def __init__(self, payload: dict[str, object], *, json_error: Exception | None = None) -> None:
-        self.status = 200
-        self.reason = "OK"
+    def __init__(
+        self,
+        payload: dict[str, object],
+        *,
+        json_error: Exception | None = None,
+        status: int = 200,
+        reason: str = "OK",
+    ) -> None:
+        self.status = status
+        self.reason = reason
         self._payload = payload
         self._json_error = json_error
 
@@ -1733,6 +1740,21 @@ class _CompactSession:
         timeout=None,
     ):
         self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return self._response
+
+
+class _ThreadGoalRequestSession:
+    def __init__(self, response: object) -> None:
+        self._response = response
+        self.calls: list[dict[str, object]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: object,
+    ):
+        self.calls.append({"method": method, "url": url, **kwargs})
         return self._response
 
 
@@ -15652,6 +15674,69 @@ async def test_transcribe_audio_maps_body_read_transport_errors_to_upstream_unav
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_unavailable"
     assert _proxy_error_message(exc) == expected_message
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_status_body_read_transport_error_keeps_status_phase(monkeypatch):
+    response = _TranscribeResponse({}, status=429, reason="Too Many Requests")
+    session = _ThreadGoalRequestSession(response)
+
+    async def raise_body_read_error(resp):
+        del resp
+        raise proxy_module.aiohttp.ClientPayloadError("status body read failed")
+
+    monkeypatch.setattr(proxy_module, "_error_payload_from_response", raise_body_read_error)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.thread_goal_request(
+            "post",
+            {},
+            headers={"X-Request-Id": "req_thread_goal_status_body_read"},
+            access_token="token-1",
+            account_id="acc_thread_goal_1",
+            method="POST",
+            timeout_seconds=10.0,
+            base_url="https://upstream.example",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 429
+    assert exc.failure_phase == "status"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "status body read failed"
+    assert session.calls[0]["method"] == "POST"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_status_body_read_transport_error_keeps_status_phase(monkeypatch):
+    response = _TranscribeResponse({}, status=503, reason="Service Unavailable")
+    session = _TranscribeSession(response)
+
+    async def raise_body_read_error(resp):
+        del resp
+        raise proxy_module.aiohttp.ClientPayloadError("status body read failed")
+
+    monkeypatch.setattr(proxy_module, "_error_payload_from_response", raise_body_read_error)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.transcribe_audio(
+            b"\x01\x02",
+            filename="sample.wav",
+            content_type="audio/wav",
+            prompt=None,
+            headers={"X-Request-Id": "req_transcribe_status_body_read"},
+            access_token="token-1",
+            account_id="acc_transcribe_1",
+            base_url="https://upstream.example",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 503
+    assert exc.failure_phase == "status"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "status body read failed"
 
 
 class _CBStub:

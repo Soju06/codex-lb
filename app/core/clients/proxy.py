@@ -2705,7 +2705,17 @@ async def thread_goal_request(
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:
-                error_payload = await _error_payload_from_response(resp)
+                try:
+                    error_payload = await _error_payload_from_response(resp)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
+                    error_code = "upstream_unavailable"
+                    error_message = message
+                    raise ProxyResponseError(
+                        resp.status,
+                        openai_error("upstream_unavailable", message),
+                        failure_phase="status",
+                    ) from exc
                 error_code, error_message = _error_details_from_envelope(error_payload)
                 raise ProxyResponseError(resp.status, error_payload, failure_phase="status")
             try:
@@ -3019,7 +3029,17 @@ async def _transcribe_audio_with_session(
         ) as resp:
             status_code = resp.status
             if resp.status >= 400:
-                error_payload = await _error_payload_from_response(resp)
+                try:
+                    error_payload = await _error_payload_from_response(resp)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    message = str(exc) or "Request to upstream timed out"
+                    error_code = "upstream_unavailable"
+                    error_message = message
+                    raise ProxyResponseError(
+                        resp.status,
+                        openai_error("upstream_unavailable", message),
+                        failure_phase="status",
+                    ) from exc
                 error_code, error_message = _error_details_from_envelope(error_payload)
                 raise ProxyResponseError(resp.status, error_payload, failure_phase="status")
             try:

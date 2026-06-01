@@ -44,6 +44,13 @@ def upgrade() -> None:
                 "set sticky_reallocation_primary_budget_threshold_pct = sticky_reallocation_budget_threshold_pct"
             )
         )
+    if "sticky_reallocation_secondary_budget_threshold_pct" not in columns:
+        bind.execute(
+            sa.text(
+                "update dashboard_settings "
+                "set sticky_reallocation_secondary_budget_threshold_pct = sticky_reallocation_budget_threshold_pct"
+            )
+        )
 
 
 def downgrade() -> None:

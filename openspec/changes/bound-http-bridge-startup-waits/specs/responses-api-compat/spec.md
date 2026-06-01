@@ -39,3 +39,32 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** the upstream reader retires that same bridge session after a failed precreated replay
 - **THEN** the waiting request or prewarm is rejected before it is appended to pending requests or sent upstream
 - **AND** the retired bridge session remains closed and removed from local reuse
+- **AND** the post-admission ownership check, pending enqueue, and upstream send are mutually exclusive with stale-session retirement
+
+#### Scenario: Unregistered stale bridge reference cannot submit after admission
+
+- **WHEN** an HTTP bridge request or prewarm holds a stale bridge session reference
+- **AND** that bridge session is no longer the registered local owner for its session key
+- **THEN** the request is rejected after response-create gate admission and before it is appended or sent upstream
+- **AND** response-create gate and admission state acquired by the rejected request is released
+
+#### Scenario: Unregistered closed bridge reference cannot reconnect
+
+- **WHEN** an HTTP bridge request holds a closed stale bridge session reference
+- **AND** that bridge session is no longer the registered local owner for its session key
+- **THEN** the request is rejected before attempting to reconnect the stale bridge upstream
+
+#### Scenario: Reader crash closes bridge before releasing pending gate
+
+- **WHEN** an HTTP bridge upstream reader crashes while a pending request owns the response-create gate
+- **AND** another request or prewarm is waiting on that same gate
+- **THEN** the crashed bridge session is marked closed before the pending request gate is released
+- **AND** the waiting request or prewarm cannot submit on the crashed bridge
+- **AND** the crashed bridge session is removed from local reuse and its upstream resources are closed
+
+#### Scenario: Prewarm cleanup does not consume visible queue slots
+
+- **WHEN** a prewarm request is rejected or interrupted after response-create gate admission
+- **AND** a visible HTTP bridge request is still counted in the session queue
+- **THEN** prewarm cleanup releases its response-create gate and admission state
+- **AND** the visible request queue count is preserved

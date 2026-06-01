@@ -1190,16 +1190,10 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     if model is None:
         return False
     registry = get_model_registry()
-    get_snapshot = getattr(registry, "get_snapshot", None)
-    if not callable(get_snapshot):
+    plan_types_for_model = getattr(registry, "plan_types_for_model", None)
+    if not callable(plan_types_for_model):
         return False
-    snapshot = get_snapshot()
-    if snapshot is None:
-        return False
-    model_plans = getattr(snapshot, "model_plans", None)
-    if not isinstance(model_plans, dict):
-        return False
-    return model.strip().lower() in model_plans
+    return bool(plan_types_for_model(model))
 
 
 def _clone_account(account: Account) -> Account:

@@ -95,13 +95,13 @@ def _bootstrap_model(
     display_name: str,
     *,
     prefer_websockets: bool,
+    minimal_client_version: str | None,
     reasoning_levels: tuple[ReasoningLevel, ...] = _REASONING_LEVELS_EXTENDED,
     context_window: int = 272_000,
     input_modalities: tuple[str, ...] = ("text", "image"),
     default_reasoning_level: str | None = "medium",
     default_verbosity: str | None = "low",
     supported_in_api: bool = True,
-    minimal_client_version: str | None = "0.124.0",
     available_in_plans: frozenset[str] = _BOOTSTRAP_AVAILABLE_IN_PLANS,
     visibility: str = "list",
     shell_type: str = "shell_command",
@@ -136,13 +136,19 @@ def _bootstrap_model(
     )
 
 
-# Static fallback models used before the first upstream registry refresh.
-# These ensure /models and /backend-api/codex/models return known slugs
-# immediately on startup (e.g. before any account is added or the first
-# refresh completes). Keep this list conservative: every slug must exist
-# upstream, and the live upstream data always takes precedence once available.
+# Static bundled fallback models used before the first upstream registry refresh.
+# This mirrors Codex's model-manager pattern: ship a conservative catalog so
+# startup/offline paths have usable metadata, then treat the live upstream
+# registry as authoritative once a refresh succeeds. Keep compatibility fields
+# explicit rather than inherited from helper defaults; every slug must exist
+# upstream, and live upstream data always takes precedence once available.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
-    _bootstrap_model("gpt-5.5", "GPT-5.5", prefer_websockets=True),
+    _bootstrap_model(
+        "gpt-5.5",
+        "GPT-5.5",
+        prefer_websockets=True,
+        minimal_client_version="0.124.0",
+    ),
     _bootstrap_model(
         "gpt-5.4",
         "GPT-5.4",
@@ -162,6 +168,7 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         "gpt-5.3-codex",
         "GPT-5.3 Codex",
         prefer_websockets=True,
+        minimal_client_version="0.98.0",
         available_in_plans=_BOOTSTRAP_CORE_AVAILABLE_IN_PLANS,
     ),
     _bootstrap_model(
@@ -174,7 +181,12 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         supported_in_api=False,
         minimal_client_version="0.100.0",
     ),
-    _bootstrap_model("gpt-5.2", "GPT-5.2", prefer_websockets=True, minimal_client_version="0.0.1"),
+    _bootstrap_model(
+        "gpt-5.2",
+        "GPT-5.2",
+        prefer_websockets=True,
+        minimal_client_version="0.0.1",
+    ),
     _bootstrap_model(
         "codex-auto-review",
         "Codex Auto Review",
@@ -206,9 +218,11 @@ class ModelRegistry:
         return self._bootstrap_models
 
     def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+        normalized_slug = slug.strip().lower()
         if self._snapshot is None:
-            return None
-        return self._snapshot.model_plans.get(slug, frozenset())
+            model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+            return model.available_in_plans if model is not None else None
+        return self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(normalized_slug, frozenset())
 
     def prefers_websockets(self, slug: str | None) -> bool:
         if not isinstance(slug, str):

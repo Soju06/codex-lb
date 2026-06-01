@@ -26,6 +26,16 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
+EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.5": "0.124.0",
+    "gpt-5.4": "0.98.0",
+    "gpt-5.4-mini": "0.98.0",
+    "gpt-5.3-codex": "0.98.0",
+    "gpt-5.3-codex-spark": "0.100.0",
+    "gpt-5.2": "0.0.1",
+    "codex-auto-review": "0.98.0",
+}
+
 
 def _model(slug: str) -> UpstreamModel:
     return UpstreamModel(
@@ -60,6 +70,13 @@ async def test_plan_types_for_model_returns_none_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
     result = registry.plan_types_for_model("some-model")
     assert result is None
+
+
+def test_plan_types_for_model_uses_bootstrap_when_uninitialized():
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    assert registry.plan_types_for_model("gpt-5.4") == EXPECTED_CORE_MODEL_PLANS
+    assert registry.plan_types_for_model("GPT-5.4") == EXPECTED_CORE_MODEL_PLANS
 
 
 @pytest.mark.asyncio
@@ -118,6 +135,10 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
 def test_bootstrap_models_include_representative_upstream_metadata():
     registry = ModelRegistry(ttl_seconds=60.0)
     models = registry.get_models_with_fallback()
+
+    assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
+    for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
+        assert models[slug].minimal_client_version == expected_version
 
     gpt54 = models["gpt-5.4"]
     assert gpt54.minimal_client_version == "0.98.0"

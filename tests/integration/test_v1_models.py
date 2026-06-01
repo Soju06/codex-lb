@@ -34,6 +34,16 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
+EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.5": "0.124.0",
+    "gpt-5.4": "0.98.0",
+    "gpt-5.4-mini": "0.98.0",
+    "gpt-5.3-codex": "0.98.0",
+    "gpt-5.3-codex-spark": "0.100.0",
+    "gpt-5.2": "0.0.1",
+    "codex-auto-review": "0.98.0",
+}
+
 
 def _make_upstream_model(
     slug: str,
@@ -117,6 +127,10 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+
+    assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
+    for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
+        assert entries[slug]["minimal_client_version"] == expected_version
 
     gpt54 = entries["gpt-5.4"]
     assert gpt54["minimal_client_version"] == "0.98.0"

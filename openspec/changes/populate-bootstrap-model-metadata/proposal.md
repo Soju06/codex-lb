@@ -7,11 +7,13 @@ OpenAI-compatible clients until a refresh succeeds.
 
 ## What Changes
 
-- Seed the uninitialized model registry with a conservative static catalog of
-  known upstream model slugs.
+- Seed the uninitialized model registry with a conservative bundled fallback
+  catalog of known upstream model slugs, matching the official Codex pattern of
+  using static metadata only until live registry data is available.
 - Include representative upstream metadata for those bootstrap entries so
   `/backend-api/codex/models` remains useful before refresh.
-- Use bootstrap metadata when resolving websocket preference before refresh.
+- Use bootstrap metadata when resolving websocket preference and plan-based
+  account filtering before refresh.
 - Keep refreshed upstream registry data authoritative once it exists.
 
 ## Impact

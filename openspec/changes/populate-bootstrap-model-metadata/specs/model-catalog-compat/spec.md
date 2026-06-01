@@ -4,7 +4,9 @@
 
 Before the first successful upstream model-registry refresh, the system MUST
 serve a conservative static catalog of known Codex model slugs from both
-`GET /v1/models` and `GET /backend-api/codex/models`. The bootstrap catalog MUST
+`GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
+bundled fallback for startup/offline paths; refreshed upstream model-registry
+data remains the authoritative source once available. The bootstrap catalog MUST
 include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`,
 `gpt-5.3-codex-spark`, `gpt-5.2`, and `codex-auto-review`, and MUST NOT invent
 unverified variant slugs such as `gpt-5.5-pro`.
@@ -20,7 +22,7 @@ unverified variant slugs such as `gpt-5.5-pro`.
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /backend-api/codex/models`
-- **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
+- **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
 
 ### Requirement: Refreshed upstream model data remains authoritative
 
@@ -28,8 +30,8 @@ The system MUST treat a refreshed upstream model-registry snapshot as
 authoritative over the static bootstrap catalog. Once that snapshot exists,
 model catalog endpoints and model-behavior lookups MUST use the refreshed
 snapshot instead of the static bootstrap catalog. Before refresh, websocket
-preference lookup MUST use bootstrap model metadata when the requested slug
-matches a bootstrap entry.
+preference lookup and account plan filtering MUST use bootstrap model metadata
+when the requested slug matches a bootstrap entry.
 
 #### Scenario: Refreshed snapshot replaces bootstrap catalog
 
@@ -43,3 +45,10 @@ matches a bootstrap entry.
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** websocket preference is checked for a bootstrap model marked as websocket-preferred
 - **THEN** the lookup returns that bootstrap preference
+
+#### Scenario: Bootstrap plan metadata filters accounts before refresh
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** a bootstrap model excludes a plan from its plan-availability metadata
+- **WHEN** account selection is requested for that bootstrap model
+- **THEN** accounts on excluded plans are not selected for that model

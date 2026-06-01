@@ -48,19 +48,7 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: false,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 86400,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -110,19 +98,7 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: false,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 31536000,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 });

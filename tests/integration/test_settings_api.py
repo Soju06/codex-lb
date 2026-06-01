@@ -109,3 +109,21 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_allows_partial_updates(async_client):
+    original_response = await async_client.get("/api/settings")
+    assert original_response.status_code == 200
+    original = original_response.json()
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"warmupModel": "gpt-5.4-pro"},
+    )
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["warmupModel"] == "gpt-5.4-pro"
+    assert updated["stickyThreadsEnabled"] == original["stickyThreadsEnabled"]
+    assert updated["preferEarlierResetAccounts"] == original["preferEarlierResetAccounts"]
+    assert updated["routingStrategy"] == original["routingStrategy"]

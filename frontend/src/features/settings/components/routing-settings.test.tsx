@@ -45,19 +45,7 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 180,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(
@@ -72,19 +60,7 @@ describe("RoutingSettings", () => {
     await user.type(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }), "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       openaiCacheAffinityMaxAgeSeconds: 240,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -105,18 +81,6 @@ describe("RoutingSettings", () => {
 
     expect(onSave).toHaveBeenCalledWith({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -135,19 +99,7 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save power" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "relative_availability",
       relativeAvailabilityPower: 1.5,
-      relativeAvailabilityTopK: 5,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
@@ -175,19 +127,7 @@ describe("RoutingSettings", () => {
     await user.click(saveTopK);
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "relative_availability",
-      relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 6,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: "gpt-5.4-mini",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -202,19 +142,7 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save warmup model" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
       warmupModel: "gpt-5.4-pro",
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

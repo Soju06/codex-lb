@@ -34,9 +34,9 @@ export const DashboardSettingsSchema = z.object({
 });
 
 export const SettingsUpdateRequestSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
+  stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
-  preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetAccounts: z.boolean().optional(),
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),

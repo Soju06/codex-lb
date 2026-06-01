@@ -116,9 +116,17 @@ async def update_settings(
     try:
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
-                sticky_threads_enabled=payload.sticky_threads_enabled,
+                sticky_threads_enabled=(
+                    payload.sticky_threads_enabled
+                    if payload.sticky_threads_enabled is not None
+                    else current.sticky_threads_enabled
+                ),
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
-                prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_accounts=(
+                    payload.prefer_earlier_reset_accounts
+                    if payload.prefer_earlier_reset_accounts is not None
+                    else current.prefer_earlier_reset_accounts
+                ),
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
                 relative_availability_power=(
                     payload.relative_availability_power

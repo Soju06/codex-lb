@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from app.core.config import settings as settings_module
 from app.core.config.settings import Settings
 
 pytestmark = pytest.mark.unit
@@ -241,6 +242,24 @@ def test_settings_upstream_websocket_proxy_env_auto_enables_when_proxy_is_presen
 def test_settings_upstream_websocket_proxy_env_auto_enables_when_socks_proxy_is_present(monkeypatch):
     monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is True
+
+
+def test_settings_upstream_websocket_proxy_env_auto_enables_when_dotenv_proxy_is_present(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_local_file = tmp_path / ".env.local"
+    env_file.write_text("", encoding="utf-8")
+    env_local_file.write_text("https_proxy=http://127.0.0.1:7890\n", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "ENV_FILES", (env_file, env_local_file))
+    for name in (
+        "https_proxy",
+        "HTTPS_PROXY",
+        "CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     settings = Settings()
 

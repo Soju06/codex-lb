@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
+from dotenv import dotenv_values
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -17,6 +18,7 @@ from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 BASE_DIR = Path(__file__).resolve().parents[3]
+ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
 DOCKER_CALLBACK_HOST = "0.0.0.0"
@@ -44,7 +46,12 @@ def _default_http_bridge_instance_id() -> str:
 
 
 def _default_upstream_websocket_trust_env() -> bool:
-    return outbound_proxy_env_configured()
+    if outbound_proxy_env_configured():
+        return True
+    for env_file in ENV_FILES:
+        if outbound_proxy_env_configured(dotenv_values(env_file)):
+            return True
+    return False
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -117,7 +124,7 @@ def _normalize_cidr_list(value: StringListInput, *, field_name: str, invalid_lab
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
-        env_file=(BASE_DIR / ".env", BASE_DIR / ".env.local"),
+        env_file=ENV_FILES,
         env_file_encoding="utf-8",
         extra="ignore",
     )

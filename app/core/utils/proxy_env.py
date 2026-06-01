@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import urllib.request
+from collections.abc import Mapping
 from urllib.parse import urlparse, urlunparse
 
 _WEBSOCKET_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
@@ -25,9 +26,10 @@ STANDARD_OUTBOUND_PROXY_ENV_NAMES: tuple[str, ...] = tuple(
 )
 
 
-def outbound_proxy_env_configured() -> bool:
+def outbound_proxy_env_configured(environ: Mapping[str, str | None] = os.environ) -> bool:
     return any(
-        name.lower() in STANDARD_OUTBOUND_PROXY_ENV_NAMES and value.strip() for name, value in os.environ.items()
+        name.lower() in STANDARD_OUTBOUND_PROXY_ENV_NAMES and value is not None and value.strip()
+        for name, value in environ.items()
     )
 
 

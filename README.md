@@ -533,6 +533,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://www.linkedin.com/in/mahir-ozdin/"><img src="https://avatars.githubusercontent.com/u/9491185?v=4?s=100" width="100px;" alt="Mahir Taha Özdin"/><br /><sub><b>Mahir Taha Özdin</b></sub></a><br /><a href="#ideas-mahirozdin" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mahirozdin" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mahirozdin" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://datfooldive.github.io/"><img src="https://avatars.githubusercontent.com/u/110718021?v=4?s=100" width="100px;" alt="hikki"/><br /><sub><b>hikki</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=datfooldive" title="Code">💻</a> <a href="#design-datfooldive" title="Design">🎨</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/1llu5ion"><img src="https://avatars.githubusercontent.com/u/23450032?v=4?s=100" width="100px;" alt="Nataprom"/><br /><sub><b>Nataprom</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=1llu5ion" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=1llu5ion" title="Tests">⚠️</a></td>
+    </tr>
   </tbody>
 </table>
 

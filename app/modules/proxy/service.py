@@ -9916,13 +9916,44 @@ class ProxyService:
 
         try:
             if payload.previous_response_id is not None:
+                previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
                 preferred_account_id = await self._resolve_websocket_previous_response_owner(
                     previous_response_id=payload.previous_response_id,
                     api_key=api_key,
-                    session_id=_owner_lookup_session_id_from_headers(headers),
+                    session_id=previous_response_lookup_session_id,
                     surface="http_stream",
                 )
                 require_preferred_account = preferred_account_id is not None
+                if preferred_account_id is None:
+                    message = "Previous response owner account is unavailable; retry later."
+                    _record_continuity_fail_closed(
+                        surface="http_stream",
+                        reason="owner_account_unavailable",
+                        previous_response_id=payload.previous_response_id,
+                        session_id=previous_response_lookup_session_id,
+                        upstream_error_code="owner_lookup_miss",
+                    )
+                    event = response_failed_event(
+                        "previous_response_owner_unavailable",
+                        message,
+                        response_id=request_id,
+                    )
+                    yield format_sse_event(event)
+                    await self._write_request_log(
+                        account_id=None,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=payload.model,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        status="error",
+                        error_code="previous_response_owner_unavailable",
+                        error_message=message,
+                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                        transport=request_transport,
+                        service_tier=payload.service_tier,
+                        requested_service_tier=payload.service_tier,
+                    )
+                    return
             file_required_preferred_account = False
             if preferred_account_id is None:
                 # ``input_file.file_id`` references must land on the account

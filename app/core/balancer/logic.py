@@ -370,17 +370,19 @@ def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, 
 
 
 def _relative_availability_divisor_seconds(state: AccountState, current: float) -> float:
-    if state.secondary_reset_at is None:
+    reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
+    if reset_at is None:
         remaining_seconds = float(UNKNOWN_RESET_FALLBACK_SECONDS)
     else:
-        remaining_seconds = max(0.0, float(state.secondary_reset_at) - current)
+        remaining_seconds = max(0.0, float(reset_at) - current)
     return max(remaining_seconds, float(RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS))
 
 
 def _relative_availability_remaining_seconds(state: AccountState, current: float) -> float:
-    if state.secondary_reset_at is None:
+    reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
+    if reset_at is None:
         return float(UNKNOWN_RESET_FALLBACK_SECONDS)
-    return max(0.0, float(state.secondary_reset_at) - current)
+    return max(0.0, float(reset_at) - current)
 
 
 def _relative_availability_raw_score(state: AccountState, current: float) -> float:

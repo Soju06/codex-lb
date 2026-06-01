@@ -669,6 +669,46 @@ def test_requested_limit_relative_availability_uses_requested_secondary_only_whe
     assert result.account.account_id == "limited-high-second"
 
 
+def test_requested_limit_relative_availability_uses_requested_reset_window():
+    now = int(time.time())
+    states = [
+        AccountState(
+            "ordinary-late-requested-soon",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            secondary_used_percent=90.0,
+            secondary_reset_at=now + 7 * 24 * 3600,
+            priority_used_percent=0.0,
+            priority_secondary_used_percent=0.0,
+            priority_reset_at=now + 3_600,
+            priority_capacity_credits=100.0,
+            limit_scoped_usage=True,
+        ),
+        AccountState(
+            "ordinary-soon-requested-late",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            secondary_used_percent=0.0,
+            secondary_reset_at=now + 3_600,
+            priority_used_percent=0.0,
+            priority_secondary_used_percent=0.0,
+            priority_reset_at=now + 7 * 24 * 3600,
+            priority_capacity_credits=100.0,
+            limit_scoped_usage=True,
+        ),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+        now=now,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "ordinary-late-requested-soon"
+
+
 def test_bypass_quota_exceeded_does_not_affect_other_statuses():
     """bypass_quota_exceeded should only affect QUOTA_EXCEEDED, not PAUSED/DEACTIVATED."""
     now = 1_700_000_000.0

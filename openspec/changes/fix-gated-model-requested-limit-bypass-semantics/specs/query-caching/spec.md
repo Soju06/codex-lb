@@ -15,6 +15,12 @@ When a request targets a gated model whose canonical additional quota is known, 
 - **WHEN** selecting an account for the gated model with requested-limit routing
 - **THEN** both requested additional windows may contribute to ranking and budget-safety decisions
 
+#### Scenario: Requested reset window drives relative availability
+- **GIVEN** account A has an ordinary secondary window that resets later than its requested additional quota
+- **AND** account B has an ordinary secondary window that resets sooner than its requested additional quota
+- **WHEN** selecting an account for the gated model with relative-availability routing
+- **THEN** requested-limit scoring uses each account's requested additional-quota reset window instead of the ordinary secondary reset window
+
 ### Requirement: Quota status bypass preserves cooldown backoff
 When requested additional-quota data proves an account can serve a gated model despite persisted `QUOTA_EXCEEDED` account status, account selection MAY bypass the persisted quota status for that requested gated model. This bypass SHALL NOT bypass `cooldown_until`, pause, deactivation, rate-limit, or error-backoff gates.
 

@@ -58,6 +58,7 @@ from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_definition,
+    get_additional_quota_routing_policy,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -1735,8 +1736,8 @@ def _additional_quota_routing_policy_override(limit_name: str | None, policies: 
     normalized_limit_name = canonicalize_additional_quota_key(limit_name=limit_name)
     if normalized_limit_name is None:
         return None
-    policy = policies.get(normalized_limit_name)
-    if policy is None or policy == "inherit":
+    policy = get_additional_quota_routing_policy(normalized_limit_name, overrides=policies)
+    if policy == "inherit":
         return None
     return policy
 

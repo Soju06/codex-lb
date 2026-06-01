@@ -2323,6 +2323,63 @@ async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_k
 
 
 @pytest.mark.asyncio
+async def test_load_selection_inputs_uses_registry_additional_quota_routing_policy_by_default():
+    from app.modules.proxy.load_balancer import ROUTING_POLICY_BURN_FIRST, LoadBalancer
+
+    async def _mocked_additional_filter(
+        self,
+        accounts: list[Account],
+        *,
+        model: str | None,
+        limit_name: str,
+        explicit_limit: bool,
+        repos,
+    ) -> _AdditionalLimitFilterResult:
+        return _AdditionalLimitFilterResult(
+            accounts=accounts,
+            latest_primary={},
+            latest_secondary={},
+        )
+
+    mock_accounts_repo = AsyncMock()
+    mock_accounts_repo.list_accounts = AsyncMock(
+        return_value=[_make_test_account(account_id="a", status=AccountStatus.ACTIVE)]
+    )
+    mock_repos = MagicMock()
+    mock_repos.accounts = mock_accounts_repo
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
+    mock_repos.additional_usage = AsyncMock()
+    mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
+    mock_repos.__aexit__ = AsyncMock(return_value=None)
+
+    balancer = LoadBalancer(repo_factory=lambda: mock_repos)
+    with pytest.MonkeyPatch().context() as monkeypatch:
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
+            _mocked_additional_filter,
+        )
+        monkeypatch.setattr(
+            "app.modules.proxy.load_balancer.get_settings_cache",
+            lambda: SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+            ),
+        )
+        selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="codex-spark")
+
+    states, _ = _build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        runtime={},
+        routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+    )
+
+    assert selection_inputs.routing_policy_override == ROUTING_POLICY_BURN_FIRST
+    assert states[0].routing_policy == ROUTING_POLICY_BURN_FIRST
+
+
+@pytest.mark.asyncio
 async def test_load_selection_inputs_inherits_account_policy_for_additional_quota_by_default():
     from app.modules.proxy.load_balancer import LoadBalancer
 
@@ -2361,10 +2418,12 @@ async def test_load_selection_inputs_inherits_account_policy_for_additional_quot
         monkeypatch.setattr(
             "app.modules.proxy.load_balancer.get_settings_cache",
             lambda: SimpleNamespace(
-                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+                get=AsyncMock(
+                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"inherit"}')
+                )
             ),
         )
-        selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="test-limit")
+        selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="codex-spark")
 
     states, _ = _build_states(
         accounts=selection_inputs.accounts,

@@ -12,7 +12,7 @@ export type ImportSettingsProps = {
 
 export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) {
   const save = (patch: Partial<SettingsUpdateRequest>) =>
-    void onSave(buildSettingsUpdateRequest(settings, patch));
+    void onSave(buildSettingsUpdateRequest(patch));
 
   return (
     <section className="rounded-xl border bg-card p-5">

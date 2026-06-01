@@ -36,7 +36,7 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
   const showInvalidInputWarning = trimmed !== "" && !valid;
 
   const save = () =>
-    void onSave(buildSettingsUpdateRequest(settings, { dashboardSessionTtlSeconds: parsedSeconds }));
+    void onSave(buildSettingsUpdateRequest({ dashboardSessionTtlSeconds: parsedSeconds }));
 
   return (
     <section className="rounded-xl border bg-card p-5">

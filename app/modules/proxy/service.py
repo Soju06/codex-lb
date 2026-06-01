@@ -6897,51 +6897,53 @@ class ProxyService:
                 ),
             )
         if session.closed:
-            async with self._http_bridge_lock:
-                current_session = self._http_bridge_sessions.get(session.key)
-            if current_session is not session:
-                _log_http_bridge_event(
-                    "submit_on_closed",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    detail="session_replaced_before_reconnect",
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-                )
-            # Try reconnecting the upstream websocket first.  For requests
-            # carrying previous_response_id we only reconnect (send_request=
-            # False) because the fresh upstream won't recognise the old
-            # response id.  If reconnection itself fails, raise 502 so the
-            # client retries with previous_response_id intact rather than
-            # receiving 400 previous_response_not_found (which causes the
-            # CLI to drop previous_response_id and resend the full
-            # conversation history, inflating per-turn context by ~20x).
-            recovered = await self._retry_http_bridge_request_on_fresh_upstream(
-                session,
-                request_state=request_state,
-                text_data=text_data,
-                send_request=False,
-            )
-            if recovered:
-                session.closed = False
-            else:
-                _log_http_bridge_event(
-                    "submit_on_closed",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-                )
+            async with session.lifecycle_lock:
+                if session.closed:
+                    async with self._http_bridge_lock:
+                        current_session = self._http_bridge_sessions.get(session.key)
+                    if current_session is not session:
+                        _log_http_bridge_event(
+                            "submit_on_closed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            detail="session_replaced_before_reconnect",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                        )
+                    # Try reconnecting the upstream websocket first.  For requests
+                    # carrying previous_response_id we only reconnect (send_request=
+                    # False) because the fresh upstream won't recognise the old
+                    # response id.  If reconnection itself fails, raise 502 so the
+                    # client retries with previous_response_id intact rather than
+                    # receiving 400 previous_response_not_found (which causes the
+                    # CLI to drop previous_response_id and resend the full
+                    # conversation history, inflating per-turn context by ~20x).
+                    recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                        session,
+                        request_state=request_state,
+                        text_data=text_data,
+                        send_request=False,
+                    )
+                    if recovered:
+                        session.closed = False
+                    else:
+                        _log_http_bridge_event(
+                            "submit_on_closed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                        )
         if session.upstream_control.retire_after_drain:
             await self._retire_http_bridge_after_drain_if_ready(session)
             raise ProxyResponseError(
@@ -7390,8 +7392,8 @@ class ProxyService:
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         continue
-                    try:
-                        async with session.lifecycle_lock:
+                    async with session.lifecycle_lock:
+                        try:
                             session.closed = True
                             async with session.pending_lock:
                                 session.queued_request_count = 0
@@ -7405,11 +7407,11 @@ class ProxyService:
                                 api_key=None,
                                 response_create_gate=session.response_create_gate,
                             )
-                    finally:
-                        await self._retire_stale_pending_http_bridge_session(
-                            session,
-                            detail=receive_timeout.error_code,
-                        )
+                        finally:
+                            await self._retire_stale_pending_http_bridge_session(
+                                session,
+                                detail=receive_timeout.error_code,
+                            )
                     break
 
                 if message.kind == "text" and message.text is not None:
@@ -7423,8 +7425,8 @@ class ProxyService:
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
-                try:
-                    async with session.lifecycle_lock:
+                async with session.lifecycle_lock:
+                    try:
                         session.closed = True
                         async with session.pending_lock:
                             session.queued_request_count = 0
@@ -7438,11 +7440,11 @@ class ProxyService:
                             api_key=None,
                             response_create_gate=session.response_create_gate,
                         )
-                finally:
-                    await self._retire_stale_pending_http_bridge_session(
-                        session,
-                        detail="stream_incomplete",
-                    )
+                    finally:
+                        await self._retire_stale_pending_http_bridge_session(
+                            session,
+                            detail="stream_incomplete",
+                        )
                 break
         except asyncio.CancelledError:
             raise
@@ -7453,8 +7455,8 @@ class ProxyService:
                 session.key.affinity_kind,
                 exc_info=True,
             )
-            try:
-                async with session.lifecycle_lock:
+            async with session.lifecycle_lock:
+                try:
                     session.closed = True
                     async with session.pending_lock:
                         session.queued_request_count = 0
@@ -7468,11 +7470,11 @@ class ProxyService:
                         api_key=None,
                         response_create_gate=session.response_create_gate,
                     )
-            finally:
-                await self._retire_stale_pending_http_bridge_session(
-                    session,
-                    detail="reader_crash",
-                )
+                finally:
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail="reader_crash",
+                    )
         finally:
             session.closed = True
 

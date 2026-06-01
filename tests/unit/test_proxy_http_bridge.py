@@ -7730,6 +7730,79 @@ async def test_submit_http_bridge_request_rejects_unregistered_closed_session_wi
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_request_waits_for_closed_session_retirement_before_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    retry_started = asyncio.Event()
+
+    async def retry_fresh(*_args: object, **_kwargs: object) -> bool:
+        retry_started.set()
+        return True
+
+    monkeypatch.setattr(service, "_retry_http_bridge_request_on_fresh_upstream", retry_fresh)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-closed-retiring-submit",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"new"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_closed_retiring", None),
+        headers={"x-codex-turn-state": "http_turn_closed_retiring"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_closed_retiring",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-retiring", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        closed=True,
+    )
+    service._http_bridge_sessions[session.key] = session
+
+    async with session.lifecycle_lock:
+        submit_task = asyncio.create_task(
+            service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            )
+        )
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(retry_started.wait(), timeout=0.01)
+            service._http_bridge_sessions.pop(session.key, None)
+        finally:
+            if submit_task.done():
+                await submit_task
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await submit_task
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert retry_started.is_set() is False
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_does_not_send_after_retirement_between_validation_and_send() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(

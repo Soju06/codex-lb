@@ -39,7 +39,19 @@ class UsageHistorySnapshot:
 class _BulkHistoryCacheEntry:
     since: datetime
     max_id: int
+    fingerprint: _BulkHistoryFingerprint
     rows_by_account: dict[str, list[UsageHistorySnapshot]]
+
+
+@dataclass(frozen=True, slots=True)
+class _BulkHistoryFingerprint:
+    row_count: int
+    max_id: int
+    id_sum: int
+    used_percent_total: float
+    reset_at_total: float
+    window_minutes_sum: int
+    max_recorded_at: str
 
 
 _BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryCacheEntry] = {}
@@ -75,6 +87,34 @@ def _max_snapshot_id(grouped: dict[str, list[UsageHistorySnapshot]]) -> int:
     return max((row.id for rows in grouped.values() for row in rows), default=0)
 
 
+def _fingerprint_grouped_history(grouped: dict[str, list[UsageHistorySnapshot]]) -> _BulkHistoryFingerprint:
+    row_count = 0
+    max_id = 0
+    id_sum = 0
+    used_percent_total = 0.0
+    reset_at_total = 0.0
+    window_minutes_sum = 0
+    max_recorded_at = ""
+    for rows in grouped.values():
+        for row in rows:
+            row_count += 1
+            max_id = max(max_id, row.id)
+            id_sum += row.id
+            used_percent_total += row.used_percent
+            reset_at_total += row.reset_at or 0.0
+            window_minutes_sum += row.window_minutes or 0
+            max_recorded_at = max(max_recorded_at, row.recorded_at.isoformat(sep=" "))
+    return _BulkHistoryFingerprint(
+        row_count=row_count,
+        max_id=max_id,
+        id_sum=id_sum,
+        used_percent_total=used_percent_total,
+        reset_at_total=reset_at_total,
+        window_minutes_sum=window_minutes_sum,
+        max_recorded_at=max_recorded_at,
+    )
+
+
 def _append_grouped_history(
     target: dict[str, list[UsageHistorySnapshot]],
     source: dict[str, list[UsageHistorySnapshot]],
@@ -83,6 +123,55 @@ def _append_grouped_history(
         bucket = target.setdefault(account_id, [])
         bucket.extend(rows)
         bucket.sort(key=lambda row: (row.recorded_at, row.id))
+
+
+def _merged_grouped_history(
+    target: dict[str, list[UsageHistorySnapshot]],
+    source: dict[str, list[UsageHistorySnapshot]],
+) -> dict[str, list[UsageHistorySnapshot]]:
+    merged = {account_id: list(rows) for account_id, rows in target.items()}
+    _append_grouped_history(merged, source)
+    return merged
+
+
+def _bulk_history_fingerprint_sqlite(
+    conn: sqlite3.Connection,
+    account_ids: list[str],
+    window: str,
+    since: datetime,
+) -> _BulkHistoryFingerprint:
+    placeholders = ",".join("?" for _ in account_ids)
+    since_param = since.isoformat(sep=" ")
+    if window == "primary":
+        window_clause = "coalesce(window, 'primary') = 'primary'"
+        params = [*account_ids, since_param]
+    else:
+        window_clause = "window = ?"
+        params = [*account_ids, window, since_param]
+    sql = f"""
+        select
+            count(*),
+            coalesce(max(id), 0),
+            coalesce(sum(id), 0),
+            coalesce(total(used_percent), 0.0),
+            coalesce(total(coalesce(reset_at, 0)), 0.0),
+            coalesce(sum(coalesce(window_minutes, 0)), 0),
+            coalesce(max(recorded_at), '')
+        from usage_history
+        where account_id in ({placeholders})
+          and {window_clause}
+          and recorded_at >= ?
+    """
+    row = conn.execute(sql, params).fetchone()
+    return _BulkHistoryFingerprint(
+        row_count=int(row[0]),
+        max_id=int(row[1]),
+        id_sum=int(row[2]),
+        used_percent_total=float(row[3]),
+        reset_at_total=float(row[4]),
+        window_minutes_sum=int(row[5]),
+        max_recorded_at=str(row[6]),
+    )
 
 
 def _query_bulk_history_since_sqlite(
@@ -221,6 +310,7 @@ def _bulk_history_since_sqlite(
         with _BULK_HISTORY_SQLITE_CACHE_LOCK:
             cached = _BULK_HISTORY_SQLITE_CACHE.get(cache_key)
             if cached is not None and cached.since <= since:
+                current_fingerprint = _bulk_history_fingerprint_sqlite(conn, account_ids, window, cached.since)
                 new_rows = _query_bulk_history_since_sqlite(
                     conn,
                     account_ids,
@@ -228,15 +318,25 @@ def _bulk_history_since_sqlite(
                     cached.since,
                     after_id=cached.max_id,
                 )
+                candidate_rows = _merged_grouped_history(cached.rows_by_account, new_rows)
+                candidate_fingerprint = _fingerprint_grouped_history(candidate_rows)
+                if current_fingerprint != candidate_fingerprint:
+                    grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, cached.since)
+                    cached.max_id = _max_snapshot_id(grouped)
+                    cached.fingerprint = _fingerprint_grouped_history(grouped)
+                    cached.rows_by_account = grouped
+                    return _clone_filtered_history(grouped, since)
                 if new_rows:
                     _append_grouped_history(cached.rows_by_account, new_rows)
                     cached.max_id = max(cached.max_id, _max_snapshot_id(new_rows))
+                    cached.fingerprint = current_fingerprint
                 return _clone_filtered_history(cached.rows_by_account, since)
 
             grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, since)
             _BULK_HISTORY_SQLITE_CACHE[cache_key] = _BulkHistoryCacheEntry(
                 since=since,
                 max_id=_max_snapshot_id(grouped),
+                fingerprint=_fingerprint_grouped_history(grouped),
                 rows_by_account=grouped,
             )
             return _clone_filtered_history(grouped, since)

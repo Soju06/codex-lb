@@ -294,6 +294,9 @@ def _sticky_key_for_responses_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
+    # This helper only classifies locality keys. Stored-object continuity such
+    # as `previous_response_id` is resolved later by ProxyService and must stay
+    # hard owner-bound even if this returns a prompt-cache affinity policy.
     cache_key, _ = _resolve_prompt_cache_key(
         payload,
         openai_cache_affinity=openai_cache_affinity,

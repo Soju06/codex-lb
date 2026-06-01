@@ -88,6 +88,9 @@ class AccountState:
     priority_reset_at: int | None = None
     priority_capacity_credits: float | None = None
     limit_scoped_usage: bool = False
+    inflight_response_creates: int = 0
+    inflight_streams: int = 0
+    leased_tokens: float = 0.0
 
 
 @dataclass

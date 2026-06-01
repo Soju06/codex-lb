@@ -12468,6 +12468,12 @@ class ProxyService:
                         preferred_account_id in excluded_account_ids_set,
                         scoped_account_ids is not None and preferred_account_id not in scoped_account_ids,
                     )
+                    if not fallback_on_preferred_account_unavailable:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Preferred account is not available",
+                            error_code="preferred_account_unavailable",
+                        )
                 if preferred_eligible:
                     preferred_selection = await self._load_balancer.select_account(
                         sticky_key=sticky_key,

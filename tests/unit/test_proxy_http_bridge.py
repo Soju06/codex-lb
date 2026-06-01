@@ -1170,6 +1170,42 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_required_preferred_does_not_fallback_when_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=cast(Any, SimpleNamespace(id="acc-other")),
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(sticky_reallocation_budget_threshold_pct=95.0))
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-excluded",
+        kind="stream",
+        request_stage="retry",
+        preferred_account_id="acc-file-owner",
+        exclude_account_ids={"acc-file-owner"},
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "preferred_account_unavailable"
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_select_account_with_budget_soft_preference_can_fallback_after_account_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

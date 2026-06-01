@@ -286,6 +286,11 @@ class Settings(BaseSettings):
     proxy_response_create_limit: int = Field(default=256, ge=0)
     proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
+    proxy_account_response_create_limit: int = Field(default=4, ge=0)
+    proxy_account_stream_limit: int = Field(default=8, ge=0)
+    proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
+    proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
+    proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 

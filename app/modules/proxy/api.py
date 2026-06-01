@@ -70,6 +70,7 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -1952,14 +1953,27 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
+    if not enforce_openai_sdk_contract:
+        stream = _prepend_initial_sse_heartbeat(
+            stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses",
+        )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME,
+            keepalive_frame=keepalive_frame,
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            **turn_state_headers,
+            **rate_limit_headers,
+        },
     )
 
 
@@ -2247,6 +2261,23 @@ async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterat
         yield await first_task
     except StopAsyncIteration:
         return
+    async for line in stream:
+        yield line
+
+
+async def _prepend_initial_sse_heartbeat(
+    stream: AsyncIterator[str],
+    keepalive_frame: str,
+    *,
+    request_id: str | None = None,
+    route_family: str = "responses",
+) -> AsyncIterator[str]:
+    logger.info(
+        "responses_stream_heartbeat request_id=%s route_family=%s stage=initial elapsed_seconds=0.000",
+        request_id,
+        route_family,
+    )
+    yield keepalive_frame
     async for line in stream:
         yield line
 

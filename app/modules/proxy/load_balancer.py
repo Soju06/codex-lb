@@ -6,7 +6,8 @@ import time
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Literal
+from uuid import uuid4
 
 from app.core import usage as usage_core
 from app.core.balancer import (
@@ -25,6 +26,13 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    account_cap_rejections_total,
+    account_lease_acquired_total,
+    account_lease_released_total,
+    account_lease_stale_reclaimed_total,
+)
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
@@ -50,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_SELECTION_ATTEMPTS = 4
 
+_ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
+_STICKY_EXISTING_UNSET = object()
 _RECOVERABLE_STATUSES = frozenset(
     {
         AccountStatus.ACTIVE,
@@ -63,6 +73,8 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
+
+AccountLeaseKind = Literal["response_create", "stream"]
 
 
 @dataclass
@@ -77,6 +89,19 @@ class RuntimeState:
     health_tier: int = 0
     drain_entered_at: float | None = None
     probe_success_streak: int = 0
+    inflight_response_creates: int = 0
+    inflight_streams: int = 0
+    leased_tokens: float = 0.0
+    leases: dict[str, "AccountLease"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountLease:
+    lease_id: str
+    account_id: str
+    kind: AccountLeaseKind
+    acquired_at: float
+    estimated_tokens: float = 0.0
 
 
 @dataclass
@@ -84,6 +109,7 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+    lease: AccountLease | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +134,119 @@ class LoadBalancer:
         self._account_locks_registry_lock = asyncio.Lock()
         self._selection_inputs_cache = get_account_selection_cache()
 
+    async def release_account_lease(self, lease: AccountLease | None) -> None:
+        if lease is None:
+            return
+        async with self._runtime_lock:
+            self._release_account_lease_locked(lease, reason="explicit")
+
+    async def acquire_account_lease(
+        self,
+        account_id: str,
+        *,
+        kind: AccountLeaseKind,
+        estimated_tokens: float = 0.0,
+    ) -> AccountLease | None:
+        async with self._runtime_lock:
+            self._reclaim_stale_account_leases_locked()
+            runtime = self._runtime.setdefault(account_id, RuntimeState())
+            if kind == "response_create":
+                cap = get_settings().proxy_account_response_create_limit
+                if cap > 0 and runtime.inflight_response_creates >= cap:
+                    _record_account_cap_rejection("response_create")
+                    return None
+            else:
+                cap = get_settings().proxy_account_stream_limit
+                if cap > 0 and runtime.inflight_streams >= cap:
+                    _record_account_cap_rejection("stream")
+                    return None
+            return self._acquire_account_lease_locked(
+                account_id,
+                kind=kind,
+                estimated_tokens=estimated_tokens,
+            )
+
+    async def account_pressure_snapshot(self, account_id: str) -> tuple[int, int, float]:
+        async with self._runtime_lock:
+            runtime = self._runtime.get(account_id)
+            if runtime is None:
+                return 0, 0, 0.0
+            return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
+
+    def _acquire_account_lease_locked(
+        self,
+        account_id: str,
+        *,
+        kind: AccountLeaseKind,
+        estimated_tokens: float,
+    ) -> AccountLease:
+        runtime = self._runtime.setdefault(account_id, RuntimeState())
+        lease = AccountLease(
+            lease_id=uuid4().hex,
+            account_id=account_id,
+            kind=kind,
+            acquired_at=time.monotonic(),
+            estimated_tokens=max(0.0, estimated_tokens),
+        )
+        if runtime.leases is None:
+            runtime.leases = {}
+        runtime.leases[lease.lease_id] = lease
+        if kind == "response_create":
+            runtime.inflight_response_creates += 1
+        else:
+            runtime.inflight_streams += 1
+        runtime.leased_tokens += lease.estimated_tokens
+        runtime.last_selected_at = time.time()
+        runtime.version += 1
+        _record_account_lease_acquired(kind)
+        return lease
+
+    def _account_lease_allowed_locked(self, account_id: str, *, kind: AccountLeaseKind) -> bool:
+        runtime = self._runtime.setdefault(account_id, RuntimeState())
+        if kind == "response_create":
+            cap = get_settings().proxy_account_response_create_limit
+            return cap <= 0 or runtime.inflight_response_creates < cap
+        cap = get_settings().proxy_account_stream_limit
+        return cap <= 0 or runtime.inflight_streams < cap
+
+    def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
+        runtime = self._runtime.get(lease.account_id)
+        if runtime is None or runtime.leases is None:
+            return False
+        current = runtime.leases.pop(lease.lease_id, None)
+        if current is None:
+            return False
+        if current.kind == "response_create":
+            runtime.inflight_response_creates = max(0, runtime.inflight_response_creates - 1)
+        else:
+            runtime.inflight_streams = max(0, runtime.inflight_streams - 1)
+        runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
+        runtime.version += 1
+        _record_account_lease_released(current.kind, reason)
+        if reason == "stale":
+            _record_account_lease_stale_reclaimed(current.kind)
+            logger.warning(
+                "Reclaimed stale account lease account_id=%s kind=%s age_seconds=%.3f",
+                current.account_id,
+                current.kind,
+                time.monotonic() - current.acquired_at,
+            )
+        return True
+
+    def _reclaim_stale_account_leases_locked(self) -> None:
+        settings = get_settings()
+        now = time.monotonic()
+        for runtime in self._runtime.values():
+            if not runtime.leases:
+                continue
+            stale = [
+                lease
+                for lease in runtime.leases.values()
+                if now - lease.acquired_at >= _account_lease_stale_ttl_seconds(lease.kind, settings)
+            ]
+            for lease in stale:
+                self._release_account_lease_locked(lease, reason="stale")
+
     async def select_account(
         self,
         sticky_key: str | None = None,
@@ -124,6 +263,8 @@ class LoadBalancer:
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
         budget_threshold_pct: float = 95.0,
+        lease_kind: AccountLeaseKind | None = None,
+        estimated_lease_tokens: float = 0.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -165,58 +306,81 @@ class LoadBalancer:
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
+        selected_lease: AccountLease | None = None
+        selection_error_code: str | None = None
         if sticky_key is None:
             attempt = 0
             while True:
                 attempt += 1
-                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
-                states, account_map = _build_states(
-                    accounts=selection_inputs.accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    runtime=self._runtime,
-                )
-
-                result = _select_account_preferring_budget_safe(
-                    states,
-                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                    routing_strategy=routing_strategy,
-                    relative_availability_power=relative_availability_power,
-                    relative_availability_top_k=relative_availability_top_k,
-                    budget_threshold_pct=budget_threshold_pct,
-                )
-
-                selected_account_map = account_map
-                selected_states = []
-                for state in states:
-                    account = account_map.get(state.account_id)
-                    if account is None:
-                        continue
-                    await self._sync_runtime_state_for_account(
-                        account,
-                        state,
-                        selected=result.account is not None and state.account_id == result.account.account_id,
+                async with self._runtime_lock:
+                    self._reclaim_stale_account_leases_locked()
+                    self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+                    states, account_map = _build_states(
+                        accounts=selection_inputs.accounts,
+                        latest_primary=selection_inputs.latest_primary,
+                        latest_secondary=selection_inputs.latest_secondary,
+                        runtime=self._runtime,
                     )
-                    selected_states.append(state)
-
-                if result.account is not None:
-                    selected = account_map.get(result.account.account_id)
-                    if selected is None:
+                    selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
+                    if not selection_states and states:
+                        result = SelectionResult(None, "No available accounts")
                         error_message = result.error_message
+                        selection_error_code = _account_cap_error_code(lease_kind)
+                        logger.warning(
+                            "Account cap exhausted during selection lease_kind=%s reason=%s candidates=%s",
+                            lease_kind,
+                            selection_error_code,
+                            len(states),
+                        )
+                        _record_account_cap_rejection(lease_kind)
                     else:
-                        selected_reset_at = selected.reset_at
-                        for state in states:
-                            if state.account_id == result.account.account_id:
-                                state.status = result.account.status
-                                state.deactivation_reason = result.account.deactivation_reason
-                                selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                break
-                        selected_snapshot = _clone_account(selected)
-                        selected_snapshot.status = result.account.status
-                        selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                        selected_snapshot.reset_at = selected_reset_at
-                else:
-                    error_message = result.error_message
+                        selection_error_code = None
+                        result = _select_account_preferring_budget_safe(
+                            selection_states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            budget_threshold_pct=budget_threshold_pct,
+                        )
+
+                    selected_account_map = account_map
+                    selected_states = []
+                    for state in states:
+                        account = account_map.get(state.account_id)
+                        if account is None:
+                            continue
+                        self._sync_runtime_state(
+                            account,
+                            state,
+                            selected=result.account is not None and state.account_id == result.account.account_id,
+                        )
+                        selected_states.append(state)
+
+                    if result.account is not None:
+                        selected = account_map.get(result.account.account_id)
+                        if selected is None:
+                            error_message = result.error_message
+                        else:
+                            selected_reset_at = selected.reset_at
+                            for state in states:
+                                if state.account_id == result.account.account_id:
+                                    state.status = result.account.status
+                                    state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                    break
+                            if lease_kind is not None:
+                                selected_lease = self._acquire_account_lease_locked(
+                                    selected.id,
+                                    kind=lease_kind,
+                                    estimated_tokens=estimated_lease_tokens,
+                                )
+                            selected_snapshot = _clone_account(selected)
+                            selected_snapshot.status = result.account.status
+                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot.reset_at = selected_reset_at
+                    else:
+                        error_message = result.error_message
 
                 pre_persist_runtime_state = {
                     aid: (
@@ -229,14 +393,21 @@ class LoadBalancer:
                 }
                 pre_persist_cache_generation = self._selection_inputs_cache.generation
 
-                async with self._repo_factory() as repos:
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
-                    )
+                try:
+                    async with self._repo_factory() as repos:
+                        stale_account_ids = await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
+                except BaseException:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
+                    raise
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
                         selected_snapshot = None
                         error_message = None
@@ -259,6 +430,8 @@ class LoadBalancer:
                     and self._selection_inputs_cache.generation != pre_persist_cache_generation
                     and attempt < _MAX_SELECTION_ATTEMPTS
                 ):
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -298,38 +471,68 @@ class LoadBalancer:
                 break
 
         else:
+            sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
             attempt = 0
             while True:
                 attempt += 1
-                self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
-                states, account_map = _build_states(
-                    accounts=selection_inputs.accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    runtime=self._runtime,
-                )
-                async with self._repo_factory() as repos:
-                    result = await self._select_with_stickiness(
-                        states=states,
-                        account_map=account_map,
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        reallocate_sticky=reallocate_sticky,
-                        sticky_max_age_seconds=sticky_max_age_seconds,
-                        budget_threshold_pct=budget_threshold_pct,
-                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                        routing_strategy=routing_strategy,
-                        relative_availability_power=relative_availability_power,
-                        relative_availability_top_k=relative_availability_top_k,
-                        sticky_repo=repos.sticky_sessions,
+                async with self._runtime_lock:
+                    self._reclaim_stale_account_leases_locked()
+                    self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+                    states, account_map = _build_states(
+                        accounts=selection_inputs.accounts,
+                        latest_primary=selection_inputs.latest_primary,
+                        latest_secondary=selection_inputs.latest_secondary,
+                        runtime=self._runtime,
                     )
-                    selected_account_map = account_map
-                    selected_states = []
+                if sticky_key and sticky_kind == StickySessionKind.CODEX_SESSION:
+                    async with self._repo_factory() as repos:
+                        sticky_existing_account_id = await repos.sticky_sessions.get_account_id(
+                            sticky_key,
+                            kind=sticky_kind,
+                            max_age_seconds=sticky_max_age_seconds,
+                        )
+                hard_sticky = sticky_kind == StickySessionKind.CODEX_SESSION and isinstance(
+                    sticky_existing_account_id, str
+                )
+                selection_states = (
+                    states if hard_sticky else _filter_states_for_account_caps(states, lease_kind=lease_kind)
+                )
+                if not selection_states and states:
+                    result = SelectionResult(None, "No available accounts")
+                    selection_error_code = _account_cap_error_code(lease_kind)
+                    logger.warning(
+                        "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
+                        lease_kind,
+                        selection_error_code,
+                        len(states),
+                    )
+                    _record_account_cap_rejection(lease_kind)
+                else:
+                    selection_error_code = None
+                    async with self._repo_factory() as repos:
+                        result = await self._select_with_stickiness(
+                            states=selection_states,
+                            account_map=account_map,
+                            sticky_key=sticky_key,
+                            sticky_kind=sticky_kind,
+                            reallocate_sticky=reallocate_sticky,
+                            sticky_max_age_seconds=sticky_max_age_seconds,
+                            budget_threshold_pct=budget_threshold_pct,
+                            prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            sticky_repo=repos.sticky_sessions,
+                            sticky_existing_account_id=sticky_existing_account_id,
+                        )
+                selected_account_map = account_map
+                selected_states = []
+                async with self._runtime_lock:
                     for state in states:
                         account = account_map.get(state.account_id)
                         if account is None:
                             continue
-                        await self._sync_runtime_state_for_account(
+                        self._sync_runtime_state(
                             account,
                             state,
                             selected=result.account is not None and state.account_id == result.account.account_id,
@@ -351,16 +554,35 @@ class LoadBalancer:
                             selected_snapshot.status = result.account.status
                             selected_snapshot.deactivation_reason = result.account.deactivation_reason
                             selected_snapshot.reset_at = selected_reset_at
+                            if lease_kind is not None:
+                                if not self._account_lease_allowed_locked(selected.id, kind=lease_kind):
+                                    selected_snapshot = None
+                                    error_message = "No available accounts"
+                                    selection_error_code = _account_cap_error_code(lease_kind)
+                                else:
+                                    selected_lease = self._acquire_account_lease_locked(
+                                        selected.id,
+                                        kind=lease_kind,
+                                        estimated_tokens=estimated_lease_tokens,
+                                    )
                     else:
                         error_message = result.error_message
 
-                    stale_account_ids = await self._persist_selection_state(
-                        repos.accounts,
-                        selected_account_map,
-                        selected_states,
-                    )
+                try:
+                    async with self._repo_factory() as repos:
+                        stale_account_ids = await self._persist_selection_state(
+                            repos.accounts,
+                            selected_account_map,
+                            selected_states,
+                        )
+                except BaseException:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
+                    raise
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
                     selected_snapshot = None
                     error_message = None
                     selected_states = []
@@ -374,6 +596,24 @@ class LoadBalancer:
                             error_message=selection_inputs.error_message,
                             error_code=selection_inputs.error_code,
                         )
+                    await asyncio.sleep(0)
+                    continue
+                if (
+                    selected_snapshot is None
+                    and selection_error_code is not None
+                    and not hard_sticky
+                    and attempt < _MAX_SELECTION_ATTEMPTS
+                ):
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
                     await asyncio.sleep(0)
                     continue
                 break
@@ -391,7 +631,7 @@ class LoadBalancer:
             if error_message == "No available accounts":
                 set_degraded("all upstream accounts are unavailable")
                 error_message = _format_degraded_error_message(error_message)
-            return AccountSelection(account=None, error_message=error_message, error_code=None)
+            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
             selected_snapshot.id,
@@ -399,7 +639,7 @@ class LoadBalancer:
             bool(sticky_key),
             model,
         )
-        return AccountSelection(account=selected_snapshot, error_message=None, error_code=None)
+        return AccountSelection(account=selected_snapshot, error_message=None, error_code=None, lease=selected_lease)
 
     async def _load_selection_inputs(
         self,
@@ -615,7 +855,11 @@ class LoadBalancer:
 
     def _prune_runtime(self, accounts: Iterable[Account]) -> None:
         account_ids = {account.id for account in accounts}
-        stale_ids = [account_id for account_id in self._runtime if account_id not in account_ids]
+        stale_ids = [
+            account_id
+            for account_id, runtime in self._runtime.items()
+            if account_id not in account_ids and not runtime.leases
+        ]
         for account_id in stale_ids:
             self._runtime.pop(account_id, None)
 
@@ -662,6 +906,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
+        sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
@@ -675,12 +920,14 @@ class LoadBalancer:
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
 
-        existing = await sticky_repo.get_account_id(
-            sticky_key,
-            kind=sticky_kind,
-            max_age_seconds=sticky_max_age_seconds,
-        )
-
+        if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
+            existing = await sticky_repo.get_account_id(
+                sticky_key,
+                kind=sticky_kind,
+                max_age_seconds=sticky_max_age_seconds,
+            )
+        else:
+            existing = sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None
         # When the pinned account is temporarily unavailable (rate-limited,
         # error backoff) but still in the pool, pick a fallback WITHOUT
         # overwriting the sticky mapping so the next request returns to the
@@ -702,8 +949,8 @@ class LoadBalancer:
                     sticky_kind
                     in (
                         StickySessionKind.PROMPT_CACHE,
-                        StickySessionKind.CODEX_SESSION,
                         StickySessionKind.STICKY_THREAD,
+                        StickySessionKind.CODEX_SESSION,
                     )
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
@@ -1051,6 +1298,71 @@ def _build_states(
     return states, account_map
 
 
+def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:
+    ttl_seconds = float(getattr(settings, "proxy_account_lease_ttl_seconds", 900.0))
+    if kind != "stream":
+        return ttl_seconds
+    valid_stream_budget_seconds = max(
+        ttl_seconds,
+        float(getattr(settings, "proxy_request_budget_seconds", ttl_seconds)),
+        float(getattr(settings, "http_responses_stream_request_budget_seconds", ttl_seconds)),
+        float(getattr(settings, "http_responses_session_bridge_request_budget_seconds", ttl_seconds)),
+    )
+    return max(ttl_seconds, valid_stream_budget_seconds + _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS)
+
+
+def _filter_states_for_account_caps(
+    states: Iterable[AccountState],
+    *,
+    lease_kind: AccountLeaseKind | None,
+) -> list[AccountState]:
+    if lease_kind is None:
+        return list(states)
+    settings = get_settings()
+    filtered: list[AccountState] = []
+    for state in states:
+        if lease_kind == "response_create":
+            cap = settings.proxy_account_response_create_limit
+            if cap > 0 and state.inflight_response_creates >= cap:
+                continue
+        else:
+            cap = settings.proxy_account_stream_limit
+            if cap > 0 and state.inflight_streams >= cap:
+                continue
+        filtered.append(state)
+    return filtered
+
+
+def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
+    if lease_kind == "response_create":
+        return "account_response_create_cap"
+    if lease_kind == "stream":
+        return "account_stream_cap"
+    return None
+
+
+def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:
+    if PROMETHEUS_AVAILABLE and account_lease_acquired_total is not None:
+        account_lease_acquired_total.labels(kind=kind).inc()
+
+
+def _record_account_lease_released(kind: AccountLeaseKind, reason: str) -> None:
+    if PROMETHEUS_AVAILABLE and account_lease_released_total is not None:
+        account_lease_released_total.labels(kind=kind, reason=reason).inc()
+
+
+def _record_account_lease_stale_reclaimed(kind: AccountLeaseKind) -> None:
+    if PROMETHEUS_AVAILABLE and account_lease_stale_reclaimed_total is not None:
+        account_lease_stale_reclaimed_total.labels(kind=kind).inc()
+
+
+def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
+    if kind is None:
+        return
+    if PROMETHEUS_AVAILABLE and account_cap_rejections_total is not None:
+        account_cap_rejections_total.labels(kind=kind).inc()
+
+
 def _state_from_account(
     *,
     account: Account,
@@ -1193,22 +1505,37 @@ def _state_from_account(
         runtime.probe_success_streak = 0
         runtime.health_tier = HEALTH_TIER_HEALTHY
 
+    inflight_pressure_pct = (runtime.inflight_response_creates + runtime.inflight_streams) * getattr(
+        settings, "proxy_account_inflight_penalty_pct", 2.5
+    )
+    leased_token_pressure_pct = 0.0
+    capacity_credits = usage_core.capacity_for_plan(account.plan_type, "secondary") or 0.0
+    if capacity_credits > 0.0 and runtime.leased_tokens > 0:
+        lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
+        leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
+    pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
+    effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
+    effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
+
     return AccountState(
         account_id=account.id,
         status=status,
-        used_percent=used_percent,
+        used_percent=effective_used_percent,
         reset_at=reset_at,
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
-        secondary_used_percent=secondary_used,
+        secondary_used_percent=effective_secondary_used_percent,
         secondary_reset_at=secondary_reset,
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
         plan_type=account.plan_type,
-        capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+        capacity_credits=capacity_credits,
         health_tier=new_tier,
+        inflight_response_creates=runtime.inflight_response_creates,
+        inflight_streams=runtime.inflight_streams,
+        leased_tokens=runtime.leased_tokens,
     )
 
 

@@ -70,6 +70,8 @@ def _extract_first_event(lines: list[str]) -> dict:
         if not line.startswith("data: ") or line.startswith("data: [DONE]"):
             continue
         event = json.loads(line[6:])
+        if event.get("type") == "codex.keepalive":
+            continue
         if event.get("type") == "response.created":
             response = event.get("response")
             if isinstance(response, dict) and response.get("status") == "in_progress" and response.get("output") == []:

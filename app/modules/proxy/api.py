@@ -1954,12 +1954,13 @@ async def _stream_responses(
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
     keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
-    stream = _prepend_initial_sse_heartbeat(
-        stream,
-        keepalive_frame,
-        request_id=get_request_id(),
-        route_family="responses",
-    )
+    if not enforce_openai_sdk_contract:
+        stream = _prepend_initial_sse_heartbeat(
+            stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses",
+        )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,

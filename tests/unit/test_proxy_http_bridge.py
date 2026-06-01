@@ -1198,6 +1198,8 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
 
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+
+
 async def test_select_account_with_budget_required_file_pin_does_not_fallback_on_account_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

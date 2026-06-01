@@ -14341,6 +14341,7 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
         return "relative_availability"
     return "capacity_weighted"
 
+
 def _relative_availability_power(settings: DashboardSettings) -> float:
     raw_value = getattr(settings, "relative_availability_power", None)
     value = float(raw_value) if raw_value is not None else 2.0
@@ -14358,7 +14359,6 @@ def _prefer_earlier_reset_window(settings: DashboardSettings) -> ResetPreference
     if value == "primary":
         return "primary"
     return "secondary"
-
 
 
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:

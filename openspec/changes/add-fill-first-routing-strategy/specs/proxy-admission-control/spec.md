@@ -2,10 +2,10 @@
 
 ## ADDED Requirements
 
-### Requirement: The fill_first routing strategy MUST select the lowest-usage eligible account deterministically
+### Requirement: The fill_first routing strategy MUST select the highest-usage eligible account deterministically
 
 The load balancer MUST pick a single account from the effective candidate
-pool by selecting the lowest primary 5h `used_percent` when the configured
+pool by selecting the highest primary 5h `used_percent` when the configured
 `routing_strategy` is `fill_first`, treating an unknown `used_percent` as
 `0.0`.
 
@@ -29,10 +29,10 @@ or any other availability gate enforced by `select_account`.
 
 When `prefer_earlier_reset` is enabled, `fill_first` MUST narrow the
 candidate pool to accounts whose secondary reset bucket is earliest
-before applying the lowest-`used_percent` ranking, mirroring the
+before applying the highest-`used_percent` ranking, mirroring the
 `capacity_weighted` strategy.
 
-#### Scenario: Lowest primary usage wins
+#### Scenario: Highest primary usage wins
 
 - **GIVEN** the routing strategy is `fill_first`
 - **AND** all eligible accounts share `health_tier = HEALTHY`
@@ -40,7 +40,7 @@ before applying the lowest-`used_percent` ranking, mirroring the
   account `B` has primary `used_percent = 5.0`,
   and account `C` has primary `used_percent = 0.0`
 - **WHEN** an account is selected
-- **THEN** account `C` is returned
+- **THEN** account `A` is returned
 
 #### Scenario: Stable selection across consecutive calls
 
@@ -56,7 +56,7 @@ before applying the lowest-`used_percent` ranking, mirroring the
   `QUOTA_EXCEEDED`, enters cooldown, or transitions to `DRAINING`
   while at least one other healthy account remains
 - **WHEN** the balancer is invoked
-- **THEN** the next-lowest-`used_percent` healthy account is returned
+- **THEN** the next-highest-`used_percent` healthy account is returned
 - **AND** no random draw influences the outcome
 
 #### Scenario: Highest secondary usage breaks primary ties

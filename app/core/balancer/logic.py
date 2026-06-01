@@ -520,11 +520,11 @@ def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
 def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:
     primary_used = state.used_percent if state.used_percent is not None else 0.0
     secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else 0.0
-    return primary_used, -secondary_used, state.account_id
+    return -primary_used, -secondary_used, state.account_id
 
 
 def _select_fill_first(available: list[AccountState]) -> AccountState:
-    """Pick the eligible account with the lowest primary 5h ``used_percent``.
+    """Pick the eligible account with the highest primary 5h ``used_percent``.
 
     Deterministic. ``None`` ``used_percent`` is treated as ``0.0`` so a
     freshly refreshed account ties with an unknown-usage account.
@@ -536,25 +536,10 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
     one for later cycles, matching operator intent for "fill first" behavior.
     ``account_id`` ascending is the final stable tiebreaker.
 
-    The strategy stays on the currently selected healthy account while it remains
-    in the candidate pool, which keeps cache locality as long as it keeps
-    successfully serving traffic. Once that account leaves the pool (rate-limited,
-    quota-exceeded, in cooldown, or transitioned out of healthy), selection
-    falls back to the lowest-``used_percent`` candidate.
-
     Drained accounts are only reachable here when no healthy or probing
     account exists, via the existing ``effective_pool`` ladder; this helper
     introduces no new bypass.
     """
-    if available:
-        recent_healthy = [
-            state
-            for state in available
-            if state.health_tier == HEALTH_TIER_HEALTHY and state.last_selected_at is not None
-        ]
-        if recent_healthy:
-            return max(recent_healthy, key=lambda state: state.last_selected_at)
-
     return min(available, key=_fill_first_sort_key)
 
 

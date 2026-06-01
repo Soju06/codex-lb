@@ -19,7 +19,7 @@ stays on a single account long enough to take advantage of upstream caching.
 ## Solution
 
 Add a fourth routing strategy, `fill_first`, that **deterministically picks
-the eligible account with the lowest primary 5h `used_percent`**. When
+the eligible account with the highest primary 5h `used_percent`**. When
 two or more candidates share the same primary `used_percent`, the
 account with the **higher** secondary (weekly) `used_percent` is
 preferred — i.e. the one with the least remaining weekly capacity is
@@ -27,13 +27,13 @@ drained first and the freshest one is preserved for later. `account_id`
 ascending is the final stable tiebreaker. The "fill" behavior emerges
 naturally from the existing pool gating:
 
-- An account stays selected while it remains the lowest-usage candidate.
+- An account stays selected while it remains the highest-usage candidate.
 - Its primary `used_percent` rises with traffic until it falls out of the
   effective pool (rate-limited, quota-exceeded, cooldown, or
-  `health_tier == DRAINING`), at which point the next-lowest account is
+  `health_tier == DRAINING`), at which point the next-highest account is
   picked.
 - By the time later accounts saturate, the first account's 5h window has
-  typically reset and it re-enters the pool as the lowest again.
+  typically reset and can re-enter the pool as fresh capacity.
 
 The strategy does **not** introduce new randomness, new sticky state, or new
 bypasses around health tiers or error backoff — it plugs into the same
@@ -45,7 +45,7 @@ by every other strategy.
 - Extend the `RoutingStrategy` literal in `app/core/balancer/logic.py` to
   include `"fill_first"`.
 - Implement a pure helper `_select_fill_first(pool)` that returns
-  `min(pool, key=(used_percent or 0.0, -(secondary_used_percent or 0.0), account_id))`.
+  `min(pool, key=(-(used_percent or 0.0), -(secondary_used_percent or 0.0), account_id))`.
 - Add a `fill_first` branch to `select_account()` dispatch that respects
   `prefer_earlier_reset` the same way `capacity_weighted` does.
 - Widen the Pydantic regex in `app/modules/settings/schemas.py`

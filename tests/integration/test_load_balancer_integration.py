@@ -603,4 +603,4 @@ async def test_load_balancer_fill_first_cycles_through_accounts(db_setup):
 
     third = await balancer.select_account(routing_strategy="fill_first")
     assert third.account is not None
-    assert third.account.id == accounts[2].id
+    assert third.account.id == accounts[1].id

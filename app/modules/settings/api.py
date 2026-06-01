@@ -260,4 +260,3 @@ async def update_settings(
         details={"changed_fields": changed_fields},
     )
     return _settings_response(updated)
-    return _settings_response(updated)

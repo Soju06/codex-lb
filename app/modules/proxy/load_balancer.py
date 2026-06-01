@@ -801,10 +801,12 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
+            standard_latest_primary, standard_latest_secondary = await asyncio.gather(
+                repos.usage.latest_by_account(),
+                repos.usage.latest_by_account(window="secondary"),
+            )
             if effective_limit_name:
-                latest_primary = additional_filter.latest_primary
-                latest_secondary = additional_filter.latest_secondary
-                ignore_standard_quota_account_ids = frozenset(
+                quota_scoped_account_ids = frozenset(
                     account.id
                     for account in accounts
                     if additional_limit_name is not None
@@ -813,11 +815,19 @@ class LoadBalancer:
                         plan_type=account.plan_type,
                     )
                 )
+                latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = dict(standard_latest_primary)
+                latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory] = dict(standard_latest_secondary)
+                for account_id in quota_scoped_account_ids:
+                    latest_primary.pop(account_id, None)
+                    latest_secondary.pop(account_id, None)
+                    if account_id in additional_filter.latest_primary:
+                        latest_primary[account_id] = additional_filter.latest_primary[account_id]
+                    if account_id in additional_filter.latest_secondary:
+                        latest_secondary[account_id] = additional_filter.latest_secondary[account_id]
+                ignore_standard_quota_account_ids = quota_scoped_account_ids
             else:
-                latest_primary, latest_secondary = await asyncio.gather(
-                    repos.usage.latest_by_account(),
-                    repos.usage.latest_by_account(window="secondary"),
-                )
+                latest_primary = standard_latest_primary
+                latest_secondary = standard_latest_secondary
                 ignore_standard_quota_account_ids = frozenset()
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
@@ -830,7 +840,7 @@ class LoadBalancer:
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
                 ignore_standard_quota_status=ignore_standard_quota_status,
-                persist_standard_quota_status=not ignore_standard_quota_status,
+                persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
             )
             await self._selection_inputs_cache.set(
@@ -1304,6 +1314,8 @@ class LoadBalancer:
     ) -> set[str]:
         stale_account_ids: set[str] = set()
         for state in states:
+            if state.ignore_standard_quota:
+                continue
             account = account_map.get(state.account_id)
             if account is not None:
                 persisted = await self._persist_state_if_current(accounts_repo, account, state)
@@ -1399,7 +1411,7 @@ def _build_states(
             secondary_entry=latest_secondary.get(account.id),
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
-        if routing_policy_override is not None:
+        if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)

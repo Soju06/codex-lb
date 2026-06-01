@@ -309,6 +309,7 @@ async def test_load_balancer_standard_quota_bypass_stays_per_account_for_gated_m
 
     mock_repos = MagicMock()
     mock_repos.accounts.list_accounts = AsyncMock(return_value=[pro, plus])
+    mock_repos.usage.latest_by_account = AsyncMock(return_value={})
     mock_repos.additional_usage.latest_by_quota_key = AsyncMock(side_effect=latest_by_quota_key)
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)

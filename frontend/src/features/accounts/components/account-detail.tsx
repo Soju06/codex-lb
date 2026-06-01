@@ -13,7 +13,10 @@ import { AccountAliasForm } from "@/features/accounts/components/account-alias-f
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
-import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountSummary,
+} from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
@@ -28,8 +31,12 @@ export type AccountDetailProps = {
   onReauth: () => void;
   onExport: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  onRoutingPolicyChange: (
+    accountId: string,
+    routingPolicy: AccountRoutingPolicy,
+  ) => void;
   onExportOpenCodeAuth: (accountId: string) => void;
+  onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
 };
 
 export function AccountDetail({
@@ -45,6 +52,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onExportOpenCodeAuth,
+  onSecurityWorkAuthorizedChange,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -55,8 +63,12 @@ export function AccountDetail({
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
           <User className="h-5 w-5 text-muted-foreground" />
         </div>
-        <p className="mt-3 text-sm font-medium text-muted-foreground">Select an account</p>
-        <p className="mt-1 text-xs text-muted-foreground/70">Choose an account from the list to view details.</p>
+        <p className="mt-3 text-sm font-medium text-muted-foreground">
+          Select an account
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground/70">
+          Choose an account from the list to view details.
+        </p>
       </div>
     );
   }
@@ -64,21 +76,43 @@ export function AccountDetail({
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
   const compactId = formatCompactAccountId(account.accountId);
-  const emailSubtitle = account.displayName && account.displayName !== account.email
-    ? account.email
-    : null;
+  const emailSubtitle =
+    account.displayName && account.displayName !== account.email
+      ? account.email
+      : null;
   const idSuffix = showAccountId ? ` (${compactId})` : "";
 
   return (
-    <div key={account.accountId} className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5">
+    <div
+      key={account.accountId}
+      className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5"
+    >
       {/* Account header */}
       <div>
         <h2 className="text-base font-semibold">
-          {titleIsEmail ? <><span className={blurred ? "privacy-blur" : ""}>{title}</span>{idSuffix}</> : <>{title}{!emailSubtitle ? idSuffix : ""}</>}
+          {titleIsEmail ? (
+            <>
+              <span className={blurred ? "privacy-blur" : ""}>{title}</span>
+              {idSuffix}
+            </>
+          ) : (
+            <>
+              {title}
+              {!emailSubtitle ? idSuffix : ""}
+            </>
+          )}
         </h2>
         {emailSubtitle ? (
-          <p className="mt-0.5 text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            <span className={blurred ? "privacy-blur" : ""}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
+          <p
+            className="mt-0.5 text-xs text-muted-foreground"
+            title={
+              showAccountId ? `Account ID ${account.accountId}` : undefined
+            }
+          >
+            <span className={blurred ? "privacy-blur" : ""}>
+              {emailSubtitle}
+            </span>
+            {showAccountId ? ` | ID ${compactId}` : ""}
           </p>
         ) : null}
       </div>
@@ -98,11 +132,18 @@ export function AccountDetail({
         <Select
           value={account.routingPolicy ?? "normal"}
           onValueChange={(value) =>
-            onRoutingPolicyChange(account.accountId, value as AccountRoutingPolicy)
+            onRoutingPolicyChange(
+              account.accountId,
+              value as AccountRoutingPolicy,
+            )
           }
           disabled={busy}
         >
-          <SelectTrigger size="sm" className="w-36 text-xs" aria-label="Routing policy">
+          <SelectTrigger
+            size="sm"
+            className="w-36 text-xs"
+            aria-label="Routing policy"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent align="end">
@@ -125,6 +166,7 @@ export function AccountDetail({
         onLimitWarmupChange={onLimitWarmupChange}
         onExportOpenCodeAuth={onExportOpenCodeAuth}
         onRoutingPolicyChange={onRoutingPolicyChange}
+        onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
     </div>
   );

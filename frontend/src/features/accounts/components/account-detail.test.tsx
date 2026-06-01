@@ -31,6 +31,7 @@ describe("AccountDetail", () => {
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onExportOpenCodeAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
       />,
     );
 

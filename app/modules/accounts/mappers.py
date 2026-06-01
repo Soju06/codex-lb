@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
-from app.core.balancer import ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -130,6 +129,7 @@ def _account_to_summary(
         plan_type=plan_type,
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
@@ -153,7 +153,7 @@ def _account_to_summary(
 
 
 def _normalize_account_routing_policy(value: str | None) -> str:
-    if value in {"normal", ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE}:
+    if value in _ACCOUNT_ROUTING_POLICIES:
         return value
     return "normal"
 
@@ -201,12 +201,6 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
-
-
-def _normalize_account_routing_policy(value: str | None) -> str:
-    if value in _ACCOUNT_ROUTING_POLICIES:
-        return value
-    return "normal"
 
 
 def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):

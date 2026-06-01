@@ -33,9 +33,10 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     setAliasMutation,
+    limitWarmupMutation,
+    updateMutation,
     deleteMutation,
     exportMutation,
-    limitWarmupMutation,
     routingPolicyMutation,
     exportOpenCodeAuthMutation,
   } = useAccounts();
@@ -99,22 +100,24 @@ export function AccountsPage() {
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
+    limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     exportMutation.isPending ||
-    limitWarmupMutation.isPending ||
     routingPolicyMutation.isPending ||
-    exportOpenCodeAuthMutation.isPending;
+    exportOpenCodeAuthMutation.isPending ||
+    updateMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
+    getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(exportMutation.error) ||
-    getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
-    getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
+    getErrorMessageOrNull(exportOpenCodeAuthMutation.error) ||
+    getErrorMessageOrNull(updateMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -170,7 +173,16 @@ export function AccountsPage() {
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
             onRoutingPolicyChange={(accountId, routingPolicy) =>
-              void routingPolicyMutation.mutateAsync({ accountId, routingPolicy })
+              void routingPolicyMutation.mutateAsync({
+                accountId,
+                routingPolicy,
+              })
+            }
+            onSecurityWorkAuthorizedChange={(accountId, enabled) =>
+              void updateMutation.mutateAsync({
+                accountId,
+                securityWorkAuthorized: enabled,
+              })
             }
           />
         </div>

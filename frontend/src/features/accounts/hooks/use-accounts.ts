@@ -11,6 +11,7 @@ import {
   pauseAccount,
   reactivateAccount,
   setAccountAlias,
+  updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
@@ -147,6 +148,18 @@ export function useAccountMutations() {
     },
   });
 
+  const updateMutation = useMutation({
+    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
+      updateAccount(accountId, { securityWorkAuthorized }),
+    onSuccess: () => {
+      toast.success("Account updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Update failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -157,6 +170,7 @@ export function useAccountMutations() {
     limitWarmupMutation,
     routingPolicyMutation,
     exportOpenCodeAuthMutation,
+    updateMutation,
   };
 }
 

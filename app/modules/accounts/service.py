@@ -231,8 +231,19 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
+    async def update_account(self, account_id: str, *, security_work_authorized: bool | None = None) -> bool:
+        result = False
+        if security_work_authorized is not None:
+            result = await self._repo.update_security_work_authorized(account_id, security_work_authorized)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
+
     async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
-        return await self._repo.update_limit_warmup_enabled(account_id, enabled)
+        result = await self._repo.update_limit_warmup_enabled(account_id, enabled)
+        if result:
+            get_account_selection_cache().invalidate()
+        return result
 
     async def set_routing_policy(self, account_id: str, routing_policy: str) -> bool:
         result = await self._repo.update_routing_policy(account_id, routing_policy)

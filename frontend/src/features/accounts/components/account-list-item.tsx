@@ -1,4 +1,4 @@
-import { Flame, Shield } from "lucide-react";
+import { Flame, Shield, ShieldCheck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -7,10 +7,18 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
-import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountSummary,
+} from "@/features/accounts/schemas";
 import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSlug,
+} from "@/utils/formatters";
 
 export type AccountListItemProps = {
   account: AccountSummary;
@@ -19,23 +27,39 @@ export type AccountListItemProps = {
   onSelect: (accountId: string) => void;
 };
 
-export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
+export function AccountListItem({
+  account,
+  selected,
+  showAccountId = false,
+  onSelect,
+}: AccountListItemProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
-  const emailSubtitle = account.displayName && account.displayName !== account.email
-    ? account.email
-    : null;
+  const emailSubtitle =
+    account.displayName && account.displayName !== account.email
+      ? account.email
+      : null;
   const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
-  const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
+  const idSuffix = showAccountId
+    ? ` | ID ${formatCompactAccountId(account.accountId)}`
+    : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primary !== null || account.resetAtPrimary != null;
-  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondary !== null || account.resetAtSecondary != null;
-  const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
-  const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const hasPrimaryWindow =
+    account.windowMinutesPrimary != null ||
+    primary !== null ||
+    account.resetAtPrimary != null;
+  const hasSecondaryWindow =
+    account.windowMinutesSecondary != null ||
+    secondary !== null ||
+    account.resetAtSecondary != null;
+  const showPrimaryRow =
+    hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
+  const showSecondaryRow =
+    hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
 
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
@@ -48,26 +72,70 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       onClick={() => onSelect(account.accountId)}
       className={cn(
         "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
-        selected
-          ? "bg-primary/8 ring-1 ring-primary/25"
-          : "hover:bg-muted/50",
+        selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
       <div className="flex items-center gap-2.5">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">
-            {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
+            {titleIsEmail && blurred ? (
+              <span className="privacy-blur">{title}</span>
+            ) : (
+              title
+            )}
           </p>
-          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
+          <p
+            className="truncate text-xs text-muted-foreground"
+            title={
+              showAccountId ? `Account ID ${account.accountId}` : undefined
+            }
+          >
+            {emailSubtitle ? (
+              <>
+                <span className={blurred ? "privacy-blur" : undefined}>
+                  {emailSubtitle}
+                </span>
+                {idSuffix}
+              </>
+            ) : (
+              <>
+                {baseSubtitle}
+                {idSuffix}
+              </>
+            )}
           </p>
         </div>
-        <RoutingPolicyBadge policy={account.routingPolicy as AccountRoutingPolicy | undefined} />
+        <RoutingPolicyBadge
+          policy={account.routingPolicy as AccountRoutingPolicy | undefined}
+        />
+        {account.securityWorkAuthorized === true ? (
+          <ShieldCheck
+            className="h-3.5 w-3.5 text-emerald-600"
+            aria-label="Trusted Access for Cyber"
+          />
+        ) : null}
         <StatusBadge status={status} />
       </div>
-      <div className={cn("mt-2 grid gap-2", showPrimaryRow && showSecondaryRow ? "grid-cols-2" : "grid-cols-1")}>
-        {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
-        {showSecondaryRow ? <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} /> : null}
+      <div
+        className={cn(
+          "mt-2 grid gap-2",
+          showPrimaryRow && showSecondaryRow ? "grid-cols-2" : "grid-cols-1",
+        )}
+      >
+        {showPrimaryRow ? (
+          <MiniQuotaRow
+            label="5h"
+            percent={primary}
+            resetAt={account.resetAtPrimary}
+          />
+        ) : null}
+        {showSecondaryRow ? (
+          <MiniQuotaRow
+            label="Weekly"
+            percent={secondary}
+            resetAt={account.resetAtSecondary}
+          />
+        ) : null}
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
         <span>{warmupLabel}</span>
@@ -77,7 +145,11 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   );
 }
 
-function RoutingPolicyBadge({ policy }: { policy: AccountRoutingPolicy | undefined }) {
+function RoutingPolicyBadge({
+  policy,
+}: {
+  policy: AccountRoutingPolicy | undefined;
+}) {
   if (policy === "burn_first") {
     return (
       <Badge
@@ -101,7 +173,10 @@ function RoutingPolicyBadge({ policy }: { policy: AccountRoutingPolicy | undefin
     );
   }
   return (
-    <Badge variant="outline" className="shrink-0 px-1.5 text-[11px] text-muted-foreground">
+    <Badge
+      variant="outline"
+      className="shrink-0 px-1.5 text-[11px] text-muted-foreground"
+    >
       Normal
     </Badge>
   );
@@ -120,14 +195,18 @@ function MiniQuotaRow({
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
-        <span className="tabular-nums font-medium">{formatPercentNullable(percent)}</span>
+        <span className="tabular-nums font-medium">
+          {formatPercentNullable(percent)}
+        </span>
       </div>
       <MiniQuotaBar
         aria-label={`${label} credits remaining`}
         percent={percent}
         testId={`mini-quota-track-${label.toLowerCase()}`}
       />
-      <div className="text-[10px] text-muted-foreground">{formatMiniQuotaResetLabel(resetAt ?? null)}</div>
+      <div className="text-[10px] text-muted-foreground">
+        {formatMiniQuotaResetLabel(resetAt ?? null)}
+      </div>
     </div>
   );
 }

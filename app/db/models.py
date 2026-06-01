@@ -95,6 +95,12 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",

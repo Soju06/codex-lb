@@ -69,6 +69,7 @@ export const AccountSummarySchema = z.object({
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
+  securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
@@ -164,6 +165,10 @@ export const AccountExportResponseSchema = z.object({
   planType: z.string(),
   status: z.string(),
   authJson: z.string(),
+});
+
+export const AccountUpdateRequestSchema = z.object({
+  securityWorkAuthorized: z.boolean().optional(),
 });
 
 export const OauthStartRequestSchema = z.object({

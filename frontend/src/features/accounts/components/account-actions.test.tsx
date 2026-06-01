@@ -18,6 +18,8 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExport={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
         onExportOpenCodeAuth={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
       />,

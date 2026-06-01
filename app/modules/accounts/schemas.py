@@ -76,6 +76,7 @@ class AccountSummary(DashboardModel):
     plan_type: str
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     status: str
+    security_work_authorized: bool = False
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
@@ -127,6 +128,14 @@ class AccountOpenCodeAuthExportResponse(DashboardModel):
     filename: str
     account: AccountOpenCodeAuthExportAccount
     auth_json: OpenCodeAuthJson
+
+
+class AccountUpdateRequest(DashboardModel):
+    security_work_authorized: bool | None = None
+
+
+class AccountUpdateResponse(DashboardModel):
+    status: str
 
 
 class AccountPauseResponse(DashboardModel):

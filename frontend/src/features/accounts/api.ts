@@ -1,4 +1,4 @@
-import { del, get, post, put } from "@/lib/api-client";
+import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
@@ -9,6 +9,7 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountUpdateRequestSchema,
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
@@ -58,6 +59,15 @@ export function setAccountAlias(accountId: string, alias: string | null) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
     AccountAliasResponseSchema,
+    { body: validated },
+  );
+}
+
+export function updateAccount(accountId: string, payload: unknown) {
+  const validated = AccountUpdateRequestSchema.parse(payload);
+  return patch(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
+    AccountActionResponseSchema,
     { body: validated },
   );
 }

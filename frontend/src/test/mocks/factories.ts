@@ -84,6 +84,7 @@ export function createAccountSummary(
 		planType: "plus",
 		routingPolicy: "normal",
 		status: "active",
+		securityWorkAuthorized: false,
 		usage: {
 			primaryRemainingPercent: 82,
 			secondaryRemainingPercent: 67,

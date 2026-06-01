@@ -279,29 +279,41 @@ class AccountsRepository:
         chatgpt_account_id: str,
     ) -> None:
         duplicate_accounts = (
-            await self._session.execute(
-                select(Account.id).where(
-                    Account.chatgpt_account_id == chatgpt_account_id,
-                    Account.id != canonical.id,
+            (
+                await self._session.execute(
+                    select(Account.id).where(
+                        Account.chatgpt_account_id == chatgpt_account_id,
+                        Account.id != canonical.id,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         duplicate_ids = list(duplicate_accounts)
         if not duplicate_ids:
             return
 
         duplicate_api_key_ids = (
-            await self._session.execute(
-                select(ApiKeyAccountAssignment.api_key_id).where(ApiKeyAccountAssignment.account_id == canonical.id)
+            (
+                await self._session.execute(
+                    select(ApiKeyAccountAssignment.api_key_id).where(ApiKeyAccountAssignment.account_id == canonical.id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         existing_api_key_ids = set(duplicate_api_key_ids)
 
         duplicate_assignments = (
-            await self._session.execute(
-                select(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id.in_(duplicate_ids))
+            (
+                await self._session.execute(
+                    select(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id.in_(duplicate_ids))
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for assignment in duplicate_assignments:
             if assignment.api_key_id in existing_api_key_ids:
                 await self._session.delete(assignment)
@@ -312,17 +324,17 @@ class AccountsRepository:
             update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
         await self._session.execute(
-            update(AdditionalUsageHistory).where(
-                AdditionalUsageHistory.account_id.in_(duplicate_ids)
-            ).values(account_id=canonical.id)
+            update(AdditionalUsageHistory)
+            .where(AdditionalUsageHistory.account_id.in_(duplicate_ids))
+            .values(account_id=canonical.id)
         )
         await self._session.execute(
             update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
         await self._session.execute(
-            update(AccountLimitWarmup).where(AccountLimitWarmup.account_id.in_(duplicate_ids)).values(
-                account_id=canonical.id
-            )
+            update(AccountLimitWarmup)
+            .where(AccountLimitWarmup.account_id.in_(duplicate_ids))
+            .values(account_id=canonical.id)
         )
         await self._session.execute(
             update(StickySession).where(StickySession.account_id.in_(duplicate_ids)).values(account_id=canonical.id)

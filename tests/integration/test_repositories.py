@@ -409,64 +409,78 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
         assert saved.plan_type == "team"
 
         rows = list(
-            (
-                await session.execute(
-                    select(Account).where(Account.chatgpt_account_id == "chatgpt_merge")
-                )
-            ).scalars().all()
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_merge")))
+            .scalars()
+            .all()
         )
         assert len(rows) == 1
         assert rows[0].id == "acc_merge_main"
 
         account_histories = (
-            await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_merge_main"))
-        ).scalars().all()
+            (await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_merge_main")))
+            .scalars()
+            .all()
+        )
         assert len(account_histories) == 1
         assert account_histories[0].used_percent == 55.0
 
         additional_histories = (
-            await session.execute(
-                select(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == "acc_merge_main")
+            (
+                await session.execute(
+                    select(AdditionalUsageHistory).where(AdditionalUsageHistory.account_id == "acc_merge_main")
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(additional_histories) == 1
         assert additional_histories[0].quota_key == "gpt-5.1"
 
         account_warmups = (
-            await session.execute(select(AccountLimitWarmup).where(AccountLimitWarmup.account_id == "acc_merge_main"))
-        ).scalars().all()
+            (await session.execute(select(AccountLimitWarmup).where(AccountLimitWarmup.account_id == "acc_merge_main")))
+            .scalars()
+            .all()
+        )
         assert len(account_warmups) == 1
         assert account_warmups[0].status == "pending"
 
         sticky_sessions = (
-            await session.execute(select(StickySession).where(StickySession.account_id == "acc_merge_main"))
-        ).scalars().all()
+            (await session.execute(select(StickySession).where(StickySession.account_id == "acc_merge_main")))
+            .scalars()
+            .all()
+        )
         assert len(sticky_sessions) == 1
         assert sticky_sessions[0].key == "sticky-dup"
 
         bridge_sessions = (
-            await session.execute(
-                select(HttpBridgeSessionRecord).where(
-                    HttpBridgeSessionRecord.account_id == "acc_merge_main"
+            (
+                await session.execute(
+                    select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.account_id == "acc_merge_main")
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(bridge_sessions) == 1
         assert bridge_sessions[0].session_key_value == "turn:merge"
 
         assignments = (
-            await session.execute(
-                select(ApiKeyAccountAssignment).where(
-                    ApiKeyAccountAssignment.account_id == "acc_merge_main"
+            (
+                await session.execute(
+                    select(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == "acc_merge_main")
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(assignments) == 1
         assert assignments[0].api_key_id == api_key.id
 
         duplicate_request_logs = (
-            await session.execute(select(RequestLog).where(RequestLog.account_id == "acc_merge_main__copy2"))
-        ).scalars().all()
+            (await session.execute(select(RequestLog).where(RequestLog.account_id == "acc_merge_main__copy2")))
+            .scalars()
+            .all()
+        )
         assert len(duplicate_request_logs) == 0
 
 

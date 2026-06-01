@@ -131,6 +131,9 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -492,6 +495,26 @@ def _response_create_text_with_size_guard(
             )
             return None
     return text_data
+
+
+def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
+    if budget is None:
+        return 0.0
+    input_tokens = _bounded_lease_token_estimate(
+        budget.input_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    )
+    output_tokens = _bounded_lease_token_estimate(
+        budget.output_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    )
+    return float(input_tokens + output_tokens)
+
+
+def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 class ProxyService:
@@ -958,6 +981,7 @@ class ProxyService:
                 request_stage=request_state.request_stage,
                 preferred_account_id=request_state.preferred_account_id,
                 fallback_on_preferred_account_unavailable=not file_required_preferred_account,
+                request_usage_budget=request_state.request_usage_budget,
             )
         except ProxyResponseError as exc:
             if not (
@@ -1031,6 +1055,7 @@ class ProxyService:
                 request_stage=request_state.request_stage,
                 preferred_account_id=request_state.preferred_account_id,
                 fallback_on_preferred_account_unavailable=not file_required_preferred_account,
+                request_usage_budget=request_state.request_usage_budget,
             )
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
             forwarded_any = False
@@ -1115,6 +1140,7 @@ class ProxyService:
                     durable_lookup=durable_lookup,
                     request_stage="reattach",
                     preferred_account_id=request_state.preferred_account_id,
+                    request_usage_budget=request_state.request_usage_budget,
                 )
                 _record_bridge_reattach(
                     path="owner_forward_fail"
@@ -1392,6 +1418,7 @@ class ProxyService:
                     durable_lookup=None,
                     request_stage=request_state.request_stage,
                     preferred_account_id=None,
+                    request_usage_budget=request_state.request_usage_budget,
                 )
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
                     reroute_session,
@@ -1532,6 +1559,7 @@ class ProxyService:
                 fallback_on_preferred_account_unavailable=not (
                     file_required_preferred_account and retry_preferred_account_id is not None
                 ),
+                request_usage_budget=estimate_api_key_request_usage(retry_payload),
             )
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
@@ -2113,7 +2141,9 @@ class ProxyService:
 
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
-            estimated_lease_tokens = float(estimate_api_key_request_usage(payload).input_tokens or 0)
+            estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
+                estimate_api_key_request_usage(payload)
+            )
             for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
                 selection = await self._select_account_with_budget(
                     deadline,
@@ -4413,6 +4443,7 @@ class ProxyService:
             event_queue=asyncio.Queue() if attach_event_queue else None,
             transport=transport,
             api_key=api_key,
+            request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
@@ -4766,7 +4797,9 @@ class ProxyService:
                 exclude_account_ids=exclude_account_ids,
                 preferred_account_id=preferred_account_id,
                 lease_kind="stream",
-                estimated_lease_tokens=float(len((request_state.request_text or "").encode("utf-8"))),
+                estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                    request_state.request_usage_budget
+                ),
                 fallback_on_preferred_account_unavailable=not require_preferred_account,
             )
         except ProxyResponseError as exc:
@@ -5238,6 +5271,7 @@ class ProxyService:
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -5263,6 +5297,7 @@ class ProxyService:
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -5287,6 +5322,7 @@ class ProxyService:
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = get_settings()
         api_key_id = api_key.id if api_key is not None else None
@@ -6140,18 +6176,34 @@ class ProxyService:
                 preferred_account_id is not None and not fallback_on_preferred_account_unavailable
             )
             try:
-                created_session = await self._create_http_bridge_session(
-                    key,
-                    headers=headers,
-                    affinity=affinity,
-                    api_key=api_key,
-                    request_model=request_model,
-                    idle_ttl_seconds=effective_idle_ttl_seconds,
-                    request_stage=request_stage,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=require_preferred_account,
-                    fallback_on_preferred_account_unavailable=fallback_on_preferred_account_unavailable,
+                create_session = self._create_http_bridge_session
+                create_kwargs: dict[str, Any] = {
+                    "headers": headers,
+                    "affinity": affinity,
+                    "api_key": api_key,
+                    "request_model": request_model,
+                    "idle_ttl_seconds": effective_idle_ttl_seconds,
+                    "request_stage": request_stage,
+                    "preferred_account_id": preferred_account_id,
+                    "require_preferred_account": require_preferred_account,
+                    "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
+                    "request_usage_budget": request_usage_budget,
+                }
+                try:
+                    create_signature = inspect.signature(create_session)
+                except (TypeError, ValueError):
+                    create_signature = None
+                create_accepts_var_keyword = create_signature is not None and any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in create_signature.parameters.values()
                 )
+                if (
+                    create_signature is not None
+                    and not create_accepts_var_keyword
+                    and "request_usage_budget" not in create_signature.parameters
+                ):
+                    create_kwargs.pop("request_usage_budget", None)
+                created_session = await create_session(key, **create_kwargs)
                 await self._claim_durable_http_bridge_session(
                     created_session,
                     allow_takeover=force_durable_takeover or _http_bridge_allow_durable_takeover(durable_lookup),
@@ -6552,6 +6604,7 @@ class ProxyService:
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        request_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -6584,7 +6637,7 @@ class ProxyService:
                 "exclude_account_ids": excluded_account_ids,
                 "preferred_account_id": preferred_candidate_id,
                 "lease_kind": "stream",
-                "estimated_lease_tokens": 0.0,
+                "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
@@ -7418,6 +7471,9 @@ class ProxyService:
                 exclude_account_ids=excluded_account_ids,
                 preferred_account_id=preferred_candidate_id,
                 lease_kind=None if reuse_current_account_lease else "stream",
+                estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                    request_state.request_usage_budget
+                ),
                 fallback_on_preferred_account_unavailable=not reuse_current_account_lease,
             )
             account = selection.account
@@ -9898,7 +9954,6 @@ class ProxyService:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
-        estimated_lease_tokens = float(estimate_api_key_request_usage(payload).input_tokens or 0)
         max_attempts = _STREAM_MAX_ACCOUNT_ATTEMPTS
         settled = False
         any_attempt_logged = False
@@ -9909,6 +9964,9 @@ class ProxyService:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         account_leases: list[AccountLease] = []
+        estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
+            estimate_api_key_request_usage(payload)
+        )
 
         async def _release_tracked_stream_lease(lease: AccountLease | None) -> None:
             if lease is None:
@@ -12047,6 +12105,7 @@ class _WebSocketRequestState:
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     api_key: ApiKeyData | None = None
+    request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
     auth_replay_count: int = 0

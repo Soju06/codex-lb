@@ -2113,6 +2113,7 @@ class ProxyService:
 
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
+            estimated_lease_tokens = float(estimate_api_key_request_usage(payload).input_tokens or 0)
             for _account_attempt in range(_COMPACT_MAX_ACCOUNT_ATTEMPTS):
                 selection = await self._select_account_with_budget(
                     deadline,
@@ -2129,6 +2130,7 @@ class ProxyService:
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=file_preferred_account_id,
                     lease_kind="response_create",
+                    estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=file_preferred_account_id is None,
                 )
                 account = selection.account
@@ -4764,6 +4766,7 @@ class ProxyService:
                 exclude_account_ids=exclude_account_ids,
                 preferred_account_id=preferred_account_id,
                 lease_kind="stream",
+                estimated_lease_tokens=float(len((request_state.request_text or "").encode("utf-8"))),
                 fallback_on_preferred_account_unavailable=not require_preferred_account,
             )
         except ProxyResponseError as exc:
@@ -6520,7 +6523,7 @@ class ProxyService:
 
     async def _select_account_with_budget_for_stream(self, deadline: float, **kwargs: Any) -> AccountSelection:
         selector = self._select_account_with_budget
-        optional_kwargs = ("lease_kind", "fallback_on_preferred_account_unavailable")
+        optional_kwargs = ("lease_kind", "estimated_lease_tokens", "fallback_on_preferred_account_unavailable")
         if any(name in kwargs for name in optional_kwargs):
             try:
                 signature = inspect.signature(selector)
@@ -6581,6 +6584,7 @@ class ProxyService:
                 "exclude_account_ids": excluded_account_ids,
                 "preferred_account_id": preferred_candidate_id,
                 "lease_kind": "stream",
+                "estimated_lease_tokens": 0.0,
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
@@ -9894,6 +9898,7 @@ class ProxyService:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        estimated_lease_tokens = float(estimate_api_key_request_usage(payload).input_tokens or 0)
         max_attempts = _STREAM_MAX_ACCOUNT_ATTEMPTS
         settled = False
         any_attempt_logged = False
@@ -10014,6 +10019,7 @@ class ProxyService:
                         exclude_account_ids=excluded_account_ids,
                         preferred_account_id=preferred_account_id,
                         lease_kind="stream",
+                        estimated_lease_tokens=estimated_lease_tokens,
                         fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                     )
                 except ProxyResponseError as exc:
@@ -11662,6 +11668,7 @@ class ProxyService:
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
         lease_kind: Literal["response_create", "stream"] | None = None,
+        estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
@@ -11707,6 +11714,7 @@ class ProxyService:
                         account_ids={preferred_account_id},
                         budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                         lease_kind=lease_kind,
+                        estimated_lease_tokens=estimated_lease_tokens,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -11734,6 +11742,7 @@ class ProxyService:
                     exclude_account_ids=excluded_account_ids_set,
                     budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
                     lease_kind=lease_kind,
+                    estimated_lease_tokens=estimated_lease_tokens,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     return AccountSelection(

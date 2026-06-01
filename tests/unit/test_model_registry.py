@@ -9,6 +9,33 @@ from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, Upstre
 
 pytestmark = pytest.mark.unit
 
+EXPECTED_CORE_MODEL_PLANS = {
+    "plus",
+    "pro",
+    "prolite",
+    "team",
+    "business",
+    "enterprise",
+    "edu",
+    "education",
+    "go",
+    "hc",
+    "finserv",
+    "quorum",
+    "self_serve_business_usage_based",
+    "enterprise_cbp_usage_based",
+}
+
+EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.5": "0.124.0",
+    "gpt-5.4": "0.98.0",
+    "gpt-5.4-mini": "0.98.0",
+    "gpt-5.3-codex": "0.98.0",
+    "gpt-5.3-codex-spark": "0.100.0",
+    "gpt-5.2": "0.0.1",
+    "codex-auto-review": "0.98.0",
+}
+
 
 def _model(slug: str) -> UpstreamModel:
     return UpstreamModel(
@@ -45,6 +72,13 @@ async def test_plan_types_for_model_returns_none_when_uninitialized():
     assert result is None
 
 
+def test_plan_types_for_model_uses_bootstrap_when_uninitialized():
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    assert registry.plan_types_for_model("gpt-5.4") == EXPECTED_CORE_MODEL_PLANS
+    assert registry.plan_types_for_model("GPT-5.4") == EXPECTED_CORE_MODEL_PLANS
+
+
 @pytest.mark.asyncio
 async def test_plan_types_for_model_returns_empty_for_unknown_model():
     registry = ModelRegistry(ttl_seconds=60.0)
@@ -78,12 +112,59 @@ async def test_prefers_websockets_uses_snapshot_value():
     assert registry.prefers_websockets("unknown-model") is False
 
 
+@pytest.mark.asyncio
+async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"plus": [_model("model-http")]})
+
+    assert registry.prefers_websockets("gpt-5.3-codex-spark") is False
+
+
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
+    assert registry.prefers_websockets("gpt-5.3-codex") is True
+    assert registry.prefers_websockets("gpt-5.3-codex-spark") is True
+    assert registry.prefers_websockets("gpt-5.4-mini") is True
+    assert registry.prefers_websockets("gpt-5.2") is True
     assert registry.prefers_websockets("gpt-5.1") is False
+
+
+def test_bootstrap_models_include_representative_upstream_metadata():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    models = registry.get_models_with_fallback()
+
+    assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
+    for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
+        assert models[slug].minimal_client_version == expected_version
+
+    gpt54 = models["gpt-5.4"]
+    assert gpt54.minimal_client_version == "0.98.0"
+    assert gpt54.raw["max_context_window"] == 1_000_000
+    assert gpt54.available_in_plans == EXPECTED_CORE_MODEL_PLANS
+
+    mini = models["gpt-5.4-mini"]
+    assert mini.prefer_websockets is True
+    assert mini.default_verbosity == "medium"
+    assert mini.minimal_client_version == "0.98.0"
+    assert {level.effort for level in mini.supported_reasoning_levels} == {"low", "medium", "high", "xhigh"}
+
+    spark = models["gpt-5.3-codex-spark"]
+    assert spark.context_window == 128_000
+    assert spark.input_modalities == ("text",)
+    assert spark.default_reasoning_level == "high"
+    assert spark.supported_in_api is False
+    assert spark.minimal_client_version == "0.100.0"
+
+    auto_review = models["codex-auto-review"]
+    assert auto_review.raw["visibility"] == "hide"
+    assert auto_review.raw["shell_type"] == "shell_command"
+    assert auto_review.raw["max_context_window"] == 1_000_000
+    assert auto_review.minimal_client_version == "0.98.0"
+    assert auto_review.available_in_plans == EXPECTED_CORE_MODEL_PLANS
+    assert models["gpt-5.3-codex"].available_in_plans == EXPECTED_CORE_MODEL_PLANS
 
 
 @pytest.mark.asyncio

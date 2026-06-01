@@ -29,6 +29,7 @@ import type { AuthSession } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
 	DashboardOverview,
+	DashboardProjections,
 	RequestLog,
 	RequestLogFilterOptions,
 	RequestLogsResponse,
@@ -37,6 +38,7 @@ import type {
 import {
 	DEFAULT_OVERVIEW_TIMEFRAME,
 	DashboardOverviewSchema,
+	DashboardProjectionsSchema,
 	RequestLogFilterOptionsSchema,
 	RequestLogSchema,
 	RequestLogsResponseSchema,
@@ -53,6 +55,7 @@ export type {
 	AccountSummary,
 	AccountTrendsResponse,
 	DashboardOverview,
+	DashboardProjections,
 	RequestLogsResponse,
 	RequestLogFilterOptions,
 	DashboardSettings,
@@ -248,6 +251,31 @@ export function createDashboardOverview(
 	return DashboardOverviewSchema.parse(response);
 }
 
+export function createDashboardProjections(
+	overrides: Partial<DashboardProjections> = {},
+): DashboardProjections {
+	return DashboardProjectionsSchema.parse({
+		depletionPrimary: {
+			risk: 0.55,
+			riskLevel: "warning" as const,
+			burnRate: 1.1,
+			safeUsagePercent: 72.0,
+			projectedExhaustionAt: null,
+			secondsUntilExhaustion: null,
+		},
+		depletionSecondary: {
+			risk: 0.65,
+			riskLevel: "warning" as const,
+			burnRate: 1.4,
+			safeUsagePercent: 58.0,
+			projectedExhaustionAt: null,
+			secondsUntilExhaustion: null,
+		},
+		weeklyCreditPace: null,
+		...overrides,
+	});
+}
+
 export function createRequestLogEntry(
 	overrides: Partial<RequestLogEntry> = {},
 ): RequestLogEntry {
@@ -366,6 +394,8 @@ export function createDashboardSettings(
 		upstreamStreamTransport: "default",
 		preferEarlierResetAccounts: false,
 		routingStrategy: "usage_weighted",
+		relativeAvailabilityPower: 2,
+		relativeAvailabilityTopK: 5,
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
 		importWithoutOverwrite: false,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from app.core.config import settings as settings_module
 from app.core.config.settings import Settings
 
 pytestmark = pytest.mark.unit
@@ -176,3 +177,101 @@ def test_settings_http_connector_limit_per_host_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST", "75")
     settings = Settings()
     assert settings.http_connector_limit_per_host == 75
+
+
+def test_settings_upstream_websocket_proxy_env_defaults_to_direct_when_unset(monkeypatch):
+    for name in (
+        "ws_proxy",
+        "WS_PROXY",
+        "wss_proxy",
+        "WSS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "socks_proxy",
+        "SOCKS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is False
+
+
+def test_settings_upstream_websocket_proxy_env_ignores_os_proxy_settings(monkeypatch):
+    import app.core.utils.proxy_env as proxy_env_module
+
+    for name in (
+        "ws_proxy",
+        "WS_PROXY",
+        "wss_proxy",
+        "WSS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "socks_proxy",
+        "SOCKS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+    monkeypatch.setattr(
+        proxy_env_module.urllib.request,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:7890"},
+    )
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is False
+
+
+def test_settings_upstream_websocket_proxy_env_auto_enables_when_proxy_is_present(monkeypatch):
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
+    monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is True
+
+
+def test_settings_upstream_websocket_proxy_env_auto_enables_when_socks_proxy_is_present(monkeypatch):
+    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7890")
+    monkeypatch.delenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is True
+
+
+def test_settings_upstream_websocket_proxy_env_auto_enables_when_dotenv_proxy_is_present(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_local_file = tmp_path / ".env.local"
+    env_file.write_text("", encoding="utf-8")
+    env_local_file.write_text("https_proxy=http://127.0.0.1:7890\n", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "ENV_FILES", (env_file, env_local_file))
+    for name in (
+        "https_proxy",
+        "HTTPS_PROXY",
+        "CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is True
+
+
+def test_settings_upstream_websocket_proxy_env_can_be_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV", "false")
+
+    settings = Settings()
+
+    assert settings.upstream_websocket_trust_env is False

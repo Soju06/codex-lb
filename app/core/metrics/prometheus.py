@@ -183,6 +183,30 @@ if PROMETHEUS_AVAILABLE:
         ["surface", "reason"],
         registry=REGISTRY,
     )
+    account_lease_acquired_total = Counter(
+        "codex_lb_account_lease_acquired_total",
+        "Total account pressure leases acquired by kind",
+        ["kind"],
+        registry=REGISTRY,
+    )
+    account_lease_released_total = Counter(
+        "codex_lb_account_lease_released_total",
+        "Total account pressure leases released by kind and reason",
+        ["kind", "reason"],
+        registry=REGISTRY,
+    )
+    account_lease_stale_reclaimed_total = Counter(
+        "codex_lb_account_lease_stale_reclaimed_total",
+        "Total stale account pressure leases reclaimed by kind",
+        ["kind"],
+        registry=REGISTRY,
+    )
+    account_cap_rejections_total = Counter(
+        "codex_lb_account_cap_rejections_total",
+        "Total account-local cap rejections by kind",
+        ["kind"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -225,6 +249,10 @@ else:
     bridge_public_contract_error_total: CounterLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
+    account_lease_acquired_total: CounterLike | None = None
+    account_lease_released_total: CounterLike | None = None
+    account_lease_stale_reclaimed_total: CounterLike | None = None
+    account_cap_rejections_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -238,6 +266,10 @@ __all__ = [
     "PROMETHEUS_AVAILABLE",
     "REGISTRY",
     "active_connections",
+    "account_cap_rejections_total",
+    "account_lease_acquired_total",
+    "account_lease_released_total",
+    "account_lease_stale_reclaimed_total",
     "accounts_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",

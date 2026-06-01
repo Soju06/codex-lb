@@ -82,3 +82,49 @@ actual GitHub state (status check rollup, codex review submissions,
 `mergeable` field) rather than asserting them from local history.
 Local `uv run pytest` / `uv run ruff` / `codex review --base origin/main`
 are encouraged but not substitutes for the cloud gates.
+
+## PR Readiness / Review Trapdoors
+
+These rules encode recurring review blockers observed across codex-lb PRs.
+
+- OpenSpec is a hard gate for behavior, API, schema, CLI,
+  dashboard-visible, proxy-routing, operator-contract, and compatibility
+  changes. Create or update `openspec/changes/<slug>/` before coding, keep
+  `spec.md` normative with MUST/SHALL-style requirements, put rationale and
+  examples in `context.md` or change notes, and run strict OpenSpec validation
+  before calling the PR ready. Code/tests alone are not enough when OpenSpec is
+  required.
+- Codex review state must come from current-head GitHub evidence. Check labels,
+  latest Codex review/comment/reaction, and GraphQL review threads before using
+  or claiming `🤖 codex: ok`. Usage-limit, environment, or missing-review
+  results mean missing evidence, not approval. Unresolved non-outdated P-level
+  Codex threads block readiness even when a top-level review comment looks
+  clean.
+- Proxy failover and retry patches must prove account ownership and settlement
+  invariants. File-pinned requests must not cross accounts; API-key reservations
+  must settle before error-health writes; excluded accounts must actually leave
+  the selection loop; idle disconnects must not mark otherwise healthy accounts
+  unhealthy; security/trusted-access routing must degrade only along the
+  documented path.
+- Async, fan-out, and session-lifecycle patches must prove task ownership and
+  cleanup. Do not share one `AsyncSession` across concurrent tasks; cancel or
+  await spawned tasks on failure; preserve finalization/settlement paths after
+  partial errors; bound fan-out; and test partial-failure behavior, not only
+  the all-success path.
+- Database migrations must prove Alembic graph and data hygiene. New revisions
+  must sit on the current intended parent with a single-head upgrade path, have
+  downgrade/upgrade coverage where the project expects it, and include
+  historical-row backfills or compatibility handling when new fields affect
+  existing data.
+- Issue-resolving PRs must name the exact `Fixes #N` / `Closes #N`, or state
+  that they are partial. Keep PRs one concern wide. Revive stale work by making
+  a focused branch on current `main`; do not drag an old broad/conflicted branch
+  forward unless the maintainer explicitly wants that shape.
+- Bug fixes need regression coverage at the externally failing product path:
+  route, bridge, websocket, CLI, schema, dashboard UI, or migration path as
+  applicable. Helper-only tests are not enough when the failing surface is
+  elsewhere.
+- Compatibility work must verify canonical and equivalent paths, trailing slash
+  behavior, external error envelopes, env-var semantics, and response-schema
+  contracts. Update OpenSpec/context and tests together so docs cannot promise
+  behavior the code does not implement.

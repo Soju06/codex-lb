@@ -127,6 +127,12 @@ export const DashboardOverviewSchema = z.object({
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
+export const DashboardProjectionsSchema = z.object({
+  depletionPrimary: DepletionSchema.nullable().optional(),
+  depletionSecondary: DepletionSchema.nullable().optional(),
+  weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
+});
+
 export const RequestLogCostBreakdownSchema = z.object({
   inputUsd: z.number().nullable().optional().default(null),
   cachedInputUsd: z.number().nullable().optional().default(null),
@@ -197,6 +203,7 @@ export const FilterStateSchema = z.object({
 
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
+export type DashboardProjections = z.infer<typeof DashboardProjectionsSchema>;
 export type DashboardOverviewTimeframe = z.infer<typeof DashboardOverviewTimeframeSchema>;
 export type TrendPoint = z.infer<typeof TrendPointSchema>;
 export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;

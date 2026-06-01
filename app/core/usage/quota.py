@@ -15,6 +15,9 @@ def apply_usage_quota(
     runtime_reset: float | None,
     secondary_used: float | None,
     secondary_reset: int | None,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
 ) -> tuple[AccountStatus, float | None, float | None]:
     used_percent = primary_used
     reset_at = runtime_reset
@@ -24,12 +27,21 @@ def apply_usage_quota(
 
     if secondary_used is not None:
         if secondary_used >= 100.0:
-            status = AccountStatus.QUOTA_EXCEEDED
-            used_percent = 100.0
-            if secondary_reset is not None:
-                reset_at = secondary_reset
-            return status, used_percent, reset_at
-        if status == AccountStatus.QUOTA_EXCEEDED:
+            if _has_usable_credits(
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+            ):
+                if status == AccountStatus.QUOTA_EXCEEDED:
+                    status = AccountStatus.ACTIVE
+                    reset_at = None
+            else:
+                status = AccountStatus.QUOTA_EXCEEDED
+                used_percent = 100.0
+                if secondary_reset is not None:
+                    reset_at = secondary_reset
+                return status, used_percent, reset_at
+        elif status == AccountStatus.QUOTA_EXCEEDED:
             if runtime_reset and runtime_reset > time.time():
                 reset_at = runtime_reset
             else:
@@ -62,3 +74,21 @@ def _fallback_primary_reset(primary_window_minutes: int | None) -> float | None:
     if not window_minutes:
         return None
     return time.time() + float(window_minutes) * 60.0
+
+
+def _has_usable_credits(
+    *,
+    credits_has: bool | None,
+    credits_unlimited: bool | None,
+    credits_balance: float | None,
+) -> bool:
+    if credits_unlimited is True:
+        return True
+    if credits_has is True:
+        return True
+    if credits_balance is None:
+        return False
+    try:
+        return float(credits_balance) > 0.0
+    except (TypeError, ValueError):
+        return False

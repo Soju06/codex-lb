@@ -179,6 +179,9 @@ def _effective_status_from_usage(
         runtime_reset=float(account.reset_at) if account.reset_at else None,
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+        credits_has=_first_not_none(primary_usage, secondary_usage, "credits_has"),
+        credits_unlimited=_first_not_none(primary_usage, secondary_usage, "credits_unlimited"),
+        credits_balance=_first_not_none(primary_usage, secondary_usage, "credits_balance"),
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
         if (
@@ -189,6 +192,16 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
+
+
+def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):
+    if primary_usage is not None:
+        value = getattr(primary_usage, field)
+        if value is not None:
+            return value
+    if secondary_usage is not None:
+        return getattr(secondary_usage, field)
+    return None
 
 
 def _effective_usage_windows(

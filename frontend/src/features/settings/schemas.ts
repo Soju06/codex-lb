@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const RoutingStrategySchema = z.enum(["usage_weighted", "round_robin", "capacity_weighted"]);
+export const RoutingStrategySchema = z.enum([
+  "usage_weighted",
+  "round_robin",
+  "capacity_weighted",
+  "relative_availability",
+]);
 export const UpstreamStreamTransportSchema = z.enum(["default", "auto", "http", "websocket"]);
 export const LimitWarmupWindowsSchema = z.enum(["primary", "secondary", "both"]);
 const LimitWarmupModelSchema = z.string().min(1).max(128);
@@ -11,6 +16,8 @@ export const DashboardSettingsSchema = z.object({
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
   preferEarlierResetAccounts: z.boolean(),
   routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
+  relativeAvailabilityPower: z.number().positive().optional().default(2),
+  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional().default(43200),
   importWithoutOverwrite: z.boolean(),
@@ -30,6 +37,8 @@ export const SettingsUpdateRequestSchema = z.object({
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
   preferEarlierResetAccounts: z.boolean(),
   routingStrategy: RoutingStrategySchema.optional(),
+  relativeAvailabilityPower: z.number().positive().optional(),
+  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
   importWithoutOverwrite: z.boolean().optional(),

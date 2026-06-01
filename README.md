@@ -138,9 +138,11 @@ responses_websockets_v2 = true
 
 These flags are experimental and do not replace `wire_api = "responses"`.
 
-If upstream websocket handshakes must use environment proxies in your deployment, set
-`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=true`. By default websocket handshakes connect directly to
-match Codex CLI's native transport.
+Upstream websocket handshakes automatically honor standard proxy environment variables when they are
+present. `wss://` handshakes check `wss_proxy`, `socks_proxy`, `https_proxy`, and `all_proxy`;
+plain `ws://` handshakes also check `ws_proxy` and `http_proxy`. Set
+`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=false` only when websocket handshakes must bypass those
+environment proxies and connect directly.
 
 **With [API key auth](#api-key-authentication):**
 
@@ -176,16 +178,17 @@ Healthy websocket signals:
 If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
 
 **Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
-old sessions won't appear until you re-tag them:
+old sessions won't appear until you re-tag them. Use the built-in retag command
+instead of editing Codex files by hand; see
+[Codex session retagging](openspec/specs/runtime-portability/context.md#codex-session-retagging) for backups, Docker, WSL,
+and rollback details.
 
 ```bash
-# JSONL session files (all versions)
-find ~/.codex/sessions -name '*.jsonl' \
-  -exec sed -i '' 's/"model_provider":"openai"/"model_provider":"codex-lb"/g' {} +
+# Preview what will change first.
+codex-lb codex-sessions retag --from openai --to codex-lb --dry-run
 
-# SQLite state DB (>= v0.105.0, creates ~/.codex/state_*.sqlite)
-sqlite3 ~/.codex/state_5.sqlite \
-  "UPDATE threads SET model_provider = 'codex-lb' WHERE model_provider = 'openai';"
+# Then close Codex/Codex CLI and apply the retag.
+codex-lb codex-sessions retag --from openai --to codex-lb --yes
 ```
 
 </details>

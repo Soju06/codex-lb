@@ -1943,6 +1943,8 @@ def _select_account_preferring_budget_safe(
             routing_strategy=routing_strategy,
             allow_backoff_fallback=False,
             deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
             ignore_standard_quota=ignore_standard_quota,
         )
         if burn_first.account is not None:

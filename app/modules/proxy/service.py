@@ -7126,9 +7126,9 @@ class ProxyService:
                     if bridge_lock is not None:
                         async with bridge_lock:
                             if http_bridge_sessions is not None:
-                                current_session = http_bridge_sessions.get(session.key, session)
+                                current_session = http_bridge_sessions.get(session.key)
                     elif http_bridge_sessions is not None:
-                        current_session = http_bridge_sessions.get(session.key, session)
+                        current_session = http_bridge_sessions.get(session.key)
                     if current_session is not session:
                         _log_http_bridge_event(
                             "submit_on_closed",
@@ -7138,6 +7138,10 @@ class ProxyService:
                             detail="session_replaced_before_reconnect",
                             cache_key_family=session.key.affinity_kind,
                             model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                         )
                     # Try reconnecting the upstream websocket first.  For requests
                     # carrying previous_response_id we only reconnect (send_request=
@@ -7223,9 +7227,9 @@ class ProxyService:
                 if bridge_lock is not None:
                     async with bridge_lock:
                         if http_bridge_sessions is not None:
-                            current_session = http_bridge_sessions.get(session.key, session)
+                            current_session = http_bridge_sessions.get(session.key)
                 elif http_bridge_sessions is not None:
-                    current_session = http_bridge_sessions.get(session.key, session)
+                    current_session = http_bridge_sessions.get(session.key)
                 session_replaced = current_session is not session
                 if session.closed or session_replaced:
                     _log_http_bridge_event(
@@ -7239,11 +7243,10 @@ class ProxyService:
                         cache_key_family=session.key.affinity_kind,
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,
                     )
-                    if session.closed:
-                        raise ProxyResponseError(
-                            502,
-                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
-                        )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                    )
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
@@ -7376,9 +7379,9 @@ class ProxyService:
                     if bridge_lock is not None:
                         async with bridge_lock:
                             if http_bridge_sessions is not None:
-                                current_session = http_bridge_sessions.get(session.key, session)
+                                current_session = http_bridge_sessions.get(session.key)
                     elif http_bridge_sessions is not None:
-                        current_session = http_bridge_sessions.get(session.key, session)
+                        current_session = http_bridge_sessions.get(session.key)
                     session_replaced = current_session is not session
                     if session.closed or session_replaced:
                         _log_http_bridge_event(
@@ -7394,20 +7397,15 @@ class ProxyService:
                             cache_key_family=session.key.affinity_kind,
                             model_class=_extract_model_class(session.request_model) if session.request_model else None,
                         )
-                        if not session_replaced or session.closed:
-                            session.prewarmed = False
-                            await self._cleanup_http_bridge_submit_interruption(
-                                session,
-                                request_state=warmup_state,
-                                gate_acquired=gate_acquired,
-                                request_enqueued=request_enqueued,
-                                counted_in_queue=False,
-                            )
-                            gate_acquired = False
-                            return
                         session.prewarmed = False
-                        # Session was replaced during admission; warmup can be
-                        # retried on demand with the current request path.
+                        await self._cleanup_http_bridge_submit_interruption(
+                            session,
+                            request_state=warmup_state,
+                            gate_acquired=gate_acquired,
+                            request_enqueued=request_enqueued,
+                            counted_in_queue=False,
+                        )
+                        gate_acquired = False
                         return
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)

@@ -276,8 +276,7 @@ async def connect_responses_websocket(
         "ping_timeout": None,
         "max_size": settings.max_sse_event_bytes,
     }
-    if proxy_url is not None or not settings.upstream_websocket_trust_env:
-        connect_kwargs["proxy"] = proxy_url
+    connect_kwargs["proxy"] = proxy_url
     try:
         response = await websocket_connect(url, **connect_kwargs)
     except asyncio.TimeoutError as exc:

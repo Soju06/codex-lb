@@ -145,6 +145,7 @@ class LoadBalancer:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 additional_limit_name=effective_limit_name,
+                explicit_additional_limit=additional_limit_name is not None,
                 account_ids=scoped_account_ids,
             )
             if excluded_ids and selection_inputs.accounts:
@@ -432,6 +433,7 @@ class LoadBalancer:
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        explicit_additional_limit: bool = False,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
         canonical_limit_name = (
@@ -446,6 +448,7 @@ class LoadBalancer:
             model,
             additional_limit_name,
             canonical_limit_name,
+            explicit_additional_limit,
             None if account_ids is None else tuple(sorted(set(account_ids))),
         )
         cached = await self._selection_inputs_cache.get(cache_key)
@@ -513,7 +516,7 @@ class LoadBalancer:
                     accounts,
                     model=model,
                     limit_name=effective_limit_name,
-                    explicit_limit=additional_limit_name is not None,
+                    explicit_limit=explicit_additional_limit,
                     repos=repos,
                 )
                 if not accounts:
@@ -1551,6 +1554,8 @@ def _additional_quota_eligibility(
     secondary_entry = fresh_secondary.get(account_id)
 
     if not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+        if explicit_limit:
+            return "data_unavailable"
         return "not_applicable"
 
     if latest_primary_entry is None and latest_secondary_entry is None:

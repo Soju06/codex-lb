@@ -790,6 +790,8 @@ async def test_select_account_proceeds_without_cached_usage_rows(monkeypatch) ->
 async def test_select_account_prefilters_accounts_by_additional_usage_limit() -> None:
     account_ineligible = _make_account("acc-additional-exhausted", email="full@example.com")
     account_eligible = _make_account("acc-additional-eligible", email="ok@example.com")
+    account_ineligible.plan_type = "pro"
+    account_eligible.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -824,6 +826,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 account_id=account_ineligible.id,
                 window="primary",
                 used_percent=100.0,
+                reset_at=now_epoch + 300,
                 recorded_at=now,
             ),
             account_eligible.id: _additional_entry(
@@ -831,6 +834,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 account_id=account_eligible.id,
                 window="primary",
                 used_percent=35.0,
+                reset_at=now_epoch + 300,
                 recorded_at=now,
             ),
         }
@@ -978,6 +982,7 @@ async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(
 @pytest.mark.parametrize("additional_limit_name", ["codex_other", "GPT-5.3-Codex-Spark"])
 async def test_select_account_accepts_legacy_additional_limit_aliases(additional_limit_name: str) -> None:
     account = _make_account(f"acc-additional-{additional_limit_name}")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     usage_repo = StubUsageRepository(
@@ -1020,6 +1025,41 @@ async def test_select_account_accepts_legacy_additional_limit_aliases(additional
 
     assert selection.account is not None
     assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_requires_explicit_additional_limit_to_apply_to_plan() -> None:
+    account = _make_account("acc-explicit-limit-plan-mismatch", "explicit-limit-plan-mismatch@example.com")
+    account.plan_type = "plus"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=61,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            StubAdditionalUsageRepository(primary={}, secondary={}),
+        )
+    )
+
+    selection = await balancer.select_account(additional_limit_name="codex_spark")
+
+    assert selection.account is None
+    assert selection.error_code == "additional_quota_data_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1441,9 +1481,10 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        explicit_additional_limit: bool = False,
         account_ids: Collection[str] | None = None,
     ):
-        del model, additional_limit_name, account_ids
+        del model, additional_limit_name, explicit_additional_limit, account_ids
         return load_balancer_module._SelectionInputs(
             accounts=[account],
             latest_primary={account.id: primary_entry},
@@ -1693,6 +1734,7 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        explicit_additional_limit: bool = False,
         account_ids: Collection[str] | None = None,
     ):
         nonlocal load_calls
@@ -1700,6 +1742,7 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
         return await original_load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
+            explicit_additional_limit=explicit_additional_limit,
             account_ids=account_ids,
         )
 
@@ -1833,6 +1876,7 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        explicit_additional_limit: bool = False,
         account_ids: Collection[str] | None = None,
     ):
         nonlocal load_calls
@@ -1840,6 +1884,7 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         return await original_load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
+            explicit_additional_limit=explicit_additional_limit,
             account_ids=account_ids,
         )
 
@@ -1917,6 +1962,7 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         *,
         model: str | None,
         additional_limit_name: str | None = None,
+        explicit_additional_limit: bool = False,
         account_ids: Collection[str] | None = None,
     ):
         nonlocal load_calls
@@ -1924,6 +1970,7 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         return await original_load_selection_inputs(
             model=model,
             additional_limit_name=additional_limit_name,
+            explicit_additional_limit=explicit_additional_limit,
             account_ids=account_ids,
         )
 
@@ -2044,6 +2091,7 @@ async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(m
 @pytest.mark.asyncio
 async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(

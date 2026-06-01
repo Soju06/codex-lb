@@ -526,7 +526,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
                 AsyncMock(return_value=("pod-a", ("pod-a",))),
             )
             create_http_bridge_session = AsyncMock()
-            monkeypatch.setattr(service, "_create_http_bridge_session_compatible", create_http_bridge_session)
+            monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
             monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
             monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
 

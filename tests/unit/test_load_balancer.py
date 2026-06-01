@@ -322,6 +322,44 @@ def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
     assert reset_at == pytest.approx(now + 60.0)
 
 
+def test_apply_usage_quota_secondary_exhausted_without_credits_sets_quota_exceeded():
+    secondary_reset = 1_700_000_000
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.ACTIVE,
+        primary_used=40.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=secondary_reset,
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+    assert status == AccountStatus.QUOTA_EXCEEDED
+    assert used_percent == 100.0
+    assert reset_at == secondary_reset
+
+
+def test_apply_usage_quota_secondary_exhausted_with_credits_reactivates_account():
+    future_reset = 1_700_000_000.0
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        primary_used=40.0,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=future_reset,
+        secondary_used=100.0,
+        secondary_reset=int(future_reset),
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=25.0,
+    )
+    assert status == AccountStatus.ACTIVE
+    assert used_percent == 40.0
+    assert reset_at is None
+
+
 def test_handle_quota_exceeded_sets_used_percent_and_cooldown():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_quota_exceeded(state, {})
@@ -527,6 +565,9 @@ def _make_test_usage(
     used_percent: float = 10.0,
     reset_at: int | None = None,
     recorded_at: datetime | None = None,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
 ) -> UsageHistory:
     return UsageHistory(
         id=1,
@@ -536,6 +577,9 @@ def _make_test_usage(
         used_percent=used_percent,
         reset_at=reset_at,
         window_minutes=10080,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
 
 
@@ -611,6 +655,39 @@ def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_a
         runtime=RuntimeState(),
     )
     assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_uses_secondary_credits_when_primary_lacks_credit_fields(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=40.0,
+        reset_at=None,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+    secondary = _make_test_usage(
+        used_percent=100.0,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        credits_balance=25.0,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 40.0
+    assert state.reset_at is None
+    assert state.blocked_at is None
 
 
 def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_missing_and_no_blocked_at(
@@ -1742,3 +1819,220 @@ def test_select_account_capacity_weighted_with_prefer_falls_back_when_earliest_b
         )
         assert result.account is not None
         assert result.account.account_id == "earliest-lower-usage"
+
+
+def test_select_account_relative_availability_prefers_more_urgent_weekly_capacity():
+    random.seed(101)
+    now = time.time()
+    soon_plus = AccountState(
+        "soon-plus",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=60.0,
+        secondary_reset_at=int(now + 6 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    later_pro = AccountState(
+        "later-pro",
+        AccountStatus.ACTIVE,
+        used_percent=60.0,
+        secondary_used_percent=60.0,
+        secondary_reset_at=int(now + 72 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    counts = {"soon-plus": 0, "later-pro": 0}
+    for _ in range(2000):
+        result = select_account([soon_plus, later_pro], now=now, routing_strategy="relative_availability")
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    assert counts["soon-plus"] > counts["later-pro"]
+
+
+def test_select_account_relative_availability_ignores_prefer_earlier_reset_bucket():
+    now = time.time()
+    early_low = AccountState(
+        "early-low",
+        AccountStatus.ACTIVE,
+        used_percent=90.0,
+        secondary_used_percent=90.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    later_high = AccountState(
+        "later-high",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 6 * 3600),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    result = select_account(
+        [early_low, later_high],
+        now=now,
+        prefer_earlier_reset=True,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "later-high"
+
+
+def test_select_account_relative_availability_missing_reset_uses_seven_day_fallback():
+    now = time.time()
+    missing_reset = AccountState(
+        "missing-reset",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=None,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    known_reset = AccountState(
+        "known-reset",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 24 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    result = select_account(
+        [missing_reset, known_reset],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "known-reset"
+
+
+def test_select_account_relative_availability_clamps_divisor_floor_to_five_minutes():
+    now = time.time()
+    first = AccountState(
+        "a",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 5),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    second = AccountState(
+        "b",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 299),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    result = select_account(
+        [first, second],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
+def test_select_account_relative_availability_top_k_limits_weighted_draw():
+    random.seed(202)
+    now = time.time()
+    leader = AccountState(
+        "leader",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    runner_up = AccountState(
+        "runner-up",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 2 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    tail = AccountState(
+        "tail",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3 * 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    for _ in range(200):
+        result = select_account(
+            [leader, runner_up, tail],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_top_k=1,
+        )
+        assert result.account is not None
+        assert result.account.account_id == "leader"
+
+
+def test_select_account_relative_availability_power_sharpens_preference_for_the_leader():
+    now = time.time()
+    leader = AccountState(
+        "leader",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 3600),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+    close_second = AccountState(
+        "close-second",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        secondary_reset_at=int(now + 4500),
+        plan_type="plus",
+        capacity_credits=7560.0,
+    )
+
+    counts_power_1 = {"leader": 0, "close-second": 0}
+    random.seed(303)
+    for _ in range(3000):
+        result = select_account(
+            [leader, close_second],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_power=1.0,
+        )
+        assert result.account is not None
+        counts_power_1[result.account.account_id] += 1
+
+    counts_power_4 = {"leader": 0, "close-second": 0}
+    random.seed(303)
+    for _ in range(3000):
+        result = select_account(
+            [leader, close_second],
+            now=now,
+            routing_strategy="relative_availability",
+            relative_availability_power=4.0,
+        )
+        assert result.account is not None
+        counts_power_4[result.account.account_id] += 1
+
+    leader_ratio_power_1 = counts_power_1["leader"] / 3000
+    leader_ratio_power_4 = counts_power_4["leader"] / 3000
+    assert leader_ratio_power_4 > leader_ratio_power_1 + 0.05

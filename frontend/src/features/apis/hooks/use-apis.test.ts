@@ -10,22 +10,38 @@ import {
 	createApiKeyUsage7Day,
 } from "@/test/mocks/factories";
 
-const apiMocks = vi.hoisted(() => ({
+const apiKeysApiMocks = vi.hoisted(() => ({
 	listApiKeys: vi.fn(),
 	createApiKey: vi.fn(),
 	updateApiKey: vi.fn(),
 	deleteApiKey: vi.fn(),
 	regenerateApiKey: vi.fn(),
+	listModels: vi.fn(),
+	API_KEYS_BASE_PATH: "/api/api-keys",
+}));
+
+const apisApiMocks = vi.hoisted(() => ({
 	getApiKeyTrends: vi.fn(),
 	getApiKeyUsage7Day: vi.fn(),
 }));
+
+const apiMocks = {
+	listApiKeys: apiKeysApiMocks.listApiKeys,
+	createApiKey: apiKeysApiMocks.createApiKey,
+	updateApiKey: apiKeysApiMocks.updateApiKey,
+	deleteApiKey: apiKeysApiMocks.deleteApiKey,
+	regenerateApiKey: apiKeysApiMocks.regenerateApiKey,
+	getApiKeyTrends: apisApiMocks.getApiKeyTrends,
+	getApiKeyUsage7Day: apisApiMocks.getApiKeyUsage7Day,
+};
 
 const toastMocks = vi.hoisted(() => ({
 	success: vi.fn(),
 	error: vi.fn(),
 }));
 
-vi.mock("@/features/apis/api", () => apiMocks);
+vi.mock("@/features/api-keys/api", () => apiKeysApiMocks);
+vi.mock("@/features/apis/api", () => apisApiMocks);
 vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function createTestQueryClient(): QueryClient {

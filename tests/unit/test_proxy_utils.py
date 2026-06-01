@@ -51,6 +51,13 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_relative_availability_settings_default_when_stored_values_are_null():
+    settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
+
+    assert proxy_service._relative_availability_power(settings) == 2.0
+    assert proxy_service._relative_availability_top_k(settings) == 5
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_missing_tool_precreated",
@@ -994,6 +1001,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 180.0
     settings.max_sse_event_bytes = 16 * 1024 * 1024
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -1019,7 +1027,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
     resolve_file_account = AsyncMock(return_value="acc_pinned")
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_file_account)
 
-    calls: list[tuple[str, object, str | None]] = []
+    calls: list[tuple[str, object, str | None, float | None]] = []
 
     async def fake_stream_with_retry(
         payload,
@@ -1028,8 +1036,12 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
         rewritten_file_account_id: str | None = None,
         **kwargs,
     ):
-        del headers, kwargs
-        calls.append(("retry", payload, rewritten_file_account_id))
+        del headers
+        budget = proxy_service._stream_request_budget_seconds(
+            settings,
+            request_transport=kwargs["request_transport"],
+        )
+        calls.append(("retry", payload, rewritten_file_account_id, budget))
         yield "data: retry\n\n"
 
     async def fake_stream_via_http_bridge(
@@ -1040,7 +1052,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
         **kwargs,
     ):
         del payload, headers, rewritten_file_account_id, kwargs
-        calls.append(("bridge", None, None))
+        calls.append(("bridge", None, None, None))
         yield "data: bridge\n\n"
 
     monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
@@ -1062,7 +1074,17 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
 
     assert output == ["data: retry\n\n"]
     resolve_file_account.assert_awaited_once_with(oversized_payload, {})
-    assert calls == [("retry", oversized_payload, "acc_pinned")]
+    assert calls == [("retry", oversized_payload, "acc_pinned", 180.0)]
+
+
+def test_stream_request_budget_uses_http_responses_budget_for_http_transport() -> None:
+    settings = SimpleNamespace(
+        proxy_request_budget_seconds=5.0,
+        http_responses_stream_request_budget_seconds=180.0,
+    )
+
+    assert proxy_service._stream_request_budget_seconds(settings, request_transport="http") == 180.0
+    assert proxy_service._stream_request_budget_seconds(settings, request_transport="websocket") == 5.0
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():
@@ -5618,7 +5640,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         AsyncMock(
             side_effect=proxy_module.ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
             )
         ),
     )
@@ -5785,6 +5807,175 @@ async def test_connect_proxy_websocket_fails_over_on_handshake_usage_limit_reach
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_scopes_transient_exclusions_to_connect_loop(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_ws_transient_reconnect_a")
+    account_b = _make_account("acc_ws_transient_reconnect_b")
+    upstream_b = SimpleNamespace(name="upstream-b")
+    upstream_a = SimpleNamespace(name="upstream-a")
+    transient_handshake_error = proxy_module.ProxyResponseError(
+        429,
+        openai_error("usage_limit_reached", "usage limit reached"),
+    )
+    seen_excluded_account_ids: list[set[str]] = []
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if len(seen_excluded_account_ids) == 1:
+            return AccountSelection(account=account_a, error_message=None)
+        if len(seen_excluded_account_ids) == 2:
+            return AccountSelection(account=account_b, error_message=None)
+        if len(seen_excluded_account_ids) == 3:
+            return AccountSelection(account=account_a, error_message=None)
+        raise AssertionError("unexpected extra account selection")
+
+    async def ensure_fresh_with_budget(
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> Account:
+        del force, timeout_seconds
+        return account
+
+    async def open_upstream_with_budget(
+        account: Account,
+        headers: dict[str, str],
+        *,
+        timeout_seconds: float,
+    ) -> SimpleNamespace:
+        del account, headers, timeout_seconds
+        result = open_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    open_results: list[SimpleNamespace | BaseException] = [
+        transient_handshake_error,
+        upstream_b,
+        upstream_a,
+    ]
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "mark_rate_limit", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh_with_budget)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream_with_budget)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_transient_exclusion_scope",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+    assert selected_account == account_b
+    assert selected_upstream is upstream_b
+    assert request_state.excluded_account_ids == set()
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == account_a
+    assert selected_upstream is upstream_a
+    assert seen_excluded_account_ids == [set(), {account_a.id}, set()]
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_clears_stale_forced_refresh_when_fallback_account_selected(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    force_refresh_account = _make_account("acc_ws_stale_force_refresh")
+    fallback_account = _make_account("acc_ws_stale_force_fallback")
+    upstream = SimpleNamespace()
+    ensure_calls: list[tuple[str, bool]] = []
+    seen_account_id_filters: list[set[str] | None] = []
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        account_ids = cast(set[str] | None, kwargs.get("account_ids"))
+        seen_account_id_filters.append(set(account_ids) if account_ids is not None else None)
+        if account_ids == {force_refresh_account.id}:
+            return AccountSelection(account=None, error_message="preferred unavailable", error_code="no_accounts")
+        return AccountSelection(account=fallback_account, error_message=None)
+
+    async def ensure_fresh_with_budget(
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> Account:
+        del timeout_seconds
+        ensure_calls.append((account.id, force))
+        return account
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh_with_budget)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_forced_refresh",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        force_refresh_account_id=force_refresh_account.id,
+        preferred_account_id=force_refresh_account.id,
+    )
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == fallback_account
+    assert selected_upstream is upstream
+    assert seen_account_id_filters == [{force_refresh_account.id}, None]
+    assert ensure_calls == [(fallback_account.id, False)]
+    assert request_state.force_refresh_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_logs.calls == []
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_fails_over_after_repeated_401_refresh_retry(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -5916,7 +6107,7 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
         openai_error("usage_limit_reached", "usage limit reached"),
     )
 
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error]))
@@ -6228,7 +6419,7 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
 
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
     )
     monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
@@ -6285,7 +6476,7 @@ async def test_select_websocket_connect_account_records_fail_closed_for_preferre
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
     )
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -6350,7 +6541,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
     monkeypatch.setattr(
         service,
-        "_select_account_with_budget_compatible",
+        "_select_account_with_budget",
         AsyncMock(
             return_value=AccountSelection(
                 account=None,
@@ -7316,6 +7507,67 @@ async def test_pop_replayable_precreated_websocket_request_replays_injected_anch
         fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
         fresh_upstream_request_is_retry_safe=True,
         proxy_injected_previous_response_id=True,
+    )
+    pending_requests = deque([pending_request])
+
+    replay_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replay_request is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 1
+    assert pending_request.previous_response_id is None
+    assert pending_request.proxy_injected_previous_response_id is False
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert pending_request.request_text is not None
+    assert json.loads(pending_request.request_text) == fresh_payload
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_precreated_request_refuses_short_client_previous_response_id():
+    anchored_payload = {"type": "response.create", "previous_response_id": "resp_anchor", "input": ["tail"]}
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_short_anchor_no_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        previous_response_id="resp_anchor",
+        request_text=json.dumps(anchored_payload, separators=(",", ":")),
+    )
+    pending_requests = deque([pending_request])
+
+    replay_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replay_request is None
+    assert list(pending_requests) == [pending_request]
+    assert pending_request.replay_count == 0
+    assert pending_request.previous_response_id == "resp_anchor"
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_precreated_request_replays_retry_safe_client_full_resend():
+    anchored_payload = {"type": "response.create", "previous_response_id": "resp_anchor", "input": ["tail"]}
+    fresh_payload = {"type": "response.create", "input": ["old", "tail"]}
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_client_full_resend_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        previous_response_id="resp_anchor",
+        request_text=json.dumps(anchored_payload, separators=(",", ":")),
+        fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
     )
     pending_requests = deque([pending_request])
 
@@ -9037,6 +9289,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
         started_at=0.0,
         previous_response_id="resp_anchor",
         request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+        expose_stale_previous_response_classifier=True,
     )
     followup_request_b = proxy_service._WebSocketRequestState(
         request_id="ws_req_missing_tool_same_anchor_b",
@@ -9047,6 +9300,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
         started_at=0.0,
         previous_response_id="resp_anchor",
         request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+        expose_stale_previous_response_classifier=True,
     )
     pending_requests = deque([followup_request_a, followup_request_b])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -9080,6 +9334,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
     for emitted_text in upstream_control.downstream_texts:
         assert '"type":"response.failed"' in emitted_text
         assert '"code":"stream_incomplete"' in emitted_text
+        assert "codex_previous_response_stale" not in emitted_text
         assert "call_missing_output" not in emitted_text
     assert finalize_request_state.await_count == 2
     finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]
@@ -9340,6 +9595,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
         started_at=0.0,
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -9376,6 +9634,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     assert upstream_control.suppress_downstream_event is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
     assert list(pending_requests) == []
 
 
@@ -9407,6 +9668,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
         started_at=0.0,
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -9443,6 +9707,9 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     assert upstream_control.suppress_downstream_event is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
     assert list(pending_requests) == []
 
 
@@ -10885,6 +11152,94 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_websocket_masks_owner_lookup_previous_response_not_found(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self._disconnect_sent = False
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            if not self._disconnect_sent:
+                await self._done.wait()
+                self._disconnect_sent = True
+                return {"type": "websocket.disconnect"}
+            await asyncio.sleep(0)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    async def fail_owner_lookup(*args, **kwargs):
+        del args, kwargs
+        error = proxy_module.openai_error(
+            "invalid_request_error",
+            "Previous response with id 'resp_prev_owner_missing' not found.",
+            error_type="invalid_request_error",
+        )
+        error["error"]["param"] = "previous_response_id"
+        raise proxy_module.ProxyResponseError(400, error)
+
+    async def fail_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("owner lookup failure must fail before websocket connect")
+
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", fail_owner_lookup)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_prev_owner_missing",
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_owner_prev_missing"},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert len(downstream.sent_text) == 1
+    assert "invalid_request_error" not in downstream.sent_text[0]
+    assert "resp_prev_owner_missing" not in downstream.sent_text[0]
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "response.failed"
+    error = payload["response"]["error"]
+    assert error["code"] == "stream_incomplete"
+    assert error["type"] == "server_error"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_websocket_masks_prepare_previous_response_not_found(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -11038,7 +11393,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     owner_lookup = AsyncMock(side_effect=owner_lookup_error)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", owner_lookup)
     select_account = AsyncMock(side_effect=AssertionError("owner lookup failure must happen before account selection"))
-    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         async for _ in service._stream_with_retry(
@@ -11306,6 +11661,11 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         previous_response_id="resp_anchor",
         fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
         fresh_upstream_request_is_retry_safe=True,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_type_override="server_error",
+        error_param_override="previous_response_id",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -11343,6 +11703,11 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     assert pending_request.request_text == json.dumps(fresh_request_payload, separators=(",", ":"))
     # Retry-safety flag is consumed (set back to False) so we don't loop.
     assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_type_override is None
+    assert pending_request.error_param_override is None
+    assert pending_request.error_http_status_override is None
 
 
 @pytest.mark.asyncio
@@ -11409,6 +11774,9 @@ async def test_pop_replayable_created_without_visible_output_request_state():
         awaiting_response_created=False,
         response_event_count=1,
         downstream_visible=False,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous replay failed",
+        error_http_status_override=502,
     )
     pending_requests = deque([pending_request])
 
@@ -11425,6 +11793,38 @@ async def test_pop_replayable_created_without_visible_output_request_state():
     assert pending_request.response_event_count == 0
     assert pending_request.suppress_next_created_downstream is True
     assert pending_request.replay_downstream_response_id == "resp_created_then_closed"
+    assert pending_request.error_code_override is None
+    assert pending_request.error_message_override is None
+    assert pending_request.error_http_status_override is None
+
+
+def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_auth_replay_overrides",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"retry"}',
+        awaiting_response_created=True,
+        error_code_override="upstream_unavailable",
+        error_message_override="previous auth replay failed",
+        error_type_override="server_error",
+        error_param_override="previous_response_id",
+        error_http_status_override=502,
+    )
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_auth_replay(request_state)
+
+    assert replay_text == '{"type":"response.create","input":"retry"}'
+    assert request_state.replay_count == 1
+    assert request_state.auth_replay_count == 1
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert request_state.error_type_override is None
+    assert request_state.error_param_override is None
+    assert request_state.error_http_status_override is None
 
 
 @pytest.mark.asyncio
@@ -12486,7 +12886,7 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
         AsyncMock(
             side_effect=proxy_module.ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", "Proxy request budget exhausted"),
+                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
             )
         ),
     )
@@ -13223,7 +13623,7 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_compact_responses_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13249,8 +13649,8 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
 
@@ -13709,7 +14109,7 @@ async def test_response_create_admission_waits_on_session_gate_before_shared_cap
 
 
 @pytest.mark.asyncio
-async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_compact_selection_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13754,13 +14154,13 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert _proxy_error_message(exc) == "Proxy request budget exhausted"
     select_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
+async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13814,14 +14214,14 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert transcribe_calls == 1
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailable(monkeypatch):
+async def test_transcribe_selection_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -14424,6 +14824,52 @@ def test_classify_upstream_close_rejected_only_for_clean_close_before_any_respon
     assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+
+
+@pytest.mark.asyncio
+async def test_try_open_websocket_connect_attempt_does_not_refresh_twice_after_forced_refresh(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_forced_refresh_401")
+    handshake_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still invalid"))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    ensure_fresh = AsyncMock(return_value=account)
+    open_upstream = AsyncMock(side_effect=handshake_error)
+    retry_after_401 = AsyncMock(side_effect=AssertionError("forced refresh must not refresh same account twice"))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(service, "_retry_websocket_connect_after_401", retry_after_401)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_forced_refresh_401",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        force_refresh_account_id=account.id,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._try_open_websocket_connect_attempt(
+            account,
+            {},
+            deadline=20.0,
+            api_key=None,
+            request_state=request_state,
+            client_send_lock=anyio.Lock(),
+            websocket=cast(WebSocket, SimpleNamespace()),
+            force_refresh=True,
+        )
+
+    assert exc_info.value is handshake_error
+    ensure_fresh.assert_awaited_once_with(account, force=True, timeout_seconds=10.0)
+    open_upstream.assert_awaited_once()
+    retry_after_401.assert_not_called()
+    assert request_state.force_refresh_account_id is None
 
 
 @pytest.mark.asyncio
@@ -15891,6 +16337,33 @@ async def test_inline_http_bridge_image_urls_rechecks_expanded_payload_size(monk
     assert exc_info.value.failure_phase == "validation"
     assert request_state.request_text is not None
     assert "data:image/png;base64," in request_state.request_text
+
+
+def test_response_create_dump_uses_configured_data_dir(monkeypatch, tmp_path):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_dump_data_dir",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"too large"}',
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+
+    assert proxy_service._write_response_create_dump(
+        request_state,
+        account_id_value="acc-data-dir",
+        error_code="payload_too_large",
+        error_message="too large",
+        log_prefix="unit",
+    )
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    assert list(dump_dir.glob("*.response-create.json.gz"))
+    assert list(dump_dir.glob("*.meta.json"))
 
 
 @pytest.mark.asyncio

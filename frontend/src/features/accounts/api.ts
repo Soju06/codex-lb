@@ -5,6 +5,7 @@ import {
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
   AccountExportResponseSchema,
+  AccountOpenCodeAuthExportResponseSchema,
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
@@ -74,9 +75,17 @@ export function getAccountTrends(accountId: string) {
   );
 }
 
-export function deleteAccount(accountId: string) {
+export function exportAccountOpenCodeAuth(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/opencode-auth`,
+    AccountOpenCodeAuthExportResponseSchema,
+  );
+}
+
+export function deleteAccount(accountId: string, deleteHistory = false) {
+  const qs = deleteHistory ? "?delete_history=true" : "";
   return del(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
     AccountActionResponseSchema,
   );
 }

@@ -9,7 +9,7 @@ import {
   ModelsResponseSchema,
 } from "@/features/api-keys/schemas";
 
-const API_KEYS_BASE_PATH = "/api/api-keys";
+export const API_KEYS_BASE_PATH = "/api/api-keys";
 const MODELS_PATH = "/api/models";
 
 export function listApiKeys() {

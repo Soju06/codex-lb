@@ -13,7 +13,7 @@ import { RecentRequestsTable } from "@/features/dashboard/components/recent-requ
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
-import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
+import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
@@ -40,10 +40,11 @@ export function DashboardPage() {
     [searchParams],
   );
   const dashboardQuery = useDashboard(overviewTimeframe);
+  const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
 
-  const isRefreshing = dashboardQuery.isFetching || logsQuery.isFetching;
+  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
 
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -92,11 +93,16 @@ export function DashboardPage() {
     if (!overview || !logPage) {
       return null;
     }
-    return buildDashboardView(overview, logPage.requests, {
-      isDark,
-      showAccountBurnrate,
-    });
-  }, [overview, logPage, isDark, showAccountBurnrate]);
+    return buildDashboardView(
+      overview,
+      logPage.requests,
+      {
+        isDark,
+        showAccountBurnrate,
+      },
+      projectionsQuery.data,
+    );
+  }, [overview, logPage, isDark, showAccountBurnrate, projectionsQuery.data]);
 
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();

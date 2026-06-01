@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Coins, DollarSign, Flame, type LucideIcon } fr
 import type {
   AccountSummary,
   DashboardOverview,
+  DashboardProjections,
   Depletion,
   RequestLog,
   TrendPoint,
@@ -698,6 +699,7 @@ export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
   optionsOrIsDark: DashboardViewOptions | boolean = false,
+  projections?: DashboardProjections,
 ): DashboardView {
   const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
@@ -794,11 +796,13 @@ export function buildDashboardView(
     primaryTotal: sumRemaining(primaryUsageItems),
     secondaryTotal: sumRemaining(secondaryUsageItems),
     requestLogs,
-    safeLinePrimary: buildDepletionView(overview.depletionPrimary),
-    safeLineSecondary: buildDepletionView(overview.depletionSecondary),
+    safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
+    safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
     weeklyCreditPace:
-      overview.weeklyCreditPace !== undefined
-        ? overview.weeklyCreditPace
-        : buildWeeklyCreditPace(overview.accounts),
+      projections?.weeklyCreditPace !== undefined
+        ? projections.weeklyCreditPace
+        : overview.weeklyCreditPace !== undefined
+          ? overview.weeklyCreditPace
+          : buildWeeklyCreditPace(overview.accounts),
   };
 }

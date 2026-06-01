@@ -3,6 +3,7 @@ import { get } from "@/lib/api-client";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
+  DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
   type OverviewTimeframe,
@@ -50,6 +51,10 @@ export function getDashboardOverview(params: DashboardOverviewParams = {}) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
   return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
+}
+
+export function getDashboardProjections() {
+  return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

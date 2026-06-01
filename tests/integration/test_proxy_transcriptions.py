@@ -185,7 +185,7 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
             )
         return {"text": "retried"}
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         if force:
             account.chatgpt_account_id = "acc_transcribe_retry_new"
         return account
@@ -272,7 +272,7 @@ async def test_backend_transcribe_initial_refresh_failure_returns_handled_error(
         transcribe_calls += 1
         return {"text": "unexpected"}
 
-    async def fake_ensure_fresh(self, account, force: bool = False):
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
         if not force:
             raise RefreshError(
                 code="invalid_grant",

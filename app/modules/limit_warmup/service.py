@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import AsyncContextManager, Callable, Protocol
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
@@ -30,6 +31,7 @@ LIMIT_WARMUP_HEADER = "x-codex-lb-limit-warmup"
 _DEFAULT_WARMUP_INSTRUCTIONS = "Reply with OK only."
 _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
 _QUOTA_ERROR_CODES = {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "usage_limit_reached"}
+_MAX_CONCURRENT_WARMUP_SENDS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,15 @@ class LimitWarmupSendResult:
     latency_ms: int
     usage: ResponseUsage | None = None
     error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LimitWarmupSendOutcome:
+    attempt: AccountLimitWarmup
+    account: Account
+    model: str
+    result: LimitWarmupSendResult | None
     error_message: str | None = None
 
 
@@ -100,16 +111,26 @@ class LimitWarmupRequestLogRepository(Protocol):
 
 
 class StreamingLimitWarmupSender:
-    def __init__(self, accounts_repo: AccountsRepository) -> None:
+    def __init__(
+        self,
+        accounts_repo: AccountsRepository,
+        *,
+        accounts_repo_factory: Callable[[], AsyncContextManager[AccountsRepository]] | None = None,
+    ) -> None:
         self._accounts_repo = accounts_repo
+        self._accounts_repo_factory = accounts_repo_factory
         self._auth_manager = AuthManager(accounts_repo)
         self._encryptor = TokenEncryptor()
+        self._auth_lock = asyncio.Lock()
 
     async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
         request_id = f"limit-warmup-{uuid.uuid4().hex}"
         started = time.monotonic()
         try:
-            fresh_account = await self._auth_manager.ensure_fresh(account)
+            async with self._auth_lock:
+                fresh_account = await self._ensure_fresh(account)
+                access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
+                chatgpt_account_id = fresh_account.chatgpt_account_id
         except RefreshError as exc:
             return LimitWarmupSendResult(
                 request_id=request_id,
@@ -145,7 +166,6 @@ class StreamingLimitWarmupSender:
             LIMIT_WARMUP_HEADER: "1",
             "user-agent": "codex-lb-limit-warmup",
         }
-        access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
         usage: ResponseUsage | None = None
         with override_stream_timeouts(
             connect_timeout_seconds=5.0,
@@ -156,7 +176,7 @@ class StreamingLimitWarmupSender:
                 payload,
                 headers,
                 access_token,
-                fresh_account.chatgpt_account_id,
+                chatgpt_account_id,
                 upstream_stream_transport_override="http",
             ):
                 event = parse_sse_event(event_block)
@@ -190,6 +210,15 @@ class StreamingLimitWarmupSender:
             error_code="stream_incomplete",
             error_message="Warm-up stream ended without a terminal event",
         )
+
+    async def _ensure_fresh(self, account: Account) -> Account:
+        if self._accounts_repo_factory is None:
+            return await self._auth_manager.ensure_fresh(account)
+        async with self._accounts_repo_factory() as accounts_repo:
+            return await AuthManager(
+                accounts_repo,
+                refresh_repo_factory=self._accounts_repo_factory,
+            ).ensure_fresh(account)
 
 
 class LimitWarmupService:
@@ -225,6 +254,8 @@ class LimitWarmupService:
         sender = self._sender
         if sender is None:
             raise RuntimeError("LimitWarmupService requires a sender")
+        send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
+        send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
 
         for account in accounts:
             if not _account_is_safe_candidate(account):
@@ -281,15 +312,73 @@ class LimitWarmupService:
                 if attempt is None:
                     continue
 
-                completed = await self._send_and_complete(
-                    attempt,
-                    account=account,
-                    model=model,
-                    prompt=settings.limit_warmup_prompt,
-                    sender=sender,
+                send_task = asyncio.create_task(
+                    self._send_warmup(
+                        attempt,
+                        account=account,
+                        model=model,
+                        prompt=settings.limit_warmup_prompt,
+                        sender=sender,
+                        semaphore=send_semaphore,
+                    ),
+                    name=f"limit-warmup:{attempt.id}",
                 )
-                latest_attempts[account.id] = completed or attempt
-                break
+                send_tasks[send_task] = attempt
+
+        pending_send_tasks = set(send_tasks)
+        try:
+            while pending_send_tasks:
+                completed_send_tasks, pending_send_tasks = await asyncio.wait(
+                    pending_send_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                completion_error: BaseException | None = None
+                for send_task in completed_send_tasks:
+                    outcome = await send_task
+                    try:
+                        completed = await self._complete_warmup(outcome)
+                    except Exception as exc:
+                        completion_error = completion_error or exc
+                        await self._mark_aborted_warmup(
+                            outcome.attempt,
+                            error_code="warmup_completion_failed",
+                            error_message="Limit warm-up completion failed",
+                        )
+                        continue
+                    latest_attempts[outcome.account.id] = completed or outcome.attempt
+                if completion_error is not None:
+                    raise completion_error
+        finally:
+            if pending_send_tasks:
+                for send_task in pending_send_tasks:
+                    send_task.cancel()
+                drained_results = await asyncio.gather(*pending_send_tasks, return_exceptions=True)
+                for send_task, drained_result in zip(pending_send_tasks, drained_results, strict=True):
+                    if isinstance(drained_result, LimitWarmupSendOutcome):
+                        try:
+                            completed = await self._complete_warmup(drained_result)
+                        except Exception:
+                            await self._mark_aborted_warmup(
+                                drained_result.attempt,
+                                error_code="warmup_completion_failed",
+                                error_message="Limit warm-up completion failed",
+                            )
+                            continue
+                        latest_attempts[drained_result.account.id] = completed or drained_result.attempt
+                        continue
+                    await self._mark_aborted_warmup(
+                        send_tasks[send_task],
+                        error_code=(
+                            "warmup_cancelled"
+                            if isinstance(drained_result, asyncio.CancelledError)
+                            else "warmup_send_failed"
+                        ),
+                        error_message=(
+                            "Limit warm-up cancelled after another warm-up completion failed"
+                            if isinstance(drained_result, asyncio.CancelledError)
+                            else (_truncate(str(drained_result)) or "Limit warm-up send failed")
+                        ),
+                    )
 
     def _resolve_model(self, configured_model: str, account: Account) -> str | None:
         normalized = configured_model.strip()
@@ -315,7 +404,7 @@ class LimitWarmupService:
             return None
         return min(candidates, key=lambda item: (item[0], item[1]))[1]
 
-    async def _send_and_complete(
+    async def _send_warmup(
         self,
         attempt: AccountLimitWarmup,
         *,
@@ -323,25 +412,39 @@ class LimitWarmupService:
         model: str,
         prompt: str,
         sender: LimitWarmupSender,
-    ) -> AccountLimitWarmup | None:
+        semaphore: asyncio.Semaphore,
+    ) -> LimitWarmupSendOutcome:
         try:
-            result = await sender.send(account, model=model, prompt=prompt)
+            async with semaphore:
+                result = await sender.send(account, model=model, prompt=prompt)
         except Exception as exc:
             logger.warning(
                 "Limit warm-up send failed account_id=%s window=%s", account.id, attempt.window, exc_info=True
             )
-            completed_at = utcnow()
-            return await self._warmup_repo.complete_attempt(
-                attempt.id,
-                status="failed",
-                completed_at=completed_at,
-                error_code="warmup_send_failed",
-                error_message=_truncate(str(exc)),
+            return LimitWarmupSendOutcome(
+                attempt=attempt,
+                account=account,
+                model=model,
+                result=None,
+                error_message=str(exc),
             )
 
+        return LimitWarmupSendOutcome(attempt=attempt, account=account, model=model, result=result)
+
+    async def _complete_warmup(self, outcome: LimitWarmupSendOutcome) -> AccountLimitWarmup | None:
+        if outcome.result is None:
+            return await self._warmup_repo.complete_attempt(
+                outcome.attempt.id,
+                status="failed",
+                completed_at=utcnow(),
+                error_code="warmup_send_failed",
+                error_message=_truncate(outcome.error_message),
+            )
+
+        result = outcome.result
         await self._record_request_log(
-            account=account,
-            model=model,
+            account=outcome.account,
+            model=outcome.model,
             result=result,
         )
         status = "succeeded" if result.success else "failed"
@@ -349,12 +452,35 @@ class LimitWarmupService:
         if error_code in _QUOTA_ERROR_CODES:
             error_code = "quota_still_exhausted"
         return await self._warmup_repo.complete_attempt(
-            attempt.id,
+            outcome.attempt.id,
             status=status,
             completed_at=utcnow(),
             error_code=error_code,
             error_message=_truncate(result.error_message),
         )
+
+    async def _mark_aborted_warmup(
+        self,
+        attempt: AccountLimitWarmup,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        try:
+            await self._warmup_repo.complete_attempt(
+                attempt.id,
+                status="failed",
+                completed_at=utcnow(),
+                error_code=error_code,
+                error_message=error_message,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mark aborted limit warm-up attempt_id=%s error_code=%s",
+                attempt.id,
+                error_code,
+                exc_info=True,
+            )
 
     async def _record_request_log(
         self,
@@ -446,8 +572,10 @@ def _build_candidate(
         return None
     if before.used_percent < 100.0:
         return None
-    available_percent = max(0.0, 100.0 - after.used_percent)
-    if available_percent < min_available_percent:
+    if after.used_percent >= 100.0:
+        return None
+    available_percent = 100.0 - after.used_percent
+    if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
     if after.reset_at <= before.reset_at:
         return None

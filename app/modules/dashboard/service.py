@@ -18,6 +18,7 @@ from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
+    DashboardProjectionsResponse,
     DashboardUsageWindows,
     DepletionResponse,
 )
@@ -122,109 +123,34 @@ class DashboardService:
             ),
         )
 
-        # Compute depletion separately for primary-window and secondary-window
-        # accounts so the aggregate is not skewed by mixing different window
-        # durations.  The response includes a "window" field that tells the
-        # frontend which donut to render the safe-line marker on.
-        normalized_primary_ids = {row.account_id for row in primary_rows}
-        all_account_ids = set(primary_usage.keys()) | set(secondary_usage.keys())
-
-        # Batch fetch: collect account IDs and determine the widest lookback
-        # per window so we can issue at most 2 bulk queries instead of O(N).
-        pri_fetch_ids: list[str] = []
-        sec_fetch_ids: list[str] = []
-        pri_since = now  # will be narrowed to the earliest needed
-        sec_since = now
-        # Per-account cutoffs for in-memory filtering after bulk fetch
-        pri_cutoffs: dict[str, datetime] = {}
-        sec_cutoffs: dict[str, datetime] = {}
-        weekly_only_ids: set[str] = set()
-        weekly_only_history_sources: dict[str, str] = {}
-
-        for account_id in all_account_ids:
-            if account_id in normalized_primary_ids:
-                usage_entry = primary_usage[account_id]
-                acct_window = usage_entry.window_minutes if usage_entry.window_minutes else 300
-                acct_since = now - timedelta(minutes=acct_window)
-                pri_fetch_ids.append(account_id)
-                pri_cutoffs[account_id] = acct_since
-                if acct_since < pri_since:
-                    pri_since = acct_since
-                if account_id in secondary_usage:
-                    sec_entry = secondary_usage[account_id]
-                    sec_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
-                    s_since = now - timedelta(minutes=sec_window)
-                    sec_fetch_ids.append(account_id)
-                    sec_cutoffs[account_id] = s_since
-                    if s_since < sec_since:
-                        sec_since = s_since
-            elif account_id in primary_usage:
-                weekly_only_ids.add(account_id)
-                primary_entry = primary_usage[account_id]
-                sec_entry = secondary_usage.get(account_id)
-                use_primary_stream = _should_use_weekly_primary_history(primary_entry, sec_entry)
-                weekly_only_history_sources[account_id] = "primary" if use_primary_stream else "secondary"
-                current_entry = primary_entry if use_primary_stream else sec_entry
-                acct_window = current_entry.window_minutes if current_entry and current_entry.window_minutes else 10080
-                acct_since = now - timedelta(minutes=acct_window)
-                if use_primary_stream:
-                    pri_fetch_ids.append(account_id)
-                    pri_cutoffs[account_id] = acct_since
-                    if acct_since < pri_since:
-                        pri_since = acct_since
-                else:
-                    sec_fetch_ids.append(account_id)
-                    sec_cutoffs[account_id] = acct_since
-                    if acct_since < sec_since:
-                        sec_since = acct_since
-            else:
-                sec_entry = secondary_usage[account_id]
-                acct_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
-                acct_since = now - timedelta(minutes=acct_window)
-                sec_fetch_ids.append(account_id)
-                sec_cutoffs[account_id] = acct_since
-                if acct_since < sec_since:
-                    sec_since = acct_since
-
-        # Issue at most 2 bulk queries
-        all_pri_rows = (
-            await self._repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since) if pri_fetch_ids else {}
-        )
-        all_sec_rows = (
-            await self._repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since) if sec_fetch_ids else {}
+        additional_ts = await self._repo.latest_additional_recorded_at()
+        return DashboardOverviewResponse(
+            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
+            timeframe=build_overview_timeframe(overview_timeframe),
+            accounts=account_summaries,
+            summary=summary,
+            windows=windows,
+            trends=trends,
         )
 
-        # Filter in-memory to each account's actual cutoff
-        primary_history: dict[str, list[UsageHistory]] = {}
-        secondary_history: dict[str, list[UsageHistory]] = {}
-
-        for account_id in all_account_ids:
-            if account_id in normalized_primary_ids:
-                cutoff = pri_cutoffs[account_id]
-                rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
-                if rows:
-                    primary_history[account_id] = rows
-                if account_id in sec_cutoffs:
-                    s_cutoff = sec_cutoffs[account_id]
-                    s_rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), s_cutoff)
-                    if s_rows:
-                        secondary_history[account_id] = s_rows
-            elif account_id in weekly_only_ids:
-                source = weekly_only_history_sources[account_id]
-                if source == "primary":
-                    cutoff = pri_cutoffs[account_id]
-                    rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
-                else:
-                    cutoff = sec_cutoffs[account_id]
-                    rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
-                if rows:
-                    secondary_history[account_id] = rows
-            else:
-                cutoff = sec_cutoffs[account_id]
-                rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
-                if rows:
-                    secondary_history[account_id] = rows
-
+    async def get_projections(self) -> DashboardProjectionsResponse:
+        now = utcnow()
+        accounts = await self._repo.list_accounts()
+        primary_usage = await self._repo.latest_usage_by_account("primary")
+        secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        account_summaries = build_account_summaries(
+            accounts=accounts,
+            primary_usage=primary_usage,
+            secondary_usage=secondary_usage,
+            encryptor=self._encryptor,
+            include_auth=False,
+        )
+        primary_history, secondary_history = await _load_projection_histories(
+            self._repo,
+            primary_usage,
+            secondary_usage,
+            now,
+        )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
         settings = get_settings()
         weekly_credit_pace = build_weekly_credit_pace(
@@ -234,19 +160,120 @@ class DashboardService:
             now=now,
             usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
         )
-
-        additional_ts = await self._repo.latest_additional_recorded_at()
-        return DashboardOverviewResponse(
-            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
-            timeframe=build_overview_timeframe(overview_timeframe),
-            accounts=account_summaries,
-            summary=summary,
-            windows=windows,
-            trends=trends,
+        return DashboardProjectionsResponse(
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,
         )
+
+
+async def _load_projection_histories(
+    repo: DashboardRepository,
+    primary_usage: dict[str, UsageHistory],
+    secondary_usage: dict[str, UsageHistory],
+    now: datetime,
+) -> tuple[dict[str, list[UsageHistory]], dict[str, list[UsageHistory]]]:
+    # Compute depletion separately for primary-window and secondary-window
+    # accounts so the aggregate is not skewed by mixing different window durations.
+    primary_rows_raw = _rows_from_latest(primary_usage)
+    secondary_rows_raw = _rows_from_latest(secondary_usage)
+    primary_rows, _ = usage_core.normalize_weekly_only_rows(
+        primary_rows_raw,
+        secondary_rows_raw,
+    )
+    normalized_primary_ids = {row.account_id for row in primary_rows}
+    all_account_ids = set(primary_usage.keys()) | set(secondary_usage.keys())
+
+    # Batch fetch: collect account IDs and determine the widest lookback per
+    # window so we can issue at most 2 bulk queries instead of O(N).
+    pri_fetch_ids: list[str] = []
+    sec_fetch_ids: list[str] = []
+    pri_since = now
+    sec_since = now
+    pri_cutoffs: dict[str, datetime] = {}
+    sec_cutoffs: dict[str, datetime] = {}
+    weekly_only_ids: set[str] = set()
+    weekly_only_history_sources: dict[str, str] = {}
+
+    for account_id in all_account_ids:
+        if account_id in normalized_primary_ids:
+            usage_entry = primary_usage[account_id]
+            acct_window = usage_entry.window_minutes if usage_entry.window_minutes else 300
+            acct_since = now - timedelta(minutes=acct_window)
+            pri_fetch_ids.append(account_id)
+            pri_cutoffs[account_id] = acct_since
+            if acct_since < pri_since:
+                pri_since = acct_since
+            if account_id in secondary_usage:
+                sec_entry = secondary_usage[account_id]
+                sec_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
+                s_since = now - timedelta(minutes=sec_window)
+                sec_fetch_ids.append(account_id)
+                sec_cutoffs[account_id] = s_since
+                if s_since < sec_since:
+                    sec_since = s_since
+        elif account_id in primary_usage:
+            weekly_only_ids.add(account_id)
+            primary_entry = primary_usage[account_id]
+            sec_entry = secondary_usage.get(account_id)
+            use_primary_stream = _should_use_weekly_primary_history(primary_entry, sec_entry)
+            weekly_only_history_sources[account_id] = "primary" if use_primary_stream else "secondary"
+            current_entry = primary_entry if use_primary_stream else sec_entry
+            acct_window = current_entry.window_minutes if current_entry and current_entry.window_minutes else 10080
+            acct_since = now - timedelta(minutes=acct_window)
+            if use_primary_stream:
+                pri_fetch_ids.append(account_id)
+                pri_cutoffs[account_id] = acct_since
+                if acct_since < pri_since:
+                    pri_since = acct_since
+            else:
+                sec_fetch_ids.append(account_id)
+                sec_cutoffs[account_id] = acct_since
+                if acct_since < sec_since:
+                    sec_since = acct_since
+        else:
+            sec_entry = secondary_usage[account_id]
+            acct_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
+            acct_since = now - timedelta(minutes=acct_window)
+            sec_fetch_ids.append(account_id)
+            sec_cutoffs[account_id] = acct_since
+            if acct_since < sec_since:
+                sec_since = acct_since
+
+    all_pri_rows = await repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since) if pri_fetch_ids else {}
+    all_sec_rows = await repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since) if sec_fetch_ids else {}
+
+    primary_history: dict[str, list[UsageHistory]] = {}
+    secondary_history: dict[str, list[UsageHistory]] = {}
+
+    for account_id in all_account_ids:
+        if account_id in normalized_primary_ids:
+            cutoff = pri_cutoffs[account_id]
+            rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
+            if rows:
+                primary_history[account_id] = rows
+            if account_id in sec_cutoffs:
+                s_cutoff = sec_cutoffs[account_id]
+                s_rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), s_cutoff)
+                if s_rows:
+                    secondary_history[account_id] = s_rows
+        elif account_id in weekly_only_ids:
+            source = weekly_only_history_sources[account_id]
+            if source == "primary":
+                cutoff = pri_cutoffs[account_id]
+                rows = filter_depletion_history_since(all_pri_rows.get(account_id, []), cutoff)
+            else:
+                cutoff = sec_cutoffs[account_id]
+                rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
+            if rows:
+                secondary_history[account_id] = rows
+        else:
+            cutoff = sec_cutoffs[account_id]
+            rows = filter_depletion_history_since(all_sec_rows.get(account_id, []), cutoff)
+            if rows:
+                secondary_history[account_id] = rows
+
+    return primary_history, secondary_history
 
 
 def _build_depletion_by_window(

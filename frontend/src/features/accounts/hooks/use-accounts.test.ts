@@ -40,11 +40,12 @@ describe("useAccounts", () => {
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),
     );
-    await result.current.deleteMutation.mutateAsync(imported.accountId);
+    await result.current.deleteMutation.mutateAsync({ accountId: imported.accountId, deleteHistory: false });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     });
   });
 
@@ -93,6 +94,7 @@ describe("useAccounts", () => {
       expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-export");
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     } finally {
       clickSpy.mockRestore();
       Object.defineProperty(URL, "createObjectURL", {

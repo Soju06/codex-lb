@@ -787,7 +787,7 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
         del self, kwargs
         return account
 
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 

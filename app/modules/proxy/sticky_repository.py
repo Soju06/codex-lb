@@ -15,6 +15,15 @@ from app.db.models import Account, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
+# Each (key, kind) pair in delete_entries contributes 2 bind parameters to
+# the underlying DELETE...OR (key=:k AND kind=:t)... statement. SQLite's
+# default SQLITE_LIMIT_VARIABLE_NUMBER is 999 on builds older than 3.32
+# and 32766 on newer builds, so chunking conservatively at 250 pairs
+# (500 bind parameters) keeps delete-filtered safe on any libsqlite that
+# ships with current Python interpreters. Postgres allows up to 65535
+# bind parameters, which this chunk size also respects.
+_DELETE_ENTRIES_CHUNK_SIZE = 250
+
 
 @dataclass(frozen=True, slots=True)
 class StickySessionListEntryRecord:
@@ -85,13 +94,19 @@ class StickySessionsRepository:
         targets = {(key, kind) for key, kind in entries if key}
         if not targets:
             return []
-        statement = delete(StickySession).where(
-            or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in targets))
-        )
-        async with sqlite_writer_section():
-            result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
-            await self._session.commit()
-        return [(key, kind) for key, kind in result.all()]
+
+        deleted: list[tuple[str, StickySessionKind]] = []
+        targets_list = list(targets)
+        for offset in range(0, len(targets_list), _DELETE_ENTRIES_CHUNK_SIZE):
+            chunk = targets_list[offset : offset + _DELETE_ENTRIES_CHUNK_SIZE]
+            statement = delete(StickySession).where(
+                or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in chunk))
+            )
+            async with sqlite_writer_section():
+                result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
+                await self._session.commit()
+            deleted.extend((key, kind) for key, kind in result.all())
+        return deleted
 
     async def list_entry_identifiers(
         self,

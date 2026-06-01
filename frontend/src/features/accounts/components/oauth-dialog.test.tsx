@@ -1,8 +1,22 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OauthDialog } from "@/features/accounts/components/oauth-dialog";
+
+const { toastError } = vi.hoisted(() => ({
+  toastError: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: toastError,
+  },
+}));
+
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalIsSecureContext = Object.getOwnPropertyDescriptor(window, "isSecureContext");
+const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
 
 const idleState = {
   status: "idle" as const,
@@ -60,6 +74,172 @@ const errorState = {
 };
 
 describe("OauthDialog", () => {
+  afterEach(() => {
+    if (originalClipboard) {
+      Object.defineProperty(navigator, "clipboard", originalClipboard);
+    }
+    if (originalIsSecureContext) {
+      Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
+    }
+    if (originalExecCommand) {
+      Object.defineProperty(document, "execCommand", originalExecCommand);
+    }
+    toastError.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the browser-stage copy button focused after keyboard activation", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const copyButton = screen.getByRole("button", { name: "Copy" });
+    copyButton.focus();
+    expect(copyButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(copyButton).toHaveFocus();
+    });
+  });
+
+  it("blurs the browser-stage copy button after pointer activation", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const copyButton = screen.getByRole("button", { name: "Copy" });
+    copyButton.focus();
+    expect(copyButton).toHaveFocus();
+
+    await user.click(copyButton);
+
+    await waitFor(() => {
+      expect(copyButton).not.toHaveFocus();
+    });
+  });
+
+  it("restores keyboard focus after fallback copy inside dialog", async () => {
+    const user = userEvent.setup();
+    const execCommand = vi.fn(() => {
+      expect(document.activeElement?.tagName).toBe("TEXTAREA");
+      return true;
+    });
+
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const copyButton = screen.getByRole("button", { name: "Copy" });
+    copyButton.focus();
+    expect(copyButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith("copy");
+      expect(copyButton).toHaveFocus();
+    });
+  });
+
+  it("shows an error toast when browser-stage copy fails", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard blocked"));
+    const execCommand = vi.fn(() => false);
+
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(
+      <OauthDialog
+        open
+        state={browserPendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith("copy");
+      expect(toastError).toHaveBeenCalledWith("Failed to copy");
+    });
+  });
+
   it("renders intro stage with method selection and starts flow", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn().mockResolvedValue(undefined);

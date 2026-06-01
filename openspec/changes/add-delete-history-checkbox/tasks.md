@@ -1,0 +1,8 @@
+- [x] Add optional `children` prop to `ConfirmDialog`, rendered between the description and footer in `frontend/src/components/confirm-dialog.tsx`.
+- [x] Add `delete_history: boolean` query parameter support to `DELETE /api/accounts/{account_id}` in `app/modules/accounts/api.py` and `AccountDeleteResponse` schema.
+- [x] Add `delete_history` parameter to `AccountsService.delete_account` and conditionally hard-delete `request_logs` in `AccountsRepository.delete` when true.
+- [x] Add `deleteAccount(accountId, deleteHistory)` signature to `frontend/src/features/accounts/api.ts` passing `?delete_history=true` query param.
+- [x] Update `useAccounts` delete mutation to accept `deleteHistory` parameter in `frontend/src/features/accounts/hooks/use-accounts.ts`.
+- [x] Wire a checked/unchecked state with a `Checkbox` inside `ConfirmDialog` children in `accounts-page.tsx`, passing the boolean to the delete mutation on confirm.
+- [x] Add/update integration tests for delete with `delete_history=true` verifying `request_logs` rows are hard-deleted instead of soft-deleted.
+- [x] Validate with lint, typecheck, and test suite.

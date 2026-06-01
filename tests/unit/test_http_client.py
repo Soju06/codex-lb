@@ -65,10 +65,16 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
     connector = MagicMock()
+    websocket_connector = MagicMock()
+    ssl_context = MagicMock()
 
     with (
         patch("app.core.clients.http.get_settings", return_value=_settings()),
-        patch("app.core.clients.http.aiohttp.TCPConnector", return_value=connector) as tcp_connector_cls,
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as ssl_context_factory,
+        patch(
+            "app.core.clients.http.aiohttp.TCPConnector",
+            side_effect=[connector, websocket_connector],
+        ) as tcp_connector_cls,
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
             side_effect=[http_session, websocket_session],
@@ -77,10 +83,31 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     ):
         await http_module.init_http_client()
 
-    tcp_connector_cls.assert_called_once_with(limit=100, limit_per_host=50)
+    assert ssl_context_factory.call_count == 2
+    assert tcp_connector_cls.call_args_list[0].kwargs == {
+        "limit": 100,
+        "limit_per_host": 50,
+        "ssl": ssl_context,
+    }
+    assert tcp_connector_cls.call_args_list[1].kwargs == {"ssl": ssl_context}
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
+    assert client_session_cls.call_args_list[1].kwargs["connector"] is websocket_connector
 
     await http_module.close_http_client()
+
+
+def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> None:
+    with (
+        patch("app.core.clients.http.certifi.where", return_value="/tmp/cacert.pem") as certifi_where,
+        patch("app.core.clients.http.ssl.create_default_context") as create_default_context,
+    ):
+        context = http_module._build_ssl_context()
+
+    ssl_context = create_default_context.return_value
+    certifi_where.assert_called_once_with()
+    create_default_context.assert_called_once_with()
+    ssl_context.load_verify_locations.assert_called_once_with(cafile="/tmp/cacert.pem")
+    assert context is ssl_context
 
 
 @pytest.mark.asyncio

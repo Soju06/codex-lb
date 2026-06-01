@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
@@ -9,6 +9,8 @@ const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalIsSecureContext = Object.getOwnPropertyDescriptor(window, "isSecureContext");
 
 vi.mock("sonner", () => ({
   toast: {
@@ -43,10 +45,24 @@ describe("RecentRequestsTable", () => {
     toastError.mockReset();
   });
 
+  afterEach(() => {
+    if (originalClipboard) {
+      Object.defineProperty(navigator, "clipboard", originalClipboard);
+    }
+
+    if (originalIsSecureContext) {
+      Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
+    }
+  });
+
   it("renders rows with status badges and supports request details and copy actions", async () => {
     const longError = "Rate limit reached while processing this request ".repeat(3);
     const writeText = vi.fn().mockResolvedValue(undefined);
 
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },

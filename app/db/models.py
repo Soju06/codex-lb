@@ -272,6 +272,18 @@ class DashboardSettings(Base):
         server_default=text("'capacity_weighted'"),
         nullable=False,
     )
+    relative_availability_power: Mapped[float] = mapped_column(
+        Float,
+        default=2.0,
+        server_default=text("2.0"),
+        nullable=False,
+    )
+    relative_availability_top_k: Mapped[int] = mapped_column(
+        Integer,
+        default=5,
+        server_default=text("5"),
+        nullable=False,
+    )
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -707,6 +719,13 @@ Index(
 Index(
     "idx_usage_window_account_latest",
     _PRIMARY_WINDOW_INDEX_EXPR,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at.desc(),
+    UsageHistory.id.desc(),
+)
+Index(
+    "idx_usage_window_raw_account_latest",
+    UsageHistory.window,
     UsageHistory.account_id,
     UsageHistory.recorded_at.desc(),
     UsageHistory.id.desc(),

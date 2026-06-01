@@ -23,6 +23,7 @@ export const ROUTING_LABELS = {
   usage_weighted: "usage weighted",
   round_robin: "round robin",
   capacity_weighted: "capacity weighted",
+  relative_availability: "relative availability",
   sticky: "sticky",
 } as const;
 

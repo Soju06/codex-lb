@@ -285,10 +285,40 @@ def test_check_schema_drift_detects_missing_manual_performance_index(tmp_path: P
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).connect() as connection:
         connection.execute(text("DROP INDEX idx_usage_window_account_latest"))
+        connection.execute(text("DROP INDEX idx_usage_window_raw_account_latest"))
         connection.commit()
 
     drift = check_schema_drift(url)
     assert any("idx_usage_window_account_latest" in diff for diff in drift)
+    assert any("idx_usage_window_raw_account_latest" in diff for diff in drift)
+
+
+def test_raw_usage_window_latest_index_migration_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "raw-window-latest-index.db"
+    url = _db_url(db_path)
+    pre_revision = "20260513_000000_add_accounts_alias"
+    target_revision = "20260525_000000_add_usage_raw_window_latest_index"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE INDEX idx_usage_window_raw_account_latest
+                ON usage_history ("window", account_id, recorded_at DESC, id DESC)
+                """
+            )
+        )
+        connection.commit()
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        index_names = {index["name"] for index in inspect(connection).get_indexes("usage_history")}
+        assert "idx_usage_window_raw_account_latest" in index_names
 
 
 def test_check_schema_drift_detects_missing_dashboard_read_indexes(tmp_path: Path) -> None:
@@ -374,6 +404,8 @@ def test_run_upgrade_repairs_branched_legacy_revision_ids(tmp_path: Path) -> Non
         api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
 
         assert "routing_strategy" in dashboard_columns
+        assert "relative_availability_power" in dashboard_columns
+        assert "relative_availability_top_k" in dashboard_columns
         assert "enforced_model" in api_key_columns
         assert "enforced_reasoning_effort" in api_key_columns
         assert inspector.has_table("api_firewall_allowlist")

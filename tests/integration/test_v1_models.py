@@ -7,6 +7,43 @@ from app.core.types import JsonValue
 
 pytestmark = pytest.mark.integration
 
+BOOTSTRAP_MODEL_SLUGS = {
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2",
+    "codex-auto-review",
+}
+
+EXPECTED_CORE_MODEL_PLANS = {
+    "plus",
+    "pro",
+    "prolite",
+    "team",
+    "business",
+    "enterprise",
+    "edu",
+    "education",
+    "go",
+    "hc",
+    "finserv",
+    "quorum",
+    "self_serve_business_usage_based",
+    "enterprise_cbp_usage_based",
+}
+
+EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.5": "0.124.0",
+    "gpt-5.4": "0.98.0",
+    "gpt-5.4-mini": "0.98.0",
+    "gpt-5.3-codex": "0.98.0",
+    "gpt-5.3-codex-spark": "0.100.0",
+    "gpt-5.2": "0.0.1",
+    "codex-auto-review": "0.98.0",
+}
+
 
 def _make_upstream_model(
     slug: str,
@@ -70,14 +107,56 @@ async def test_v1_models_list(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_empty_when_registry_not_populated(async_client):
+async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["object"] == "list"
-    assert payload["data"] == []
+    ids = {item["id"] for item in payload["data"]}
+    assert ids == BOOTSTRAP_MODEL_SLUGS
+    assert "gpt-5.5-pro" not in ids
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_client):
+    registry = get_model_registry()
+    registry._snapshot = None
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+
+    assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
+    for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
+        assert entries[slug]["minimal_client_version"] == expected_version
+
+    gpt54 = entries["gpt-5.4"]
+    assert gpt54["minimal_client_version"] == "0.98.0"
+    assert gpt54["max_context_window"] == 1_000_000
+    assert set(gpt54["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+
+    mini = entries["gpt-5.4-mini"]
+    assert mini["prefer_websockets"] is True
+    assert mini["default_verbosity"] == "medium"
+    assert mini["minimal_client_version"] == "0.98.0"
+    assert {level["effort"] for level in mini["supported_reasoning_levels"]} == {"low", "medium", "high", "xhigh"}
+
+    spark = entries["gpt-5.3-codex-spark"]
+    assert spark["context_window"] == 128_000
+    assert spark["input_modalities"] == ["text"]
+    assert spark["default_reasoning_level"] == "high"
+    assert spark["supported_in_api"] is False
+    assert spark["minimal_client_version"] == "0.100.0"
+
+    auto_review = entries["codex-auto-review"]
+    assert auto_review["visibility"] == "hide"
+    assert auto_review["shell_type"] == "shell_command"
+    assert auto_review["max_context_window"] == 1_000_000
+    assert auto_review["minimal_client_version"] == "0.98.0"
+    assert set(auto_review["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+    assert set(entries["gpt-5.3-codex"]["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
 
 
 @pytest.mark.asyncio
@@ -392,13 +471,15 @@ async def test_backend_codex_models_includes_supported_in_api_false_models(async
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_empty_when_registry_not_populated(async_client):
+async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["models"] == []
+    slugs = {item["slug"] for item in payload["models"]}
+    assert slugs == BOOTSTRAP_MODEL_SLUGS
+    assert "gpt-5.5-pro" not in slugs
 
 
 @pytest.mark.asyncio

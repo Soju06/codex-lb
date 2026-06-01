@@ -13,7 +13,7 @@ import pytest
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import ModelRegistrySnapshot
+from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -2146,6 +2146,37 @@ async def test_select_account_respects_registry_plan_filter_for_mapped_model(mon
 
     assert selection.account is None
     assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
+async def test_select_account_uses_bootstrap_plan_filter_before_registry_refresh(monkeypatch) -> None:
+    account = _make_account("acc-bootstrap-plan-filtered", "bootstrap-plan-filtered@example.com")
+    account.plan_type = "free"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.4")
+
+    assert registry.get_snapshot() is None
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.4'"
 
 
 @pytest.mark.asyncio

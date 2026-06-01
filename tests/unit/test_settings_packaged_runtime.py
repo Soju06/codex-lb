@@ -10,6 +10,23 @@ import app.core.config.settings as settings_module
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _restore_settings_module():
+    """Reload-based tests rebind module globals (e.g. ``get_settings``) to fresh
+    objects. Other modules import those globals by value at import time, so a
+    leaked reload leaves them pointing at a stale ``get_settings`` whose
+    ``lru_cache`` the conftest fixture can no longer clear. Snapshot and restore
+    the module namespace so dependents stay consistent across tests.
+    """
+    saved = dict(settings_module.__dict__)
+    try:
+        yield
+    finally:
+        settings_module.__dict__.clear()
+        settings_module.__dict__.update(saved)
+        settings_module.get_settings.cache_clear()
+
+
 def test_packaged_runtime_reads_env_file_from_executable_directory(tmp_path) -> None:
     executable_dir = tmp_path / "release"
     executable_dir.mkdir()

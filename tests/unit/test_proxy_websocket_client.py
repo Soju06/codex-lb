@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from websockets.asyncio.server import serve as websocket_serve
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
@@ -48,6 +51,55 @@ class _FakeConnection:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+
+
+async def _local_proxy_tunnel_handler(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    proxy_hits: list[str],
+) -> None:
+    target_writer: asyncio.StreamWriter | None = None
+    try:
+        request_line = await reader.readline()
+        method, target, _version = request_line.decode("ascii").strip().split(" ", 2)
+        assert method == "CONNECT"
+        host, port_text = target.rsplit(":", 1)
+        proxy_hits.append(target)
+
+        while await reader.readline() != b"\r\n":
+            pass
+
+        target_reader, target_writer = await asyncio.open_connection(host, int(port_text))
+        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await writer.drain()
+
+        async def relay(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while data := await src.read(65536):
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+
+        relays = [
+            asyncio.create_task(relay(reader, target_writer)),
+            asyncio.create_task(relay(target_reader, writer)),
+        ]
+        try:
+            await asyncio.wait(relays, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in relays:
+                task.cancel()
+            await asyncio.gather(*relays, return_exceptions=True)
+    finally:
+        writer.close()
+        if target_writer is not None:
+            target_writer.close()
+        with contextlib.suppress(ConnectionError):
+            await writer.wait_closed()
+        if target_writer is not None:
+            with contextlib.suppress(ConnectionError):
+                await target_writer.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -440,6 +492,58 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert seen["url"] == "ws://chatgpt.local/backend-api/codex/responses"
     assert kwargs["proxy"] == "http://127.0.0.1:7890"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_traverses_http_proxy_smoke(monkeypatch):
+    async def upstream_handler(connection):
+        assert await connection.recv() == "hello"
+        await connection.send('{"type":"response.completed"}')
+
+    proxy_hits: list[str] = []
+
+    async with websocket_serve(upstream_handler, "127.0.0.1", 0) as upstream_server:
+        upstream_socket = next(iter(upstream_server.sockets))
+        upstream_port = upstream_socket.getsockname()[1]
+        proxy_server = await asyncio.start_server(
+            lambda reader, writer: _local_proxy_tunnel_handler(reader, writer, proxy_hits),
+            "127.0.0.1",
+            0,
+        )
+        async with proxy_server:
+            proxy_port = proxy_server.sockets[0].getsockname()[1]
+            monkeypatch.delenv("no_proxy", raising=False)
+            monkeypatch.delenv("NO_PROXY", raising=False)
+            monkeypatch.delenv("ws_proxy", raising=False)
+            monkeypatch.delenv("WS_PROXY", raising=False)
+            monkeypatch.delenv("http_proxy", raising=False)
+            monkeypatch.delenv("HTTP_PROXY", raising=False)
+            monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{proxy_port}")
+            monkeypatch.delenv("all_proxy", raising=False)
+            monkeypatch.delenv("ALL_PROXY", raising=False)
+            monkeypatch.setattr(
+                proxy_websocket_module,
+                "get_settings",
+                lambda: SimpleNamespace(
+                    upstream_base_url=f"http://127.0.0.1:{upstream_port}/backend-api",
+                    upstream_connect_timeout_seconds=7.0,
+                    max_sse_event_bytes=4321,
+                    upstream_websocket_trust_env=True,
+                ),
+            )
+
+            websocket = await connect_responses_websocket(
+                {"openai-beta": "responses_websockets=2026-02-06"},
+                "access-token",
+                None,
+            )
+            await websocket.send_text("hello")
+            message = await websocket.receive()
+            await websocket.close()
+
+    assert message.kind == "text"
+    assert message.text == '{"type":"response.completed"}'
+    assert proxy_hits == [f"127.0.0.1:{upstream_port}"]
 
 
 @pytest.mark.asyncio

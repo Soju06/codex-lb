@@ -13,4 +13,4 @@
 
 - [x] 3.1 Run targeted backend tests for websocket proxy resolution
 - [x] 3.2 Validate the OpenSpec delta locally
-- [ ] 3.3 Confirm a live OpenAI-compatible request succeeds with the provided proxy exports
+- [x] 3.3 Confirm websocket proxy env handling with a local HTTP CONNECT proxy smoke test

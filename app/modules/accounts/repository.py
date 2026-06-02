@@ -243,7 +243,11 @@ class AccountsRepository:
                 await self._single_unknown_workspace_account_by_email(account.email)
                 if account.workspace_id
                 else await self._single_account_by_email(account.email)
+                if not account.workspace_id
+                else None
             )
+            if existing_by_email and not _can_reuse_email_fallback(existing_by_email, account):
+                existing_by_email = None
             if existing_by_email:
                 _apply_account_updates(existing_by_email, account)
                 await self._session.commit()
@@ -579,7 +583,9 @@ class AccountsRepository:
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
             )
-            return result.scalar_one_or_none()
+            matched = result.scalar_one_or_none()
+            if matched is not None and _can_reuse_email_fallback(matched, account):
+                return matched
         return None
 
     def _dialect_name(self) -> str:
@@ -656,6 +662,14 @@ def _same_unknown_workspace_identity(existing: Account, incoming: Account) -> bo
         and not incoming.workspace_id
         and existing.chatgpt_account_id == incoming.chatgpt_account_id
         and existing.email == incoming.email
+    )
+
+
+def _can_reuse_email_fallback(existing: Account, incoming: Account) -> bool:
+    return (
+        not incoming.chatgpt_account_id
+        or not existing.chatgpt_account_id
+        or existing.chatgpt_account_id == incoming.chatgpt_account_id
     )
 
 

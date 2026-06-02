@@ -248,6 +248,53 @@ async def test_account_slot_upgrades_single_legacy_unknown_workspace_row(db_setu
         assert usage[stored.id].request_count == 1
 
 
+@pytest.mark.asyncio
+async def test_account_slot_keeps_distinct_workspace_chatgpt_identities(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        first = _make_account("acc_first", "shared-workspace@example.com")
+        first.chatgpt_account_id = "raw_first"
+        first.workspace_id = "ws_shared"
+        await repo.upsert_account_slot(first, preserve_unknown_workspace_duplicates=False)
+
+        second = _make_account("acc_second", "shared-workspace@example.com")
+        second.chatgpt_account_id = "raw_second"
+        second.workspace_id = "ws_shared"
+        saved = await repo.upsert_account_slot(second, preserve_unknown_workspace_duplicates=False)
+
+        assert saved.id == "acc_second"
+
+        accounts = list((await session.execute(select(Account).order_by(Account.id.asc()))).scalars().all())
+        assert [(account.id, account.chatgpt_account_id) for account in accounts] == [
+            ("acc_first", "raw_first"),
+            ("acc_second", "raw_second"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_account_slot_does_not_promote_mismatched_legacy_row_by_email(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        legacy = _make_account("acc_legacy", "legacy-shared@example.com")
+        legacy.chatgpt_account_id = "raw_legacy"
+        await repo.upsert(legacy, merge_by_email=False)
+
+        workspace = _make_account("acc_workspace", "legacy-shared@example.com")
+        workspace.chatgpt_account_id = "raw_workspace"
+        workspace.workspace_id = "ws_new"
+        saved = await repo.upsert_account_slot(workspace, preserve_unknown_workspace_duplicates=False)
+
+        assert saved.id == "acc_workspace"
+
+        accounts = list((await session.execute(select(Account).order_by(Account.id.asc()))).scalars().all())
+        assert [(account.id, account.chatgpt_account_id, account.workspace_id) for account in accounts] == [
+            ("acc_legacy", "raw_legacy", None),
+            ("acc_workspace", "raw_workspace", "ws_new"),
+        ]
+
+
 def _make_account_with_chatgpt_id(account_id: str, email: str, chatgpt_id: str) -> Account:
     account = _make_account(account_id, email)
     account.chatgpt_account_id = chatgpt_id

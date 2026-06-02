@@ -14,10 +14,8 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestLog
+from app.db.models import Account, ApiKey, RequestKind, RequestLog
 from app.db.session import sqlite_writer_section
-
-_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,9 +28,16 @@ class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    @staticmethod
+    def _exclude_warmup_clause() -> ColumnElement[bool]:
+        return RequestLog.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
+
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
-            select(RequestLog).where(RequestLog.requested_at >= since, _normal_traffic_clause())
+            select(RequestLog).where(
+                RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
+            )
         )
         return list(result.scalars().all())
 
@@ -105,7 +110,8 @@ class RequestLogsRepository:
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(RequestLog.requested_at >= since, _normal_traffic_clause())
+            .where(RequestLog.requested_at >= since)
+            .where(self._exclude_warmup_clause())
             .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
             .order_by(bucket_col)
         )
@@ -137,7 +143,10 @@ class RequestLogsRepository:
             func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-        ).where(RequestLog.requested_at >= since, _normal_traffic_clause())
+        ).where(
+            RequestLog.requested_at >= since,
+            self._exclude_warmup_clause(),
+        )
         result = await self._session.execute(stmt)
         row = result.one()
         return RequestActivityAggregate(
@@ -154,7 +163,7 @@ class RequestLogsRepository:
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
                 RequestLog.requested_at >= since,
-                _normal_traffic_clause(),
+                self._exclude_warmup_clause(),
                 RequestLog.status != "success",
                 RequestLog.error_code.is_not(None),
             )
@@ -190,6 +199,13 @@ class RequestLogsRepository:
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        bridge_stage: str | None = None,
+        request_kind: str = RequestKind.NORMAL.value,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
@@ -201,9 +217,9 @@ class RequestLogsRepository:
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,
+                request_kind=request_kind,
                 model=model,
                 plan_type=resolved_plan_type,
-                source=source,
                 transport=transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
@@ -219,6 +235,12 @@ class RequestLogsRepository:
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
+                failure_phase=failure_phase,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                upstream_status_code=upstream_status_code,
+                upstream_error_code=upstream_error_code,
+                bridge_stage=bridge_stage,
                 requested_at=requested_at or utcnow(),
             )
             log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
@@ -433,7 +455,7 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
     ) -> _RequestLogFilters:
-        conditions = [_normal_traffic_clause()]
+        conditions = []
         if exclude_soft_deleted:
             conditions.append(RequestLog.deleted_at.is_(None))
         if since is not None:
@@ -523,7 +545,3 @@ async def _safe_rollback(session: AsyncSession) -> None:
             await session.rollback()
     except BaseException:
         return
-
-
-def _normal_traffic_clause():
-    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)

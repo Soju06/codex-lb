@@ -168,7 +168,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
             checked={settings.totpRequiredOnLogin}
             disabled={lock}
             onCheckedChange={(checked) =>
-              void onSave(buildSettingsUpdateRequest(settings, { totpRequiredOnLogin: checked }))
+              void onSave(buildSettingsUpdateRequest({ totpRequiredOnLogin: checked }))
             }
           />
         </div>

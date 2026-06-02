@@ -413,7 +413,16 @@ class UsageUpdater:
             )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        await self._sync_identity_metadata(account, payload)
+        identity_matches_slot = await self._sync_identity_metadata(account, payload)
+        if not identity_matches_slot:
+            logger.warning(
+                "Usage refresh payload reported a workspace slot owned by another account; "
+                "skipping account usage mutation account_id=%s payload_workspace_id=%s request_id=%s",
+                account.id,
+                payload.workspace_id,
+                get_request_id(),
+            )
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
         now_epoch = _now_epoch()
         if self._additional_usage_repo is not None:
@@ -527,7 +536,7 @@ class UsageUpdater:
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
 
-    async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> None:
+    async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
         payload_workspace_id = _clean_optional(payload.workspace_id)
         next_workspace_id = payload_workspace_id or account.workspace_id
@@ -543,27 +552,25 @@ class UsageUpdater:
             if slot_taken:
                 logger.warning(
                     "Usage payload reported workspace_id=%s for legacy account_id=%s, but that slot "
-                    "is already owned by another account; keeping unknown workspace",
+                    "is already owned by another account; skipping usage payload",
                     payload_workspace_id,
                     account.id,
                 )
-                next_workspace_id = account.workspace_id
-                next_workspace_label = account.workspace_label
-                next_seat_type = account.seat_type
+                return False
         if (
             next_plan_type == account.plan_type
             and next_workspace_id == account.workspace_id
             and next_workspace_label == account.workspace_label
             and next_seat_type == account.seat_type
         ):
-            return
+            return True
 
         account.plan_type = next_plan_type
         account.workspace_id = next_workspace_id
         account.workspace_label = next_workspace_label
         account.seat_type = next_seat_type
         if not self._auth_manager:
-            return
+            return True
 
         await self._auth_manager._repo.update_tokens(
             account.id,
@@ -578,6 +585,7 @@ class UsageUpdater:
             workspace_label=account.workspace_label,
             seat_type=account.seat_type,
         )
+        return True
 
     async def _recover_quota_status_from_usage(
         self,

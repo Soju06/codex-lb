@@ -1086,7 +1086,7 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_usage_refresh_does_not_promote_unknown_workspace_into_taken_slot(monkeypatch) -> None:
+async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
 
@@ -1114,23 +1114,27 @@ async def test_usage_refresh_does_not_promote_unknown_workspace_into_taken_slot(
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
 
     usage_repo = StubUsageRepository(return_rows=True)
+    additional_repo = StubAdditionalUsageRepository()
     accounts_repo = StubAccountsRepository()
     account = _make_account("acc_unknown_taken", "chatgpt_shared", email="shared@example.com")
     account.workspace_id = None
     account.workspace_label = None
     account.seat_type = None
+    original_plan_type = account.plan_type
     accounts_repo.accounts_by_id[account.id] = account
     accounts_repo.taken_workspace_slots.add(("shared@example.com", "chatgpt_shared", "ws_taken"))
-    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo, additional_usage_repo=additional_repo)
 
-    await updater.refresh_accounts([account], latest_usage={})
+    result = await updater.refresh_accounts([account], latest_usage={})
 
+    assert result is False
+    assert usage_repo.entries == []
+    assert additional_repo.entries == []
     assert account.workspace_id is None
     assert account.workspace_label is None
     assert account.seat_type is None
-    assert accounts_repo.token_updates[-1]["workspace_id"] is None
-    assert accounts_repo.token_updates[-1]["workspace_label"] is None
-    assert accounts_repo.token_updates[-1]["seat_type"] is None
+    assert account.plan_type == original_plan_type
+    assert accounts_repo.token_updates == []
 
 
 @pytest.mark.asyncio

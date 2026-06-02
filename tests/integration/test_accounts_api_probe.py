@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.modules.accounts.service import AccountsService
 
 pytestmark = pytest.mark.integration
@@ -64,6 +65,25 @@ async def test_probe_paused_account_returns_409(async_client, monkeypatch):
     assert response.status_code == 409
     body = response.json()
     assert body["error"]["code"] == "account_not_probable"
+
+
+@pytest.mark.asyncio
+async def test_probe_refresh_failure_returns_structured_409(async_client, monkeypatch):
+    async def _fail_probe(self, account_id, model=None):  # noqa: ARG001 - route-level error handling only
+        raise RefreshError(
+            code="invalid_grant",
+            message="refresh token revoked",
+            is_permanent=True,
+        )
+
+    monkeypatch.setattr(AccountsService, "probe_account", _fail_probe)
+
+    response = await async_client.post("/api/accounts/acc_refresh_failed/probe")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "account_probe_refresh_failed"
+    assert "refresh token revoked" in body["error"]["message"]
 
 
 @pytest.mark.asyncio

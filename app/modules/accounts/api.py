@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.refresh import RefreshError
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
@@ -159,6 +160,11 @@ async def probe_account(
         result = await context.service.probe_account(account_id, model=requested_model)
     except AccountNotProbableError as exc:
         raise DashboardConflictError(str(exc), code="account_not_probable") from exc
+    except RefreshError as exc:
+        raise DashboardConflictError(
+            f"Probe could not refresh account credentials: {exc.message}",
+            code="account_probe_refresh_failed",
+        ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(

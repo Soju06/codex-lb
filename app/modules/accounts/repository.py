@@ -529,11 +529,17 @@ class AccountsRepository:
         chatgpt_account_id: str | None,
         workspace_id: str,
     ) -> bool:
-        predicates = [(Account.email == email) & (Account.workspace_id == workspace_id)]
         if chatgpt_account_id:
-            predicates.append(
-                (Account.chatgpt_account_id == chatgpt_account_id) & (Account.workspace_id == workspace_id)
-            )
+            predicates = [
+                (Account.chatgpt_account_id == chatgpt_account_id) & (Account.workspace_id == workspace_id),
+                (
+                    (Account.email == email)
+                    & (Account.workspace_id == workspace_id)
+                    & Account.chatgpt_account_id.is_(None)
+                ),
+            ]
+        else:
+            predicates = [(Account.email == email) & (Account.workspace_id == workspace_id)]
         result = await self._session.execute(
             select(Account.id).where(Account.id != account_id).where(or_(*predicates)).limit(1)
         )

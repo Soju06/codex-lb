@@ -249,6 +249,45 @@ async def test_account_slot_upgrades_single_legacy_unknown_workspace_row(db_setu
 
 
 @pytest.mark.asyncio
+async def test_workspace_slot_taken_ignores_same_email_workspace_when_chatgpt_identity_differs(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        first = _make_account("acc_first_slot", "slot-taken@example.com")
+        first.chatgpt_account_id = "raw_first_slot"
+        first.workspace_id = "ws_shared_slot"
+        await repo.upsert_account_slot(first, preserve_unknown_workspace_duplicates=False)
+
+        assert (
+            await repo.workspace_slot_taken(
+                account_id="acc_second_slot",
+                email="slot-taken@example.com",
+                chatgpt_account_id="raw_second_slot",
+                workspace_id="ws_shared_slot",
+            )
+            is False
+        )
+        assert (
+            await repo.workspace_slot_taken(
+                account_id="acc_second_slot",
+                email="slot-taken@example.com",
+                chatgpt_account_id="raw_first_slot",
+                workspace_id="ws_shared_slot",
+            )
+            is True
+        )
+        assert (
+            await repo.workspace_slot_taken(
+                account_id="acc_second_slot",
+                email="slot-taken@example.com",
+                chatgpt_account_id=None,
+                workspace_id="ws_shared_slot",
+            )
+            is True
+        )
+
+
+@pytest.mark.asyncio
 async def test_account_slot_keeps_distinct_workspace_chatgpt_identities(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

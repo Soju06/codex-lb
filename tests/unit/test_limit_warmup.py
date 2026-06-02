@@ -278,6 +278,11 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "upstream_error_code": None,
             "bridge_stage": None,
             "request_kind": "normal",
+            "upstream_proxy_route_mode": None,
+            "upstream_proxy_pool_id": None,
+            "upstream_proxy_endpoint_id": None,
+            "upstream_proxy_fallback_used": None,
+            "upstream_proxy_fail_closed_reason": None,
             "useragent": "codex-lb-limit-warmup",
             "useragent_group": "internal",
         }

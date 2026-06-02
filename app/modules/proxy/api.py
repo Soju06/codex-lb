@@ -1913,7 +1913,7 @@ def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, J
     value = raw.get(key)
     if not isinstance(value, list):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, JsonValue], item)) for item in value if isinstance(item, Mapping)]
 
 
 def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:

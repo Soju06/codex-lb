@@ -187,7 +187,11 @@ class AccountsRepository:
 
         existing = await self._session.get(Account, account.id)
         if existing:
-            if merge_by_email:
+            if merge_by_email or _is_workspace_less_reauth_for_known_slot(
+                existing,
+                account,
+                merge_by_chatgpt_identity=merge_by_chatgpt_identity,
+            ):
                 _apply_account_updates(existing, account)
                 await self._session.commit()
                 await self._session.refresh(existing)
@@ -633,9 +637,10 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     if source.chatgpt_account_id is not None:
         target.chatgpt_account_id = source.chatgpt_account_id
     target.email = source.email
-    target.workspace_id = source.workspace_id
-    target.workspace_label = source.workspace_label
-    target.seat_type = source.seat_type
+    if source.workspace_id is not None or target.workspace_id is None:
+        target.workspace_id = source.workspace_id
+        target.workspace_label = source.workspace_label
+        target.seat_type = source.seat_type
     target.plan_type = source.plan_type
     target.access_token_encrypted = source.access_token_encrypted
     target.refresh_token_encrypted = source.refresh_token_encrypted
@@ -673,6 +678,22 @@ def _same_unknown_workspace_identity(existing: Account, incoming: Account) -> bo
     return (
         not existing.workspace_id
         and not incoming.workspace_id
+        and existing.chatgpt_account_id == incoming.chatgpt_account_id
+        and existing.email == incoming.email
+    )
+
+
+def _is_workspace_less_reauth_for_known_slot(
+    existing: Account,
+    incoming: Account,
+    *,
+    merge_by_chatgpt_identity: bool,
+) -> bool:
+    return (
+        merge_by_chatgpt_identity
+        and existing.workspace_id is not None
+        and incoming.workspace_id is None
+        and incoming.chatgpt_account_id is not None
         and existing.chatgpt_account_id == incoming.chatgpt_account_id
         and existing.email == incoming.email
     )

@@ -416,6 +416,37 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspac
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_preserves_workspace_when_deterministic_id_matches(
+    db_setup,
+):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        workspace = _make_account_with_chatgpt_id("acc_reauth", "same-id-workspace@example.com", "chatgpt_same_id")
+        workspace.workspace_id = "ws_learned"
+        workspace.workspace_label = "Learned Workspace"
+        workspace.seat_type = "member"
+        workspace.plan_type = "team"
+        await repo.upsert(workspace, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_reauth", "same-id-workspace@example.com", "chatgpt_same_id")
+        reauth.workspace_id = None
+        reauth.workspace_label = None
+        reauth.seat_type = None
+        reauth.plan_type = "plus"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_reauth"
+        assert saved.workspace_id == "ws_learned"
+        assert saved.workspace_label == "Learned Workspace"
+        assert saved.seat_type == "member"
+        assert saved.plan_type == "plus"
+
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert [(account.id, account.workspace_id) for account in accounts] == [("acc_reauth", "ws_learned")]
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_workspace_less_reauth_uses_unknown_row(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

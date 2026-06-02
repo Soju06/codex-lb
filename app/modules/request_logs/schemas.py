@@ -24,6 +24,8 @@ class RequestLogEntry(DashboardModel):
     request_kind: str = "normal"
     model: str
     source: str | None = None
+    useragent: str | None = None
+    useragent_group: str | None = None
     transport: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None

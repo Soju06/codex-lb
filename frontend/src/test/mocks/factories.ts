@@ -309,6 +309,8 @@ export function createRequestLogEntry(
 		model: "gpt-5.1",
 		source: null,
 		transport: "http",
+		useragent: null,
+		useragentGroup: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,

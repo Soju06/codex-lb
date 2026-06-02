@@ -8,7 +8,7 @@ import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
-from typing import Any, Protocol, Self, cast
+from typing import Any, Iterator, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -214,6 +214,41 @@ def test_filter_inbound_headers_strips_proxy_identity_headers():
     assert "True-Client-IP" not in filtered
     assert filtered["User-Agent"] == "codex-test"
     assert filtered["Accept"] == "text/event-stream"
+
+
+def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
+    assert proxy_service._request_log_useragent_fields(
+        {
+            "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        }
+    ) == (
+        "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        "opencode",
+    )
+
+
+def test_request_log_useragent_fields_accept_lowercase_header_name() -> None:
+    assert proxy_service._request_log_useragent_fields(
+        {
+            "user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        }
+    ) == (
+        "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        "opencode",
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, (None, None)),
+        ({"User-Agent": "   \t\n "}, (None, None)),
+    ],
+)
+def test_request_log_useragent_fields_handle_missing_and_blank_headers(
+    headers: Mapping[str, str], expected: tuple[None, None]
+) -> None:
+    assert proxy_service._request_log_useragent_fields(headers) == expected
 
 
 def test_build_upstream_headers_overrides_auth():
@@ -1861,6 +1896,27 @@ async def test_write_request_log_persists_failure_metadata() -> None:
     assert call["bridge_stage"] == "owner_forward"
 
 
+@pytest.mark.asyncio
+async def test_write_request_log_persists_useragent_fields() -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    await service._write_request_log(
+        account_id="acc_request_log_useragent",
+        api_key=None,
+        request_id="resp_request_log_useragent",
+        model="gpt-5.4",
+        latency_ms=5,
+        status="success",
+        useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        useragent_group="opencode",
+    )
+
+    call = request_logs.calls[0]
+    assert call["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    assert call["useragent_group"] == "opencode"
+
+
 def test_request_log_failure_metadata_does_not_tag_direct_http_errors_as_owner_forward() -> None:
     metadata = proxy_service._request_log_failure_metadata(
         proxy_module.ProxyResponseError(
@@ -2119,6 +2175,15 @@ def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_affinity, "get_settings", lambda: settings)
+
+
+@pytest.fixture(autouse=True)
+def _reset_request_id_context() -> Iterator[None]:
+    token = set_request_id(None)
+    try:
+        yield
+    finally:
+        reset_request_id(token)
 
 
 def _make_account(account_id: str) -> Account:
@@ -5871,6 +5936,45 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_persists_useragent_fields_in_request_log(monkeypatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_useragent")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=OpenAIResponsePayload.model_validate({"output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+        }
+    )
+
+    await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact", "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+    )
+
+    assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    assert request_logs.calls[0]["useragent_group"] == "opencode"
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_does_not_infer_previous_response_id_from_session_scope(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -7660,6 +7764,51 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
     assert request_logs.calls[0]["request_id"] == "ws_req_budget_timeout"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_persists_useragent_fields_in_request_log(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_useragent",
+        model="gpt-5.1",
+        service_tier="default",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+    await service._connect_proxy_websocket(
+        {"user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    assert request_logs.calls[0]["useragent_group"] == "opencode"
 
 
 @pytest.mark.asyncio
@@ -19526,6 +19675,27 @@ def test_prepare_response_bridge_request_state_keeps_repeated_first_attempt_tool
     assert len(upstream_input) == 4
     assert upstream_input[2]["call_id"] == "call_repeat"
     assert upstream_input[3]["call_id"] == "call_repeat"
+
+
+def test_prepare_http_bridge_request_persists_useragent_on_request_state():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    headers: Mapping[str, str] = {
+        "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        "session_id": "sid-bridge-useragent",
+    }
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hello", "input": []})
+
+    request_state, text_data = service._prepare_http_bridge_request(
+        payload,
+        headers,
+        api_key=None,
+        api_key_reservation=None,
+    )
+
+    assert request_state.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    assert request_state.useragent_group == "opencode"
 
 
 @pytest.mark.asyncio

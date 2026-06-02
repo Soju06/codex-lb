@@ -20,7 +20,7 @@ def _make_account(account_id: str, email: str) -> Account:
         access_token_encrypted=encryptor.encrypt("access"),
         refresh_token_encrypted=encryptor.encrypt("refresh"),
         id_token_encrypted=encryptor.encrypt("id"),
-        last_refresh=datetime.now(timezone.utc),
+        last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )

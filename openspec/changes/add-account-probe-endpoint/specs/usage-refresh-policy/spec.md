@@ -8,7 +8,7 @@ The dashboard MUST expose an admin-only endpoint that sends a single minimal `re
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
 - **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=1`, `stream=true`, `store=false`
-- **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
+- **AND** the service triggers an immediate forced usage refresh for that account
 - **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
 
 #### Scenario: Probe rejects hard-blocked accounts

@@ -11011,6 +11011,8 @@ class ProxyService:
                                 account_id=account.id,
                             )
                         )
+                        await _release_tracked_stream_lease(current_account_lease)
+                        current_account_lease = None
                         excluded_account_ids.add(account.id)
                         require_security_work_authorized = True
                         last_security_work_retry_error = exc
@@ -11276,6 +11278,8 @@ class ProxyService:
                                     account_id=account.id,
                                 )
                             )
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
                             excluded_account_ids.add(account.id)
                             require_security_work_authorized = True
                             continue

@@ -5849,6 +5849,18 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
     regular_account = _make_account("acc_regular_security")
     authorized_account = _make_account("acc_authorized_security")
     authorized_account.security_work_authorized = True
+    regular_lease = AccountLease(
+        lease_id="lease_regular_security",
+        account_id=regular_account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    authorized_lease = AccountLease(
+        lease_id="lease_authorized_security",
+        account_id=authorized_account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "If this seems wrong, try rephrasing your request. "
@@ -5857,17 +5869,24 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
     )
     select_account = AsyncMock(
         side_effect=[
-            AccountSelection(account=regular_account, error_message=None),
-            AccountSelection(account=authorized_account, error_message=None),
+            AccountSelection(account=regular_account, error_message=None, lease=regular_lease),
+            AccountSelection(account=authorized_account, error_message=None, lease=authorized_lease),
         ]
     )
     record_error = AsyncMock()
+    released_leases: list[AccountLease] = []
+
+    async def release_account_lease(lease: AccountLease | None) -> None:
+        if lease is None:
+            return
+        released_leases.append(lease)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
     monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
@@ -5891,6 +5910,8 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
                 + "\n\n"
             )
             return
+        assert regular_lease in released_leases
+        assert authorized_lease not in released_leases
         yield (
             'data: {"type":"response.completed","response":'
             '{"id":"resp_ok","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
@@ -5920,6 +5941,8 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
     ]
     assert request_logs.calls[0]["error_code"] == "security_work_authorization_required"
     assert request_logs.calls[1]["status"] == "success"
+    assert regular_lease in released_leases
+    assert authorized_lease in released_leases
 
 
 @pytest.mark.asyncio

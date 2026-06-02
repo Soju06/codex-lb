@@ -9,7 +9,7 @@ This change adds the per-account "force-probe" admin endpoint requested in upstr
 - Add `POST /api/accounts/{account_id}/probe` (admin / dashboard auth) returning the probe HTTP status plus before/after `primary_used_percent`, `secondary_used_percent`, and account `status`.
 - The endpoint:
   1. Looks up the account; returns 404 if missing; 409 if `paused`/`deactivated` (probing a hard-blocked account is rejected).
-  2. Decrypts the account access token and sends a single minimal `responses.create` directly to `{upstream_base_url}/codex/responses` (stream=true, store=false, max_output_tokens=1). The call bypasses load-balancer scoring (it does not touch `LoadBalancer.select_account`) and consumes a tiny amount of upstream quota by design.
+  2. Ensures the account token is fresh, decrypts the current access token, and sends a single minimal `responses.create` directly to `{upstream_base_url}/codex/responses` (stream=true, store=false, max_output_tokens=1). The call bypasses load-balancer scoring (it does not touch `LoadBalancer.select_account`) and consumes a tiny amount of upstream quota by design.
   3. Triggers an immediate `UsageUpdater.force_refresh(account)` so the post-probe `/wham/usage` snapshot is persisted without being skipped by freshness/cooldown gates.
   4. Reloads the account + latest primary/secondary usage and returns the before/after snapshot.
 - Add `AccountProbeRequest` (optional `model`, default `gpt-5.5`) and `AccountProbeResponse` schemas in `app/modules/accounts/schemas.py`.

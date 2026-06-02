@@ -18,6 +18,7 @@ from app.core.auth import (
     token_expiry_epoch_ms,
 )
 from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
@@ -25,6 +26,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
@@ -82,6 +84,7 @@ class AccountsService:
         self._additional_usage_repo = additional_usage_repo
         self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
+        self._auth_manager = AuthManager(repo)
         self._encryptor = TokenEncryptor()
 
     async def list_accounts(self) -> list[AccountSummary]:
@@ -318,17 +321,28 @@ class AccountsService:
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
 
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
         probe_model = model or DEFAULT_PROBE_MODEL
-        probe_status = await self._send_probe_request(
-            access_token=access_token,
-            chatgpt_account_id=account.chatgpt_account_id,
-            model=probe_model,
-        )
-
-        if self._usage_repo and self._usage_updater:
-            await self._usage_updater.force_refresh(account)
+        try:
+            account = await self._ensure_fresh_for_probe(account)
+        except RefreshError as exc:
+            logger.warning(
+                "Probe token refresh failed account_id=%s error=%s",
+                account.id,
+                exc.code,
+            )
+            probe_status = PROBE_NETWORK_FAILURE_STATUS
             get_account_selection_cache().invalidate()
+        else:
+            access_token = self._encryptor.decrypt(account.access_token_encrypted)
+            probe_status = await self._send_probe_request(
+                access_token=access_token,
+                chatgpt_account_id=account.chatgpt_account_id,
+                model=probe_model,
+            )
+
+            if self._usage_repo and self._usage_updater:
+                await self._usage_updater.force_refresh(account)
+                get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
@@ -344,6 +358,9 @@ class AccountsService:
             account_status_before=status_before,
             account_status_after=refreshed.status.value,
         )
+
+    async def _ensure_fresh_for_probe(self, account: Account) -> Account:
+        return await self._auth_manager.ensure_fresh(account)
 
     async def _latest_usage_percents(self, account_id: str) -> tuple[float | None, float | None]:
         if self._usage_repo is None:

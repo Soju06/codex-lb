@@ -11,6 +11,14 @@ from app.modules.accounts.service import AccountsService
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _disable_probe_token_refresh(monkeypatch):
+    async def _fresh(self, account):  # noqa: ANN001, ARG001 - test helper
+        return account
+
+    monkeypatch.setattr(AccountsService, "_ensure_fresh_for_probe", _fresh)
+
+
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")

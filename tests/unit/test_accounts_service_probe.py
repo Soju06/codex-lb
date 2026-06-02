@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.service import (
@@ -64,6 +65,7 @@ def _build_service(
     usage_repo.latest_entry_for_account.side_effect = _latest_entry_for_account
 
     service = AccountsService(repo=repo, usage_repo=usage_repo)
+    service._ensure_fresh_for_probe = AsyncMock(return_value=account)  # type: ignore[method-assign]
     # Stop the real UsageUpdater from running — the unit test asserts the
     # service-level orchestration, not the refresh internals.
     usage_updater = AsyncMock()
@@ -147,6 +149,53 @@ async def test_probe_account_uses_default_model_when_omitted(monkeypatch):
     await service.probe_account(_ACCOUNT_ID)
 
     assert captured_kwargs["model"] == DEFAULT_PROBE_MODEL
+
+
+@pytest.mark.asyncio
+async def test_probe_account_refreshes_stale_token_before_upstream_probe(monkeypatch):
+    account = _make_account()
+    fresh_account = _make_account()
+    fresh_token = "fresh-access-token-not-a-real-secret"
+    encryptor = TokenEncryptor()
+    fresh_account.access_token_encrypted = encryptor.encrypt(fresh_token)
+    service = _build_service(account=account, primary_pct=10.0, secondary_pct=20.0)
+    service._ensure_fresh_for_probe = AsyncMock(return_value=fresh_account)  # type: ignore[method-assign]
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def _fake_probe(**kwargs):
+        captured_kwargs.update(kwargs)
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    await service.probe_account(_ACCOUNT_ID)
+
+    assert captured_kwargs["access_token"] == fresh_token
+    assert captured_kwargs["chatgpt_account_id"] == _CHATGPT_ACCOUNT_ID
+
+
+@pytest.mark.asyncio
+async def test_probe_account_does_not_send_probe_when_token_refresh_fails(monkeypatch):
+    account = _make_account()
+    service = _build_service(account=account, primary_pct=10.0, secondary_pct=20.0)
+    service._ensure_fresh_for_probe = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RefreshError("token_expired", "Token expired", True),
+    )
+
+    async def _fake_probe(**kwargs):
+        raise AssertionError("probe request should not be sent with a stale token")
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 0
+    assert service._usage_updater is not None
+    force_refresh_mock = service._usage_updater.force_refresh
+    assert isinstance(force_refresh_mock, AsyncMock)
+    force_refresh_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,12 @@
 
 The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
 
+#### Scenario: Probe refreshes stale token before upstream request
+- **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
+- **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
+- **AND** the account access token is stale
+- **THEN** the service refreshes the token before sending the upstream probe request
+
 #### Scenario: Probe wakes the upstream limiter and refreshes usage state
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`

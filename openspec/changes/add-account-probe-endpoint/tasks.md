@@ -9,6 +9,7 @@
   - returns `None` when the account is missing,
   - raises `AccountNotProbableError` when `status in (PAUSED, DEACTIVATED)`,
   - captures `primary` and `secondary` usage snapshots via `self._usage_repo.latest_entry_for_account`,
+  - refreshes stale account token material before decrypting and sending the probe,
   - decrypts the access token via `self._encryptor.decrypt`,
   - calls a new private `_send_probe_request(*, access_token, chatgpt_account_id, model) -> int` helper using the shared leased HTTP session, a 30s total timeout, a 10s `sock_connect` timeout, the upstream HTTP status on response, and `0` on network failure,
   - triggers `self._usage_updater.force_refresh(account)` after the probe so the post-probe `/wham/usage` fetch bypasses freshness/cooldown gates while respecting the refresh kill switch,
@@ -31,6 +32,8 @@
   - `test_probe_account_rejects_deactivated_account`
   - `test_probe_account_captures_before_after_snapshot`
   - `test_probe_account_uses_default_model_when_omitted`
+  - `test_probe_account_refreshes_stale_token_before_upstream_probe`
+  - `test_probe_account_does_not_send_probe_when_token_refresh_fails`
   - `test_probe_account_never_logs_access_token`
   - `test_probe_account_surfaces_network_failure_status`
   - `test_send_probe_request_uses_shared_http_client`

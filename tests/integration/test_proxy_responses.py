@@ -682,10 +682,7 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
-    assert (
-        response.json()["error"]["message"]
-        == "Previous response owner account is unavailable; retry later."
-    )
+    assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
 
 
 @pytest.mark.asyncio

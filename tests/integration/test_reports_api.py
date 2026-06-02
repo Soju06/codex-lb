@@ -26,8 +26,12 @@ def _make_account(account_id: str, email: str) -> Account:
     )
 
 
+def _naive_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=None)
+
+
 async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
-    start_at = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    start_at = _naive_utc(datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports", "reports@example.com"))
         session.add_all(
@@ -97,8 +101,8 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
 
 
 async def test_reports_api_includes_end_date_until_next_midnight(async_client, db_setup):
-    end_day_last_second = datetime(2026, 6, 1, 23, 59, 59, tzinfo=timezone.utc)
-    next_day_midnight = datetime(2026, 6, 2, 0, 0, 0, tzinfo=timezone.utc)
+    end_day_last_second = _naive_utc(datetime(2026, 6, 1, 23, 59, 59, tzinfo=timezone.utc))
+    next_day_midnight = _naive_utc(datetime(2026, 6, 2, 0, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports_end", "reports-end@example.com"))
         session.add_all(
@@ -142,7 +146,7 @@ async def test_reports_api_includes_end_date_until_next_midnight(async_client, d
 
 
 async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
-    start_at = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    start_at = _naive_utc(datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports_warmup", "reports-warmup@example.com"))
         session.add_all(
@@ -188,7 +192,7 @@ async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
 
 
 async def test_reports_api_applies_account_and_model_filters(async_client, db_setup):
-    start_at = datetime(2026, 6, 1, 13, 0, 0, tzinfo=timezone.utc)
+    start_at = _naive_utc(datetime(2026, 6, 1, 13, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add_all(
             [
@@ -261,7 +265,7 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
 
 
 async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
-    start_at = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
+    start_at = _naive_utc(datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports_unpriced", "reports-unpriced@example.com"))
         session.add_all(
@@ -319,7 +323,7 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
                 RequestLog(
                     account_id="acc_reports_sparse_a",
                     request_id="report-sparse-a",
-                    requested_at=datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc),
+                    requested_at=_naive_utc(datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)),
                     model="gpt-5.1",
                     status="success",
                     input_tokens=5,
@@ -330,7 +334,7 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
                 RequestLog(
                     account_id="acc_reports_sparse_b",
                     request_id="report-sparse-b",
-                    requested_at=datetime(2026, 6, 3, 10, 0, 0, tzinfo=timezone.utc),
+                    requested_at=_naive_utc(datetime(2026, 6, 3, 10, 0, 0, tzinfo=timezone.utc)),
                     model="gpt-5.1",
                     status="success",
                     input_tokens=5,

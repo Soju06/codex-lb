@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
+from app.core.utils.time import to_utc_naive, utcnow
 from app.modules.reports.repository import ReportsRepository
 from app.modules.reports.schemas import (
     AccountCostEntry,
@@ -23,11 +24,13 @@ class ReportsService:
         account_ids: list[str] | None = None,
         model: str | None = None,
     ) -> ReportsResponse:
-        now = datetime.now(timezone.utc)
+        now = utcnow()
         if end_date is None:
             end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
         if start_date is None:
             start_date = (end_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_date = to_utc_naive(start_date)
+        end_date = to_utc_naive(end_date)
 
         daily = await self._repository.aggregate_daily(start_date, end_date, account_ids, model)
         by_model = await self._repository.aggregate_by_model(start_date, end_date, account_ids, model)

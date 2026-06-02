@@ -557,7 +557,7 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
             return False
         existing_type = diff[5]
         metadata_type = diff[6]
-        return existing_type.__class__.__name__.upper() == "REAL" and metadata_type.__class__.__name__ == "Float"
+        return str(existing_type).upper() == "REAL" and str(metadata_type).upper() in {"FLOAT", "REAL"}
 
     return False
 

@@ -9,7 +9,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -127,6 +127,16 @@ async def test_warmup_request_logs_are_excluded_from_dashboard_api_key_and_accou
         assert key_usage_7d.total_requests == 1
         assert key_usage_7d.total_tokens == 15
         assert key_usage_7d.cached_input_tokens == 3
+
+        key_account_costs = await api_keys_repo.usage_7d_by_account("key-warmup-exclusion", since, until)
+        assert key_account_costs == [
+            ApiKeyAccountCost(
+                account_id="acc-warmup-exclusion",
+                email="warmup-exclusion@example.com",
+                cost_usd=key_usage_7d.total_cost_usd,
+                is_deleted=False,
+            )
+        ]
 
         account_usage = await accounts_repo.list_request_usage_summary_by_account(["acc-warmup-exclusion"])
         summary = account_usage["acc-warmup-exclusion"]

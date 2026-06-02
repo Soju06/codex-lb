@@ -6,9 +6,9 @@ Operators need a way to proactively warm account pools before real traffic arriv
 
 - Add `POST /v1/warmup` with API-key authentication behavior aligned to existing `/v1/*` proxy routes.
 - Add warmup modes:
-  - `default`: warm only accounts with a usable primary (5h) usage row and 100% remaining.
-  - `all-or-none`: reject unless every target account satisfies the same eligibility.
-  - `force-update`: warm all target accounts regardless of usage.
+  - `normal`: warm only accounts with a usable primary (5h) usage row and 100% remaining.
+  - `strict`: reject unless every target account satisfies the same eligibility.
+  - `force`: warm all target accounts regardless of usage.
 - Add configurable warmup model setting with default `gpt-5.4-mini`; this setting determines the upstream warmup request `model` value (it is not an upstream `warmup_model` field).
 - Run warmup fan-out in parallel with a bounded max concurrency of 5 accounts per execution.
 - Persist and expose warmup requests in request logs as a distinct request kind.

@@ -1539,6 +1539,7 @@ def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_f
         "additional_quota_data_unavailable",
         "no_additional_quota_eligible_accounts",
         "bridge_instance_mismatch",
+        "previous_response_owner_unavailable",
     ],
 )
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_selection_failures(
@@ -17193,6 +17194,43 @@ async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monke
     record_success.assert_not_awaited()
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
+
+
+@pytest.mark.asyncio
+async def test_files_finalize_pinned_initial_selection_does_not_fall_back(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    pinned_account = _make_account("acc_files_finalize_initial_pinned")
+    fallback_account = _make_account("acc_files_finalize_initial_fallback")
+    select_account_calls: list[dict[str, object]] = []
+
+    async def select_account_with_budget(_deadline: float, **kwargs: object) -> AccountSelection:
+        select_account_calls.append(dict(kwargs))
+        if kwargs.get("fallback_on_preferred_account_unavailable") is False:
+            return AccountSelection(
+                account=None,
+                error_message="Preferred account is unavailable",
+                error_code="preferred_account_unavailable",
+            )
+        return AccountSelection(account=fallback_account, error_message=None)
+
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account_with_budget)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=fallback_account))
+    finalize_file = AsyncMock(side_effect=AssertionError("pinned finalize must not invoke a fallback account"))
+    monkeypatch.setattr(proxy_service, "core_finalize_file", finalize_file)
+    await service._pin_file_account("file_pinned_initial", pinned_account.id)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.finalize_file("file_pinned_initial", {"session_id": "sid-files-finalize"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 503
+    assert _proxy_error_code(exc) == "preferred_account_unavailable"
+    assert select_account_calls[0]["preferred_account_id"] == pinned_account.id
+    assert select_account_calls[0]["fallback_on_preferred_account_unavailable"] is False
+    finalize_file.assert_not_awaited()
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] is None
 
 
 def test_prepare_response_bridge_request_state_dedupes_replayed_previous_response_tool_calls_before_serializing():

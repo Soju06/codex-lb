@@ -7,7 +7,7 @@ This change crosses proxy API/service, settings persistence/UI, request-log sche
 ## Goals / Non-Goals
 
 **Goals:**
-- Add `POST /v1/warmup` with `default`, `all-or-none`, and `force-update` modes.
+- Add `POST /v1/warmup` with `normal`, `strict`, and `force` modes.
 - Use API-key account scope semantics for the warmup target pool.
 - Persist warmup requests as identifiable request-log rows.
 - Exclude warmup rows from aggregate dashboard metrics and API-key usage accounting.
@@ -40,8 +40,8 @@ This change crosses proxy API/service, settings persistence/UI, request-log sche
 - **Why:** reduces warmup completion time for larger account pools while keeping upstream burst pressure bounded and predictable.
 - **Alternatives considered:** fully sequential execution (rejected due to slower pool warmup), fully unbounded fan-out (rejected due to upstream pressure risk).
 
-### Decision: Scope-aware target pool with strict all-or-none validation
-- **Choice:** scope by assigned accounts when enabled, else all active accounts; `all-or-none` rejects if any account lacks a valid primary 5h 100%-remaining state.
+### Decision: Scope-aware target pool with strict validation
+- **Choice:** scope by assigned accounts when enabled, else all active accounts; `strict` rejects if any account lacks a valid primary 5h 100%-remaining state.
 - **Why:** matches product requirements and explicit strict pool semantics.
 
 ## Risks / Trade-offs

@@ -3837,8 +3837,8 @@ class ProxyService:
         translate ``FileProxyError`` -> ``ProxyResponseError``, and always
         write a request-log entry on the way out. When
         ``preferred_account_id`` is provided (e.g. from the file_id pin
-        for ``finalize_file``), prefer that account if it is still live;
-        fall back to a fresh selection otherwise.
+        for ``finalize_file``), the call is strict to that account and
+        fails closed when the owner account is unavailable.
         """
         filtered = filter_inbound_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
@@ -3864,6 +3864,7 @@ class ProxyService:
                 routing_strategy=routing_strategy,
                 model=None,
                 preferred_account_id=preferred_account_id,
+                fallback_on_preferred_account_unavailable=preferred_account_id is None,
             )
             account = selection.account
             if not account:
@@ -14156,6 +14157,8 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "bridge_owner_forward_failed",
         "bridge_instance_mismatch",
         "bridge_owner_unreachable",
+        "preferred_account_unavailable",
+        "previous_response_owner_unavailable",
         "insufficient_image_quota",
         "ip_forbidden",
         "no_accounts",

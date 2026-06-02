@@ -793,6 +793,7 @@ class ApiKeysRepository:
                 RequestLog.api_key_id == key_id,
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
+                self._exclude_warmup_clause(),
             )
             .group_by(RequestLog.account_id, Account.email, deleted_expr)
         )

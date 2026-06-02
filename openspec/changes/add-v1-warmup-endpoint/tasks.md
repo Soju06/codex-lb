@@ -11,7 +11,7 @@
 ## 3. Warmup API and service flow
 
 - [x] 3.1 Add `POST /v1/warmup` route and request/response schemas.
-- [x] 3.2 Implement warmup mode logic (`default`, `all-or-none`, `force-update`) with strict primary-window eligibility checks.
+- [x] 3.2 Implement warmup mode logic (`normal`, `strict`, `force`) with strict primary-window eligibility checks.
 - [x] 3.3 Implement scoped/unscoped target-pool resolution from API key behavior.
 - [x] 3.4 Implement upstream warmup submission and per-account result summary generation.
 - [x] 3.5 Run warmup submissions in parallel with a fixed max concurrency of 5 accounts.
@@ -31,7 +31,7 @@
 
 ## 6. Verification
 
-- [x] 6.1 Add/adjust backend tests for warmup modes, strict all-or-none rejection, and request-log tagging.
+- [x] 6.1 Add/adjust backend tests for warmup modes, strict rejection, and request-log tagging.
 - [x] 6.2 Add/adjust aggregate tests proving warmup exclusion from dashboard and API-key accounting paths.
 - [x] 6.3 Add/adjust frontend tests for settings schema/control and warmup request-log rendering.
 - [x] 6.4 Add/adjust backend test coverage for bounded warmup parallelism (max 5 in-flight submissions).

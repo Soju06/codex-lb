@@ -16561,6 +16561,72 @@ async def test_thread_goal_upstream_connection_reset_fails_over_after_freshness(
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_failover_401_force_refreshes_fallback_account(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_call_a")
+    account_b = _make_account("acc_thread_goal_call_b")
+    refreshed_b = _make_account("acc_thread_goal_call_b")
+    refreshed_b.access_token_encrypted = service._encryptor.encrypt("access-refreshed-b")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_tokens: list[str] = []
+    refresh_forces: list[tuple[str, bool]] = []
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+
+    async def fake_ensure_fresh(account, *, force=False, timeout_seconds=None):
+        del timeout_seconds
+        refresh_forces.append((account.id, force))
+        if account.id == account_b.id and force:
+            return refreshed_b
+        return account
+
+    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+
+    async def fake_thread_goal_request(
+        operation: str,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        method: str,
+        timeout_seconds: float,
+    ) -> dict[str, JsonValue]:
+        del operation, payload, headers, account_id, method, timeout_seconds
+        upstream_tokens.append(access_token)
+        if access_token == "access-token":
+            if len(upstream_tokens) == 1:
+                raise proxy_module.ProxyResponseError(
+                    502,
+                    openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+                    failure_phase="connect",
+                )
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "stale fallback token"),
+            )
+        return {"goal": {"id": "goal-ok-after-fallback-refresh"}}
+
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
+
+    response = await service.thread_goal_request("get", {}, {"session_id": "sid-thread-goal"})
+
+    assert response == {"goal": {"id": "goal-ok-after-fallback-refresh"}}
+    assert upstream_tokens == ["access-token", "access-token", "access-refreshed-b"]
+    assert refresh_forces == [(account_a.id, False), (account_b.id, False), (account_b.id, True)]
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    record_error.assert_awaited_once_with(account_a)
+    record_success.assert_awaited_once_with(refreshed_b)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["account_id"] == refreshed_b.id
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_body_read_connection_reset_does_not_fail_over(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

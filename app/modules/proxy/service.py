@@ -12720,6 +12720,31 @@ class ProxyService:
         except ProxyResponseError as failover_exc:
             failover_failed_account = _proxy_response_failed_account(failover_exc, next_account)
             setattr(failover_exc, _FAILED_ACCOUNT_ATTR, failover_failed_account)
+            if failover_exc.status_code == 401:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    _raise_proxy_budget_exhausted()
+                try:
+                    refreshed_account = await self._ensure_fresh_with_budget_or_auth_error(
+                        next_account,
+                        force=True,
+                        timeout_seconds=remaining_budget,
+                    )
+                except ProxyResponseError as refresh_exc:
+                    refresh_failed_account = _proxy_response_failed_account(refresh_exc, next_account)
+                    setattr(refresh_exc, _FAILED_ACCOUNT_ATTR, refresh_failed_account)
+                    if refresh_exc.status_code != 401:
+                        await self._handle_proxy_error(refresh_failed_account, refresh_exc)
+                    raise
+                try:
+                    retry_result = await call_next(refreshed_account)
+                except ProxyResponseError as retry_exc:
+                    retry_failed_account = _proxy_response_failed_account(retry_exc, refreshed_account)
+                    setattr(retry_exc, _FAILED_ACCOUNT_ATTR, retry_failed_account)
+                    await self._handle_proxy_error(retry_failed_account, retry_exc)
+                    raise
+                await self._load_balancer.record_success(refreshed_account)
+                return refreshed_account, retry_result
             await self._handle_proxy_error(failover_failed_account, failover_exc)
             raise
         await self._load_balancer.record_success(next_account)
@@ -12729,11 +12754,12 @@ class ProxyService:
         self,
         account: Account,
         *,
+        force: bool = False,
         timeout_seconds: float | None = None,
         error_type: str = "invalid_request_error",
     ) -> Account:
         try:
-            return await self._ensure_fresh_with_budget(account, timeout_seconds=timeout_seconds)
+            return await self._ensure_fresh_with_budget(account, force=force, timeout_seconds=timeout_seconds)
         except RefreshError as refresh_exc:
             failed_account = _refresh_error_failed_account(refresh_exc, account)
             if refresh_exc.transport_error:

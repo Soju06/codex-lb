@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select, update
@@ -185,7 +186,7 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
     assert len(rows) == 1
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
-    assert limit.current_value == 2
+    assert limit.current_value == 0
 
 
 @pytest.mark.asyncio
@@ -438,7 +439,7 @@ async def test_warmup_rejects_disallowed_model_without_upstream_calls(async_clie
 
 
 @pytest.mark.asyncio
-async def test_warmup_enforces_api_key_limits_before_upstream_calls(async_client, monkeypatch):
+async def test_warmup_ignores_api_key_limits_for_accounting(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
     eligible_id = await _import_account(async_client, "acc-warmup-limited", "warmup-limited@example.com")
@@ -464,7 +465,14 @@ async def test_warmup_enforces_api_key_limits_before_upstream_calls(async_client
         del args, kwargs
         nonlocal called
         called = True
-        return CompactResponsePayload.model_validate({"object": "response.compact", "id": "resp-not-used"})
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": "resp-warmup-limited",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
 
@@ -474,17 +482,21 @@ async def test_warmup_enforces_api_key_limits_before_upstream_calls(async_client
         json={"mode": "normal"},
     )
 
-    assert response.status_code == 429
-    assert called is False
+    assert response.status_code == 200
+    assert called is True
     async with SessionLocal() as session:
         log_row = (
             await session.execute(
                 select(RequestLog).where(RequestLog.request_kind == "warmup").order_by(RequestLog.id.desc())
             )
         ).scalar_one()
-    assert log_row.status == "error"
-    assert log_row.error_code == "rate_limit_exceeded"
-    assert "Usage resets at" in (log_row.error_message or "")
+        limit = (
+            await session.execute(
+                select(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id, ApiKeyLimit.limit_type == "total_tokens")
+            )
+        ).scalar_one()
+    assert log_row.status == "success"
+    assert limit.current_value == 1
 
 
 @pytest.mark.asyncio
@@ -596,7 +608,7 @@ async def test_warmup_account_rate_limit_failure_does_not_abort_summary(async_cl
 
 
 @pytest.mark.asyncio
-async def test_warmup_api_key_limit_mid_fanout_does_not_abort_summary(async_client, monkeypatch):
+async def test_warmup_does_not_reserve_api_key_usage(async_client, monkeypatch):
     await _enable_api_key_auth(async_client)
     first_raw_id = "acc-warmup-key-limit-a"
     first_id = await _import_account(async_client, first_raw_id, "warmup-key-limit-a@example.com")
@@ -609,15 +621,7 @@ async def test_warmup_api_key_limit_mid_fanout_does_not_abort_summary(async_clie
         del self, force, timeout_seconds
         return account
 
-    reservation_attempts = 0
-
-    async def _fake_reserve(self, api_key, *, request_model, request_service_tier, request_usage_budget=None):
-        del self, api_key, request_model, request_service_tier, request_usage_budget
-        nonlocal reservation_attempts
-        reservation_attempts += 1
-        if reservation_attempts == 2:
-            raise ProxyRateLimitError("api key limit exhausted")
-        return None
+    reserve_usage = AsyncMock()
 
     async def _fake_compact(payload, headers, access_token, account_id, session=None):
         del payload, headers, access_token, session
@@ -631,7 +635,7 @@ async def test_warmup_api_key_limit_mid_fanout_does_not_abort_summary(async_clie
         )
 
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
-    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", _fake_reserve)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", reserve_usage)
     monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
 
     response = await async_client.post(
@@ -643,15 +647,9 @@ async def test_warmup_api_key_limit_mid_fanout_does_not_abort_summary(async_clie
     assert response.status_code == 200
     payload = response.json()
     assert payload["total_accounts"] == 2
-    assert len(payload["submitted"]) == 1
-    assert payload["submitted"][0]["account_id"] == first_id
-    assert payload["failed"] == [
-        {
-            "account_id": second_id,
-            "error_code": "rate_limit_exceeded",
-            "error_message": "api key limit exhausted",
-        }
-    ]
+    assert [entry["account_id"] for entry in payload["submitted"]] == [first_id, second_id]
+    assert payload["failed"] == []
+    reserve_usage.assert_not_awaited()
 
 
 @pytest.mark.asyncio

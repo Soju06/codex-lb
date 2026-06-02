@@ -3253,7 +3253,6 @@ class ProxyService:
         cached_input_tokens: int | None = None
         reasoning_tokens: int | None = None
         reservation: ApiKeyUsageReservationData | None = None
-        usage_reservation_checked = False
 
         try:
             refresh_timeout = max(1.0, float(get_settings().upstream_connect_timeout_seconds))
@@ -3267,13 +3266,6 @@ class ProxyService:
                 store=False,
             )
             normalize_upstream_model_alias(payload)
-            reservation = await self._reserve_websocket_api_key_usage(
-                api_key,
-                request_model=payload.model,
-                request_service_tier=None,
-                request_usage_budget=estimate_api_key_request_usage(payload),
-            )
-            usage_reservation_checked = True
             response = await core_compact_responses(
                 payload,
                 upstream_headers,
@@ -3291,12 +3283,6 @@ class ProxyService:
             )
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
-            )
-            await self._settle_compact_api_key_usage(
-                api_key=api_key,
-                api_key_reservation=reservation,
-                response=response,
-                request_service_tier=None,
             )
         except RefreshError as exc:
             if exc.is_permanent:
@@ -3317,12 +3303,12 @@ class ProxyService:
         except ProxyAuthError as exc:
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
-            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
+            if not allow_pre_submit_errors_as_result:
                 raise
         except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
-            if not usage_reservation_checked and not allow_pre_submit_errors_as_result:
+            if not allow_pre_submit_errors_as_result:
                 raise
         except Exception as exc:
             error_code = "upstream_error"

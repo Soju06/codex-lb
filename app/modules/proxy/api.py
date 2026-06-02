@@ -1985,15 +1985,6 @@ async def v1_chat_completions(
                 payload,
                 headers=rate_limit_headers,
             )
-        cursor_context_limit_error = _cursor_context_length_error_envelope(api_key, startup_error)
-        if cursor_context_limit_error is not None:
-            await _release_reservation(reservation)
-            return _cursor_context_length_chat_response(
-                payload.stream,
-                responses_payload.model,
-                cursor_context_limit_error,
-                headers=rate_limit_headers,
-            )
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options

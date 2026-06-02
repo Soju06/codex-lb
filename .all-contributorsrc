@@ -552,6 +552,16 @@
         "code",
         "design"
       ]
+    },
+    {
+      "login": "mercenarioZ",
+      "name": "mercenarioZ",
+      "avatar_url": "https://avatars.githubusercontent.com/u/122884010?v=4",
+      "profile": "https://github.com/mercenarioZ",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

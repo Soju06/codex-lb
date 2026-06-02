@@ -177,7 +177,7 @@ async def test_thread_goal_get_forwards_upstream_goal(async_client, monkeypatch,
             "operation": "get",
             "payload": {"threadId": thread_id},
             "access_token": "access-token",
-            "account_id": generate_unique_account_id("acc_goal_get", "goal-get@example.com"),
+            "account_id": "acc_goal_get",
             "method": method,
             "timeout_seconds": calls[0]["timeout_seconds"],
             "session_id": "goal-session",
@@ -244,10 +244,7 @@ async def test_thread_goal_mutations_forward_upstream(
         operation,
         payload,
         "access-token",
-        generate_unique_account_id(
-            f"acc_goal_{operation}",
-            f"goal-{operation}@example.com",
-        ),
+        f"acc_goal_{operation}",
         "POST",
     )
     assert isinstance(calls[0][5], float)
@@ -513,7 +510,7 @@ async def test_thread_goal_set_uses_active_account_when_budget_selection_is_empt
         "clear",
         payload,
         "access-token",
-        generate_unique_account_id("acc_goal_control", "goal-control@example.com"),
+        "acc_goal_control",
         "POST",
     )
     assert isinstance(calls[0][5], float)
@@ -592,7 +589,7 @@ async def test_codex_control_json_endpoints_forward_upstream(
             "query_params": {},
             "session_id": "control-session",
             "access_token": "access-token",
-            "account_id": generate_unique_account_id("acc_codex_control", "codex-control@example.com"),
+            "account_id": "acc_codex_control",
             "timeout_seconds": calls[0]["timeout_seconds"],
         }
     ]
@@ -642,7 +639,7 @@ async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, m
             b"v=offer\r\n",
             "application/sdp",
             "access-token",
-            generate_unique_account_id("acc_codex_realtime", "codex-realtime@example.com"),
+            "acc_codex_realtime",
             calls[0][6],
         )
     ]
@@ -772,7 +769,7 @@ async def test_codex_agent_identity_jwks_routes_forward_upstream(async_client, m
         None,
         [("kid", "test"), ("kid", "next")],
         "access-token",
-        generate_unique_account_id("acc_codex_jwks", "codex-jwks@example.com"),
+        "acc_codex_jwks",
     )
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0

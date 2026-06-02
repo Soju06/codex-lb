@@ -574,15 +574,14 @@ def select_account(
         selected = min(candidate_pool, key=lambda state: _reset_drain_sort_key(state, current))
         return SelectionResult(selected, None)
 
-    burn_first = [s for s in available if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
-    normal = [s for s in available if _routing_policy(s) == ROUTING_POLICY_NORMAL]
-    preserve = [s for s in available if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
-    policy_pool = burn_first or normal or preserve or available
-
-    healthy = [s for s in policy_pool if s.health_tier == HEALTH_TIER_HEALTHY]
-    probing = [s for s in policy_pool if s.health_tier == HEALTH_TIER_PROBING]
-    draining = [s for s in policy_pool if s.health_tier == HEALTH_TIER_DRAINING]
-    effective_pool = healthy or probing or draining or policy_pool
+    healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
+    probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
+    draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
+    health_pool = healthy or probing or draining or available
+    burn_first = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
+    normal = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_NORMAL]
+    preserve = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
+    effective_pool = burn_first or normal or preserve or health_pool
     effective_prefer_earlier_reset = prefer_earlier_reset and routing_strategy != "relative_availability"
 
     if routing_strategy == "round_robin":

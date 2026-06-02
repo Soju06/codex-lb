@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.balancer import (
+    HEALTH_TIER_DRAINING,
+    HEALTH_TIER_HEALTHY,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -301,6 +303,35 @@ def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
 
     assert result.account is not None
     assert result.account.account_id == "temp"
+
+
+def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "temp",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
 
 
 def test_budget_safe_selection_falls_back_when_burn_first_unavailable():

@@ -2300,7 +2300,8 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
         )
 
-    burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
+    best_health_states = _best_health_tier_states(state_list)
+    burn_first_states = [state for state in best_health_states if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
     if burn_first_states:
         burn_first = select_account(
             burn_first_states,
@@ -2368,6 +2369,17 @@ def _select_account_preferring_budget_safe(
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
     )
+
+
+def _best_health_tier_states(states: list[AccountState]) -> list[AccountState]:
+    healthy = [state for state in states if state.health_tier == HEALTH_TIER_HEALTHY]
+    if healthy:
+        return healthy
+    probing = [state for state in states if state.health_tier == HEALTH_TIER_PROBING]
+    if probing:
+        return probing
+    draining = [state for state in states if state.health_tier == HEALTH_TIER_DRAINING]
+    return draining or states
 
 
 def _is_upstream_circuit_breaker_open() -> bool:

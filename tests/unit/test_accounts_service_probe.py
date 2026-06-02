@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -9,6 +8,7 @@ import pytest
 
 from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
@@ -34,7 +34,7 @@ def _make_account(status: AccountStatus = AccountStatus.ACTIVE) -> Account:
         access_token_encrypted=encryptor.encrypt(_PROBE_TOKEN_PLAINTEXT),
         refresh_token_encrypted=encryptor.encrypt("refresh"),
         id_token_encrypted=encryptor.encrypt("id"),
-        last_refresh=datetime(2026, 5, 17),
+        last_refresh=utcnow(),
         status=status,
         deactivation_reason=None,
     )
@@ -65,7 +65,6 @@ def _build_service(
     usage_repo.latest_entry_for_account.side_effect = _latest_entry_for_account
 
     service = AccountsService(repo=repo, usage_repo=usage_repo)
-    service._ensure_fresh_for_probe = AsyncMock(return_value=account)  # type: ignore[method-assign]
     # Stop the real UsageUpdater from running — the unit test asserts the
     # service-level orchestration, not the refresh internals.
     usage_updater = AsyncMock()
@@ -159,7 +158,7 @@ async def test_probe_account_refreshes_stale_token_before_upstream_probe(monkeyp
     encryptor = TokenEncryptor()
     fresh_account.access_token_encrypted = encryptor.encrypt(fresh_token)
     service = _build_service(account=account, primary_pct=10.0, secondary_pct=20.0)
-    service._ensure_fresh_for_probe = AsyncMock(return_value=fresh_account)  # type: ignore[method-assign]
+    monkeypatch.setattr(service, "_ensure_fresh_for_probe", AsyncMock(return_value=fresh_account))
 
     captured_kwargs: dict[str, Any] = {}
 
@@ -179,8 +178,10 @@ async def test_probe_account_refreshes_stale_token_before_upstream_probe(monkeyp
 async def test_probe_account_does_not_send_probe_when_token_refresh_fails(monkeypatch):
     account = _make_account()
     service = _build_service(account=account, primary_pct=10.0, secondary_pct=20.0)
-    service._ensure_fresh_for_probe = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RefreshError("token_expired", "Token expired", True),
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_for_probe",
+        AsyncMock(side_effect=RefreshError("token_expired", "Token expired", True)),
     )
 
     async def _fake_probe(**kwargs):

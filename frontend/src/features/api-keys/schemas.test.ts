@@ -81,6 +81,21 @@ describe("ApiKeySchema", () => {
     expect(parsed.pooledRemainingPercentSecondary).toBe(85.0);
     expect(parsed.pooledCapacityCreditsPrimary).toBe(225.0);
   });
+
+  it("defaults usage sections to both visible sections", () => {
+    const parsed = ApiKeySchema.parse({
+      id: "key-1",
+      name: "Service Key",
+      keyPrefix: "sk-live",
+      allowedModels: null,
+      expiresAt: null,
+      isActive: true,
+      createdAt: ISO,
+      lastUsedAt: null,
+    });
+
+    expect(parsed.usageSections).toBe("upstream_limits,account_pool_usage");
+  });
 });
 
 describe("ApiKeyCreateResponseSchema", () => {
@@ -107,9 +122,11 @@ describe("ApiKeyCreateRequestSchema", () => {
     const parsed = ApiKeyCreateRequestSchema.parse({
       name: "Scoped Key",
       assignedAccountIds: ["acc_primary"],
+      usageSections: "account_pool_usage",
     });
 
     expect(parsed.assignedAccountIds).toEqual(["acc_primary"]);
+    expect(parsed.usageSections).toBe("account_pool_usage");
   });
 
   it("accepts opportunistic traffic class in create payload", () => {
@@ -140,11 +157,13 @@ describe("ApiKeyUpdateRequestSchema", () => {
       weeklyTokenLimit: 50000,
       expiresAt: ISO,
       isActive: false,
+      usageSections: "upstream_limits",
     });
 
     expect(parsed.name).toBe("Updated Key");
     expect(parsed.applyToCodexModel).toBe(true);
     expect(parsed.isActive).toBe(false);
+    expect(parsed.usageSections).toBe("upstream_limits");
   });
 
   it("rejects invalid weeklyTokenLimit", () => {

@@ -34,7 +34,7 @@ The computation SHALL use the same account scope as the API key's assigned accou
 
 - **WHEN** a valid API key calls `GET /v1/usage`
 - **AND** the API key's `usage_sections` does NOT include `account_pool_usage`
-- **THEN** the response does NOT include `account_pool_usage`
+- **THEN** `account_pool_usage` is `null`
 
 ### Requirement: API key usage_sections controls which /v1/usage detail sections are returned
 

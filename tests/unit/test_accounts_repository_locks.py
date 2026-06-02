@@ -55,7 +55,8 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
     async def fake_merge_by_email_enabled() -> bool:  # only used when merge_by_email is None
         return True
 
-    async def fake_account_by_chatgpt_identity(_chatgpt_id: str):
+    async def fake_account_by_chatgpt_identity(_chatgpt_id: str, *, workspace_id: str | None):
+        del workspace_id
         return None
 
     async def fake_single_account_by_email(_email: str):

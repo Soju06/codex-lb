@@ -7503,7 +7503,7 @@ class ProxyService:
                                 current_session = http_bridge_sessions.get(session.key)
                     elif http_bridge_sessions is not None:
                         current_session = http_bridge_sessions.get(session.key)
-                    if current_session is None:
+                    if current_session is None and _http_bridge_key_strength(session.key) == "hard":
                         _log_http_bridge_event(
                             "submit_on_closed",
                             session.key,
@@ -7614,7 +7614,7 @@ class ProxyService:
                             current_session = http_bridge_sessions.get(session.key)
                 elif http_bridge_sessions is not None:
                     current_session = http_bridge_sessions.get(session.key)
-                session_unregistered = current_session is None
+                session_unregistered = current_session is None and _http_bridge_key_strength(session.key) == "hard"
                 session_replaced = current_session is not None and current_session is not session
                 if session.closed or session_unregistered or session_replaced:
                     _log_http_bridge_event(

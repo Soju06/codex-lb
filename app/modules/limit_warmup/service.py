@@ -104,11 +104,17 @@ class LimitWarmupRequestLogRepository(Protocol):
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
-        request_kind: str | None = "real",
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        bridge_stage: str | None = None,
+        request_kind: str = "normal",
     ) -> object: ...
 
 
@@ -519,7 +525,7 @@ class LimitWarmupService:
             transport="http",
             request_kind=LIMIT_WARMUP_REQUEST_KIND,
             plan_type=account.plan_type,
-            source=LIMIT_WARMUP_SOURCE,
+            source="limit_warmup",
         )
 
 

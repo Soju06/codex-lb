@@ -166,11 +166,17 @@ class FakeRequestLogsRepo:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
-        request_kind: str | None = "real",
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        bridge_stage: str | None = None,
+        request_kind: str = "normal",
     ) -> None:
         self.logs.append(
             {
@@ -197,6 +203,12 @@ class FakeRequestLogsRepo:
                 "session_id": session_id,
                 "plan_type": plan_type,
                 "source": source,
+                "failure_phase": failure_phase,
+                "failure_detail": failure_detail,
+                "failure_exception_type": failure_exception_type,
+                "upstream_status_code": upstream_status_code,
+                "upstream_error_code": upstream_error_code,
+                "bridge_stage": bridge_stage,
             }
         )
 

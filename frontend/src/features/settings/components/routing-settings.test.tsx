@@ -39,6 +39,7 @@ const BASE_SETTINGS: DashboardSettings = {
   singleAccountId: null,
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
   importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
@@ -72,6 +73,7 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -101,6 +103,7 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -135,6 +138,7 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -168,6 +172,7 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -283,12 +288,30 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
     });
+  });
+
+  it("saves warmup model updates", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const warmupModelInput = screen.getByLabelText("Warmup model");
+    await user.clear(warmupModelInput);
+    await user.type(warmupModelInput, "gpt-5.4-pro");
+    await user.click(screen.getByRole("button", { name: "Save warmup model" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+      warmupModel: "gpt-5.4-pro",
+      }),
+    );
   });
 
   it("shows the configured upstream transport", () => {
@@ -328,6 +351,7 @@ describe("RoutingSettings", () => {
       singleAccountId: "acc-two",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -362,6 +386,7 @@ describe("RoutingSettings", () => {
       singleAccountId: "acc-one",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -376,6 +401,7 @@ describe("RoutingSettings", () => {
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
@@ -419,6 +445,7 @@ describe("RoutingSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,

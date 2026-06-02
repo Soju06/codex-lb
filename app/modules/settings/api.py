@@ -106,6 +106,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
         additional_quota_routing_policies=settings.additional_quota_routing_policies,
         additional_quota_policies=additional_quota_policies,
+        warmup_model=settings.warmup_model,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
@@ -179,9 +180,17 @@ async def update_settings(
         )
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
-                sticky_threads_enabled=payload.sticky_threads_enabled,
+                sticky_threads_enabled=(
+                    payload.sticky_threads_enabled
+                    if payload.sticky_threads_enabled is not None
+                    else current.sticky_threads_enabled
+                ),
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
-                prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_accounts=(
+                    payload.prefer_earlier_reset_accounts
+                    if payload.prefer_earlier_reset_accounts is not None
+                    else current.prefer_earlier_reset_accounts
+                ),
                 prefer_earlier_reset_window=payload.prefer_earlier_reset_window or current.prefer_earlier_reset_window,
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
                 relative_availability_power=(
@@ -227,6 +236,7 @@ async def update_settings(
                     if payload.additional_quota_routing_policies is not None
                     else current.additional_quota_routing_policies
                 ),
+                warmup_model=(payload.warmup_model if payload.warmup_model is not None else current.warmup_model),
                 import_without_overwrite=(
                     payload.import_without_overwrite
                     if payload.import_without_overwrite is not None
@@ -285,6 +295,7 @@ async def update_settings(
             "sticky_reallocation_primary_budget_threshold_pct",
             "sticky_reallocation_secondary_budget_threshold_pct",
             "additional_quota_routing_policies",
+            "warmup_model",
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",

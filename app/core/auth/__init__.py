@@ -40,6 +40,34 @@ class OpenAIAuthClaims(BaseModel):
 
     chatgpt_account_id: str | None = None
     chatgpt_plan_type: str | None = None
+    workspace_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "workspace_id",
+            "chatgpt_workspace_id",
+            "organization_id",
+            "org_id",
+            "tenant_id",
+        ),
+    )
+    workspace_label: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "workspace_label",
+            "workspace_name",
+            "organization_name",
+            "org_name",
+            "tenant_name",
+        ),
+    )
+    seat_type: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "seat_type",
+            "chatgpt_seat_type",
+            "entitlement_type",
+        ),
+    )
 
 
 class IdTokenClaims(BaseModel):
@@ -48,6 +76,34 @@ class IdTokenClaims(BaseModel):
     email: str | None = None
     chatgpt_account_id: str | None = None
     chatgpt_plan_type: str | None = None
+    workspace_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "workspace_id",
+            "chatgpt_workspace_id",
+            "organization_id",
+            "org_id",
+            "tenant_id",
+        ),
+    )
+    workspace_label: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "workspace_label",
+            "workspace_name",
+            "organization_name",
+            "org_name",
+            "tenant_name",
+        ),
+    )
+    seat_type: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "seat_type",
+            "chatgpt_seat_type",
+            "entitlement_type",
+        ),
+    )
     exp: int | float | str | None = None
     auth: OpenAIAuthClaims | None = Field(
         default=None,
@@ -60,6 +116,9 @@ class AccountClaims:
     account_id: str | None
     email: str | None
     plan_type: str | None
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
 
 
 def parse_auth_json(raw: bytes) -> AuthFile:
@@ -92,6 +151,9 @@ def claims_from_auth(auth: AuthFile) -> AccountClaims:
         account_id=auth.tokens.account_id or auth_claims.chatgpt_account_id or claims.chatgpt_account_id,
         email=claims.email,
         plan_type=plan_type,
+        workspace_id=clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id),
+        workspace_label=clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label),
+        seat_type=normalize_seat_type(auth_claims.seat_type or claims.seat_type),
     )
 
 
@@ -105,7 +167,15 @@ def token_expiry_epoch_ms(token: str) -> int | None:
     return None
 
 
-def generate_unique_account_id(account_id: str | None, email: str | None) -> str:
+def generate_unique_account_id(
+    account_id: str | None,
+    email: str | None,
+    workspace_id: str | None = None,
+) -> str:
+    workspace_key = clean_account_identity_part(workspace_id)
+    if account_id and workspace_key:
+        workspace_hash = hashlib.sha256(workspace_key.encode()).hexdigest()[:8]
+        return f"{account_id}_{workspace_hash}"
     if account_id and email and email != DEFAULT_EMAIL:
         email_hash = hashlib.sha256(email.encode()).hexdigest()[:8]
         return f"{account_id}_{email_hash}"
@@ -120,3 +190,17 @@ def fallback_account_id(email: str | None) -> str:
         digest = hashlib.sha256(email.encode()).hexdigest()[:12]
         return f"email_{digest}"
     return f"local_{uuid4().hex[:12]}"
+
+
+def clean_account_identity_part(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def normalize_seat_type(value: str | None) -> str | None:
+    cleaned = clean_account_identity_part(value)
+    if cleaned is None:
+        return None
+    return cleaned.lower().replace("-", "_")

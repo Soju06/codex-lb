@@ -9,7 +9,12 @@ from datetime import datetime, timedelta
 import aiohttp
 from pydantic import ValidationError
 
-from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
+from app.core.auth import (
+    OpenAIAuthClaims,
+    clean_account_identity_part,
+    extract_id_token_claims,
+    normalize_seat_type,
+)
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.http import lease_http_session
@@ -35,6 +40,9 @@ class TokenRefreshResult:
     account_id: str | None
     plan_type: str | None
     email: str | None
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
 
 
 class RefreshError(Exception):
@@ -116,6 +124,9 @@ async def refresh_access_token(
     account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
     plan_type = auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type
     email = claims.email
+    workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
+    workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
+    seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
 
     return TokenRefreshResult(
         access_token=payload_data.access_token,
@@ -124,6 +135,9 @@ async def refresh_access_token(
         account_id=account_id,
         plan_type=plan_type,
         email=email,
+        workspace_id=workspace_id,
+        workspace_label=workspace_label,
+        seat_type=seat_type,
     )
 
 

@@ -165,10 +165,18 @@ The system SHALL enforce per-key model restrictions in the proxy service layer (
 
 For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/transcribe`, the service MUST evaluate restrictions against fixed effective model `gpt-4o-transcribe`.
 
+`/backend-api/codex/models` SHALL keep the existing allowlist filtering behavior by default. When an authenticated API key has `apply_to_codex_model = true` and `allowed_models` is non-empty, `/backend-api/codex/models` SHALL return the full catalog and rewrite each model entry visibility so allowlisted models use `visibility: "list"` and every other model uses `visibility: "hide"`. When `apply_to_codex_model = true` but `allowed_models` is null or empty, `/backend-api/codex/models` SHALL preserve the original behavior because there is no allowlist to apply.
+
 #### Scenario: Requested model not allowed
 
 - **WHEN** a key has `allowed_models: ["o3-pro"]` and a request is made for model `gpt-4.1`
 - **THEN** the proxy returns 403 with OpenAI-format error `{ "error": { "code": "model_not_allowed", "message": "This API key does not have access to model 'gpt-4.1'" } }`
+
+#### Scenario: Cursor alias allowed model permits canonical request
+
+- **WHEN** a key has `allowed_models: ["gpt-5.4-mini-high"]`
+- **AND** a request is made for model `gpt-5.4-mini`
+- **THEN** the proxy permits the request because the allowed alias resolves to the requested canonical model
 
 #### Scenario: All models allowed
 
@@ -180,6 +188,18 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **WHEN** a key with `allowed_models: ["o3-pro"]` calls `GET /v1/models`
 - **THEN** the response contains only models matching the allowed list
 
+#### Scenario: Model list canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]` and `enforced_model: "gpt-5.4-mini-high"` calls `GET /v1/models`
+- **THEN** the response contains the canonical model `gpt-5.4-mini`
+- **AND** the response does not expose a synthetic `gpt-5.4-mini-high` model id
+
+#### Scenario: Codex model list visibility canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
+- **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
+- **AND** other entries are hidden according to the API key allowlist policy
+
 #### Scenario: No API key auth (disabled)
 
 - **WHEN** `api_key_auth_enabled` is false and a request is made to `/v1/models`
@@ -190,6 +210,22 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **WHEN** a key has `allowed_models: ["gpt-5.1"]` and a request is made to `/v1/audio/transcriptions` or `/backend-api/transcribe`
 - **THEN** the proxy returns 403 with OpenAI-format error code `model_not_allowed` for model `gpt-4o-transcribe`
 
+#### Scenario: Codex models keep filtered behavior by default
+- **WHEN** a key has `allowed_models: ["o3-pro"]` and `apply_to_codex_model: false`
+- **AND** the key calls `GET /backend-api/codex/models`
+- **THEN** the response contains only models matching the allowed list
+
+#### Scenario: Codex models rewrite visibility when opted in
+- **WHEN** a key has `allowed_models: ["o3-pro"]` and `apply_to_codex_model: true`
+- **AND** the key calls `GET /backend-api/codex/models`
+- **THEN** the response contains the full catalog
+- **AND** the `o3-pro` entry has `visibility: "list"`
+- **AND** every model not in `allowed_models` has `visibility: "hide"`
+
+#### Scenario: Codex models preserve original behavior without an allowlist
+- **WHEN** a key has `allowed_models: null` and `apply_to_codex_model: true`
+- **AND** the key calls `GET /backend-api/codex/models`
+- **THEN** the response preserves the original `/backend-api/codex/models` behavior because there is no allowlist to apply
 ### Requirement: Weekly token usage tracking
 
 The system SHALL atomically increment `weekly_tokens_used` on the API key record when a proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
@@ -244,7 +280,9 @@ The system SHALL record the `api_key_id` in the `request_logs` table for proxy r
 
 ### Requirement: Frontend API Key management
 
-The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, assigned-account selection, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again.
+The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, assigned-account selection, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again, and the copy action MUST remain functional in secure and non-secure contexts.
+
+The create and edit dialogs SHALL expose an `Apply to codex /model` checkbox directly below `Allowed models`. The checkbox SHALL default to unchecked for new keys and SHALL edit the stored API key value for existing keys.
 
 #### Scenario: Create key with optional account scoping
 
@@ -258,6 +296,20 @@ The SPA settings page SHALL include an API Key management section with: a toggle
 - **WHEN** admin creates a key via the UI
 - **THEN** a dialog shows the full plain key with a copy button and a warning message
 
+#### Scenario: API key dialog copy fallback
+
+- **WHEN** a user clicks Copy for the created API key inside the dialog
+- **THEN** the copy operation succeeds using secure Clipboard API when available
+- **AND** falls back to dialog-scoped `execCommand("copy")` when secure Clipboard API is unavailable
+
+#### Scenario: Create key with codex model visibility option
+- **WHEN** an admin opens the create API key dialog
+- **THEN** the `Apply to codex /model` checkbox appears directly below `Allowed models`
+- **AND** it is unchecked by default
+
+#### Scenario: Edit key with stored codex model visibility option
+- **WHEN** an admin opens the edit API key dialog for a key with `apply_to_codex_model: true`
+- **THEN** the `Apply to codex /model` checkbox is shown as checked
 ### Requirement: Cost accounting uses model and service-tier pricing
 When computing API key `cost_usd` usage, the system MUST price requests using the resolved model pricing and the authoritative `service_tier` reported by the upstream response when available, falling back to the forwarded request `service_tier` only when the response omits it. Requests sent with non-standard service tiers MUST use the published pricing for the tier actually used instead of falling back to standard-tier pricing.
 
@@ -568,3 +620,134 @@ The dashboard API key CRUD surface MUST allow callers to persist an optional enf
 - **THEN** the persisted API key stores `flex`
 - **AND** subsequent reads return `flex`
 
+### Requirement: API key list includes pooled credit data
+
+The `GET /api/api-keys/` list endpoint SHALL include per-key pooled credit data computed by aggregating upstream usage across the selectable accounts assigned to each key. When a key has no assigned accounts, the system SHALL pool across all selectable accounts.
+
+Selectable accounts exclude accounts whose status is `paused` or `deactivated`, matching load-balancer routing eligibility.
+
+The response SHALL include `pooled_remaining_percent_primary` (float or null), `pooled_remaining_percent_secondary` (float or null), and `pooled_capacity_credits_primary` (float, default 0.0) on each key object.
+
+When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are free-tier), `pooled_remaining_percent_primary` SHALL be null.
+
+#### Scenario: Scoped key pools assigned accounts only
+
+- **WHEN** an API key has `assignedAccountIds` containing two accounts
+- **AND** those accounts have usage data
+- **THEN** `pooled_remaining_percent_primary` and `pooled_remaining_percent_secondary` reflect only those two accounts
+
+#### Scenario: Unscoped key pools all accounts
+
+- **WHEN** an API key has `assignedAccountIds` = []
+- **THEN** pooled credit fields reflect all accounts in the system
+
+#### Scenario: Free-tier accounts hide primary bar
+
+- **WHEN** all assigned accounts have plan_type "free" (primary capacity = 0)
+- **THEN** `pooled_capacity_credits_primary` = 0.0
+- **AND** `pooled_remaining_percent_primary` = null
+
+#### Scenario: Paused and deactivated accounts are excluded
+
+- **WHEN** an API key has assigned accounts with active and paused statuses
+- **THEN** pooled credit fields reflect only the active selectable accounts
+
+### Requirement: API key 7-day usage includes account cost breakdown
+
+`GET /api/api-keys/{key_id}/usage-7d` SHALL return `accountCosts[]` in addition to the existing 7-day totals for the selected API key. Each `accountCosts[]` item SHALL include `accountId`, `email`, `costUsd`, and `isDeleted`.
+
+The system MUST aggregate `accountCosts[]` from request-log rows whose `api_key_id` matches the selected key and whose `requested_at` falls inside the rolling 7-day window used by the endpoint totals.
+
+#### Scenario: Account costs are sorted by descending cost
+- **WHEN** a client loads `GET /api/api-keys/{key_id}/usage-7d`
+- **AND** multiple grouped account-cost buckets exist in the 7-day window
+- **THEN** `accountCosts[]` is ordered by `costUsd` descending
+
+#### Scenario: Unknown account usage remains separate
+- **WHEN** request-log rows in the 7-day window have `account_id = NULL`
+- **AND** those rows are not soft-deleted
+- **THEN** the response includes an `accountCosts[]` item with `accountId: null`, `email: null`, and `isDeleted: false`
+
+#### Scenario: Deleted account usage is grouped into one bucket
+- **WHEN** request-log rows in the 7-day window are marked deleted
+- **THEN** the response groups their cost into a synthetic `accountCosts[]` item with `accountId: null`, `email: null`, and `isDeleted: true`
+
+#### Scenario: Deleted and unknown account usage stay distinct
+- **WHEN** the same API key has both soft-deleted request-log cost and unknown non-deleted request-log cost inside the 7-day window
+- **THEN** the response returns separate `accountCosts[]` items for the deleted and non-deleted buckets
+
+### Requirement: API key 7-day account-cost queries use a composite request-log index
+
+The database SHALL provide an index that supports filtering request logs by API key and 7-day requested-at range before grouping by account for the API-key account-cost breakdown.
+
+#### Scenario: Composite account-cost index exists after migration
+- **WHEN** database migrations are applied
+- **THEN** the `request_logs` table includes an index covering `api_key_id`, descending `requested_at`, and `account_id`
+
+### Requirement: Request-aware API-key usage reservations
+
+API-key usage reservation admission MUST reserve a bounded request-aware budget instead of an unconditional fixed 8192 input-token plus 8192 output-token pre-charge for every request. The reservation budget MUST be used only for admission and in-flight accounting; final usage accounting MUST continue to settle to the authoritative completed request usage and service-tier pricing.
+
+For token limits, admission MUST reserve from the request input and output token budgets. The input budget MAY be estimated from self-contained request payloads, while opaque upstream context MUST fall back to a conservative input budget. The output budget MUST use a bounded system default unless codex-lb can verify that a client-provided output cap is actually enforced upstream. For `cost_usd` limits, admission MUST compute the reservation cost from the same input and output token budgets and the effective request service tier. Reservation finalization MUST adjust every applicable reserved value to actual completed usage exactly once, including limits whose admission reservation was zero.
+
+#### Scenario: Concurrent priority lanes do not require 8 × 8192 output-token headroom
+
+- **WHEN** an API key has a `cost_usd` limit with enough remaining value for the bounded request-aware reservations
+- **AND** eight `gpt-5.5` requests using `service_tier = "priority"` are admitted concurrently
+- **THEN** the proxy allows all eight reservations instead of rejecting a lane solely because the old 8192-output-token pre-charge would exceed the limit
+
+#### Scenario: Opaque input uses conservative input fallback
+
+- **WHEN** a request references input that the proxy cannot size locally, such as `previous_response_id`, `conversation`, `input_file`, or `input_image`
+- **THEN** API-key admission uses the conservative default input-token reservation budget for input tokens
+- **AND** final accounting still settles to actual completed usage
+
+#### Scenario: Zero-reservation limits still settle actual usage
+
+- **WHEN** API-key admission records a zero-delta reservation item for an applicable limit
+- **AND** the request completes with non-zero actual usage for that limit
+- **THEN** reservation finalization increments the limit by the actual usage instead of skipping the limit
+
+### Requirement: Map `auto`/`default` enforced service tier to outbound omission
+When a request is enforced under an API key whose `enforced_service_tier` is `auto` or `default`, the proxy MUST forward the request with `service_tier` absent (`None`) rather than as the literal string. Enforcement of `priority` and `flex` MUST continue to forward the literal value unchanged. codex-lb accepts `auto`, `default`, `priority`, and `flex` (plus the `fast` alias for `priority`) at the API-key `enforced_service_tier` surface; the ChatGPT/Codex backend rejects `auto` and `default` as literal values, since both already mean "let upstream pick".
+
+#### Scenario: Enforced service tier is `default`
+- **WHEN** a request is processed under an API key with `enforced_service_tier = "default"`
+- **THEN** the outbound `service_tier` field is absent
+
+#### Scenario: Enforced service tier is `auto`
+- **WHEN** a request is processed under an API key with `enforced_service_tier = "auto"`
+- **THEN** the outbound `service_tier` field is absent
+
+#### Scenario: Enforced service tier is a real upstream tier
+- **WHEN** a request is processed under an API key with `enforced_service_tier = "priority"` or `"flex"`
+- **THEN** the outbound `service_tier` field equals the enforced value
+
+### Requirement: API key allowlist allows Cursor aliases
+
+The model allowlist check MUST treat supported Cursor-style GPT-5 aliases as equivalent to their
+canonical GPT model when deciding access. A request for the canonical model must be allowed when the key
+stores a compatible alias in `allowed_models`.
+
+#### Scenario: Cursor alias allowed model permits canonical request
+
+- **WHEN** a key has `allowed_models: ["gpt-5.4-mini-high"]`
+- **AND** a request is made for model `gpt-5.4-mini`
+- **THEN** the proxy permits the request because the allowed alias resolves to the requested canonical model
+
+### Requirement: Model catalogs must expose canonical models for alias allowlists
+
+When API-key model allowlists include Cursor-style aliases, the visible model lists MUST expose canonical model IDs and
+omit alias-only synthetic IDs so clients see stable model names.
+
+#### Scenario: Model list canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]` and `enforced_model: "gpt-5.4-mini-high"` calls `GET /v1/models`
+- **THEN** the response contains the canonical model `gpt-5.4-mini`
+- **AND** the response does not expose a synthetic `gpt-5.4-mini-high` model id
+
+#### Scenario: Codex model list visibility canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
+- **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
+- **AND** other entries are hidden according to the API key allowlist policy

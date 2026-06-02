@@ -28,6 +28,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
     assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 95.0
     assert payload["stickyReallocationSecondaryBudgetThresholdPct"] == 100.0
+    assert payload["warmupModel"] == "gpt-5.4-mini"
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -57,6 +58,7 @@ async def test_settings_api_get_and_update(async_client):
             "stickyReallocationBudgetThresholdPct": 85.0,
             "stickyReallocationPrimaryBudgetThresholdPct": 85.0,
             "stickyReallocationSecondaryBudgetThresholdPct": 98.0,
+            "warmupModel": "gpt-5.4-nano",
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
@@ -85,6 +87,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["stickyReallocationBudgetThresholdPct"] == 85.0
     assert updated["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
     assert updated["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
+    assert updated["warmupModel"] == "gpt-5.4-nano"
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
@@ -114,6 +117,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["stickyReallocationBudgetThresholdPct"] == 85.0
     assert payload["stickyReallocationPrimaryBudgetThresholdPct"] == 85.0
     assert payload["stickyReallocationSecondaryBudgetThresholdPct"] == 98.0
+    assert payload["warmupModel"] == "gpt-5.4-nano"
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -278,3 +282,21 @@ async def test_settings_full_put_rejects_out_of_range_sticky_threshold(async_cli
     response = await async_client.put("/api/settings", json=payload)
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settings_api_allows_partial_updates(async_client):
+    original_response = await async_client.get("/api/settings")
+    assert original_response.status_code == 200
+    original = original_response.json()
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"warmupModel": "gpt-5.4-pro"},
+    )
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["warmupModel"] == "gpt-5.4-pro"
+    assert updated["stickyThreadsEnabled"] == original["stickyThreadsEnabled"]
+    assert updated["preferEarlierResetAccounts"] == original["preferEarlierResetAccounts"]
+    assert updated["routingStrategy"] == original["routingStrategy"]

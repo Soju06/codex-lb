@@ -149,15 +149,33 @@ class _UsageRefreshSingleflight:
         self,
         account_id: str,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
+        *,
+        join_existing: bool = True,
     ) -> AccountRefreshResult:
-        async with self._lock:
-            task = self._inflight.get(account_id)
-            if task is None or task.done():
-                task = asyncio.create_task(self._run_factory(factory))
-                self._inflight[account_id] = task
-                task.add_done_callback(
-                    lambda done, *, key=account_id: self._clear_if_current(key, done),
-                )
+        while True:
+            wait_for_existing: asyncio.Task[AccountRefreshResult] | None = None
+            async with self._lock:
+                task = self._inflight.get(account_id)
+                if task is None or task.done():
+                    task = asyncio.create_task(self._run_factory(factory))
+                    self._inflight[account_id] = task
+                    task.add_done_callback(
+                        lambda done, *, key=account_id: self._clear_if_current(key, done),
+                    )
+                    break
+                if join_existing:
+                    break
+                wait_for_existing = task
+            if wait_for_existing is None:
+                break
+            try:
+                await asyncio.shield(wait_for_existing)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception:
+                pass
         return await asyncio.shield(task)
 
     async def _run_factory(
@@ -166,10 +184,14 @@ class _UsageRefreshSingleflight:
     ) -> AccountRefreshResult:
         return await factory()
 
-    def _clear_if_current(self, account_id: str, task: asyncio.Task[AccountRefreshResult]) -> None:
-        current = self._inflight.get(account_id)
+    def _clear_if_current(
+        self,
+        key: str,
+        task: asyncio.Task[AccountRefreshResult],
+    ) -> None:
+        current = self._inflight.get(key)
         if current is task:
-            self._inflight.pop(account_id, None)
+            self._inflight.pop(key, None)
         if task.cancelled():
             return
         with contextlib.suppress(BaseException):
@@ -284,6 +306,37 @@ class UsageUpdater:
                 continue
         return refreshed
 
+    async def force_refresh(self, account: Account) -> bool:
+        """Refresh one account regardless of cached/fresh usage rows."""
+        settings = get_settings()
+        if not settings.usage_refresh_enabled:
+            return False
+        if account.status == AccountStatus.DEACTIVATED:
+            return False
+        try:
+            result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
+                account.id,
+                lambda: self._refresh_account(
+                    account,
+                    usage_account_id=account.chatgpt_account_id,
+                ),
+                join_existing=False,
+            )
+            await self._sync_account_from_repo(account)
+            if result.fetch_succeeded:
+                _last_successful_refresh[account.id] = utcnow()
+                _clear_usage_refresh_auth_cooldown(account.id)
+            return result.usage_written
+        except Exception as exc:
+            logger.warning(
+                "Forced usage refresh failed account_id=%s request_id=%s error=%s",
+                account.id,
+                get_request_id(),
+                exc,
+                exc_info=True,
+            )
+            return False
+
     async def _refresh_account_if_stale(
         self,
         account: Account,
@@ -344,7 +397,32 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        await self._sync_plan_type(account, payload)
+        if _payload_mismatches_account_slot(account, payload):
+            logger.warning(
+                "Usage refresh payload identity mismatch; skipping account mutation "
+                "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
+                "payload_plan_type=%s stored_seat_type=%s payload_seat_type=%s request_id=%s",
+                account.id,
+                account.workspace_id,
+                payload.workspace_id,
+                account.plan_type,
+                payload.plan_type,
+                account.seat_type,
+                payload.seat_type,
+                get_request_id(),
+            )
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        identity_matches_slot = await self._sync_identity_metadata(account, payload)
+        if not identity_matches_slot:
+            logger.warning(
+                "Usage refresh payload reported a workspace slot owned by another account; "
+                "skipping account usage mutation account_id=%s payload_workspace_id=%s request_id=%s",
+                account.id,
+                payload.workspace_id,
+                get_request_id(),
+            )
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
         now_epoch = _now_epoch()
         if self._additional_usage_repo is not None:
@@ -458,14 +536,41 @@ class UsageUpdater:
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
 
-    async def _sync_plan_type(self, account: Account, payload: UsagePayload) -> None:
+    async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
-        if next_plan_type == account.plan_type:
-            return
+        payload_workspace_id = _clean_optional(payload.workspace_id)
+        next_workspace_id = payload_workspace_id or account.workspace_id
+        next_workspace_label = _clean_optional(payload.workspace_label) or account.workspace_label
+        next_seat_type = _clean_optional(payload.seat_type) or account.seat_type
+        if self._auth_manager and payload_workspace_id and not account.workspace_id:
+            slot_taken = await self._auth_manager._repo.workspace_slot_taken(
+                account_id=account.id,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                workspace_id=payload_workspace_id,
+            )
+            if slot_taken:
+                logger.warning(
+                    "Usage payload reported workspace_id=%s for legacy account_id=%s, but that slot "
+                    "is already owned by another account; skipping usage payload",
+                    payload_workspace_id,
+                    account.id,
+                )
+                return False
+        if (
+            next_plan_type == account.plan_type
+            and next_workspace_id == account.workspace_id
+            and next_workspace_label == account.workspace_label
+            and next_seat_type == account.seat_type
+        ):
+            return True
 
         account.plan_type = next_plan_type
+        account.workspace_id = next_workspace_id
+        account.workspace_label = next_workspace_label
+        account.seat_type = next_seat_type
         if not self._auth_manager:
-            return
+            return True
 
         await self._auth_manager._repo.update_tokens(
             account.id,
@@ -476,7 +581,11 @@ class UsageUpdater:
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
+            workspace_id=account.workspace_id,
+            workspace_label=account.workspace_label,
+            seat_type=account.seat_type,
         )
+        return True
 
     async def _recover_quota_status_from_usage(
         self,
@@ -485,22 +594,34 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
     ) -> None:
-        if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
+        if not self._auth_manager:
             return
-        if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
-            return
-        windows = [window for window in (primary, secondary) if window is not None]
-        if secondary is None or not _window_has_available_quota(secondary):
-            return
-        if primary is not None and _window_is_exhausted(primary):
-            target_status = AccountStatus.RATE_LIMITED
-            target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
-        else:
-            if any(_window_is_exhausted(window) for window in windows):
+        if account.status == AccountStatus.RATE_LIMITED:
+            if primary is None or not _window_has_available_quota(primary):
+                return
+            if secondary is not None and not _window_has_available_quota(secondary):
                 return
             target_status = AccountStatus.ACTIVE
             target_reset_at = None
-        if not any(_window_has_available_quota(window) for window in windows):
+            expected_status = AccountStatus.RATE_LIMITED
+        elif account.status == AccountStatus.QUOTA_EXCEEDED:
+            if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
+                return
+            windows = [window for window in (primary, secondary) if window is not None]
+            if secondary is None or not _window_has_available_quota(secondary):
+                return
+            if primary is not None and _window_is_exhausted(primary):
+                target_status = AccountStatus.RATE_LIMITED
+                target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
+            else:
+                if any(_window_is_exhausted(window) for window in windows):
+                    return
+                target_status = AccountStatus.ACTIVE
+                target_reset_at = None
+            if not any(_window_has_available_quota(window) for window in windows):
+                return
+            expected_status = AccountStatus.QUOTA_EXCEEDED
+        else:
             return
 
         repo = cast(AccountsRepositoryWithStatusComparePort, self._auth_manager._repo)
@@ -510,7 +631,7 @@ class UsageUpdater:
             None,
             target_reset_at,
             blocked_at=None,
-            expected_status=AccountStatus.QUOTA_EXCEEDED,
+            expected_status=expected_status,
             expected_deactivation_reason=account.deactivation_reason,
             expected_reset_at=account.reset_at,
             expected_blocked_at=account.blocked_at,
@@ -531,6 +652,9 @@ class UsageUpdater:
             return
         account.chatgpt_account_id = stored.chatgpt_account_id
         account.email = stored.email
+        account.workspace_id = stored.workspace_id
+        account.workspace_label = stored.workspace_label
+        account.seat_type = stored.seat_type
         account.plan_type = stored.plan_type
         account.access_token_encrypted = stored.access_token_encrypted
         account.refresh_token_encrypted = stored.refresh_token_encrypted
@@ -550,6 +674,25 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     credits_unlimited = credits.unlimited
     balance_value = credits.balance
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
+
+
+def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+    payload_workspace_id = _clean_optional(payload.workspace_id)
+    if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
+        return True
+    if not payload_workspace_id:
+        payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+        stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
+        if payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type:
+            return True
+    return False
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:

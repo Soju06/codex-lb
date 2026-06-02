@@ -21,6 +21,7 @@ describe("DashboardSettingsSchema", () => {
       stickyReallocationBudgetThresholdPct: 95,
       stickyReallocationPrimaryBudgetThresholdPct: 90,
       stickyReallocationSecondaryBudgetThresholdPct: 100,
+      warmupModel: "gpt-5.4-mini",
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -44,6 +45,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
+    expect(parsed.warmupModel).toBe("gpt-5.4-mini");
     expect(parsed.importWithoutOverwrite).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(false);
@@ -130,6 +132,7 @@ describe("SettingsUpdateRequestSchema", () => {
       stickyReallocationBudgetThresholdPct: 95,
       stickyReallocationPrimaryBudgetThresholdPct: 90,
       stickyReallocationSecondaryBudgetThresholdPct: 100,
+      warmupModel: " gpt-5.4-nano ",
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
@@ -145,6 +148,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
+    expect(parsed.warmupModel).toBe("gpt-5.4-nano");
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.preferEarlierResetWindow).toBe("secondary");
     expect(parsed.importWithoutOverwrite).toBe(true);
@@ -183,6 +187,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.singleAccountId).toBeUndefined();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
     expect(parsed.dashboardSessionTtlSeconds).toBeUndefined();
+    expect(parsed.warmupModel).toBeUndefined();
   });
 
   it("rejects invalid types", () => {

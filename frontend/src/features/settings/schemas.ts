@@ -72,6 +72,7 @@ export const DashboardSettingsSchema = z
       .record(z.string(), AdditionalQuotaRoutingPolicySchema)
       .optional(),
     additionalQuotaPolicies: z.array(AdditionalQuotaPolicySchema).optional().default([]),
+    warmupModel: z.string().trim().min(1).optional().default("gpt-5.4-mini"),
     importWithoutOverwrite: z.boolean(),
     totpRequiredOnLogin: z.boolean(),
     totpConfigured: z.boolean(),
@@ -112,9 +113,9 @@ export const DashboardSettingsSchema = z
   });
 
 export const SettingsUpdateRequestSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
+  stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
-  preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetAccounts: z.boolean().optional(),
   preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
@@ -128,6 +129,7 @@ export const SettingsUpdateRequestSchema = z.object({
   additionalQuotaRoutingPolicies: z
     .record(z.string(), AdditionalQuotaRoutingPolicySchema)
     .optional(),
+  warmupModel: z.string().trim().min(1).optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),

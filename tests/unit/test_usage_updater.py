@@ -5,6 +5,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -339,6 +340,216 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_usage_recovers_rate_limited_account_when_primary_quota_returns() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_force_probe_recovered", "workspace_force_probe_recovered")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    account.reset_at = 12345
+    account.blocked_at = None
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=80.0),
+    )
+
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        },
+    ]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe", "workspace_force_probe")
+    usage_updater_module._last_successful_refresh[account.id] = datetime.now(tz=timezone.utc)
+
+    refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is True
+    refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    sync_account.assert_awaited_once_with(account)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_singleflight", "workspace_force_probe_singleflight")
+    stale_started = asyncio.Event()
+    release_stale = asyncio.Event()
+
+    async def stale_refresh(
+        refresh_account: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        assert refresh_account is account
+        assert usage_account_id == account.chatgpt_account_id
+        assert interval_seconds > 0
+        stale_started.set()
+        await release_stale.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    force_refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account_if_stale", stale_refresh)
+    monkeypatch.setattr(updater, "_refresh_account", force_refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    stale_task = asyncio.create_task(updater.refresh_accounts([account], latest_usage={}))
+    await stale_started.wait()
+
+    force_task = asyncio.create_task(updater.force_refresh(account))
+    await asyncio.sleep(0)
+
+    force_refresh_account.assert_not_awaited()
+    release_stale.set()
+    assert await stale_task is False
+    refreshed = await force_task
+
+    assert refreshed is True
+    force_refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    assert sync_account.await_count == 2
+    sync_account.assert_awaited_with(account)
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_cancel", "workspace_force_probe_cancel")
+    stale_started = asyncio.Event()
+    release_stale = asyncio.Event()
+
+    async def stale_refresh(
+        refresh_account: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        del refresh_account, usage_account_id, interval_seconds
+        stale_started.set()
+        await release_stale.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    force_refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    monkeypatch.setattr(updater, "_refresh_account_if_stale", stale_refresh)
+    monkeypatch.setattr(updater, "_refresh_account", force_refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", AsyncMock())
+
+    stale_task = asyncio.create_task(updater.refresh_accounts([account], latest_usage={}))
+    await stale_started.wait()
+    force_task = asyncio.create_task(updater.force_refresh(account))
+    await asyncio.sleep(0)
+
+    force_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await force_task
+
+    release_stale.set()
+    assert await stale_task is False
+    force_refresh_account.assert_not_awaited()
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo)
+    account = _make_account("acc_force_probe_cooldown", "workspace_force_probe_cooldown")
+    refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    usage_updater_module._mark_usage_refresh_auth_cooldown(account.id, 403)
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is True
+    refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    sync_account.assert_awaited_once_with(account)
+    assert usage_updater_module._is_usage_refresh_in_cooldown(account.id) is False
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    updater = UsageUpdater(StubUsageRepository())
+    account = _make_account("acc_force_probe_disabled", "workspace_force_probe_disabled")
+    refresh_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+
+    refreshed = await updater.force_refresh(account)
+
+    assert refreshed is False
+    refresh_account.assert_not_awaited()
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -857,11 +1068,192 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
     assert usage_repo.entries[-1].window == "secondary"
 
 
+@pytest.mark.asyncio
+async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "workspace_id": "ws_other",
+                "plan_type": "free",
+                "rate_limit": {
+                    "secondary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                },
+                "additional_rate_limits": [],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    additional_repo = StubAdditionalUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo, additional_usage_repo=additional_repo)
+    account = _make_account("acc_team_ws", "upstream_user", email="same@example.com")
+    account.workspace_id = "ws_team"
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    result = await updater.refresh_accounts([account], latest_usage={})
+
+    assert result is False
+    assert usage_repo.entries == []
+    assert additional_repo.deleted_account_ids == []
+    assert accounts_repo.status_updates == []
+    assert accounts_repo.token_updates == []
+    assert account.status == AccountStatus.ACTIVE
+    assert account.plan_type == "business"
+    assert account.workspace_id == "ws_team"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "workspace_id": "ws_taken",
+                "workspace_label": "Taken Workspace",
+                "seat_type": "business",
+                "plan_type": "team",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+                "additional_rate_limits": [],
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    additional_repo = StubAdditionalUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    account = _make_account("acc_unknown_taken", "chatgpt_shared", email="shared@example.com")
+    account.workspace_id = None
+    account.workspace_label = None
+    account.seat_type = None
+    original_plan_type = account.plan_type
+    accounts_repo.accounts_by_id[account.id] = account
+    accounts_repo.taken_workspace_slots.add(("shared@example.com", "chatgpt_shared", "ws_taken"))
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo, additional_usage_repo=additional_repo)
+
+    result = await updater.refresh_accounts([account], latest_usage={})
+
+    assert result is False
+    assert usage_repo.entries == []
+    assert additional_repo.entries == []
+    assert account.workspace_id is None
+    assert account.workspace_label is None
+    assert account.seat_type is None
+    assert account.plan_type == original_plan_type
+    assert accounts_repo.token_updates == []
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_skips_unknown_workspace_plan_mismatch(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "free",
+                "rate_limit": {
+                    "secondary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_unknown_team", "upstream_user", email="same@example.com")
+    account.plan_type = "team"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries == []
+    assert accounts_repo.status_updates == []
+    assert account.plan_type == "team"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspace_and_plan_conflicts(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "free",
+                "rate_limit": {
+                    "secondary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_workspace_missing_payload", "upstream_user", email="same@example.com")
+    account.workspace_id = "ws_team"
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries == []
+    assert accounts_repo.status_updates == []
+    assert accounts_repo.token_updates == []
+    assert account.workspace_id == "ws_team"
+    assert account.plan_type == "business"
+
+
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
         self.token_updates: list[dict[str, Any]] = []
         self.accounts_by_id: dict[str, Account] = {}
+        self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
@@ -928,14 +1320,34 @@ class StubAccountsRepository:
             plan_type = kwargs.get("plan_type")
             email = kwargs.get("email")
             chatgpt_account_id = kwargs.get("chatgpt_account_id")
+            workspace_id = kwargs.get("workspace_id")
+            workspace_label = kwargs.get("workspace_label")
+            seat_type = kwargs.get("seat_type")
             if isinstance(plan_type, str):
                 account.plan_type = plan_type
             if isinstance(email, str):
                 account.email = email
             if isinstance(chatgpt_account_id, str):
                 account.chatgpt_account_id = chatgpt_account_id
+            if isinstance(workspace_id, str):
+                account.workspace_id = workspace_id
+            if isinstance(workspace_label, str):
+                account.workspace_label = workspace_label
+            if isinstance(seat_type, str):
+                account.seat_type = seat_type
         self.token_updates.append({"account_id": account_id, **kwargs})
         return True
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool:
+        del account_id
+        return (email, chatgpt_account_id, workspace_id) in self.taken_workspace_slots
 
 
 @pytest.mark.asyncio
@@ -1269,7 +1681,7 @@ async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_syncs_plan_type_from_usage_payload(monkeypatch) -> None:
+async def test_usage_updater_does_not_sync_conflicting_plan_without_workspace_identity(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
 
@@ -1289,11 +1701,8 @@ async def test_usage_updater_syncs_plan_type_from_usage_payload(monkeypatch) -> 
 
     await updater.refresh_accounts([acc], latest_usage={})
 
-    assert acc.plan_type == "plus"
-    assert len(accounts_repo.token_updates) == 1
-    token_update = accounts_repo.token_updates[0]
-    assert token_update["account_id"] == "acc_plan_sync"
-    assert token_update["plan_type"] == "plus"
+    assert acc.plan_type == "free"
+    assert accounts_repo.token_updates == []
     assert usage_repo.entries == []
 
 

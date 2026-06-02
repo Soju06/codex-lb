@@ -18,6 +18,7 @@ export function buildSettingsUpdateRequest(
     singleAccountId: settings.singleAccountId,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+    warmupModel: settings.warmupModel,
     stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct,
     stickyReallocationPrimaryBudgetThresholdPct: settings.stickyReallocationPrimaryBudgetThresholdPct,
     stickyReallocationSecondaryBudgetThresholdPct: settings.stickyReallocationSecondaryBudgetThresholdPct,

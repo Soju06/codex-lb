@@ -14,7 +14,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, QuotaPlannerDecision
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -104,13 +104,44 @@ class QuotaWarmupService:
             force_probe=force_probe,
         )
         if not allowed:
-            row = await self._planner.update_decision_status(decision.id, status="skipped", reason=reason)
+            row = await self._planner.update_decision_status(
+                decision.id,
+                status="skipped",
+                reason=reason,
+                expected_status="planned",
+            )
+            if row is None:
+                current = await self._planner.get_decision(decision.id)
+                if current is not None:
+                    return WarmupExecutionResult(
+                        decision_id=current.id,
+                        status=current.status,
+                        reason=current.reason or f"decision_{current.status}",
+                        executed_at=current.executed_at,
+                    )
             return WarmupExecutionResult(
                 decision_id=decision.id,
                 status=row.status if row else "skipped",
                 reason=reason,
             )
         assert account is not None
+
+        claimed = await self._planner.update_decision_status(
+            decision.id,
+            status="executing",
+            reason="warmup_executing",
+            expected_status="planned",
+        )
+        if claimed is None:
+            current = await self._planner.get_decision(decision.id)
+            if current is None:
+                return WarmupExecutionResult(decision_id=decision.id, status="skipped", reason="decision_missing")
+            return WarmupExecutionResult(
+                decision_id=current.id,
+                status=current.status,
+                reason=current.reason or f"decision_{current.status}",
+                executed_at=current.executed_at,
+            )
 
         reservation_id: str | None = None
         if api_key_id is not None:
@@ -126,32 +157,43 @@ class QuotaWarmupService:
                 reservation_id = reservation.reservation_id
             except ApiKeyNotFoundError:
                 row = await self._planner.update_decision_status(
-                    decision.id, status="skipped", reason="api_key_not_found"
-                )
-                return WarmupExecutionResult(
-                    decision_id=decision.id,
-                    status=row.status if row else "skipped",
+                    decision.id,
+                    status="skipped",
                     reason="api_key_not_found",
+                    expected_status="executing",
+                )
+                return await self._result_from_update_or_current(
+                    decision_id=decision.id,
+                    row=row,
+                    fallback_status="skipped",
+                    fallback_reason="api_key_not_found",
                 )
             except ApiKeyInvalidError:
                 row = await self._planner.update_decision_status(
-                    decision.id, status="skipped", reason="api_key_invalid"
-                )
-                return WarmupExecutionResult(
-                    decision_id=decision.id,
-                    status=row.status if row else "skipped",
+                    decision.id,
+                    status="skipped",
                     reason="api_key_invalid",
+                    expected_status="executing",
+                )
+                return await self._result_from_update_or_current(
+                    decision_id=decision.id,
+                    row=row,
+                    fallback_status="skipped",
+                    fallback_reason="api_key_invalid",
                 )
             except ApiKeyRateLimitExceededError as exc:
+                reason = f"api_key_rate_limit_exceeded:{exc.reset_at.isoformat()}Z"
                 row = await self._planner.update_decision_status(
                     decision.id,
                     status="skipped",
-                    reason=f"api_key_rate_limit_exceeded:{exc.reset_at.isoformat()}Z",
+                    reason=reason,
+                    expected_status="executing",
                 )
-                return WarmupExecutionResult(
+                return await self._result_from_update_or_current(
                     decision_id=decision.id,
-                    status=row.status if row else "skipped",
-                    reason=f"api_key_rate_limit_exceeded:{exc.reset_at.isoformat()}Z",
+                    row=row,
+                    fallback_status="skipped",
+                    fallback_reason=reason,
                 )
 
         request_id = f"quota-warmup-{uuid4().hex}"
@@ -196,13 +238,14 @@ class QuotaWarmupService:
                 status="executed",
                 reason="warmup_executed",
                 executed_at=utcnow(),
+                expected_status="executing",
             )
-            return WarmupExecutionResult(
+            return await self._result_from_update_or_current(
                 decision_id=decision.id,
-                status=row.status if row else "executed",
-                reason="warmup_executed",
+                row=row,
+                fallback_status="executed",
+                fallback_reason="warmup_executed",
                 request_id=request_id,
-                executed_at=row.executed_at if row else utcnow(),
             )
         except asyncio.CancelledError:
             if reservation_id is not None:
@@ -248,13 +291,14 @@ class QuotaWarmupService:
                 status="failed",
                 reason=f"warmup_failed:{type(exc).__name__}",
                 executed_at=utcnow(),
+                expected_status="executing",
             )
-            return WarmupExecutionResult(
+            return await self._result_from_update_or_current(
                 decision_id=decision.id,
-                status=row.status if row else "failed",
-                reason=f"warmup_failed:{type(exc).__name__}",
+                row=row,
+                fallback_status="failed",
+                fallback_reason=f"warmup_failed:{type(exc).__name__}",
                 request_id=request_id,
-                executed_at=row.executed_at if row else utcnow(),
             )
 
     async def _try_record_warmup_effect(
@@ -270,6 +314,27 @@ class QuotaWarmupService:
         except Exception:
             logger.exception("Failed to record quota warmup effect", extra={"account_id": account.id, "model": model})
 
+    async def _result_from_update_or_current(
+        self,
+        *,
+        decision_id: str,
+        row: QuotaPlannerDecision | None,
+        fallback_status: str,
+        fallback_reason: str,
+        request_id: str | None = None,
+    ) -> WarmupExecutionResult:
+        if row is None:
+            row = await self._planner.get_decision(decision_id)
+        if row is None:
+            return WarmupExecutionResult(decision_id=decision_id, status=fallback_status, reason=fallback_reason)
+        return WarmupExecutionResult(
+            decision_id=row.id,
+            status=row.status,
+            reason=row.reason or fallback_reason,
+            request_id=request_id,
+            executed_at=row.executed_at,
+        )
+
     async def cancel_decision(self, decision_id: str) -> WarmupExecutionResult | None:
         row = await self._planner.get_decision(decision_id)
         if row is None:
@@ -280,8 +345,13 @@ class QuotaWarmupService:
             decision_id,
             status="canceled",
             reason="admin_canceled",
+            expected_status={"planned", "skipped"},
         )
-        assert updated is not None
+        if updated is None:
+            current = await self._planner.get_decision(decision_id)
+            if current is None:
+                return None
+            return WarmupExecutionResult(decision_id=current.id, status=current.status, reason="not_cancelable")
         return WarmupExecutionResult(decision_id=updated.id, status=updated.status, reason=updated.reason or "")
 
     async def _execution_gate(

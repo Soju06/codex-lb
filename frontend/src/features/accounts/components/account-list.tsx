@@ -15,7 +15,6 @@ import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-h
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
@@ -58,8 +57,6 @@ export function AccountList({
       );
     });
   }, [accounts, quotaDisplay, search, statusFilter]);
-
-  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
 
   return (
     <div className="space-y-3">
@@ -125,7 +122,7 @@ export function AccountList({
               key={account.accountId}
               account={account}
               selected={account.accountId === selectedAccountId}
-              showAccountId={duplicateAccountIds.has(account.accountId)}
+              showAccountId={account.isEmailDuplicate === true}
               onSelect={onSelect}
             />
           ))

@@ -54,6 +54,11 @@ class StickySessionKind(str, Enum):
     PROMPT_CACHE = "prompt_cache"
 
 
+class RequestKind(str, Enum):
+    NORMAL = "normal"
+    WARMUP = "warmup"
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -61,6 +66,9 @@ class Account(Base):
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
     routing_policy: Mapped[str] = mapped_column(
         String,
@@ -162,13 +170,18 @@ class RequestLog(Base):
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    request_kind: Mapped[str] = mapped_column(
+        String,
+        default=RequestKind.NORMAL.value,
+        server_default=text("'normal'"),
+        nullable=False,
+    )
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
-    request_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -183,6 +196,12 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_exception_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upstream_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    bridge_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
@@ -413,6 +432,11 @@ class DashboardSettings(Base):
         Float,
         default=100.0,
         server_default=text("100.0"),
+    )
+    warmup_model: Mapped[str] = mapped_column(
+        String,
+        default="gpt-5.4-mini",
+        server_default=text("'gpt-5.4-mini'"),
         nullable=False,
     )
     additional_quota_routing_policies_json: Mapped[str] = mapped_column(

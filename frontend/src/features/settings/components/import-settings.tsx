@@ -24,7 +24,7 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
             </div>
             <div>
               <h3 className="text-sm font-semibold">Import</h3>
-              <p className="text-xs text-muted-foreground">Control how account import handles duplicates.</p>
+              <p className="text-xs text-muted-foreground">Control how account import handles credential slots.</p>
             </div>
           </div>
         </div>
@@ -33,7 +33,7 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
           <div>
             <p className="text-sm font-medium">Allow import without overwrite</p>
             <p className="text-xs text-muted-foreground">
-              Keep duplicate imports as separate accounts instead of replacing existing ones.
+              Keep separate workspace or unknown credential slots instead of replacing by email.
             </p>
           </div>
           <Switch

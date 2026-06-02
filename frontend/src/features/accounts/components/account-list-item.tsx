@@ -38,14 +38,13 @@ export function AccountListItem({
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
-  const emailSubtitle =
-    account.displayName && account.displayName !== account.email
-      ? account.email
-      : null;
-  const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
-  const idSuffix = showAccountId
-    ? ` | ID ${formatCompactAccountId(account.accountId)}`
-    : "";
+  const emailSubtitle = account.displayName && account.displayName !== account.email
+    ? account.email
+    : null;
+  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
+  const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
   const hasPrimaryWindow =
@@ -84,25 +83,8 @@ export function AccountListItem({
               title
             )}
           </p>
-          <p
-            className="truncate text-xs text-muted-foreground"
-            title={
-              showAccountId ? `Account ID ${account.accountId}` : undefined
-            }
-          >
-            {emailSubtitle ? (
-              <>
-                <span className={blurred ? "privacy-blur" : undefined}>
-                  {emailSubtitle}
-                </span>
-                {idSuffix}
-              </>
-            ) : (
-              <>
-                {baseSubtitle}
-                {idSuffix}
-              </>
-            )}
+          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
         <RoutingPolicyBadge

@@ -28,6 +28,7 @@ class DashboardSettingsData:
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
     additional_quota_routing_policies: dict[str, str]
+    warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -58,6 +59,7 @@ class DashboardSettingsUpdateData:
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
     additional_quota_routing_policies: dict[str, str]
+    warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
@@ -96,6 +98,7 @@ class SettingsService:
             additional_quota_routing_policies=_parse_additional_quota_routing_policies(
                 row.additional_quota_routing_policies_json
             ),
+            warmup_model=row.warmup_model,
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
@@ -133,6 +136,7 @@ class SettingsService:
             additional_quota_routing_policies_json=_dump_additional_quota_routing_policies(
                 payload.additional_quota_routing_policies
             ),
+            warmup_model=payload.warmup_model,
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
@@ -164,6 +168,7 @@ class SettingsService:
             additional_quota_routing_policies=_parse_additional_quota_routing_policies(
                 row.additional_quota_routing_policies_json
             ),
+            warmup_model=row.warmup_model,
             import_without_overwrite=row.import_without_overwrite,
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,

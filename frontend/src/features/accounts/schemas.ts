@@ -66,6 +66,9 @@ export const AccountSummarySchema = z.object({
   email: z.string(),
   alias: z.string().nullable().optional(),
   displayName: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
@@ -87,6 +90,7 @@ export const AccountSummarySchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
+  isEmailDuplicate: z.boolean().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -103,6 +107,9 @@ export const AccountsResponseSchema = z.object({
 export const AccountImportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
 });
@@ -125,10 +132,33 @@ export const AccountOpenCodeAuthExportAccountSchema = z.object({
   email: z.string(),
 });
 
-export const AccountOpenCodeAuthExportResponseSchema = z.object({
+export const CodexAuthTokensSchema = z.object({
+  id_token: z.string(),
+  access_token: z.string(),
+  refresh_token: z.string(),
+  account_id: z.string().nullable().optional(),
+});
+
+export const CodexAuthJsonSchema = z.object({
+  auth_mode: z.string(),
+  OPENAI_API_KEY: z.string().nullable().optional(),
+  tokens: CodexAuthTokensSchema,
+  last_refresh: z.string(),
+});
+
+export const AccountAuthExportTokensSchema = z.object({
+  idToken: z.string(),
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  expiresAtMs: z.number().int().nonnegative(),
+});
+
+export const AccountAuthExportResponseSchema = z.object({
   filename: z.string(),
   account: AccountOpenCodeAuthExportAccountSchema,
-  authJson: OpenCodeAuthJsonSchema,
+  tokens: AccountAuthExportTokensSchema,
+  codexAuthJson: CodexAuthJsonSchema,
+  opencodeAuthJson: OpenCodeAuthJsonSchema,
 });
 
 export const AccountActionResponseSchema = z.object({
@@ -257,9 +287,9 @@ export type AccountAdditionalQuota = z.infer<
 >;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
-export type AccountOpenCodeAuthExportResponse = z.infer<
-  typeof AccountOpenCodeAuthExportResponseSchema
->;
+export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;
+export type AccountAuthExportTokens = z.infer<typeof AccountAuthExportTokensSchema>;
+export type AccountAuthExportResponse = z.infer<typeof AccountAuthExportResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<

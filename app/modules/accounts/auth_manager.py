@@ -41,6 +41,18 @@ class AccountsRepositoryPort(Protocol):
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool: ...
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
     ) -> bool: ...
 
 
@@ -217,6 +229,40 @@ class AuthManager:
             account.plan_type = DEFAULT_PLAN
         if result.email:
             account.email = result.email
+        incoming_workspace_id = _clean_optional(result.workspace_id)
+        current_workspace_id = _clean_optional(account.workspace_id)
+        next_workspace_id = current_workspace_id
+        if incoming_workspace_id and current_workspace_id and current_workspace_id != incoming_workspace_id:
+            logger.warning(
+                "Refresh payload reported workspace_id=%s for account_id=%s while existing "
+                "workspace_id=%s is already set; keeping slot identity",
+                incoming_workspace_id,
+                account.id,
+                current_workspace_id,
+            )
+            next_workspace_id = current_workspace_id
+        elif not current_workspace_id and incoming_workspace_id:
+            slot_taken = await self._repo.workspace_slot_taken(
+                account_id=account.id,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                workspace_id=incoming_workspace_id,
+            )
+            if slot_taken:
+                logger.warning(
+                    "Refresh payload reported workspace_id=%s for legacy account_id=%s, but that slot "
+                    "is already owned by another account; keeping unknown workspace",
+                    incoming_workspace_id,
+                    account.id,
+                )
+            else:
+                next_workspace_id = incoming_workspace_id
+                account.workspace_id = next_workspace_id
+        workspace_matches_current_slot = incoming_workspace_id is None or incoming_workspace_id == next_workspace_id
+        if workspace_matches_current_slot and result.workspace_label:
+            account.workspace_label = result.workspace_label
+        if workspace_matches_current_slot and result.seat_type:
+            account.seat_type = result.seat_type
 
         await self._repo.update_tokens(
             account.id,
@@ -227,6 +273,9 @@ class AuthManager:
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
+            workspace_id=next_workspace_id,
+            workspace_label=account.workspace_label,
+            seat_type=account.seat_type,
         )
         return account
 
@@ -262,6 +311,9 @@ class AuthManager:
                 plan_type=account.plan_type,
                 email=account.email,
                 chatgpt_account_id=raw_account_id,
+                workspace_id=account.workspace_id,
+                workspace_label=account.workspace_label,
+                seat_type=account.seat_type,
             )
         except Exception:
             logger.warning("Failed to persist chatgpt_account_id account_id=%s", account.id, exc_info=True)
@@ -298,6 +350,13 @@ def _refresh_token_material_fingerprint(encryptor: TokenEncryptor, refresh_token
     except Exception:
         material = refresh_token_encrypted
     return sha256(material).hexdigest()
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _clear_refresh_singleflight_state() -> None:

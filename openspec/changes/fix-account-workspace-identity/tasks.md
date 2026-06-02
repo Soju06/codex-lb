@@ -1,0 +1,6 @@
+- [x] Add workspace/seat metadata to account persistence and API summaries.
+- [x] Route import and OAuth persistence through workspace-slot identity.
+- [x] Guard usage refresh against workspace/plan mismatches.
+- [x] Update dashboard copy/display for workspace credential slots.
+- [x] Add regression coverage for same-email workspace-slot behavior.
+- [x] Run targeted backend/frontend/OpenSpec verification.

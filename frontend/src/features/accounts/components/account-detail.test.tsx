@@ -27,10 +27,9 @@ describe("AccountDetail", () => {
         onSetAlias={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
-        onExport={vi.fn()}
+        onExportAuth={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
-        onExportOpenCodeAuth={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
       />,
     );

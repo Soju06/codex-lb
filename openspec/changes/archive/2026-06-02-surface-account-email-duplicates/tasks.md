@@ -1,0 +1,6 @@
+- [x] Add `isEmailDuplicate` to backend `AccountSummary` and compute it from the account list returned by `GET /api/accounts`.
+- [x] Exclude blank/missing emails and `DEFAULT_EMAIL` (`unknown@example.com`) from duplicate detection.
+- [x] Scope duplicate detection to matching ChatGPT account identities so same-email accounts in different identities/workspaces are not flagged.
+- [x] Mirror the new field in the frontend account schema.
+- [x] Add integration coverage for duplicate real email/identity pairs, same-email different-identity rows, and placeholder-email exclusion.
+- [x] Document the account-summary duplicate-email contract under the frontend architecture capability.

@@ -30,10 +30,9 @@ export type AccountActionsProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
-  onExport: (accountId: string) => void;
+  onExportAuth: (accountId: string) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onExportOpenCodeAuth: (accountId: string) => void;
   onRoutingPolicyChange: (
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
@@ -47,10 +46,9 @@ export function AccountActions({
   onResume,
   onDelete,
   onReauth,
-  onExport,
+  onExportAuth,
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
-  onExportOpenCodeAuth,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
   return (
@@ -158,23 +156,11 @@ export function AccountActions({
           size="sm"
           variant="outline"
           className="h-8 gap-1.5 text-xs"
-          onClick={() => onExport(account.accountId)}
+          onClick={() => onExportAuth(account.accountId)}
           disabled={busy}
         >
           <Download className="h-3.5 w-3.5" />
           Export
-        </Button>
-
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 gap-1.5 text-xs"
-          onClick={() => onExportOpenCodeAuth(account.accountId)}
-          disabled={busy}
-        >
-          <Download className="h-3.5 w-3.5" />
-          Export OpenCode auth
         </Button>
 
         <Button

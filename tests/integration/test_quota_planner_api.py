@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, QuotaWindowObservation, RequestLog, UsageHistory
+from app.db.models import Account, AccountStatus, QuotaPlannerDecision, QuotaWindowObservation, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
 from app.modules.quota_planner.logic import PlannerSettings
@@ -212,6 +212,103 @@ async def test_quota_planner_warm_now_does_not_execute_canceled_decision(monkeyp
 
     assert result.status == "canceled"
     assert result.reason == "admin_canceled"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_claims_planned_decision_before_probe(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-claim",
+            email="warm-claim@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="claim-before-probe",
+            account_id=account.id,
+            scheduled_at=utcnow(),
+            score=3.0,
+            reason="operator_review",
+            status="planned",
+        )
+        seen_statuses: list[str] = []
+
+        async def fake_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            async with SessionLocal() as observe_session:
+                status = await observe_session.scalar(
+                    select(QuotaPlannerDecision.status).where(QuotaPlannerDecision.id == decision.id)
+                )
+                assert status is not None
+                seen_statuses.append(status)
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+        result = await QuotaWarmupService(session).warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            decision_id=decision.id,
+        )
+
+    assert seen_statuses == ["executing"]
+    assert result.status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_cancel_decision_does_not_cancel_executing(async_client, db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="executing-not-cancelable",
+            scheduled_at=utcnow(),
+            score=3.0,
+            reason="warmup_executing",
+            status="executing",
+        )
+
+    response = await async_client.post(f"/api/quota-planner/decisions/{decision.id}/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decisionId"] == decision.id
+    assert payload["status"] == "executing"
+    assert payload["reason"] == "not_cancelable"
+    async with SessionLocal() as session:
+        status = await session.scalar(select(QuotaPlannerDecision.status).where(QuotaPlannerDecision.id == decision.id))
+    assert status == "executing"
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,7 @@ const baseSettings = {
   singleAccountId: null,
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
   importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
@@ -133,11 +134,10 @@ describe("TotpSettings", () => {
       singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
+      warmupModel: baseSettings.warmupModel,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

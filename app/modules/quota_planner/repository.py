@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Integer, and_, cast, func, literal, select
+from sqlalchemy import Integer, and_, cast, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
@@ -131,20 +132,31 @@ class QuotaPlannerRepository:
         reason: str | None = None,
         executed_at: datetime | None = None,
         state_after_json: str | None = None,
+        expected_status: str | Collection[str] | None = None,
     ) -> QuotaPlannerDecision | None:
-        row = await self._session.get(QuotaPlannerDecision, decision_id)
+        values: dict[str, object] = {"status": status}
+        if reason is not None:
+            values["reason"] = reason
+        if executed_at is not None:
+            values["executed_at"] = executed_at
+        if state_after_json is not None:
+            values["state_after_json"] = state_after_json
+        stmt = update(QuotaPlannerDecision).where(QuotaPlannerDecision.id == decision_id).values(**values)
+        if expected_status is not None:
+            if isinstance(expected_status, str):
+                stmt = stmt.where(QuotaPlannerDecision.status == expected_status)
+            else:
+                stmt = stmt.where(QuotaPlannerDecision.status.in_(tuple(expected_status)))
+        stmt = stmt.returning(QuotaPlannerDecision.id)
+        async with sqlite_writer_section():
+            updated_id = await self._session.scalar(stmt)
+            await self._session.commit()
+        if updated_id is None:
+            return None
+        row = await self._session.get(QuotaPlannerDecision, updated_id)
         if row is None:
             return None
-        row.status = status
-        if reason is not None:
-            row.reason = reason
-        if executed_at is not None:
-            row.executed_at = executed_at
-        if state_after_json is not None:
-            row.state_after_json = state_after_json
-        async with sqlite_writer_section():
-            await self._session.commit()
-            await self._session.refresh(row)
+        await self._session.refresh(row)
         return row
 
     async def count_executed_warmups_since(self, since: datetime) -> int:

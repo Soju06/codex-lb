@@ -39,6 +39,9 @@ class UsagePayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     plan_type: str | None = None
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     rate_limit: RateLimitPayload | None = None
     credits: CreditsPayload | None = None
     additional_rate_limits: list[AdditionalRateLimitPayload] | None = None

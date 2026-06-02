@@ -21,6 +21,7 @@ class RequestLogEntry(DashboardModel):
     api_key_id: str | None = None
     api_key_name: str | None = None
     request_id: str
+    request_kind: str = "normal"
     model: str
     source: str | None = None
     transport: str | None = None
@@ -30,6 +31,12 @@ class RequestLogEntry(DashboardModel):
     status: str
     error_code: str | None = None
     error_message: str | None = None
+    failure_phase: str | None = None
+    failure_detail: str | None = None
+    failure_exception_type: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    bridge_stage: str | None = None
     tokens: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None

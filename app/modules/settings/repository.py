@@ -30,6 +30,7 @@ class SettingsRepository:
             single_account_id=None,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=43200,
+            warmup_model=get_settings().warmup_model,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -79,6 +80,7 @@ class SettingsRepository:
         sticky_reallocation_primary_budget_threshold_pct: float | None = None,
         sticky_reallocation_secondary_budget_threshold_pct: float | None = None,
         additional_quota_routing_policies_json: str | None = None,
+        warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
@@ -126,6 +128,8 @@ class SettingsRepository:
             )
         if additional_quota_routing_policies_json is not None:
             settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
+        if warmup_model is not None:
+            settings.warmup_model = warmup_model
         if import_without_overwrite is not None:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:

@@ -941,10 +941,32 @@ class ProxyService:
                 request_state.preferred_account_id = rewritten_file_account_id
                 file_required_preferred_account = True
         if request_state.preferred_account_id is None:
-            resolved_file_account_id = await self._resolve_file_account_for_responses(effective_payload, headers)
+            resolved_file_account_id = await self._resolve_file_account_for_responses(
+                effective_payload,
+                headers,
+            )
             if resolved_file_account_id is not None:
                 request_state.preferred_account_id = resolved_file_account_id
                 file_required_preferred_account = True
+        if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
+            selection_inputs = await self._load_balancer._load_selection_inputs(
+                model=effective_payload.model,
+                additional_limit_name=None,
+                account_ids=None,
+            )
+            if len(selection_inputs.accounts) != 1:
+                message = "Previous response owner account is unavailable; retry later."
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="owner_account_unavailable",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="owner_lookup_miss",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error("previous_response_owner_unavailable", message),
+                )
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data

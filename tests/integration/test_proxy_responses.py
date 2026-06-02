@@ -636,26 +636,30 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_retu
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_previous_response_not_found_without_http_bridge_and_missing_owner_returns_stream_incomplete(
+async def test_v1_responses_missing_previous_response_owner_fails_closed_before_account_switch(
     async_client,
     monkeypatch,
 ):
-    email = "prev-http-missing-owner@example.com"
-    raw_account_id = "acc_prev_http_missing_owner"
-    auth_json = _make_auth_json(raw_account_id, email)
-    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
-    assert response.status_code == 200
+    for raw_account_id, email in (
+        ("acc_prev_http_missing_owner_1", "prev-http-missing-owner-1@example.com"),
+        ("acc_prev_http_missing_owner_2", "prev-http-missing-owner-2@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
         del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
-        error_payload = proxy_module.openai_error(
-            "previous_response_not_found",
-            "Previous response with id 'resp_prev_http_missing_owner' not found.",
-            error_type="invalid_request_error",
-        )
-        error_payload["error"]["param"] = "previous_response_id"
-        raise proxy_module.ProxyResponseError(400, error_payload)
+        raise AssertionError("missing previous_response_id owner must fail before upstream stream attempt")
         if False:
             yield ""
 
@@ -677,8 +681,11 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_and_
     )
 
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "stream_incomplete"
-    assert response.json()["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert (
+        response.json()["error"]["message"]
+        == "Previous response owner account is unavailable; retry later."
+    )
 
 
 @pytest.mark.asyncio

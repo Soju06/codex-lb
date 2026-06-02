@@ -1522,7 +1522,7 @@ async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previo
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
-    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())

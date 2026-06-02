@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
+from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
@@ -306,6 +308,21 @@ class AccountsRepository:
         if settings is None:
             return True
         return not settings.import_without_overwrite
+
+    async def additional_quota_routing_policy_overrides(self) -> dict[str, str]:
+        settings = await self._session.get(DashboardSettings, _SETTINGS_ROW_ID)
+        if settings is None or not settings.additional_quota_routing_policies_json:
+            return {}
+        try:
+            parsed = json.loads(settings.additional_quota_routing_policies_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        string_policies = {
+            key: value for key, value in parsed.items() if isinstance(key, str) and isinstance(value, str)
+        }
+        return normalize_additional_quota_routing_policy_overrides(string_policies)
 
     async def _next_available_account_id(self, base_id: str) -> str:
         candidate = base_id

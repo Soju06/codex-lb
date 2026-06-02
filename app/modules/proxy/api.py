@@ -2142,6 +2142,15 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(
+        request,
+        context,
+        api_key,
+        model=payload.model,
+        lease_kind="response_create",
+    )
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,

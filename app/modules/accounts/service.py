@@ -91,6 +91,7 @@ class AccountsService:
         additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] = {}
         additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
         if additional_usage_repo:
+            additional_quota_routing_overrides = await self._repo.additional_quota_routing_policy_overrides()
             quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
             for quota_key in quota_keys:
                 primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
@@ -108,7 +109,10 @@ class AccountsService:
                             metered_feature=reference_entry.metered_feature,
                             display_label=get_additional_display_label_for_quota_key(quota_key)
                             or reference_entry.limit_name,
-                            routing_policy=get_additional_quota_routing_policy(quota_key),
+                            routing_policy=get_additional_quota_routing_policy(
+                                quota_key,
+                                overrides=additional_quota_routing_overrides,
+                            ),
                             primary_window=AccountAdditionalWindow(
                                 used_percent=primary_entry.used_percent,
                                 reset_at=primary_entry.reset_at,

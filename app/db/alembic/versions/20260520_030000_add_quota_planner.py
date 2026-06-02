@@ -34,11 +34,48 @@ def _index_names(table_name: str) -> set[str]:
     return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name")}
 
 
+def _ensure_request_logs_request_kind() -> None:
+    if "request_logs" not in _table_names():
+        return
+
+    request_log_columns = _column_names("request_logs")
+    if "request_kind" not in request_log_columns:
+        with op.batch_alter_table("request_logs") as batch_op:
+            batch_op.add_column(
+                sa.Column("request_kind", sa.String(), nullable=True, server_default=sa.text("'normal'"))
+            )
+
+    op.execute(
+        sa.text(
+            """
+            UPDATE request_logs
+            SET request_kind = 'normal'
+            WHERE request_kind IS NULL OR request_kind = ''
+            """
+        )
+    )
+    if "source" in request_log_columns:
+        op.execute(
+            sa.text(
+                """
+                UPDATE request_logs
+                SET request_kind = 'warmup'
+                WHERE source = 'limit_warmup'
+                """
+            )
+        )
+    with op.batch_alter_table("request_logs") as batch_op:
+        batch_op.alter_column(
+            "request_kind",
+            existing_type=sa.String(),
+            nullable=False,
+            server_default=sa.text("'normal'"),
+        )
+
+
 def upgrade() -> None:
     tables = _table_names()
-    if "request_logs" in tables and "request_kind" not in _column_names("request_logs"):
-        with op.batch_alter_table("request_logs") as batch_op:
-            batch_op.add_column(sa.Column("request_kind", sa.String(), nullable=True))
+    _ensure_request_logs_request_kind()
 
     if "quota_planner_settings" not in tables:
         op.create_table(
@@ -155,6 +192,3 @@ def downgrade() -> None:
         op.drop_table("quota_planner_decisions")
     if "quota_planner_settings" in tables:
         op.drop_table("quota_planner_settings")
-    if "request_kind" in _column_names("request_logs"):
-        with op.batch_alter_table("request_logs") as batch_op:
-            batch_op.drop_column("request_kind")

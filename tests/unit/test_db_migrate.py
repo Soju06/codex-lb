@@ -261,6 +261,54 @@ def test_request_logs_response_lookup_migration_handles_preexisting_session_id_c
         assert "idx_logs_request_status_api_key_session_time" in index_names
 
 
+def test_quota_planner_migration_repairs_preexisting_request_kind_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "quota-planner-request-kind-drift.db"
+    url = _db_url(db_path)
+    pre_revision = "20260520_000000_merge_api_key_and_http_bridge_heads"
+    target_revision = "20260520_030000_add_quota_planner"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(text("ALTER TABLE request_logs ADD COLUMN source VARCHAR"))
+        connection.execute(text("ALTER TABLE request_logs ADD COLUMN request_kind VARCHAR"))
+        connection.execute(
+            text(
+                """
+                INSERT INTO request_logs (
+                    id,
+                    request_id,
+                    model,
+                    status,
+                    source,
+                    request_kind
+                ) VALUES
+                    (1, 'normal-null', 'gpt-5.4-mini', 'success', NULL, NULL),
+                    (2, 'normal-empty', 'gpt-5.4-mini', 'success', NULL, ''),
+                    (3, 'warmup-null', 'gpt-5.4-mini', 'success', 'limit_warmup', NULL)
+                """
+            )
+        )
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        rows = connection.execute(text("SELECT request_id, request_kind FROM request_logs ORDER BY id")).fetchall()
+        request_kind_column = next(
+            column for column in inspect(connection).get_columns("request_logs") if column["name"] == "request_kind"
+        )
+
+    assert rows == [
+        ("normal-null", "normal"),
+        ("normal-empty", "normal"),
+        ("warmup-null", "warmup"),
+    ]
+    assert request_kind_column["nullable"] is False
+    assert request_kind_column["default"] is not None
+
+
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     db_path = tmp_path / "drift.db"
     url = _db_url(db_path)

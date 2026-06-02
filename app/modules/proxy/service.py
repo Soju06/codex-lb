@@ -7503,7 +7503,21 @@ class ProxyService:
                                 current_session = http_bridge_sessions.get(session.key)
                     elif http_bridge_sessions is not None:
                         current_session = http_bridge_sessions.get(session.key)
-                    if current_session is not None and current_session is not session:
+                    if current_session is None:
+                        _log_http_bridge_event(
+                            "submit_on_closed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            detail="session_unregistered_before_reconnect",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                        )
+                    if current_session is not session:
                         _log_http_bridge_event(
                             "submit_on_closed",
                             session.key,
@@ -7600,15 +7614,22 @@ class ProxyService:
                             current_session = http_bridge_sessions.get(session.key)
                 elif http_bridge_sessions is not None:
                     current_session = http_bridge_sessions.get(session.key)
+                session_unregistered = current_session is None
                 session_replaced = current_session is not None and current_session is not session
-                if session.closed or session_replaced:
+                if session.closed or session_unregistered or session_replaced:
                     _log_http_bridge_event(
                         "submit_on_closed",
                         session.key,
                         account_id=session.account.id,
                         model=session.request_model,
                         detail=(
-                            "session_retired_after_admission" if session.closed else "session_replaced_after_admission"
+                            "session_retired_after_admission"
+                            if session.closed
+                            else (
+                                "session_unregistered_after_admission"
+                                if session_unregistered
+                                else "session_replaced_after_admission"
+                            )
                         ),
                         cache_key_family=session.key.affinity_kind,
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,

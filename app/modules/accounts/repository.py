@@ -51,6 +51,10 @@ class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    @property
+    def session(self) -> AsyncSession:
+        return self._session
+
     async def get_by_id(self, account_id: str) -> Account | None:
         return await self._session.get(Account, account_id)
 
@@ -108,13 +112,16 @@ class AccountsRepository:
         return summaries
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
+        return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
+
+    async def get_active_by_chatgpt_account_id(self, chatgpt_account_id: str) -> Account | None:
         result = await self._session.execute(
-            select(Account.id)
+            select(Account)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
             .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             .limit(1)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar_one_or_none()
 
     async def upsert(
         self,

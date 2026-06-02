@@ -33,8 +33,10 @@ from app.core.clients.oauth import (
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.schemas import (
     ManualCallbackResponse,
@@ -51,6 +53,19 @@ _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_succe
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
+
+
+async def _oauth_route() -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        try:
+            return await resolve_upstream_route(
+                session,
+                account_id=None,
+                operation="oauth",
+                scope="bootstrap",
+            )
+        except UpstreamProxyRouteError as exc:
+            raise OAuthError(exc.reason, str(exc), status_code=502) from exc
 
 
 @dataclass
@@ -405,7 +420,13 @@ class OauthService:
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            route = await _oauth_route()
+            tokens = await exchange_authorization_code(
+                code=code,
+                code_verifier=verifier,
+                route=route,
+                allow_direct_egress=route is None,
+            )
             await self._persist_tokens(tokens)
             await self._set_success(flow.flow_id)
             asyncio.create_task(self._stop_callback_server_if_idle())
@@ -425,7 +446,8 @@ class OauthService:
     async def _start_device_flow(self) -> OauthStartResponse:
         flow_id = secrets.token_urlsafe(12)
         try:
-            device = await request_device_code()
+            route = await _oauth_route()
+            device = await request_device_code(route=route, allow_direct_egress=route is None)
         except OAuthError as exc:
             await self._set_error(exc.message)
             raise
@@ -473,7 +495,13 @@ class OauthService:
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            route = await _oauth_route()
+            tokens = await exchange_authorization_code(
+                code=code,
+                code_verifier=verifier,
+                route=route,
+                allow_direct_egress=route is None,
+            )
             await self._persist_tokens(tokens)
             await self._set_success(flow.flow_id)
             html = _success_html()
@@ -490,9 +518,12 @@ class OauthService:
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
         try:
             while time.time() < context.expires_at:
+                route = await _oauth_route()
                 tokens = await exchange_device_token(
                     device_auth_id=context.device_auth_id,
                     user_code=context.user_code,
+                    route=route,
+                    allow_direct_egress=route is None,
                 )
                 if tokens:
                     await self._persist_tokens(tokens)

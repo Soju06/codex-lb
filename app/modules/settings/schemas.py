@@ -15,6 +15,8 @@ class AdditionalQuotaPolicy(DashboardModel):
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    upstream_proxy_routing_enabled: bool
+    upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     routing_strategy: str = Field(
@@ -51,6 +53,8 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
     )
+    upstream_proxy_routing_enabled: bool | None = None
+    upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool | None = None
     prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(
@@ -92,3 +96,62 @@ class DashboardSettingsUpdateRequest(DashboardModel):
 
 class RuntimeConnectAddressResponse(DashboardModel):
     connect_address: str
+
+
+class UpstreamProxyEndpointCreateRequest(DashboardModel):
+    name: str = Field(min_length=1, max_length=128)
+    scheme: str = Field(pattern=r"^(http|https|socks5|socks5h)$")
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    username: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=1024)
+    is_active: bool = True
+
+
+class UpstreamProxyEndpointResponse(DashboardModel):
+    id: str
+    name: str
+    scheme: str
+    host: str
+    port: int
+    username: str | None
+    is_active: bool
+
+
+class UpstreamProxyPoolCreateRequest(DashboardModel):
+    name: str = Field(min_length=1, max_length=128)
+    endpoint_ids: list[str] = Field(default_factory=list)
+    is_active: bool = True
+
+
+class UpstreamProxyPoolMemberRequest(DashboardModel):
+    endpoint_id: str = Field(min_length=1)
+    sort_order: int = 0
+    weight: int = Field(default=1, ge=1)
+    is_active: bool = True
+
+
+class UpstreamProxyPoolResponse(DashboardModel):
+    id: str
+    name: str
+    is_active: bool
+    endpoint_ids: list[str]
+
+
+class AccountProxyBindingRequest(DashboardModel):
+    pool_id: str = Field(min_length=1)
+    is_active: bool = True
+
+
+class AccountProxyBindingResponse(DashboardModel):
+    account_id: str
+    pool_id: str
+    is_active: bool
+
+
+class UpstreamProxyAdminResponse(DashboardModel):
+    routing_enabled: bool
+    default_pool_id: str | None
+    endpoints: list[UpstreamProxyEndpointResponse]
+    pools: list[UpstreamProxyPoolResponse]
+    bindings: list[AccountProxyBindingResponse]

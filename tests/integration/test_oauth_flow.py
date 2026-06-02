@@ -15,6 +15,7 @@ import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.oauth import DeviceCode, OAuthTokens
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -720,6 +721,21 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_reports_proxy_route_errors(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_oauth_route(*_args, **_kwargs):
+        raise UpstreamProxyRouteError("default_pool_unconfigured", account_id=None)
+
+    monkeypatch.setattr(oauth_module, "resolve_upstream_route", fake_oauth_route)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+
+    assert start.status_code == 502
+    assert start.json()["error"]["code"] == "default_pool_unconfigured"
 
 
 @pytest.mark.asyncio

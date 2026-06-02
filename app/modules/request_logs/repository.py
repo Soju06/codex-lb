@@ -206,6 +206,11 @@ class RequestLogsRepository:
         upstream_error_code: str | None = None,
         bridge_stage: str | None = None,
         request_kind: str = RequestKind.NORMAL.value,
+        upstream_proxy_route_mode: str | None = None,
+        upstream_proxy_pool_id: str | None = None,
+        upstream_proxy_endpoint_id: str | None = None,
+        upstream_proxy_fallback_used: bool | None = None,
+        upstream_proxy_fail_closed_reason: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
@@ -241,6 +246,11 @@ class RequestLogsRepository:
                 upstream_status_code=upstream_status_code,
                 upstream_error_code=upstream_error_code,
                 bridge_stage=bridge_stage,
+                upstream_proxy_route_mode=upstream_proxy_route_mode,
+                upstream_proxy_pool_id=upstream_proxy_pool_id,
+                upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
+                upstream_proxy_fallback_used=upstream_proxy_fallback_used,
+                upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                 requested_at=requested_at or utcnow(),
             )
             log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))

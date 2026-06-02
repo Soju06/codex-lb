@@ -11,6 +11,7 @@ import pytest
 
 from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -340,6 +341,40 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+def _route() -> ResolvedUpstreamRoute:
+    return ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_passes_resolved_route_to_fetch_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_route", "chatgpt_acc_route")
+    repo = StubUsageRepository()
+    updater = UsageUpdater(repo)
+    route = _route()
+    calls: list[dict[str, object]] = []
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        calls.append(kwargs)
+        return UsagePayload(plan_type="plus")
+
+    resolve_upstream_route = AsyncMock(return_value=route)
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+    monkeypatch.setattr(usage_updater_module, "resolve_upstream_route", resolve_upstream_route)
+
+    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert result.fetch_succeeded is True
+    assert calls[0]["route"] is route
+    assert calls[0]["account_id"] == "chatgpt_acc_route"
+    assert resolve_upstream_route.await_args is not None
+    assert resolve_upstream_route.await_args.kwargs["account_id"] == "acc_route"
 
 
 @pytest.mark.asyncio

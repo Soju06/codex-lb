@@ -10,13 +10,14 @@ from typing import AsyncContextManager, Callable, Protocol
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import override_stream_timeouts, stream_responses
+from app.core.clients.proxy import UpstreamProxyRouteTrace, override_stream_timeouts, stream_responses
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIError, ResponseUsage
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
@@ -43,6 +44,11 @@ class LimitWarmupSendResult:
     usage: ResponseUsage | None = None
     error_code: str | None = None
     error_message: str | None = None
+    upstream_proxy_route_mode: str | None = None
+    upstream_proxy_pool_id: str | None = None
+    upstream_proxy_endpoint_id: str | None = None
+    upstream_proxy_fallback_used: bool | None = None
+    upstream_proxy_fail_closed_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +121,11 @@ class LimitWarmupRequestLogRepository(Protocol):
         upstream_error_code: str | None = None,
         bridge_stage: str | None = None,
         request_kind: str = "normal",
+        upstream_proxy_route_mode: str | None = None,
+        upstream_proxy_pool_id: str | None = None,
+        upstream_proxy_endpoint_id: str | None = None,
+        upstream_proxy_fallback_used: bool | None = None,
+        upstream_proxy_fail_closed_reason: str | None = None,
     ) -> object: ...
 
 
@@ -156,6 +167,17 @@ class StreamingLimitWarmupSender:
                 error_code="account_not_active",
                 error_message=f"Account status is {fresh_account.status.value}",
             )
+        try:
+            route = await self._resolve_upstream_route(fresh_account)
+        except UpstreamProxyRouteError as exc:
+            return LimitWarmupSendResult(
+                request_id=request_id,
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                error_code="upstream_proxy_unavailable",
+                error_message=f"Upstream proxy route unavailable: {exc.reason}",
+                upstream_proxy_fail_closed_reason=exc.reason,
+            )
 
         payload = ResponsesRequest.model_validate(
             {
@@ -175,6 +197,7 @@ class StreamingLimitWarmupSender:
             "user-agent": "codex-lb-limit-warmup",
         }
         usage: ResponseUsage | None = None
+        route_trace = UpstreamProxyRouteTrace()
         with override_stream_timeouts(
             connect_timeout_seconds=5.0,
             idle_timeout_seconds=10.0,
@@ -186,6 +209,9 @@ class StreamingLimitWarmupSender:
                 access_token,
                 chatgpt_account_id,
                 upstream_stream_transport_override="http",
+                route=route,
+                route_trace=route_trace,
+                allow_direct_egress=route is None,
             ):
                 event = parse_sse_event(event_block)
                 if event is None:
@@ -198,6 +224,10 @@ class StreamingLimitWarmupSender:
                         success=True,
                         latency_ms=_elapsed_ms(started),
                         usage=usage,
+                        upstream_proxy_route_mode=route_trace.mode,
+                        upstream_proxy_pool_id=route_trace.pool_id,
+                        upstream_proxy_endpoint_id=route_trace.endpoint_id,
+                        upstream_proxy_fallback_used=route_trace.fallback_used,
                     )
                 if event.type in _TERMINAL_ERROR_EVENTS:
                     error = _event_error(event.error, event.response.error if event.response is not None else None)
@@ -208,6 +238,10 @@ class StreamingLimitWarmupSender:
                         usage=usage,
                         error_code=error.code or event.type,
                         error_message=error.message or event.type,
+                        upstream_proxy_route_mode=route_trace.mode,
+                        upstream_proxy_pool_id=route_trace.pool_id,
+                        upstream_proxy_endpoint_id=route_trace.endpoint_id,
+                        upstream_proxy_fallback_used=route_trace.fallback_used,
                     )
 
         return LimitWarmupSendResult(
@@ -217,6 +251,10 @@ class StreamingLimitWarmupSender:
             usage=usage,
             error_code="stream_incomplete",
             error_message="Warm-up stream ended without a terminal event",
+            upstream_proxy_route_mode=route_trace.mode,
+            upstream_proxy_pool_id=route_trace.pool_id,
+            upstream_proxy_endpoint_id=route_trace.endpoint_id,
+            upstream_proxy_fallback_used=route_trace.fallback_used,
         )
 
     async def _ensure_fresh(self, account: Account) -> Account:
@@ -227,6 +265,24 @@ class StreamingLimitWarmupSender:
                 accounts_repo,
                 refresh_repo_factory=self._accounts_repo_factory,
             ).ensure_fresh(account)
+
+    async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
+        if self._accounts_repo_factory is not None:
+            async with self._accounts_repo_factory() as accounts_repo:
+                return await resolve_upstream_route(
+                    accounts_repo.session,
+                    account_id=account.id,
+                    operation="limit_warmup",
+                    scope="account",
+                    encryptor=self._encryptor,
+                )
+        return await resolve_upstream_route(
+            self._accounts_repo.session,
+            account_id=account.id,
+            operation="limit_warmup",
+            scope="account",
+            encryptor=self._encryptor,
+        )
 
 
 class LimitWarmupService:
@@ -523,9 +579,14 @@ class LimitWarmupService:
             error_code=result.error_code,
             error_message=_truncate(result.error_message),
             transport="http",
-            request_kind=LIMIT_WARMUP_REQUEST_KIND,
             plan_type=account.plan_type,
-            source="limit_warmup",
+            source=LIMIT_WARMUP_SOURCE,
+            request_kind=LIMIT_WARMUP_REQUEST_KIND,
+            upstream_proxy_route_mode=result.upstream_proxy_route_mode,
+            upstream_proxy_pool_id=result.upstream_proxy_pool_id,
+            upstream_proxy_endpoint_id=result.upstream_proxy_endpoint_id,
+            upstream_proxy_fallback_used=result.upstream_proxy_fallback_used,
+            upstream_proxy_fail_closed_reason=result.upstream_proxy_fail_closed_reason,
         )
 
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from hashlib import sha256
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token, should_refresh
@@ -15,8 +16,10 @@ from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.db.session import get_background_session
 
 
 class AccountsRepositoryPort(Protocol):
@@ -198,7 +201,7 @@ class AuthManager:
     async def refresh_account(self, account: Account) -> Account:
         refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
         try:
-            result = await self._refresh_tokens(refresh_token)
+            result = await self._refresh_tokens(refresh_token, account=account)
         except RefreshError as exc:
             if exc.is_permanent:
                 latest = await self._repo.get_by_id(account.id)
@@ -279,12 +282,36 @@ class AuthManager:
         )
         return account
 
-    async def _refresh_tokens(self, refresh_token: str) -> TokenRefreshResult:
+    async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:
         refresh_lease: RefreshAdmissionLeasePort | None = None
         if self._acquire_refresh_admission is not None:
             refresh_lease = await self._acquire_refresh_admission()
         try:
-            return await refresh_access_token(refresh_token)
+            async with get_background_session() as session:
+                try:
+                    route = await resolve_upstream_route(
+                        session,
+                        account_id=account.id,
+                        operation="token_refresh",
+                        scope="account",
+                        encryptor=self._encryptor,
+                    )
+                except UpstreamProxyRouteError as exc:
+                    raise RefreshError(
+                        "upstream_proxy_unavailable",
+                        f"Upstream proxy route unavailable: {exc.reason}",
+                        False,
+                        transport_error=True,
+                        upstream_proxy_fail_closed_reason=exc.reason,
+                    ) from exc
+            return await _call_with_supported_optional_kwargs(
+                refresh_access_token,
+                refresh_token,
+                optional_kwargs={
+                    "route": route,
+                    "allow_direct_egress": route is None,
+                },
+            )
         finally:
             if refresh_lease is not None:
                 refresh_lease.release()
@@ -357,6 +384,29 @@ def _clean_optional(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+async def _call_with_supported_optional_kwargs(
+    func: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    optional_kwargs: Mapping[str, Any],
+    **required_kwargs: Any,
+) -> Any:
+    kwargs = dict(required_kwargs)
+    kwargs.update(optional_kwargs)
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        signature = None
+    accepts_var_keyword = signature is not None and any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+    if signature is not None and not accepts_var_keyword:
+        for name in optional_kwargs:
+            if name not in signature.parameters:
+                kwargs.pop(name, None)
+    return await func(*args, **kwargs)
 
 
 def _clear_refresh_singleflight_state() -> None:

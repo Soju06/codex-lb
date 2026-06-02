@@ -2269,9 +2269,25 @@ def _select_account_preferring_budget_safe(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
 ) -> SelectionResult:
     state_list = list(states)
+    state_budget_threshold = (
+        (
+            lambda state: _state_above_sticky_budget_threshold(
+                state,
+                budget_threshold_pct,
+                secondary_budget_threshold_pct,
+            )
+        )
+        if apply_secondary_budget_threshold
+        else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
+    )
     if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+        budget_safe_states = [
+            state
+            for state in state_list
+            if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
+        ]
         return select_account(
-            state_list,
+            budget_safe_states or state_list,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2289,6 +2305,7 @@ def _select_account_preferring_budget_safe(
         burn_first = select_account(
             burn_first_states,
             prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=False,
             deterministic_probe=deterministic_probe,
@@ -2301,17 +2318,6 @@ def _select_account_preferring_budget_safe(
         if burn_first.account is not None:
             return burn_first
 
-    state_budget_threshold = (
-        (
-            lambda state: _state_above_sticky_budget_threshold(
-                state,
-                budget_threshold_pct,
-                secondary_budget_threshold_pct,
-            )
-        )
-        if apply_secondary_budget_threshold
-        else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
-    )
     preferred_states = [
         state
         for state in state_list

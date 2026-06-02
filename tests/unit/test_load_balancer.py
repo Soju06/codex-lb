@@ -2905,6 +2905,68 @@ def test_all_primary_pressured_fallback_honors_primary_reset_preference():
     assert result.account.account_id == "early"
 
 
+def test_drain_budget_safe_selection_filters_over_threshold_accounts():
+    states = [
+        AccountState(
+            "over-budget-lowest-capacity",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=10.0,
+        ),
+        AccountState(
+            "under-budget",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="sequential_drain",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "under-budget"
+
+
+def test_burn_first_selection_honors_primary_reset_preference():
+    now = time.time()
+    states = [
+        AccountState(
+            "secondary-early-primary-late",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            primary_reset_at=int(now + 6 * 3600),
+            secondary_reset_at=int(now + 30 * 60),
+            routing_policy="burn_first",
+        ),
+        AccountState(
+            "primary-early-secondary-late",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            primary_reset_at=int(now + 30 * 60),
+            secondary_reset_at=int(now + 6 * 3600),
+            routing_policy="burn_first",
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=True,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "primary-early-secondary-late"
+
+
 def test_primary_pressured_fallback_honors_reset_bucket_before_primary_usage():
     now = time.time()
     states = [

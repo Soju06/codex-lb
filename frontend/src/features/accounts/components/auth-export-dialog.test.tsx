@@ -134,6 +134,8 @@ describe("AuthExportDialog", () => {
   it("downloads auth.json in codex mode", async () => {
     const user = userEvent.setup();
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const append = vi.spyOn(document.body, "append");
+    const remove = vi.spyOn(HTMLAnchorElement.prototype, "remove");
     const createObjectURL = vi.fn(() => "blob:auth-json");
     const revokeObjectURL = vi.fn();
     Object.defineProperty(URL, "createObjectURL", {
@@ -152,7 +154,9 @@ describe("AuthExportDialog", () => {
     await user.click(screen.getByRole("button", { name: "Download" }));
 
     expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(append).toHaveBeenCalledOnce();
     expect(click).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:auth-json");
   });
 

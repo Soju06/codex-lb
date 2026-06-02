@@ -78,8 +78,13 @@ function downloadAuthJson(exportData: AccountAuthExportResponse, format: AuthFor
   const link = document.createElement("a");
   link.href = url;
   link.download = format === "codex" ? "auth.json" : exportData.filename;
-  link.click();
-  URL.revokeObjectURL(url);
+  document.body.append(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
 }
 
 function AuthExportDialogBody({

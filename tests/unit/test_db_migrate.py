@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+import sqlalchemy as sa
 from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
@@ -275,6 +276,56 @@ def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
     drift = check_schema_drift(url)
     assert drift
     assert any("rogue_table" in diff for diff in drift)
+
+
+def test_check_schema_drift_ignores_legacy_live_extra_request_log_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-extra-column.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(text("ALTER TABLE request_logs ADD COLUMN slim_summary_json TEXT"))
+        connection.commit()
+
+    assert check_schema_drift(url) == ()
+
+
+def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thresholds(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "sqlite-real-float.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    def _compare_metadata(context, metadata):
+        return [
+            (
+                "modify_type",
+                None,
+                "dashboard_settings",
+                "sticky_reallocation_primary_budget_threshold_pct",
+                {},
+                sa.REAL(),
+                sa.Float(),
+            ),
+            (
+                "modify_type",
+                None,
+                "dashboard_settings",
+                "sticky_reallocation_secondary_budget_threshold_pct",
+                {},
+                sa.REAL(),
+                sa.Float(),
+            ),
+        ]
+
+    monkeypatch.setattr(migrate_module, "compare_metadata", _compare_metadata)
+
+    assert check_schema_drift(url) == ()
 
 
 def test_check_schema_drift_detects_missing_manual_performance_index(tmp_path: Path) -> None:

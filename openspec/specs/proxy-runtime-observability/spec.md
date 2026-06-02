@@ -112,3 +112,13 @@ If request-log persistence fails for Responses WebSocket requests, the runtime M
 - **WHEN** the runtime logs a request-log persistence failure
 - **THEN** the verifier reports the failure count
 - **AND** the continuity closeout cannot be marked green until persistence failures are absent or explicitly explained
+
+### Requirement: Stale pending HTTP bridge retirement is logged
+
+When the service retires an HTTP bridge session because pending precreated replay cannot make progress after upstream close or timeout, the service MUST emit a `retire_stale_pending` bridge event with low-cardinality bridge metadata and the terminal detail code.
+
+#### Scenario: Failed precreated replay emits retirement event
+
+- **WHEN** precreated HTTP bridge replay fails after upstream close or timeout
+- **THEN** the console log includes a HTTP bridge event with `event=retire_stale_pending`
+- **AND** the event includes only hashed bridge identity and low-cardinality metadata

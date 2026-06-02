@@ -20,6 +20,9 @@ payload. Invalid payloads MUST return a 4xx response with an OpenAI error envelo
 - **WHEN** the client sends an empty `messages` array without `input`, or sends non-object message items
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
+#### Scenario: Minimal valid chat request
+- **WHEN** the client sends `{ "model": "gpt-4.1", "messages": [{"role":"user","content":"hi"}] }`
+- **THEN** the service accepts the request and begins a response (streaming or non-streaming based on `stream`)
 ### Requirement: Enforce message content type rules
 The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
 
@@ -75,6 +78,9 @@ definitions and `tool_choice`, including built-in Responses tools accepted by `/
 - **WHEN** the client sends a `/v1/chat/completions` payload with `input`, `messages` absent or empty, `tools=[{"type":"image_generation"}]`, and `tool_choice={"type":"image_generation"}`
 - **THEN** the mapped Responses request preserves the `image_generation` tool and `tool_choice`
 
+#### Scenario: web_search_preview tool normalized in mapping
+- **WHEN** the client sends `tools=[{"type":"web_search_preview"}]`
+- **THEN** the mapped Responses request includes a tool with type `web_search`
 ### Requirement: Reject file_id in Chat Completions
 The service MUST reject chat `file` content parts that include `file_id` and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
 

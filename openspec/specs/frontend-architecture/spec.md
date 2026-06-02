@@ -23,6 +23,8 @@ The Settings page SHALL include sections for: routing settings (sticky threads, 
 
 The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate). The browser OAuth stage SHALL show an authorization URL with a copy action that remains functional in secure and non-secure contexts.
 
+The Accounts page SHALL also allow exporting a selected account as an OpenCode-compatible `auth.json` payload with explicit raw-token warnings.
+
 #### Scenario: Account selection
 
 - **WHEN** a user clicks an account in the list
@@ -61,6 +63,23 @@ The Accounts page SHALL display a two-column layout: left panel with searchable 
 - **WHEN** a user clicks pause/resume/delete on an account
 - **THEN** the corresponding API is called and the account list is refreshed
 
+#### Scenario: Concurrent browser OAuth sessions stay isolated
+- **WHEN** two browser PKCE OAuth sessions are started concurrently from separate dashboard tabs or operators
+- **AND** each session later submits its own callback URL
+- **THEN** each callback is matched against the flow that minted its `state` token
+- **AND** one flow does not invalidate or overwrite the other flow's callback state
+
+#### Scenario: Browser OAuth link refresh
+- **WHEN** a user is on the browser PKCE step of the OAuth dialog
+- **AND** the current authorization URL has already been used or needs to be replaced
+- **THEN** the dialog offers a refresh action that starts the browser OAuth flow again without leaving the dialog
+- **AND** the dialog updates to the newly generated authorization URL
+
+#### Scenario: Export selected account from dashboard
+- **WHEN** a user clicks the OpenCode export action for a selected account
+- **THEN** the dashboard requests a per-account export from the backend
+- **AND** shows copy/download controls for the official OpenCode `auth.json` payload
+- **AND** warns that the payload contains raw account tokens
 ### Requirement: Request logs display account plan tier
 When a request log entry is associated with an account, the dashboard request-log API response MUST expose the persisted request-log `planType` snapshot, and the recent-requests table MUST render the plan tier in a visible request-log column or badge.
 
@@ -527,3 +546,39 @@ The weekly credits pace card header MUST align the title and gauge icon to the f
 
 - **WHEN** the weekly credits pace card renders
 - **THEN** the header row uses `justify-between` without `items-center`
+
+### Requirement: Request logs expose cost breakdown details
+When a request log has sufficient usage data, the dashboard request-log API MUST expose raw input/output token counts and a cost breakdown that separates non-cached input, cached input, and output cost.
+
+#### Scenario: Successful request log exposes token and cost segments
+- **WHEN** a successful request log row has persisted input, cached-input, and output usage
+- **THEN** `GET /api/request-logs` includes `inputTokens`, `outputTokens`, and `costBreakdown`
+- **AND** `costBreakdown` includes `inputUsd`, `cachedInputUsd`, `outputUsd`, and `totalUsd`
+
+#### Scenario: Request log output falls back to reasoning tokens
+- **WHEN** a successful request log row has no persisted `output_tokens` and does have `reasoning_tokens`
+- **THEN** `GET /api/request-logs` uses the reasoning-token value for `outputTokens`
+
+#### Scenario: Request log response preserves shape for legacy partial data
+- **WHEN** a successful request log row is missing one or more persisted token or cost segments
+- **THEN** `GET /api/request-logs` still includes `inputTokens`, `outputTokens`, and `costBreakdown`
+- **AND** any unavailable top-level token field is returned as `null`
+- **AND** `costBreakdown` includes `inputUsd`, `cachedInputUsd`, `outputUsd`, and `totalUsd`
+- **AND** any unavailable `costBreakdown` field is returned as `null`
+- **AND** clients can render only the available token and cost segments without treating the row as invalid
+
+### Requirement: Request detail dialog renders successful cost breakdowns
+The dashboard request-log `View Details` dialog MUST render a `Cost` section under `Archive` for successful request rows and MUST hide the section for non-success rows.
+
+#### Scenario: Successful request displays ordered cost details
+- **WHEN** a request log detail dialog opens for an `ok` row with available breakdown data
+- **THEN** the dialog displays the total cost first
+- **AND** the dialog lists available cost segments in this order: input, cached, output
+- **AND** each displayed segment includes its token count and matching currency value
+- **AND** token counts use the same compact formatting as the request-log tokens column
+- **AND** currency values are rounded to two decimals
+
+#### Scenario: Missing cost segments are omitted without breaking the dialog
+- **WHEN** a successful request log row is missing one or more token or cost segments
+- **THEN** the dialog renders only the available segments
+- **AND** if no segments are available the `Cost` section is hidden

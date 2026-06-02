@@ -29,6 +29,19 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 - **WHEN** the same sticky-session key value is used for more than one kind
 - **THEN** each `(key, kind)` mapping is stored and managed independently without overwriting the others
 
+#### Scenario: Dashboard sticky thread rebinds under budget pressure
+- **WHEN** a request resolves an existing `sticky_thread` mapping
+- **AND** the pinned account is otherwise eligible to serve traffic
+- **AND** the pinned account is strictly above the configured sticky reallocation budget threshold
+- **AND** another eligible account remains at or below that threshold
+- **THEN** selection rebinds the durable `sticky_thread` mapping to the healthier account before sending the request upstream
+
+#### Scenario: Dashboard sticky thread is preserved when every candidate is above the threshold
+- **WHEN** a request resolves an existing `sticky_thread` mapping
+- **AND** the pinned account is otherwise eligible to serve traffic
+- **AND** the pinned account is strictly above the configured sticky reallocation budget threshold
+- **AND** every other eligible account is also strictly above that threshold
+- **THEN** selection retains the existing pinned account to avoid sticky-pin thrashing
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
 

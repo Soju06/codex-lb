@@ -373,6 +373,14 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
         {"model": "gpt-priced", "costUsd": 0.8, "percentage": 100.0},
         {"model": "gpt-unpriced", "costUsd": 0.0, "percentage": 0.0},
     ]
+    assert payload["byAccount"] == [
+        {
+            "accountId": "acc_reports_unpriced",
+            "alias": None,
+            "costUsd": 0.8,
+            "requests": 2,
+        }
+    ]
 
 
 async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async_client, db_setup):

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
+import { listAccounts } from "@/features/accounts/api";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { ReportsPage } from "./reports-page";
 
@@ -33,31 +34,126 @@ const EMPTY_REPORT: ReportsResponse = {
 };
 
 const useReportsMock = vi.mocked(useReports);
+const listAccountsMock = vi.mocked(listAccounts);
 
 describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
+    listAccountsMock.mockReset();
+    listAccountsMock.mockResolvedValue({ accounts: [] });
   });
 
   it("keeps model options from the unfiltered model catalog", async () => {
     const user = userEvent.setup();
-    useReportsMock.mockImplementation((filters) => ({
-      data: {
-        ...EMPTY_REPORT,
-        byModel: filters.model
-          ? [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }]
-          : [
-              { model: "gpt-5.1", costUsd: 1, percentage: 50 },
-              { model: "gpt-5.2", costUsd: 1, percentage: 50 },
-            ],
-      },
-      isLoading: false,
-    }) as ReturnType<typeof useReports>);
+    useReportsMock.mockImplementation(
+      (filters) =>
+        ({
+          data: {
+            ...EMPTY_REPORT,
+            byModel: filters.model
+              ? [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }]
+              : [
+                  { model: "gpt-5.1", costUsd: 1, percentage: 50 },
+                  { model: "gpt-5.2", costUsd: 1, percentage: 50 },
+                ],
+          },
+          isLoading: false,
+        }) as ReturnType<typeof useReports>,
+    );
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
 
     await user.click(screen.getByRole("button", { name: /gpt-5.1/i }));
 
-    expect(await screen.findByRole("menuitemcheckbox", { name: /gpt-5.2/i })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("menuitemcheckbox", { name: /gpt-5.2/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an error when report loading fails", async () => {
+    useReportsMock.mockImplementation((filters) =>
+      filters.model
+        ? ({
+            isLoading: false,
+            isError: true,
+            error: new Error("report API unavailable"),
+            refetch: vi.fn(),
+            data: null as unknown as ReportsResponse,
+          } as ReturnType<typeof useReports>)
+        : ({
+            data: EMPTY_REPORT,
+            isLoading: false,
+            isError: false,
+            refetch: vi.fn(),
+          } as ReturnType<typeof useReports>),
+    );
+
+    renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
+
+    expect(
+      await screen.findByText(
+        /Failed to load report data: report API unavailable/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("shows model option load failures instead of hiding empty selector silently", async () => {
+    useReportsMock.mockImplementation((filters) =>
+      filters.model
+        ? ({
+            data: {
+              ...EMPTY_REPORT,
+              byModel: [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }],
+            },
+            isLoading: false,
+            isError: false,
+            refetch: vi.fn(),
+          } as ReturnType<typeof useReports>)
+        : ({
+            isLoading: false,
+            isError: true,
+            error: new Error("model catalog endpoint unavailable"),
+            refetch: vi.fn(),
+            data: null,
+          } as ReturnType<typeof useReports>),
+    );
+
+    renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
+
+    expect(
+      await screen.findByText(
+        /Failed to load model options: model catalog endpoint unavailable/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /gpt-5.1/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows account option load failures instead of hiding empty selector silently", async () => {
+    useReportsMock.mockImplementation(
+      () =>
+        ({
+          data: EMPTY_REPORT,
+          isLoading: false,
+          isError: false,
+          refetch: vi.fn(),
+        }) as ReturnType<typeof useReports>,
+    );
+    listAccountsMock.mockRejectedValueOnce(
+      new Error("accounts backend timeout"),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(
+      await screen.findByText(
+        /Failed to load account options: accounts backend timeout/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /accounts/i }),
+    ).toBeInTheDocument();
   });
 });

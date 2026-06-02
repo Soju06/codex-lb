@@ -35,6 +35,11 @@ const EMPTY_REPORT: ReportsResponse = {
 
 const useReportsMock = vi.mocked(useReports);
 const listAccountsMock = vi.mocked(listAccounts);
+type UseReportsMockResult = ReturnType<typeof useReports>;
+
+const asUseReportsResult = (
+  value: Partial<UseReportsMockResult>,
+): UseReportsMockResult => value as unknown as UseReportsMockResult;
 
 describe("ReportsPage", () => {
   beforeEach(() => {
@@ -45,20 +50,19 @@ describe("ReportsPage", () => {
 
   it("keeps model options from the unfiltered model catalog", async () => {
     const user = userEvent.setup();
-    useReportsMock.mockImplementation(
-      (filters) =>
-        ({
-          data: {
-            ...EMPTY_REPORT,
-            byModel: filters.model
-              ? [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }]
-              : [
-                  { model: "gpt-5.1", costUsd: 1, percentage: 50 },
-                  { model: "gpt-5.2", costUsd: 1, percentage: 50 },
-                ],
-          },
-          isLoading: false,
-        }) as ReturnType<typeof useReports>,
+    useReportsMock.mockImplementation((filters) =>
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          byModel: filters.model
+            ? [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }]
+            : [
+                { model: "gpt-5.1", costUsd: 1, percentage: 50 },
+                { model: "gpt-5.2", costUsd: 1, percentage: 50 },
+              ],
+        },
+        isLoading: false,
+      }),
     );
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
@@ -73,19 +77,19 @@ describe("ReportsPage", () => {
   it("shows an error when report loading fails", async () => {
     useReportsMock.mockImplementation((filters) =>
       filters.model
-        ? ({
+        ? asUseReportsResult({
             isLoading: false,
             isError: true,
             error: new Error("report API unavailable"),
             refetch: vi.fn(),
             data: null as unknown as ReportsResponse,
-          } as ReturnType<typeof useReports>)
-        : ({
+          })
+        : asUseReportsResult({
             data: EMPTY_REPORT,
             isLoading: false,
             isError: false,
             refetch: vi.fn(),
-          } as ReturnType<typeof useReports>),
+          }),
     );
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
@@ -101,7 +105,7 @@ describe("ReportsPage", () => {
   it("shows model option load failures instead of hiding empty selector silently", async () => {
     useReportsMock.mockImplementation((filters) =>
       filters.model
-        ? ({
+        ? asUseReportsResult({
             data: {
               ...EMPTY_REPORT,
               byModel: [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }],
@@ -109,14 +113,14 @@ describe("ReportsPage", () => {
             isLoading: false,
             isError: false,
             refetch: vi.fn(),
-          } as ReturnType<typeof useReports>)
-        : ({
+          })
+        : asUseReportsResult({
             isLoading: false,
             isError: true,
             error: new Error("model catalog endpoint unavailable"),
             refetch: vi.fn(),
-            data: null,
-          } as ReturnType<typeof useReports>),
+            data: undefined,
+          }),
     );
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
@@ -132,14 +136,13 @@ describe("ReportsPage", () => {
   });
 
   it("shows account option load failures instead of hiding empty selector silently", async () => {
-    useReportsMock.mockImplementation(
-      () =>
-        ({
-          data: EMPTY_REPORT,
-          isLoading: false,
-          isError: false,
-          refetch: vi.fn(),
-        }) as ReturnType<typeof useReports>,
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
     );
     listAccountsMock.mockRejectedValueOnce(
       new Error("accounts backend timeout"),

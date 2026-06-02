@@ -363,6 +363,24 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     assert result.current_revision == initial.current_revision
 
 
+def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Path) -> None:
+    db_path = tmp_path / "routing-security-remap.db"
+    url = _db_url(db_path)
+
+    initial = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert initial.current_revision is not None
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :legacy"),
+            {"legacy": "20260525_000000_merge_routing_settings_security_heads"},
+        )
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision == initial.current_revision
+
+
 def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "no-remap.db"
     url = _db_url(db_path)

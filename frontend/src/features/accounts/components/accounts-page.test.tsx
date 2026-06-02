@@ -59,7 +59,9 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 describe("AccountsPage", () => {
   beforeEach(() => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
-    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T12:00:00.000Z").getTime());
+    vi.spyOn(Date, "now").mockReturnValue(
+      new Date("2026-01-01T12:00:00.000Z").getTime(),
+    );
   });
 
   afterEach(() => {
@@ -92,8 +94,7 @@ describe("AccountsPage", () => {
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
       deleteMutation: idleMutation(),
-      exportMutation: idleMutation(),
-      exportOpenCodeAuthMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
@@ -106,11 +107,13 @@ describe("AccountsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getAllByText(/^(Visible First|API First)$/).map((el) => el.textContent)).toEqual([
-      "Visible First",
-      "API First",
-      "Visible First",
-    ]);
-    expect(screen.getByRole("heading", { name: "Visible First" })).toBeInTheDocument();
+    expect(
+      screen
+        .getAllByText(/^(Visible First|API First)$/)
+        .map((el) => el.textContent),
+    ).toEqual(["Visible First", "API First", "Visible First"]);
+    expect(
+      screen.getByRole("heading", { name: "Visible First" }),
+    ).toBeInTheDocument();
   });
 });

@@ -496,8 +496,7 @@ class ApiKeysService:
                 row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
             }
             needs_all_accounts = any(
-                not assigned_ids_by_key[row.id] and not row.account_assignment_scope_enabled
-                for row in rows
+                not assigned_ids_by_key[row.id] and not row.account_assignment_scope_enabled for row in rows
             )
             if needs_all_accounts:
                 all_accounts = await self._repository.list_all_accounts()

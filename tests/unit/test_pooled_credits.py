@@ -124,6 +124,28 @@ class TestComputePooledCredits:
         assert result.remaining_percent_secondary is None
         assert result.capacity_credits_primary == 0.0
 
+    def test_scoped_empty_assignment_list_returns_empty_pool(self) -> None:
+        acc_a = _make_account("acc-a", "plus")
+        acc_b = _make_account("acc-b", "pro")
+
+        result = _compute_pooled_credits(
+            assigned_account_ids=[],
+            all_accounts=[acc_a, acc_b],
+            primary_usage={
+                "acc-a": _make_usage("acc-a", "primary", 20.0),
+                "acc-b": _make_usage("acc-b", "primary", 50.0),
+            },
+            secondary_usage={
+                "acc-a": _make_usage("acc-a", "secondary", 10.0, window_minutes=10080),
+                "acc-b": _make_usage("acc-b", "secondary", 30.0, window_minutes=10080),
+            },
+            account_assignment_scope_enabled=True,
+        )
+
+        assert result.remaining_percent_primary is None
+        assert result.remaining_percent_secondary is None
+        assert result.capacity_credits_primary == 0.0
+
     def test_assigned_accounts_without_usage_history_still_count_capacity(self) -> None:
         acc_a = _make_account("acc-a", "plus")
 

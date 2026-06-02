@@ -348,9 +348,13 @@ def _compute_pooled_credits(
     all_accounts: list[Account],
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    account_assignment_scope_enabled: bool = False,
 ) -> PooledCreditData:
     import app.core.usage as usage_core
     from app.modules.usage.mappers import usage_history_to_window_row
+
+    if account_assignment_scope_enabled and not assigned_account_ids:
+        return PooledCreditData()
 
     if assigned_account_ids:
         requested_account_ids = set(assigned_account_ids)
@@ -482,25 +486,36 @@ class ApiKeysService:
             assigned_ids_by_key = {
                 row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
             }
-            needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
+            needs_all_accounts = any(
+                not assigned_ids_by_key[row.id] and not row.account_assignment_scope_enabled
+                for row in rows
+            )
             if needs_all_accounts:
                 all_accounts = await self._repository.list_all_accounts()
                 primary_usage = await self._usage_repository.latest_by_account("primary")
                 secondary_usage = await self._usage_repository.latest_by_account("secondary")
             else:
                 all_account_ids = sorted({account_id for ids in assigned_ids_by_key.values() for account_id in ids})
-                all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
-                primary_usage = await self._usage_repository.latest_by_account("primary", account_ids=all_account_ids)
-                secondary_usage = await self._usage_repository.latest_by_account(
-                    "secondary",
-                    account_ids=all_account_ids,
-                )
+                if all_account_ids:
+                    all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
+                    primary_usage = await self._usage_repository.latest_by_account(
+                        "primary", account_ids=all_account_ids
+                    )
+                    secondary_usage = await self._usage_repository.latest_by_account(
+                        "secondary",
+                        account_ids=all_account_ids,
+                    )
+                else:
+                    all_accounts = []
+                    primary_usage = {}
+                    secondary_usage = {}
             for row in rows:
                 pooled_by_key[row.id] = _compute_pooled_credits(
                     assigned_account_ids=assigned_ids_by_key[row.id],
                     all_accounts=all_accounts,
                     primary_usage=primary_usage,
                     secondary_usage=secondary_usage,
+                    account_assignment_scope_enabled=row.account_assignment_scope_enabled,
                 )
 
         return [

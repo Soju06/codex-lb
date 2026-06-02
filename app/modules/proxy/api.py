@@ -1092,6 +1092,7 @@ async def _build_account_pool_usage(
         all_accounts=all_accounts,
         primary_usage=primary_usage,
         secondary_usage=secondary_usage,
+        account_assignment_scope_enabled=account_assignment_scope_enabled,
     )
     return AccountPoolUsageResponse(
         primary=data.remaining_percent_primary,

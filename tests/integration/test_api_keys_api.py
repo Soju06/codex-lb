@@ -360,8 +360,12 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     listed = await async_client.get("/api/api-keys/")
     assert listed.status_code == 200
-    assert listed.json()[0]["assignedAccountIds"] == []
-    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    listed_key = listed.json()[0]
+    assert listed_key["assignedAccountIds"] == []
+    assert listed_key["accountAssignmentScopeEnabled"] is True
+    assert listed_key["pooledCapacityCreditsPrimary"] == 0.0
+    assert listed_key["pooledRemainingPercentPrimary"] is None
+    assert listed_key["pooledRemainingPercentSecondary"] is None
 
     usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
     assert usage.status_code == 200

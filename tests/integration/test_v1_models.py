@@ -710,6 +710,22 @@ async def test_v1_models_exposes_speed_tier_metadata(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_omits_speed_tier_metadata_when_upstream_omits_it(async_client):
+    registry = get_model_registry()
+    models = [_make_upstream_model("gpt-5.5")]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/v1/models")
+    assert resp.status_code == 200
+    entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-5.5")
+    metadata = entry["metadata"]
+
+    assert "additional_speed_tiers" not in metadata
+    assert "default_service_tier" not in metadata
+    assert "service_tiers" not in metadata
+
+
+@pytest.mark.asyncio
 async def test_v1_models_does_not_promote_raw_max_context_window(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-custom", raw=_raw_with_max_context_window(900_000))]

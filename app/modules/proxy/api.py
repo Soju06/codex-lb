@@ -1716,7 +1716,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
+        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
     for slug, model in models.items():
@@ -1745,7 +1745,19 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
             )
         )
     await _release_reservation(reservation)
-    return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
+    payload = response.model_dump(mode="json")
+    for item in payload["data"]:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+            if metadata.get(key) is None:
+                metadata.pop(key, None)
+    return payload
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1902,17 +1914,17 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
     )
 
 
-def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str]:
+def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str] | None:
     value = raw.get(key)
     if not isinstance(value, list):
-        return []
+        return None
     return [item for item in value if isinstance(item, str)]
 
 
-def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]]:
+def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]] | None:
     value = raw.get(key)
     if not isinstance(value, list):
-        return []
+        return None
     return [dict(cast(Mapping[str, JsonValue], item)) for item in value if isinstance(item, Mapping)]
 
 

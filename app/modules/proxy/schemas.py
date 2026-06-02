@@ -178,8 +178,8 @@ class ModelMetadata(BaseModel):
     supported_in_api: bool = True
     minimal_client_version: str | None = None
     priority: int = 0
-    additional_speed_tiers: list[str] = []
-    service_tiers: list[dict[str, JsonValue]] = []
+    additional_speed_tiers: list[str] | None = None
+    service_tiers: list[dict[str, JsonValue]] | None = None
     default_service_tier: str | None = None
 
 

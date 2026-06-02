@@ -303,24 +303,28 @@ def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thre
 
     def _compare_metadata(context, metadata):
         return [
-            (
-                "modify_type",
-                None,
-                "dashboard_settings",
-                "sticky_reallocation_primary_budget_threshold_pct",
-                {},
-                sa.REAL(),
-                sa.Float(),
-            ),
-            (
-                "modify_type",
-                None,
-                "dashboard_settings",
-                "sticky_reallocation_secondary_budget_threshold_pct",
-                {},
-                sa.REAL(),
-                sa.Float(),
-            ),
+            [
+                (
+                    "modify_type",
+                    None,
+                    "dashboard_settings",
+                    "sticky_reallocation_primary_budget_threshold_pct",
+                    {},
+                    sa.REAL(),
+                    sa.Float(),
+                )
+            ],
+            [
+                (
+                    "modify_type",
+                    None,
+                    "dashboard_settings",
+                    "sticky_reallocation_secondary_budget_threshold_pct",
+                    {},
+                    sa.REAL(),
+                    sa.Float(),
+                )
+            ],
         ]
 
     monkeypatch.setattr(migrate_module, "compare_metadata", _compare_metadata)

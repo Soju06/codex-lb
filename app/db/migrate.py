@@ -540,7 +540,14 @@ def _manual_schema_drift_diffs(connection: Connection) -> tuple[str, ...]:
     return tuple(diffs)
 
 
+def _unwrap_schema_drift_diff(diff: object) -> object:
+    if isinstance(diff, list) and len(diff) == 1:
+        return diff[0]
+    return diff
+
+
 def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
+    diff = _unwrap_schema_drift_diff(diff)
     if not isinstance(diff, tuple) or not diff:
         return False
 

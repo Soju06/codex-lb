@@ -18,6 +18,7 @@ DEFAULT_SLOT_SECONDS = 15 * 60
 DEFAULT_PLANNING_HORIZON_HOURS = 36
 DEFAULT_ACCOUNT_WINDOW_CAPACITY = 100.0
 MIN_PEAK_EXCESS_UNITS = 1.0
+_FORECAST_DEMAND_REQUEST_KINDS = frozenset({"normal", "real"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,10 @@ class PlannerForecast:
     peak_slot_start: datetime | None
     peak_demand_units: float
     slots: tuple[DemandForecastSlot, ...]
+
+
+def _is_forecast_demand_request(request_kind: str | None) -> bool:
+    return (request_kind or "real").lower() in _FORECAST_DEMAND_REQUEST_KINDS
 
 
 def parse_working_days(raw: str | None) -> tuple[int, ...]:
@@ -260,7 +265,7 @@ def build_demand_forecast(
     recent_units = 0.0
     recent_cutoff = current.timestamp() - 24 * 60 * 60
     for row in bins:
-        if row.request_kind != "real":
+        if not _is_forecast_demand_request(row.request_kind):
             continue
         slot_epoch = int(row.slot_epoch)
         units_by_slot_epoch[slot_epoch] = units_by_slot_epoch.get(slot_epoch, 0.0) + _bin_demand_units(row)

@@ -386,3 +386,52 @@ def test_build_demand_forecast_aggregates_same_slot_rows_before_quantile() -> No
     peak_slot = next(slot for slot in forecast.slots if slot.slot_start.hour == 10)
 
     assert peak_slot.demand_units == pytest.approx(75.6)
+
+
+def test_build_demand_forecast_uses_current_proxy_history_rows() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        forecast_quantile="p50",
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    history_slot = int(datetime(2026, 5, 11, 10, 0, tzinfo=timezone.utc).timestamp())
+
+    bins = [
+        DemandBin(
+            slot_epoch=history_slot,
+            account_id="acc-active",
+            api_key_id="key-a",
+            model="gpt-5.4",
+            reasoning_effort=None,
+            request_kind="normal",
+            status="ok",
+            input_tokens=40_000,
+            cached_input_tokens=0,
+            output_tokens=10_000,
+            cost_usd=0.0,
+            request_count=2,
+        ),
+        DemandBin(
+            slot_epoch=history_slot,
+            account_id="acc-warm",
+            api_key_id="key-b",
+            model="gpt-5.4-mini",
+            reasoning_effort=None,
+            request_kind="warmup",
+            status="ok",
+            input_tokens=90_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            request_count=1,
+        ),
+    ]
+
+    forecast = build_demand_forecast(settings=settings, bins=bins, now=now, horizon_hours=6)
+    peak_slot = next(slot for slot in forecast.slots if slot.slot_start.hour == 10)
+
+    assert peak_slot.demand_units == pytest.approx(60.6)

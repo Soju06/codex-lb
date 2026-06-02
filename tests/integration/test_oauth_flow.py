@@ -246,7 +246,7 @@ async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity
 
 
 @pytest.mark.asyncio
-async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous_in_overwrite_mode(
+async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_in_overwrite_mode(
     async_client,
     monkeypatch,
 ):
@@ -282,8 +282,9 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
         # chatgpt_account_id so that identity-aware reauth treats them
         # as distinct upstream identities and keeps both local rows.
         # The third flow then introduces a third upstream id under the
-        # same email, which is what the email-ambiguity path needs to
-        # see to surface the conflict error.
+        # same email. OAuth/reauth is keyed by upstream identity rather
+        # than email, so the overwrite-by-email import setting must not
+        # collapse this credential slot.
         call_count["value"] += 1
         if call_count["value"] == 1:
             account_id = "acc_oauth_conflict_one"
@@ -350,9 +351,16 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
     assert enable_overwrite.json()["importWithoutOverwrite"] is False
 
     result = await _run_device_flow_once()
-    assert result["status"] == "error"
-    assert result["errorMessage"] is not None
-    assert "multiple matching accounts exist" in str(result["errorMessage"]).lower()
+    assert result["status"] == "success"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matching_accounts = [account for account in accounts.json()["accounts"] if account["email"] == email]
+    assert {account["accountId"] for account in matching_accounts} == {
+        generate_unique_account_id("acc_oauth_conflict_one", email),
+        generate_unique_account_id("acc_oauth_conflict_two", email),
+        generate_unique_account_id("acc_oauth_conflict_new", email),
+    }
 
 
 @pytest.mark.asyncio

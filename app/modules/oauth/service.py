@@ -556,9 +556,19 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+                if raw_account_id and workspace_id is None:
+                    await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=True)
+                else:
+                    await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
         else:
-            await self._accounts_repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+            if raw_account_id and workspace_id is None:
+                await self._accounts_repo.upsert(
+                    account,
+                    merge_by_email=False,
+                    merge_by_chatgpt_identity=True,
+                )
+            else:
+                await self._accounts_repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

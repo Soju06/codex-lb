@@ -151,6 +151,7 @@ async def reactivate_account(
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
 
+
 @router.patch("/{account_id}", response_model=AccountUpdateResponse)
 async def update_account(
     account_id: str,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import OperationalError
@@ -169,7 +170,10 @@ class AccountsRepository:
         # by-side rows for the same email) rather than the reauth path
         # (one local row per upstream identity).
         if merge_by_chatgpt_identity and account.chatgpt_account_id:
-            canonical = await self._account_by_chatgpt_identity(account.chatgpt_account_id)
+            canonical = await self._account_by_chatgpt_identity(
+                account.chatgpt_account_id,
+                workspace_id=account.workspace_id,
+            )
             if canonical is not None:
                 _apply_account_updates(canonical, account)
                 await self._reconcile_chatgpt_identity_duplicates(
@@ -259,7 +263,12 @@ class AccountsRepository:
         await self._session.refresh(account)
         return account
 
-    async def _account_by_chatgpt_identity(self, chatgpt_account_id: str) -> Account | None:
+    async def _account_by_chatgpt_identity(
+        self,
+        chatgpt_account_id: str,
+        *,
+        workspace_id: str | None,
+    ) -> Account | None:
         """Return the canonical local account row for a ChatGPT identity.
 
         Order of preference, so that reauth reuses the row that already
@@ -270,12 +279,15 @@ class AccountsRepository:
            ``__copyN`` rows were created.
         """
 
-        result = await self._session.execute(
-            select(Account)
-            .where(Account.chatgpt_account_id == chatgpt_account_id)
-            .order_by(Account.created_at.asc(), Account.id.asc())
-            .limit(1)
-        )
+        stmt = select(Account).where(Account.chatgpt_account_id == chatgpt_account_id)
+        order_by: list[Any] = [Account.created_at.asc(), Account.id.asc()]
+        if workspace_id:
+            stmt = stmt.where(or_(Account.workspace_id == workspace_id, Account.workspace_id.is_(None)))
+            order_by.insert(0, Account.workspace_id.is_(None).asc())
+        else:
+            stmt = stmt.where(Account.workspace_id.is_(None))
+
+        result = await self._session.execute(stmt.order_by(*order_by).limit(1))
         return result.scalar_one_or_none()
 
     async def _reconcile_chatgpt_identity_duplicates(

@@ -393,6 +393,82 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_picks_oldest_canonical(
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspace_on_workspace_less_reauth(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        workspace = _make_account_with_chatgpt_id("acc_workspace", "shared@example.com", "chatgpt_workspace_less")
+        workspace.workspace_id = "ws_business"
+        workspace.workspace_label = "Business"
+        await repo.upsert(workspace, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_reauth", "shared@example.com", "chatgpt_workspace_less")
+        reauth.workspace_id = None
+        reauth.workspace_label = None
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_reauth"
+        assert saved.workspace_id is None
+
+        stored_workspace = (await session.execute(select(Account).where(Account.id == "acc_workspace"))).scalar_one()
+        assert stored_workspace.workspace_id == "ws_business"
+        assert stored_workspace.workspace_label == "Business"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_workspace_less_reauth_uses_unknown_row(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        unknown = _make_account_with_chatgpt_id("acc_unknown", "shared@example.com", "chatgpt_unknown_reauth")
+        unknown.created_at = utcnow() - timedelta(days=30)
+        await repo.upsert(unknown, merge_by_email=False)
+
+        workspace = _make_account_with_chatgpt_id("acc_workspace", "shared@example.com", "chatgpt_unknown_reauth")
+        workspace.workspace_id = "ws_business"
+        workspace.created_at = utcnow() - timedelta(days=10)
+        await repo.upsert(workspace, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_reauth", "shared@example.com", "chatgpt_unknown_reauth")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_unknown"
+        assert saved.plan_type == "team"
+        assert saved.workspace_id is None
+
+        stored_workspace = (await session.execute(select(Account).where(Account.id == "acc_workspace"))).scalar_one()
+        assert stored_workspace.workspace_id == "ws_business"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_prefers_matching_workspace_row(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        unknown = _make_account_with_chatgpt_id("acc_unknown", "shared@example.com", "chatgpt_workspace_reauth")
+        unknown.created_at = utcnow() - timedelta(days=30)
+        await repo.upsert(unknown, merge_by_email=False)
+
+        workspace = _make_account_with_chatgpt_id("acc_workspace", "shared@example.com", "chatgpt_workspace_reauth")
+        workspace.workspace_id = "ws_business"
+        workspace.created_at = utcnow() - timedelta(days=10)
+        await repo.upsert(workspace, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_reauth", "shared@example.com", "chatgpt_workspace_reauth")
+        reauth.workspace_id = "ws_business"
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_workspace"
+        assert saved.plan_type == "team"
+        assert saved.workspace_id == "ws_business"
+
+        stored_unknown = (await session.execute(select(Account).where(Account.id == "acc_unknown"))).scalar_one()
+        assert stored_unknown.workspace_id is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_rows(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

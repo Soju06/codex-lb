@@ -27,9 +27,11 @@ from app.modules.api_keys.service import (
     ApiKeysRepositoryProtocol,
     ApiKeysService,
     ApiKeyUpdateData,
+    ApiKeyValidationError,
     LimitRuleInput,
     _build_api_key_trends,
     _is_sqlite_database_locked,
+    _normalize_usage_sections,
 )
 from app.modules.usage.repository import UsageRepository
 
@@ -116,6 +118,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
+        usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -136,6 +139,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_service_tier": enforced_service_tier,
             "traffic_class": traffic_class,
             "transport_policy_override": transport_policy_override,
+            "usage_sections": usage_sections,
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "expires_at": expires_at,
             "is_active": is_active,
@@ -2014,3 +2018,111 @@ def test_build_api_key_trends_keeps_aligned_windows_at_168_buckets() -> None:
     assert trends.cost[-1].t == newest_bucket
     assert sum(point.v for point in trends.tokens) == pytest.approx(12.0)
     assert sum(point.v for point in trends.cost) == pytest.approx(0.3)
+
+
+class TestNormalizeUsageSections:
+    def test_none_returns_default(self) -> None:
+        assert _normalize_usage_sections(None) == "upstream_limits,account_pool_usage"
+
+    def test_empty_string_returns_empty(self) -> None:
+        assert _normalize_usage_sections("") == ""
+
+    def test_whitespace_only_returns_empty(self) -> None:
+        assert _normalize_usage_sections("  ") == ""
+
+    def test_single_valid_section(self) -> None:
+        assert _normalize_usage_sections("upstream_limits") == "upstream_limits"
+
+    def test_both_sections(self) -> None:
+        result = _normalize_usage_sections("upstream_limits,account_pool_usage")
+        sections = set(result.split(","))
+        assert sections == {"upstream_limits", "account_pool_usage"}
+
+    def test_spaces_around_commas(self) -> None:
+        result = _normalize_usage_sections(" upstream_limits , account_pool_usage ")
+        sections = set(result.split(","))
+        assert sections == {"upstream_limits", "account_pool_usage"}
+
+    def test_rejects_invalid_section(self) -> None:
+        with pytest.raises(ApiKeyValidationError, match="Invalid usage sections"):
+            _normalize_usage_sections("upstream_limits,invalid_section")
+
+    def test_rejects_completely_invalid(self) -> None:
+        with pytest.raises(ApiKeyValidationError, match="Invalid usage sections"):
+            _normalize_usage_sections("garbage")
+
+
+async def test_create_key_stores_usage_sections() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="my-key",
+            allowed_models=None,
+            usage_sections="upstream_limits",
+        )
+    )
+    assert created.usage_sections == "upstream_limits"
+
+
+async def test_create_key_stores_empty_usage_sections() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="my-key",
+            allowed_models=None,
+            usage_sections="",
+        )
+    )
+    assert created.usage_sections == ""
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="my-key",
+            allowed_models=None,
+        )
+    )
+    assert created.usage_sections == "upstream_limits,account_pool_usage"
+
+
+async def test_update_key_usage_sections() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    now = utcnow()
+    repo.rows["key-1"] = ApiKey(
+        id="key-1",
+        name="test",
+        key_hash="abc",
+        key_prefix="sk-",
+        allowed_models=None,
+        apply_to_codex_model=False,
+        account_assignment_scope_enabled=False,
+        usage_sections="upstream_limits,account_pool_usage",
+        expires_at=None,
+        is_active=True,
+        created_at=now,
+        last_used_at=None,
+    )
+    updated = await service.update_key(
+        "key-1",
+        ApiKeyUpdateData(
+            usage_sections="account_pool_usage",
+            usage_sections_set=True,
+        ),
+    )
+    assert updated.usage_sections == "account_pool_usage"
+
+
+async def test_create_key_rejects_invalid_usage_sections() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    with pytest.raises(ApiKeyValidationError, match="Invalid usage sections"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="my-key",
+                allowed_models=None,
+                usage_sections="bad_section",
+            )
+        )

@@ -223,6 +223,13 @@ class V1UsageLimitResponse(BaseModel):
     source: str = "api_key_limit"
 
 
+class AccountPoolUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    primary: float | None = None
+    secondary: float | None = None
+
+
 class V1UsageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -232,6 +239,7 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+    account_pool_usage: AccountPoolUsageResponse | None = None
 
 
 class V1ResetCreditEntry(BaseModel):

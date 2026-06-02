@@ -111,6 +111,7 @@ from app.modules.api_keys.service import (
     ApiKeySelfLimitData,
     ApiKeysService,
     ApiKeyUsageReservationData,
+    _compute_pooled_credits,
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
@@ -133,6 +134,7 @@ from app.modules.proxy.request_policy import (
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
+    AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
     FileCreateRequest,
@@ -720,23 +722,36 @@ async def v1_models(
 @v1_router.get("/usage", response_model=V1UsageResponse)
 async def v1_usage(
     api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> V1UsageResponse:
+) -> V1UsageResponse | JSONResponse:
+    usage_sections = _parse_usage_sections(api_key.usage_sections)
     async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
+        service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session)
+        aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
+        account_pool_usage = (
+            await _build_account_pool_usage(
+                session,
+                assigned_account_ids=api_key.assigned_account_ids,
+                account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
+            )
+            if "account_pool_usage" in usage_sections
+            else None
+        )
 
     if usage is None:
         raise ProxyAuthError("Invalid API key")
 
-    return V1UsageResponse(
+    payload = V1UsageResponse(
         request_count=usage.request_count,
         total_tokens=usage.total_tokens,
         cached_input_tokens=usage.cached_input_tokens,
         total_cost_usd=usage.total_cost_usd,
         limits=[_to_v1_usage_limit_response(limit) for limit in usage.limits],
         upstream_limits=_ordered_aggregate_limits(aggregate_limits),
+        account_pool_usage=account_pool_usage,
     )
+
+    return payload
 
 
 def _is_reset_credit_selectable_account(account: Account) -> bool:
@@ -1044,6 +1059,44 @@ async def v1_warmup_by_mode(
 
 def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse]) -> list[V1UsageLimitResponse]:
     return [limit for window in ("5h", "7d", "monthly") if (limit := aggregate_limits.get(window)) is not None]
+
+
+def _parse_usage_sections(raw: str) -> set[str]:
+    if not raw or not raw.strip():
+        return set()
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+async def _build_account_pool_usage(
+    session: AsyncSession,
+    *,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool,
+) -> AccountPoolUsageResponse | None:
+    from app.modules.api_keys.repository import ApiKeysRepository
+
+    repo = ApiKeysRepository(session)
+    usage_repo = UsageRepository(session)
+    if account_assignment_scope_enabled:
+        all_accounts = await repo.list_accounts_by_ids(assigned_account_ids)
+        usage_account_ids: list[str] | None = assigned_account_ids
+    else:
+        all_accounts = await repo.list_all_accounts()
+        usage_account_ids = None
+
+    primary_usage = await usage_repo.latest_by_account("primary", account_ids=usage_account_ids)
+    secondary_usage = await usage_repo.latest_by_account("secondary", account_ids=usage_account_ids)
+
+    data = _compute_pooled_credits(
+        assigned_account_ids=assigned_account_ids,
+        all_accounts=all_accounts,
+        primary_usage=primary_usage,
+        secondary_usage=secondary_usage,
+    )
+    return AccountPoolUsageResponse(
+        primary=data.remaining_percent_primary,
+        secondary=data.remaining_percent_secondary,
+    )
 
 
 def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:

@@ -431,6 +431,7 @@ describe("RecentRequestsTable", () => {
     expect(
       within(dialog).getByText("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36"),
     ).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Copy" })).toBeInTheDocument();
     expect(errorCodeIndex).toBeGreaterThanOrEqual(0);
     expect(userAgentIndex).toBeGreaterThan(errorCodeIndex);
   });
@@ -480,6 +481,7 @@ describe("RecentRequestsTable", () => {
     expect(userAgentField).not.toBeNull();
     expect(userAgentField).toHaveTextContent("User Agent");
     expect(userAgentField).toHaveTextContent("—");
+    expect(within(dialog).queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
   });
 
   it("hides the cost section for non-ok rows", () => {

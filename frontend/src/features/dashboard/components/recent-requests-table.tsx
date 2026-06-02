@@ -357,6 +357,9 @@ export function RecentRequestsTable({
               <RequestDetailField
                 label="User Agent"
                 value={selectedRequest?.useragent ?? "—"}
+                copyValue={selectedRequest?.useragent ?? undefined}
+                copyLabel="Copy"
+                compactCopy
               />
             </div>
 

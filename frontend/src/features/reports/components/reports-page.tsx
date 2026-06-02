@@ -14,22 +14,22 @@ import { ModelDistributionDonut } from "./model-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
 import { daysAgoLocalISO, localDateISO } from "../date";
 
-const DEFAULT_FILTERS: ReportsFiltersState = {
+const createDefaultFilters = (): ReportsFiltersState => ({
   startDate: daysAgoLocalISO(6),
   endDate: localDateISO(),
   accountId: [],
   model: "",
-};
+});
 
 export type ReportsPageProps = {
   initialFilters?: Partial<ReportsFiltersState>;
 };
 
 export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
-  const [filters, setFilters] = useState<ReportsFiltersState>({
-    ...DEFAULT_FILTERS,
+  const [filters, setFilters] = useState<ReportsFiltersState>(() => ({
+    ...createDefaultFilters(),
     ...initialFilters,
-  });
+  }));
   const reportsQuery = useReports(filters);
   const modelCatalogFilters = useMemo(
     () => ({ ...filters, model: "" }),

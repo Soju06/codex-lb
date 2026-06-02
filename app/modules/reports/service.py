@@ -26,7 +26,7 @@ class ReportsService:
     ) -> ReportsResponse:
         now = utcnow()
         if end_date is None:
-            end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            end_date = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         if start_date is None:
             start_date = (end_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
         start_date = to_utc_naive(start_date)

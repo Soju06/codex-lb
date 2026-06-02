@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
@@ -46,6 +46,30 @@ describe("ReportsPage", () => {
     useReportsMock.mockReset();
     listAccountsMock.mockReset();
     listAccountsMock.mockResolvedValue({ accounts: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("initializes default dates when the reports page mounts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-15T12:00:00Z"));
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(useReportsMock.mock.calls[0]?.[0]).toMatchObject({
+      startDate: "2030-01-09",
+      endDate: "2030-01-15",
+    });
   });
 
   it("keeps model options from the unfiltered model catalog", async () => {

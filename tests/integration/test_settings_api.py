@@ -251,6 +251,29 @@ async def test_upstream_proxy_pool_member_rejects_missing_endpoint(async_client)
 
 
 @pytest.mark.asyncio
+async def test_upstream_proxy_pool_member_rejects_duplicate_endpoint(async_client):
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "Proxy A", "scheme": "http", "host": "proxy.internal", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    endpoint_id = endpoint.json()["id"]
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Pool A", "endpointIds": [endpoint_id]},
+    )
+    assert pool.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/pools/{pool.json()['id']}/members",
+        json={"endpointId": endpoint_id},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "proxy_pool_member_duplicate"
+
+
+@pytest.mark.asyncio
 async def test_settings_update_rejects_missing_default_proxy_pool(async_client):
     settings = await async_client.get("/api/settings")
     body = settings.json()

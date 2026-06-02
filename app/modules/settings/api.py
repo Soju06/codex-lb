@@ -217,6 +217,7 @@ async def add_upstream_proxy_pool_member(
     if pool is None:
         raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
     await _validate_proxy_endpoint_ids(context, [payload.endpoint_id])
+    await _validate_proxy_pool_member_is_unique(context, pool_id=pool_id, endpoint_id=payload.endpoint_id)
     context.session.add(
         ProxyPoolMember(
             pool_id=pool_id,
@@ -232,6 +233,8 @@ async def add_upstream_proxy_pool_member(
         await context.session.rollback()
         if _is_missing_proxy_endpoint_error(exc):
             raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+        if _is_duplicate_proxy_pool_member_error(exc):
+            raise _duplicate_proxy_pool_member_error()
         raise
     endpoint_ids = (
         (
@@ -268,6 +271,23 @@ async def _validate_proxy_endpoint_ids(context: SettingsContext, endpoint_ids: l
         )
 
 
+async def _validate_proxy_pool_member_is_unique(
+    context: SettingsContext,
+    *,
+    pool_id: str,
+    endpoint_id: str,
+) -> None:
+    existing_id = (
+        await context.session.execute(
+            select(ProxyPoolMember.id)
+            .where(ProxyPoolMember.pool_id == pool_id, ProxyPoolMember.endpoint_id == endpoint_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing_id is not None:
+        raise _duplicate_proxy_pool_member_error()
+
+
 async def _validate_proxy_pool_id(context: SettingsContext, pool_id: str | None) -> None:
     if pool_id is None:
         return
@@ -283,6 +303,22 @@ async def _validate_account_id(context: SettingsContext, account_id: str) -> Non
 def _is_missing_proxy_endpoint_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "foreign key" in message or "fk constraint" in message or "violates foreign key constraint" in message
+
+
+def _is_duplicate_proxy_pool_member_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "uq_proxy_pool_members_pool_endpoint" in message
+        or ("proxy_pool_members" in message and "unique" in message)
+        or ("proxy_pool_members.pool_id" in message and "proxy_pool_members.endpoint_id" in message)
+    )
+
+
+def _duplicate_proxy_pool_member_error() -> DashboardBadRequestError:
+    return DashboardBadRequestError(
+        "Proxy endpoint is already a member of this pool",
+        code="proxy_pool_member_duplicate",
+    )
 
 
 @router.put("/upstream-proxy/accounts/{account_id}/binding", response_model=AccountProxyBindingResponse)

@@ -24,3 +24,12 @@ Request logs for migrated upstream calls MUST record route mode, proxy pool id, 
 - **GIVEN** route resolution fails closed before network open
 - **WHEN** the request log is written
 - **THEN** the log MUST include the fail-closed reason without proxy credentials.
+
+### Requirement: Upstream proxy pool membership must reject duplicates
+Dashboard upstream proxy pool member mutations MUST reject attempts to add an endpoint that is already a member of the target pool with a validation error instead of surfacing a database integrity failure.
+
+#### Scenario: Duplicate pool member rejected
+- **GIVEN** a proxy pool already contains endpoint `E`
+- **WHEN** an admin adds endpoint `E` to the same pool again
+- **THEN** the API MUST return a dashboard validation error
+- **AND** it MUST NOT return an unhandled server error.

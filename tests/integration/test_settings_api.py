@@ -6,9 +6,8 @@ import json
 import pytest
 from sqlalchemy import text
 
-from app.db.session import SessionLocal
-
 from app.core.auth import generate_unique_account_id
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 

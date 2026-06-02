@@ -1896,7 +1896,29 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
         supported_in_api=model.supported_in_api,
         minimal_client_version=model.minimal_client_version,
         priority=model.priority,
+        additional_speed_tiers=_raw_string_list(model.raw, "additional_speed_tiers"),
+        service_tiers=_raw_object_list(model.raw, "service_tiers"),
+        default_service_tier=_raw_optional_string(model.raw, "default_service_tier"),
     )
+
+
+def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str]:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]]:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
+    value = raw.get(key)
+    return value if isinstance(value, str) else None
 
 
 @v1_router.post(

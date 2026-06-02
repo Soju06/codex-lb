@@ -673,6 +673,43 @@ async def test_v1_models_reports_backend_context_window(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_exposes_speed_tier_metadata(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.5",
+            raw={
+                "additional_speed_tiers": ["fast"],
+                "default_service_tier": "priority",
+                "service_tiers": [
+                    {
+                        "id": "priority",
+                        "name": "Fast",
+                        "description": "1.5x speed, increased usage",
+                    }
+                ],
+            },
+        )
+    ]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/v1/models")
+    assert resp.status_code == 200
+    entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-5.5")
+    metadata = entry["metadata"]
+
+    assert metadata["additional_speed_tiers"] == ["fast"]
+    assert metadata["default_service_tier"] == "priority"
+    assert metadata["service_tiers"] == [
+        {
+            "id": "priority",
+            "name": "Fast",
+            "description": "1.5x speed, increased usage",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_models_does_not_promote_raw_max_context_window(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-custom", raw=_raw_with_max_context_window(900_000))]

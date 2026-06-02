@@ -185,6 +185,7 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
+    normalize_upstream_model_alias,
     openai_client_payload_error,
     openai_invalid_payload_error,
     openai_validation_error,
@@ -3265,9 +3266,10 @@ class ProxyService:
                 input="warmup",
                 store=False,
             )
+            normalize_upstream_model_alias(payload)
             reservation = await self._reserve_websocket_api_key_usage(
                 api_key,
-                request_model=warmup_model,
+                request_model=payload.model,
                 request_service_tier=None,
                 request_usage_budget=estimate_api_key_request_usage(payload),
             )

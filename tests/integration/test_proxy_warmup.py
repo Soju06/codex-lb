@@ -189,6 +189,59 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
 
 
 @pytest.mark.asyncio
+async def test_warmup_normalizes_model_alias_before_upstream(async_client, monkeypatch):
+    _set_warmup_model_env(monkeypatch, "gpt-5.4-mini-high")
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-mini-high",
+        },
+    )
+    assert settings_response.status_code == 200
+    eligible_id = await _import_account(async_client, "acc-warmup-alias", "warmup-alias@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+
+    _, key = await _create_api_key(async_client, name="warmup-alias")
+    captured_payloads: list[dict[str, object]] = []
+
+    async def _fake_compact(payload, headers, access_token, account_id, session=None):
+        del headers, access_token, account_id, session
+        captured_payloads.append(payload.model_dump(mode="json", by_alias=True, exclude_none=True))
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": "resp-warmup-alias",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["submitted"][0]["model"] == "gpt-5.4-mini-high"
+    captured_request_payload = captured_payloads[0]
+    assert captured_request_payload["model"] == "gpt-5.4-mini"
+    assert captured_request_payload["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
 async def test_warmup_mode_path_route_runs_without_request_body(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)

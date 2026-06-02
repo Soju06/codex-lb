@@ -181,7 +181,11 @@ class ModelMetadata(BaseModel):
 
 
 class ModelListItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Cursor's local-provider discovery reads OpenAI-compatible /v1/models
+    # entries and preserves provider-specific model capability fields. Keep
+    # allowing those extras so clients can learn the model context window and
+    # trigger their own compaction instead of relying on provider-side failures.
+    model_config = ConfigDict(extra="allow")
 
     id: str
     object: str = "model"

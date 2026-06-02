@@ -170,6 +170,12 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 - **WHEN** a key has `allowed_models: ["o3-pro"]` and a request is made for model `gpt-4.1`
 - **THEN** the proxy returns 403 with OpenAI-format error `{ "error": { "code": "model_not_allowed", "message": "This API key does not have access to model 'gpt-4.1'" } }`
 
+#### Scenario: Cursor alias allowed model permits canonical request
+
+- **WHEN** a key has `allowed_models: ["gpt-5.4-mini-high"]`
+- **AND** a request is made for model `gpt-5.4-mini`
+- **THEN** the proxy permits the request because the allowed alias resolves to the requested canonical model
+
 #### Scenario: All models allowed
 
 - **WHEN** a key has `allowed_models: null`
@@ -179,6 +185,18 @@ For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/t
 
 - **WHEN** a key with `allowed_models: ["o3-pro"]` calls `GET /v1/models`
 - **THEN** the response contains only models matching the allowed list
+
+#### Scenario: Model list canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]` and `enforced_model: "gpt-5.4-mini-high"` calls `GET /v1/models`
+- **THEN** the response contains the canonical model `gpt-5.4-mini`
+- **AND** the response does not expose a synthetic `gpt-5.4-mini-high` model id
+
+#### Scenario: Codex model list visibility canonicalizes Cursor aliases
+
+- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
+- **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
+- **AND** other entries are hidden according to the API key allowlist policy
 
 #### Scenario: No API key auth (disabled)
 
@@ -567,4 +585,3 @@ The dashboard API key CRUD surface MUST allow callers to persist an optional enf
 - **WHEN** a dashboard client updates an API key with `enforcedServiceTier: "flex"`
 - **THEN** the persisted API key stores `flex`
 - **AND** subsequent reads return `flex`
-

@@ -16,6 +16,7 @@ from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict, is_json_list
 
 _SUPPORTED_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
+_TEXT_CONTENT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 
 
 def _json_dict_or_none(value: JsonValue) -> dict[str, JsonValue] | None:
@@ -122,7 +123,7 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
             part_dict = _json_dict_or_none(part)
             if part_dict is not None:
                 part_type = part_dict.get("type")
-                if part_type not in (None, "text"):
+                if part_type not in (None, *_TEXT_CONTENT_PART_TYPES):
                     raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
                 text = part_dict.get("text")
                 if isinstance(text, str):
@@ -132,7 +133,7 @@ def _ensure_text_only_content(content: JsonValue, role: str) -> None:
     content_dict = _json_dict_or_none(content)
     if content_dict is not None:
         part_type = content_dict.get("type")
-        if part_type not in (None, "text"):
+        if part_type not in (None, *_TEXT_CONTENT_PART_TYPES):
             raise ClientPayloadError(f"{role} messages must be text-only.", param="messages")
         text = content_dict.get("text")
         if isinstance(text, str):
@@ -297,7 +298,7 @@ def _normalize_content_parts(content: JsonValue, role: str = "user") -> JsonValu
 def _normalize_content_part(part: dict[str, JsonValue], role: str = "user") -> JsonValue:
     part_type = part.get("type") or ("text" if "text" in part else None)
     text_type = _text_type_for_role(role)
-    if part_type in ("text", "input_text", "output_text"):
+    if part_type in _TEXT_CONTENT_PART_TYPES:
         text = part.get("text")
         if isinstance(text, str):
             return cast(JsonValue, TextContentPart(type=text_type, text=text))

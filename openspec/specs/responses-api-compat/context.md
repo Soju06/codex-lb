@@ -10,6 +10,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
+- **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.
 - **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
 - **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`.
 
@@ -75,6 +76,14 @@ Non-streaming request/response:
 // response
 { "id": "resp_123", "object": "response", "status": "completed", "output": [] }
 ```
+
+Cursor-style model alias request:
+
+```json
+{ "model": "gpt-5.4-mini-high", "input": "hi" }
+```
+
+This forwards upstream as `model: "gpt-5.4-mini"` with `reasoning.effort: "high"`.
 
 ## Operational Notes
 

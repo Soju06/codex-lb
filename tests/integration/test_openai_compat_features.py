@@ -743,6 +743,65 @@ async def test_v1_chat_completions_strict_violation_when_type_omitted_in_chat_to
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_responses_shaped_input_rejects_flat_strict_tool(async_client):
+    """Responses-shaped chat payloads must run the flat Responses strict validator."""
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Weather in Seoul?"}]}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "strict": True,
+            }
+        ],
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_function_parameters"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "tools[0].parameters"
+    assert "get_weather" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_responses_shaped_input_preserves_mcp_tool(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_mcp_tool", "chat-mcp-tool@example.com")
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_mcp_tool")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    tool = {
+        "type": "mcp",
+        "server_label": "filesystem",
+        "server_url": "https://example.com/mcp",
+        "require_approval": "never",
+    }
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Run tool."}]}],
+        "tools": [tool],
+        "tool_choice": {"type": "mcp", "server_label": "filesystem"},
+    }
+
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [tool]
+    assert seen["payload"].tool_choice == {"type": "mcp", "server_label": "filesystem"}
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_rejects_strict_function_tool_violation(async_client):
     """Same as the chat-completions case, but on the native /v1/responses endpoint.
 
@@ -899,6 +958,37 @@ async def test_v1_chat_completions_rejects_builtin_tools(async_client):
     }
     resp = await async_client.post("/v1/chat/completions", json=payload)
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_accepts_responses_shaped_builtin_tools(async_client, monkeypatch):
+    await _import_account(async_client, "acc_chat_builtin_tools", "chat-builtin-tools@example.com")
+
+    seen = {}
+    image_tool = {"type": "image_generation", "output_format": "png"}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, account_id, base_url, raise_for_status
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_builtin_tools")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Generate an image."}],
+            }
+        ],
+        "tools": [image_tool],
+        "tool_choice": {"type": "image_generation"},
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert seen["payload"].tools == [image_tool]
+    assert seen["payload"].tool_choice == {"type": "image_generation"}
 
 
 @pytest.mark.asyncio

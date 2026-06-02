@@ -76,20 +76,24 @@ def test_known_unsupported_upstream_fields_are_stripped():
         "instructions": "hi",
         "input": [],
         "max_output_tokens": 32000,
+        "metadata": {"client": "cursor"},
         "prompt_cache_retention": "4h",
         "safety_identifier": "safe_123",
         "temperature": 0.2,
         "top_p": 0.9,
+        "user": "cursor-user",
         "custom_field": "kept",
     }
     request = ResponsesRequest.model_validate(payload)
 
     dumped = request.to_payload()
     assert "max_output_tokens" not in dumped
+    assert "metadata" not in dumped
     assert "prompt_cache_retention" not in dumped
     assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
     assert "top_p" not in dumped
+    assert "user" not in dumped
     assert dumped["custom_field"] == "kept"
 
 
@@ -125,18 +129,22 @@ def test_compact_known_unsupported_upstream_fields_are_stripped():
         "model": "gpt-5.1",
         "instructions": "hi",
         "input": [],
+        "metadata": {"client": "cursor"},
         "prompt_cache_retention": "4h",
         "safety_identifier": "safe_123",
         "temperature": 0.2,
         "top_p": 0.9,
+        "user": "cursor-user",
     }
     request = ResponsesCompactRequest.model_validate(payload)
 
     dumped = request.to_payload()
+    assert "metadata" not in dumped
     assert "prompt_cache_retention" not in dumped
     assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
     assert "top_p" not in dumped
+    assert "user" not in dumped
 
 
 def test_compact_normalizes_fast_service_tier_to_priority_for_upstream():

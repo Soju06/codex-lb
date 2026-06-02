@@ -25,6 +25,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
@@ -80,6 +81,7 @@ class AccountsService:
         usage_repo: UsageRepository | None = None,
         additional_usage_repo: AdditionalUsageRepository | AdditionalUsageRepositoryPort | None = None,
         limit_warmup_repo: LimitWarmupRepository | None = None,
+        auth_manager: AuthManager | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
@@ -87,6 +89,7 @@ class AccountsService:
         self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
+        self._auth_manager = auth_manager
 
     async def list_accounts(self) -> list[AccountSummary]:
         accounts = await self._repo.list_accounts()
@@ -381,16 +384,20 @@ class AccountsService:
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
 
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        probe_account = account
+        if self._auth_manager is not None:
+            probe_account = await self._auth_manager.ensure_fresh(account, force=False)
+
+        access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
         probe_model = model or DEFAULT_PROBE_MODEL
         probe_status = await self._send_probe_request(
             access_token=access_token,
-            chatgpt_account_id=account.chatgpt_account_id,
+            chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
         )
 
         if self._usage_repo and self._usage_updater:
-            await self._usage_updater.force_refresh(account)
+            await self._usage_updater.force_refresh(probe_account)
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account

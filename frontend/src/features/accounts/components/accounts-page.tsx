@@ -16,7 +16,6 @@ import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
-import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -53,10 +52,6 @@ export function AccountsPage() {
   const sortedAccounts = useMemo(
     () => sortAccountsForDisplay(accounts, quotaDisplay),
     [accounts, quotaDisplay],
-  );
-  const duplicateAccountIds = useMemo(
-    () => buildDuplicateAccountIdSet(accounts),
-    [accounts],
   );
   const selectedAccountId = searchParams.get("selected");
 
@@ -140,11 +135,7 @@ export function AccountsPage() {
 
           <AccountDetail
             account={selectedAccount}
-            showAccountId={
-              selectedAccount
-                ? duplicateAccountIds.has(selectedAccount.accountId)
-                : false
-            }
+            showAccountId={selectedAccount?.isEmailDuplicate === true}
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}

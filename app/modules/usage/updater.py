@@ -594,22 +594,34 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
     ) -> None:
-        if account.status != AccountStatus.QUOTA_EXCEEDED or not self._auth_manager:
+        if not self._auth_manager:
             return
-        if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
-            return
-        windows = [window for window in (primary, secondary) if window is not None]
-        if secondary is None or not _window_has_available_quota(secondary):
-            return
-        if primary is not None and _window_is_exhausted(primary):
-            target_status = AccountStatus.RATE_LIMITED
-            target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
-        else:
-            if any(_window_is_exhausted(window) for window in windows):
+        if account.status == AccountStatus.RATE_LIMITED:
+            if primary is None or not _window_has_available_quota(primary):
+                return
+            if secondary is not None and not _window_has_available_quota(secondary):
                 return
             target_status = AccountStatus.ACTIVE
             target_reset_at = None
-        if not any(_window_has_available_quota(window) for window in windows):
+            expected_status = AccountStatus.RATE_LIMITED
+        elif account.status == AccountStatus.QUOTA_EXCEEDED:
+            if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
+                return
+            windows = [window for window in (primary, secondary) if window is not None]
+            if secondary is None or not _window_has_available_quota(secondary):
+                return
+            if primary is not None and _window_is_exhausted(primary):
+                target_status = AccountStatus.RATE_LIMITED
+                target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
+            else:
+                if any(_window_is_exhausted(window) for window in windows):
+                    return
+                target_status = AccountStatus.ACTIVE
+                target_reset_at = None
+            if not any(_window_has_available_quota(window) for window in windows):
+                return
+            expected_status = AccountStatus.QUOTA_EXCEEDED
+        else:
             return
 
         repo = cast(AccountsRepositoryWithStatusComparePort, self._auth_manager._repo)
@@ -619,7 +631,7 @@ class UsageUpdater:
             None,
             target_reset_at,
             blocked_at=None,
-            expected_status=AccountStatus.QUOTA_EXCEEDED,
+            expected_status=expected_status,
             expected_deactivation_reason=account.deactivation_reason,
             expected_reset_at=account.reset_at,
             expected_blocked_at=account.blocked_at,

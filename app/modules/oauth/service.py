@@ -19,6 +19,8 @@ from app.core.auth import (
     generate_unique_account_id,
     normalize_seat_type,
 )
+from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.oauth import (
     OAuthError,
     OAuthTokens,
@@ -42,6 +44,7 @@ from app.modules.oauth.schemas import (
     OauthStartResponse,
     OauthStatusResponse,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache
 
 _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
@@ -569,6 +572,15 @@ class OauthService:
                 )
             else:
                 await self._accounts_repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+
+        await self._invalidate_account_routing_caches()
+
+    async def _invalidate_account_routing_caches(self) -> None:
+        get_account_selection_cache().invalidate()
+        get_api_key_cache().clear()
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

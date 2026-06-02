@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 
 type AuthFormat = "codex" | "opencode";
 
@@ -94,6 +95,7 @@ function AuthExportDialogBody({
   exportData: AccountAuthExportResponse;
   onOpenChange: (open: boolean) => void;
 }) {
+  const blurred = usePrivacyStore((s) => s.blurred);
   const [format, setFormat] = useState<AuthFormat>("codex");
 
   const authPreview = format === "codex" ? codexAuthPreview(exportData) : opencodeAuthPreview(exportData);
@@ -142,16 +144,18 @@ function AuthExportDialogBody({
 
         <div className="rounded-lg border bg-muted/20 p-3 text-xs">
           <div className="font-medium">Exported account</div>
-          <div className="mt-1 text-muted-foreground">{exportData.account.email}</div>
+          <div className="mt-1 text-muted-foreground">
+            <span className={blurred ? "privacy-blur" : undefined}>{exportData.account.email}</span>
+          </div>
           <div className="mt-1 font-mono text-muted-foreground">
             {exportData.account.chatgptAccountId ?? exportData.account.accountId}
           </div>
         </div>
 
         <div className="space-y-2">
-          <Label>Format</Label>
+          <Label id="auth-export-format-label">Format</Label>
           <Select value={format} onValueChange={(v) => setFormat(v as AuthFormat)}>
-            <SelectTrigger className="w-[180px]">
+            <SelectTrigger className="w-[180px]" aria-labelledby="auth-export-format-label">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

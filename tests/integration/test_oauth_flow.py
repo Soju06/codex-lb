@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import time
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -243,6 +245,53 @@ async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity
     # Second reauth carried the team plan; it must be applied to the
     # existing row rather than a new __copy row.
     assert data[0]["planType"] == "team"
+
+
+@pytest.mark.asyncio
+async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_merge(monkeypatch):
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    account_cache = SimpleNamespace(invalidated=False)
+
+    def _invalidate_account_cache() -> None:
+        account_cache.invalidated = True
+
+    account_cache.invalidate = _invalidate_account_cache
+    api_key_cache = SimpleNamespace(cleared=False)
+
+    def _clear_api_key_cache() -> None:
+        api_key_cache.cleared = True
+
+    api_key_cache.clear = _clear_api_key_cache
+    poller = SimpleNamespace(bumped=[])
+
+    async def _bump(namespace: str) -> None:
+        poller.bumped.append(namespace)
+
+    poller.bump = _bump
+    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: account_cache, raising=False)
+    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: api_key_cache, raising=False)
+    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: poller, raising=False)
+    monkeypatch.setattr(oauth_module, "NAMESPACE_API_KEY", "api_key", raising=False)
+
+    payload = {
+        "email": "reauth-cache@example.com",
+        "chatgpt_account_id": "acc_reauth_cache",
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+
+    await service._persist_tokens(
+        OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+    )
+
+    repo.upsert.assert_awaited_once()
+    assert account_cache.invalidated is True
+    assert api_key_cache.cleared is True
+    assert poller.bumped == ["api_key"]
 
 
 @pytest.mark.asyncio

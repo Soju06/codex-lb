@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -127,7 +128,13 @@ def get_accounts_context(
     usage_repository = UsageRepository(session)
     additional_usage_repository = AdditionalUsageRepository(session)
     limit_warmup_repository = LimitWarmupRepository(session)
-    service = AccountsService(repository, usage_repository, additional_usage_repository, limit_warmup_repository)
+    service = AccountsService(
+        repository,
+        usage_repository,
+        additional_usage_repository,
+        limit_warmup_repository,
+        auth_manager=AuthManager(repository, refresh_repo_factory=_accounts_repo_context),
+    )
     return AccountsContext(
         session=session,
         repository=repository,

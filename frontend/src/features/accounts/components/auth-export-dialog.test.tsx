@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { renderWithProviders } from "@/test/utils";
 
 import { AuthExportDialog } from "./auth-export-dialog";
@@ -99,6 +100,7 @@ describe("AuthExportDialog", () => {
   beforeEach(() => {
     toastSuccess.mockReset();
     toastError.mockReset();
+    usePrivacyStore.setState({ blurred: false });
     if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.hasPointerCapture !== "function") {
       HTMLElement.prototype.hasPointerCapture = () => false;
     }
@@ -223,8 +225,18 @@ describe("AuthExportDialog", () => {
 
     expect(screen.getByText("Auth Export")).toBeInTheDocument();
     expect(screen.getByText("Format")).toBeInTheDocument();
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /format/i })).toBeInTheDocument();
     expect(screen.getByText(/This payload contains raw access and refresh tokens/i)).toBeInTheDocument();
+  });
+
+  it("blurs exported account email when privacy mode is enabled", async () => {
+    usePrivacyStore.setState({ blurred: true });
+
+    renderWithProviders(
+      <AuthExportDialog open exportData={exportData} onOpenChange={vi.fn()} />,
+    );
+
+    expect(screen.getByText("user@example.com")).toHaveClass("privacy-blur");
   });
 
   it("resets the format to codex when reopened", async () => {

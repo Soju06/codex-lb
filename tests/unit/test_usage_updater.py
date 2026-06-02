@@ -343,6 +343,36 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_usage_recovers_rate_limited_account_when_primary_quota_returns() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_force_probe_recovered", "workspace_force_probe_recovered")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    account.reset_at = 12345
+    account.blocked_at = None
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=80.0),
+    )
+
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        },
+    ]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

@@ -48,6 +48,7 @@ def _build_service(
     *,
     primary_pct: float | None = None,
     secondary_pct: float | None = None,
+    auth_manager: Any | None = None,
 ) -> AccountsService:
     repo = AsyncMock()
     repo.get_by_id.return_value = account
@@ -63,7 +64,7 @@ def _build_service(
 
     usage_repo.latest_entry_for_account.side_effect = _latest_entry_for_account
 
-    service = AccountsService(repo=repo, usage_repo=usage_repo)
+    service = AccountsService(repo=repo, usage_repo=usage_repo, auth_manager=auth_manager)
     # Stop the real UsageUpdater from running — the unit test asserts the
     # service-level orchestration, not the refresh internals.
     usage_updater = AsyncMock()
@@ -129,6 +130,34 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     force_refresh_mock = service._usage_updater.force_refresh
     assert isinstance(force_refresh_mock, AsyncMock)
     force_refresh_mock.assert_awaited_once_with(account)
+
+
+@pytest.mark.asyncio
+async def test_probe_account_refreshes_token_before_sending_probe(monkeypatch):
+    stale_account = _make_account(status=AccountStatus.ACTIVE)
+    fresh_account = _make_account(status=AccountStatus.ACTIVE)
+    encryptor = TokenEncryptor()
+    fresh_account.access_token_encrypted = encryptor.encrypt("fresh-access-token")
+    auth_manager = SimpleNamespace(ensure_fresh=AsyncMock(return_value=fresh_account))
+    service = _build_service(
+        account=stale_account,
+        primary_pct=95.0,
+        secondary_pct=80.0,
+        auth_manager=auth_manager,
+    )
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def _fake_probe(**kwargs):
+        captured_kwargs.update(kwargs)
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    await service.probe_account(_ACCOUNT_ID)
+
+    auth_manager.ensure_fresh.assert_awaited_once_with(stale_account, force=False)
+    assert captured_kwargs["access_token"] == "fresh-access-token"
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,9 @@ class AccountSummary(DashboardModel):
     email: str
     alias: str | None = None
     display_name: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
     usage: AccountUsage | None = None
@@ -91,8 +94,8 @@ class AccountSummary(DashboardModel):
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
-    # True when another account row in the same response shares this real email
-    # and ChatGPT account identity.
+    # True when another account row in the same response shares this real email,
+    # ChatGPT account identity, and workspace slot.
     # Operators see this after a token-invalidation cascade where re-adding
     # via OAuth creates a side-by-side row with a fresh refresh token; the
     # older row keeps a revoked token and keeps generating 401s through the
@@ -109,6 +112,9 @@ class AccountsResponse(DashboardModel):
 class AccountImportResponse(DashboardModel):
     account_id: str
     email: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
 
@@ -161,9 +167,33 @@ class AccountDeleteResponse(DashboardModel):
 class AccountExportResponse(DashboardModel):
     account_id: str
     email: str
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
     plan_type: str
     status: str
     auth_json: str
+
+
+class AccountProbeRequest(DashboardModel):
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model slug for the probe request. Defaults to the service's configured fallback when omitted."
+        ),
+    )
+
+
+class AccountProbeResponse(DashboardModel):
+    status: str
+    account_id: str
+    probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
 
 
 class AccountTrendsResponse(DashboardModel):
@@ -171,6 +201,43 @@ class AccountTrendsResponse(DashboardModel):
     primary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary: list[UsageTrendPoint] = Field(default_factory=list)
     secondary_scheduled: list[UsageTrendPoint] = Field(default_factory=list)
+
+
+class CodexAuthTokens(DashboardModel):
+    id_token: str = Field(serialization_alias="id_token", validation_alias="id_token")
+    access_token: str = Field(serialization_alias="access_token", validation_alias="access_token")
+    refresh_token: str = Field(serialization_alias="refresh_token", validation_alias="refresh_token")
+    account_id: str | None = Field(
+        default=None,
+        serialization_alias="account_id",
+        validation_alias="account_id",
+    )
+
+
+class CodexAuthJson(DashboardModel):
+    auth_mode: str = Field(default="chatgpt", serialization_alias="auth_mode", validation_alias="auth_mode")
+    openai_api_key: str | None = Field(
+        default=None,
+        serialization_alias="OPENAI_API_KEY",
+        validation_alias="OPENAI_API_KEY",
+    )
+    tokens: CodexAuthTokens
+    last_refresh: str = Field(serialization_alias="last_refresh", validation_alias="last_refresh")
+
+
+class AccountAuthExportTokens(DashboardModel):
+    id_token: str
+    access_token: str
+    refresh_token: str
+    expires_at_ms: int = Field(ge=0)
+
+
+class AccountAuthExportResponse(DashboardModel):
+    filename: str
+    account: AccountOpenCodeAuthExportAccount
+    tokens: AccountAuthExportTokens
+    codex_auth_json: CodexAuthJson
+    opencode_auth_json: OpenCodeAuthJson
 
 
 class AccountAliasRequest(DashboardModel):

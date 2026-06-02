@@ -25,7 +25,9 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
+  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
@@ -56,7 +58,7 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
           </p>
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
+            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
         <StatusBadge status={status} />

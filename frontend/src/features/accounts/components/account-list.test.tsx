@@ -244,26 +244,28 @@ describe("AccountList", () => {
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
 
-  it("shows account id only for duplicate emails", () => {
+  it("uses the backend duplicate indicator instead of recomputing by email", () => {
     render(
       <AccountList
         accounts={[
           {
             accountId: "d48f0bfc-8ea6-48a7-8d76-d0e5ef1816c5_6f12b5d5",
             email: "dup@example.com",
-            displayName: "Duplicate A",
+            displayName: "Same email, different workspace",
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
+            isEmailDuplicate: false,
             additionalQuotas: [],
           },
           {
             accountId: "7f9de2ad-7621-4a6f-88bc-ec7f3d914701_91a95cee",
             email: "dup@example.com",
-            displayName: "Duplicate B",
+            displayName: "Same email, duplicate slot",
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
+            isEmailDuplicate: true,
             additionalQuotas: [],
           },
           {
@@ -283,9 +285,8 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com \| ID d48f0bfc\.\.\.12b5d5/))).toBeInTheDocument();
-    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com \| ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
-    expect(screen.getByText("unique@example.com")).toBeInTheDocument();
+    expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/))).not.toBeInTheDocument();
+    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
     expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/unique@example\.com \| ID/))).not.toBeInTheDocument();
   });
 });

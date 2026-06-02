@@ -65,6 +65,9 @@ export const AccountSummarySchema = z.object({
   email: z.string(),
   alias: z.string().nullable().optional(),
   displayName: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -96,6 +99,9 @@ export const AccountsResponseSchema = z.object({
 export const AccountImportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
 });
@@ -118,10 +124,33 @@ export const AccountOpenCodeAuthExportAccountSchema = z.object({
   email: z.string(),
 });
 
-export const AccountOpenCodeAuthExportResponseSchema = z.object({
+export const CodexAuthTokensSchema = z.object({
+  id_token: z.string(),
+  access_token: z.string(),
+  refresh_token: z.string(),
+  account_id: z.string().nullable().optional(),
+});
+
+export const CodexAuthJsonSchema = z.object({
+  auth_mode: z.string(),
+  OPENAI_API_KEY: z.string().nullable().optional(),
+  tokens: CodexAuthTokensSchema,
+  last_refresh: z.string(),
+});
+
+export const AccountAuthExportTokensSchema = z.object({
+  idToken: z.string(),
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  expiresAtMs: z.number().int().nonnegative(),
+});
+
+export const AccountAuthExportResponseSchema = z.object({
   filename: z.string(),
   account: AccountOpenCodeAuthExportAccountSchema,
-  authJson: OpenCodeAuthJsonSchema,
+  tokens: AccountAuthExportTokensSchema,
+  codexAuthJson: CodexAuthJsonSchema,
+  opencodeAuthJson: OpenCodeAuthJsonSchema,
 });
 
 export const AccountActionResponseSchema = z.object({
@@ -144,14 +173,6 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
   status: z.string(),
   enabled: z.boolean(),
-});
-
-export const AccountExportResponseSchema = z.object({
-  accountId: z.string(),
-  email: z.string(),
-  planType: z.string(),
-  status: z.string(),
-  authJson: z.string(),
 });
 
 export const OauthStartRequestSchema = z.object({
@@ -223,14 +244,12 @@ export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountLimitWarmupStatus = z.infer<typeof AccountLimitWarmupStatusSchema>;
-export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
-export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
 export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
-export type AccountOpenCodeAuthExportResponse = z.infer<
-  typeof AccountOpenCodeAuthExportResponseSchema
->;
+export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;
+export type AccountAuthExportTokens = z.infer<typeof AccountAuthExportTokensSchema>;
+export type AccountAuthExportResponse = z.infer<typeof AccountAuthExportResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
 export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;

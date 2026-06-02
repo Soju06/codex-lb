@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
@@ -12,8 +12,10 @@ from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
+from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import connect_responses_websocket
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 
 def _proxy_error_code(exc: ProxyResponseError) -> str | None:
@@ -101,6 +103,66 @@ async def _local_proxy_tunnel_handler(
                 await target_writer.wait_closed()
 
 
+class _FakeCodexWebSocket:
+    def __init__(self) -> None:
+        self.closed = False
+        self.response = SimpleNamespace(headers={"x-codex-turn-state": "turn-routed"})
+
+    async def send_str(self, data: str) -> None:
+        del data
+
+    async def send_bytes(self, data: bytes) -> None:
+        del data
+
+    async def recv(self) -> tuple[bytes, int]:
+        return b'{"type":"response.completed"}', 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeCodexClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.websocket = _FakeCodexWebSocket()
+
+    async def open_ws_with_route_metadata(
+        self,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        **kwargs: object,
+    ) -> CodexWebSocketResult:
+        self.calls.append({"url": url, "route": route, **kwargs})
+        return CodexWebSocketResult(
+            websocket=self.websocket,
+            context=None,
+            route=route,
+            fallback_used=False,
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class _FailingCodexClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def open_ws_with_route_metadata(
+        self,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        **kwargs: object,
+    ) -> CodexWebSocketResult:
+        del url, route, kwargs
+        raise CodexTransportError("Codex upstream websocket failed via proxy endpoint ep_1: OSError")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch):
     fake_connection = _FakeConnection()
@@ -134,6 +196,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
         },
         "access-token",
         "account-123",
+        allow_direct_egress=True,
     )
 
     await websocket.send_text("hello")
@@ -156,6 +219,80 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "Cookie" not in additional_headers
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_codex_call_preserves_size_limit(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    codex_client = _FakeCodexClient()
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {
+            "openai-beta": "responses_websockets=2026-02-06",
+            "User-Agent": "Codex CLI Test",
+            "Origin": "https://chatgpt.com",
+        },
+        "access-token",
+        "account-123",
+        route=route,
+        codex_client=cast(Any, codex_client),
+    )
+    await websocket.close()
+
+    assert codex_client.calls
+    call = codex_client.calls[0]
+    assert call["url"] == "wss://chatgpt.com/backend-api/codex/responses"
+    assert call["route"] is route
+    assert call["timeout"] == 7.0
+    assert call["max_message_size"] == 4321
+    assert "max_size" not in call
+    assert websocket.response_header("x-codex-turn-state") == "turn-routed"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_transport_error_maps_proxy_error(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _FailingCodexClient()),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert "ep_1" in (_proxy_error_message(exc_info.value) or "")
 
 
 @pytest.mark.asyncio
@@ -185,6 +322,7 @@ async def test_connect_responses_websocket_appends_required_beta_header(monkeypa
         {"OpenAI-Beta": "assistants=v2"},
         "access-token",
         None,
+        allow_direct_egress=True,
     )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
@@ -222,6 +360,7 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
             {"openai-beta": "responses_websockets=2026-02-06"},
             "access-token",
             "account-123",
+            allow_direct_egress=True,
         )
 
     assert exc_info.value.status_code == 403
@@ -256,7 +395,12 @@ async def test_connect_responses_websocket_can_opt_in_to_env_proxy(monkeypatch):
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "http://127.0.0.1:7890"
@@ -298,7 +442,12 @@ async def test_connect_responses_websocket_disables_proxy_when_env_proxy_is_unse
     ):
         monkeypatch.delenv(name, raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] is None
@@ -335,7 +484,12 @@ async def test_connect_responses_websocket_uses_all_proxy_fallback(monkeypatch):
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("ALL_PROXY", raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "socks5://127.0.0.1:7890"
@@ -374,7 +528,12 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_all_proxy(mon
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
     monkeypatch.delenv("ALL_PROXY", raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "socks5://127.0.0.1:7890"
@@ -413,7 +572,12 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(m
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7892")
     monkeypatch.delenv("ALL_PROXY", raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "socks5://127.0.0.1:7891"
@@ -446,7 +610,12 @@ async def test_connect_responses_websocket_normalizes_http_socks_env_proxy(monke
     monkeypatch.setenv("socks_proxy", "http://127.0.0.1:7891")
     monkeypatch.delenv("SOCKS_PROXY", raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "socks5h://127.0.0.1:7891"
@@ -481,7 +650,12 @@ async def test_connect_responses_websocket_uses_settings_proxy_env(monkeypatch):
     for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] == "http://127.0.0.1:7890"
@@ -519,7 +693,12 @@ async def test_connect_responses_websocket_respects_settings_no_proxy(monkeypatc
     for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] is None
@@ -556,7 +735,12 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert seen["url"] == "ws://chatgpt.local/backend-api/codex/responses"
@@ -605,6 +789,7 @@ async def test_connect_responses_websocket_traverses_http_proxy_smoke(monkeypatc
                 {"openai-beta": "responses_websockets=2026-02-06"},
                 "access-token",
                 None,
+                allow_direct_egress=True,
             )
             await websocket.send_text("hello")
             message = await websocket.receive()
@@ -654,7 +839,12 @@ async def test_connect_responses_websocket_ignores_cgi_http_proxy(monkeypatch):
     monkeypatch.setenv("REQUEST_METHOD", "GET")
     monkeypatch.setenv("HTTP_PROXY", "http://attacker.invalid:8080")
 
-    await connect_responses_websocket({"openai-beta": "responses_websockets=2026-02-06"}, "access-token", None)
+    await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert seen["url"] == "ws://chatgpt.local/backend-api/codex/responses"
@@ -685,6 +875,7 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
             {"openai-beta": "responses_websockets=2026-02-06"},
             "access-token",
             "account-123",
+            allow_direct_egress=True,
         )
 
     assert exc_info.value.status_code == 502
@@ -716,6 +907,7 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
             {"openai-beta": "responses_websockets=2026-02-06"},
             "access-token",
             "account-123",
+            allow_direct_egress=True,
         )
 
     assert exc_info.value.status_code == 502

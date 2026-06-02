@@ -14,9 +14,13 @@ from app.core.auth import (
     DEFAULT_EMAIL,
     DEFAULT_PLAN,
     OpenAIAuthClaims,
+    clean_account_identity_part,
     extract_id_token_claims,
     generate_unique_account_id,
+    normalize_seat_type,
 )
+from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.oauth import (
     OAuthError,
     OAuthTokens,
@@ -29,8 +33,10 @@ from app.core.clients.oauth import (
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.schemas import (
     ManualCallbackResponse,
@@ -40,12 +46,26 @@ from app.modules.oauth.schemas import (
     OauthStartResponse,
     OauthStatusResponse,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache
 
 _async_sleep = asyncio.sleep
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
+
+
+async def _oauth_route() -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        try:
+            return await resolve_upstream_route(
+                session,
+                account_id=None,
+                operation="oauth",
+                scope="bootstrap",
+            )
+        except UpstreamProxyRouteError as exc:
+            raise OAuthError(exc.reason, str(exc), status_code=502) from exc
 
 
 @dataclass
@@ -400,7 +420,13 @@ class OauthService:
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            route = await _oauth_route()
+            tokens = await exchange_authorization_code(
+                code=code,
+                code_verifier=verifier,
+                route=route,
+                allow_direct_egress=route is None,
+            )
             await self._persist_tokens(tokens)
             await self._set_success(flow.flow_id)
             asyncio.create_task(self._stop_callback_server_if_idle())
@@ -420,7 +446,8 @@ class OauthService:
     async def _start_device_flow(self) -> OauthStartResponse:
         flow_id = secrets.token_urlsafe(12)
         try:
-            device = await request_device_code()
+            route = await _oauth_route()
+            device = await request_device_code(route=route, allow_direct_egress=route is None)
         except OAuthError as exc:
             await self._set_error(exc.message)
             raise
@@ -468,7 +495,13 @@ class OauthService:
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
+            route = await _oauth_route()
+            tokens = await exchange_authorization_code(
+                code=code,
+                code_verifier=verifier,
+                route=route,
+                allow_direct_egress=route is None,
+            )
             await self._persist_tokens(tokens)
             await self._set_success(flow.flow_id)
             html = _success_html()
@@ -485,9 +518,12 @@ class OauthService:
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
         try:
             while time.time() < context.expires_at:
+                route = await _oauth_route()
                 tokens = await exchange_device_token(
                     device_auth_id=context.device_auth_id,
                     user_code=context.user_code,
+                    route=route,
+                    allow_direct_egress=route is None,
                 )
                 if tokens:
                     await self._persist_tokens(tokens)
@@ -528,7 +564,10 @@ class OauthService:
         auth_claims = claims.auth or OpenAIAuthClaims()
         raw_account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
         email = claims.email or DEFAULT_EMAIL
-        account_id = generate_unique_account_id(raw_account_id, email)
+        workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
+        workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
+        seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
+        account_id = generate_unique_account_id(raw_account_id, email, workspace_id)
         plan_type = coerce_account_plan_type(
             auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type,
             DEFAULT_PLAN,
@@ -538,6 +577,9 @@ class OauthService:
             id=account_id,
             chatgpt_account_id=raw_account_id,
             email=email,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
             plan_type=plan_type,
             access_token_encrypted=self._encryptor.encrypt(tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(tokens.refresh_token),
@@ -548,9 +590,28 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert(account)
+                if raw_account_id and workspace_id is None:
+                    await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=True)
+                else:
+                    await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
         else:
-            await self._accounts_repo.upsert(account)
+            if raw_account_id and workspace_id is None:
+                await self._accounts_repo.upsert(
+                    account,
+                    merge_by_email=False,
+                    merge_by_chatgpt_identity=True,
+                )
+            else:
+                await self._accounts_repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+
+        await self._invalidate_account_routing_caches()
+
+    async def _invalidate_account_routing_caches(self) -> None:
+        get_account_selection_cache().invalidate()
+        get_api_key_cache().clear()
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

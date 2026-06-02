@@ -505,6 +505,51 @@ export const handlers = [
 		});
 	}),
 
+	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		if (!account) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		return HttpResponse.json({
+			filename: `opencode-auth-${account.email}.json`,
+			account: {
+				accountId: account.accountId,
+				chatgptAccountId: account.accountId,
+				email: account.email,
+			},
+			tokens: {
+				idToken: "id-token-mock-value",
+				accessToken: "access-token-mock-value",
+				refreshToken: "refresh-token-mock-value",
+				expiresAtMs: 2_000_000_000_000,
+			},
+			codexAuthJson: {
+				auth_mode: "chatgpt",
+				OPENAI_API_KEY: null,
+				tokens: {
+					id_token: "id-token",
+					access_token: "access-token",
+					refresh_token: "refresh-token",
+					account_id: accountId,
+				},
+				last_refresh: "2026-01-01T12:00:00.000000Z",
+			},
+			opencodeAuthJson: {
+				openai: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "access-token",
+					expires: 2_000_000_000_000,
+					accountId: accountId,
+				},
+			},
+		});
+	}),
+
 	http.delete("/api/accounts/:accountId", ({ params }) => {
 		const accountId = String(params.accountId);
 		const exists = state.accounts.some(

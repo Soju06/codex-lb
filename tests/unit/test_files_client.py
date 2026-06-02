@@ -97,6 +97,7 @@ async def test_create_file_returns_upstream_json_on_success() -> None:
         access_token="upstream-token",
         account_id="acc_1",
         session=_client_session(session),
+        allow_direct_egress=True,
     )
 
     assert result == {"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"}
@@ -125,6 +126,7 @@ async def test_create_file_maps_error_status_to_proxy_error() -> None:
             access_token="t",
             account_id=None,
             session=_client_session(session),
+            allow_direct_egress=True,
         )
     assert info.value.status_code == 413
     assert info.value.payload == {"error": {"message": "file too large", "type": "invalid_request_error"}}
@@ -141,6 +143,7 @@ async def test_create_file_non_json_body_yields_502() -> None:
             access_token="t",
             account_id=None,
             session=_client_session(session),
+            allow_direct_egress=True,
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_error"
@@ -157,6 +160,7 @@ async def test_create_file_transport_failure_yields_502() -> None:
             access_token="t",
             account_id=None,
             session=_client_session(session),
+            allow_direct_egress=True,
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_unavailable"
@@ -184,6 +188,7 @@ async def test_create_file_leases_shared_session_when_session_not_supplied(monke
         headers={},
         access_token="upstream-token",
         account_id="acc_1",
+        allow_direct_egress=True,
     )
 
     assert result["file_id"] == "file_abc"
@@ -215,6 +220,7 @@ async def test_finalize_file_returns_immediately_on_success(monkeypatch: pytest.
         access_token="t",
         account_id="acc_1",
         session=_client_session(session),
+        allow_direct_egress=True,
     )
 
     assert result["status"] == "success"
@@ -249,6 +255,7 @@ async def test_finalize_file_retries_then_succeeds(monkeypatch: pytest.MonkeyPat
         access_token="t",
         account_id=None,
         session=_client_session(session),
+        allow_direct_egress=True,
     )
 
     assert result["status"] == "success"
@@ -290,6 +297,7 @@ async def test_finalize_file_holds_shared_session_lease_across_poll_loop(monkeyp
         headers={},
         access_token="t",
         account_id=None,
+        allow_direct_egress=True,
     )
 
     assert result["status"] == "success"
@@ -323,6 +331,7 @@ async def test_finalize_file_returns_last_retry_after_budget_exhaustion(monkeypa
         access_token="t",
         account_id=None,
         session=_client_session(session),
+        allow_direct_egress=True,
     )
 
     assert result == {"status": "retry"}
@@ -351,6 +360,7 @@ async def test_finalize_file_maps_error_status_to_proxy_error(monkeypatch: pytes
             access_token="t",
             account_id=None,
             session=_client_session(session),
+            allow_direct_egress=True,
         )
     assert info.value.status_code == 404
     assert info.value.payload == {"error": {"message": "not found", "type": "invalid_request_error"}}
@@ -372,6 +382,7 @@ async def test_finalize_file_transport_timeout_yields_502(monkeypatch: pytest.Mo
             access_token="t",
             account_id=None,
             session=_client_session(session),
+            allow_direct_egress=True,
         )
     assert info.value.status_code == 502
     assert info.value.payload["error"]["code"] == "upstream_unavailable"

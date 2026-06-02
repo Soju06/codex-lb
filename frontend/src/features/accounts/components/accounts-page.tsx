@@ -10,13 +10,12 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
-import { OpenCodeAuthExportDialog } from "@/features/accounts/components/opencode-auth-export-dialog";
+import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import type { AccountOpenCodeAuthExportResponse } from "@/features/accounts/schemas";
-import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
+import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -34,16 +33,15 @@ export function AccountsPage() {
     resumeMutation,
     setAliasMutation,
     deleteMutation,
-    exportMutation,
+    exportAuthMutation,
     limitWarmupMutation,
-    exportOpenCodeAuthMutation,
   } = useAccounts();
   const oauth = useOauth();
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
-  const exportDialog = useDialogState<AccountOpenCodeAuthExportResponse>();
+  const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
   const accounts = useMemo(
@@ -54,10 +52,6 @@ export function AccountsPage() {
   const sortedAccounts = useMemo(
     () => sortAccountsForDisplay(accounts, quotaDisplay),
     [accounts, quotaDisplay],
-  );
-  const duplicateAccountIds = useMemo(
-    () => buildDuplicateAccountIdSet(accounts),
-    [accounts],
   );
   const selectedAccountId = searchParams.get("selected");
 
@@ -99,9 +93,8 @@ export function AccountsPage() {
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
     deleteMutation.isPending ||
-    exportMutation.isPending ||
-    limitWarmupMutation.isPending ||
-    exportOpenCodeAuthMutation.isPending;
+    exportAuthMutation.isPending ||
+    limitWarmupMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -109,9 +102,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
-    getErrorMessageOrNull(exportMutation.error) ||
-    getErrorMessageOrNull(limitWarmupMutation.error) ||
-    getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
+    getErrorMessageOrNull(exportAuthMutation.error) ||
+    getErrorMessageOrNull(limitWarmupMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -143,11 +135,7 @@ export function AccountsPage() {
 
           <AccountDetail
             account={selectedAccount}
-            showAccountId={
-              selectedAccount
-                ? duplicateAccountIds.has(selectedAccount.accountId)
-                : false
-            }
+            showAccountId={selectedAccount?.isEmailDuplicate === true}
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
@@ -156,9 +144,8 @@ export function AccountsPage() {
             }
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
-            onExport={(accountId) => void exportMutation.mutateAsync(accountId)}
-            onExportOpenCodeAuth={(accountId) => {
-              void exportOpenCodeAuthMutation
+            onExportAuth={(accountId) => {
+              void exportAuthMutation
                 .mutateAsync(accountId)
                 .then((result) => exportDialog.show(result))
                 .catch(() => null);
@@ -199,7 +186,7 @@ export function AccountsPage() {
         />
       </Suspense>
 
-      <OpenCodeAuthExportDialog
+      <AuthExportDialog
         open={exportDialog.open}
         exportData={exportDialog.data}
         onOpenChange={exportDialog.onOpenChange}

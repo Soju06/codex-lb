@@ -261,10 +261,10 @@ async def test_set_and_clear_account_alias(async_client):
 async def test_list_accounts_flags_email_duplicates(async_client):
     """Pin codex-lb #787 (B): after a token-invalidation cascade, the
     re-add OAuth flow creates a second account row with the same email
-    but a fresh accountId for the same ChatGPT account identity.
-    /api/accounts surfaces that pair via isEmailDuplicate=true on both rows
-    so the dashboard can flag the operator's "stale + fresh" pair without
-    forcing them to group by email and ChatGPT identity themselves.
+    but a fresh accountId for the same ChatGPT account identity and workspace
+    slot. /api/accounts surfaces that pair via isEmailDuplicate=true on both
+    rows so the dashboard can flag the operator's "stale + fresh" pair without
+    forcing them to group by email, ChatGPT identity, and workspace themselves.
     """
     from app.core.crypto import TokenEncryptor
     from app.core.utils.time import utcnow
@@ -274,10 +274,11 @@ async def test_list_accounts_flags_email_duplicates(async_client):
 
     encryptor = TokenEncryptor()
 
-    def _account(account_id: str, email: str, chatgpt_id: str) -> Account:
+    def _account(account_id: str, email: str, chatgpt_id: str, workspace_id: str | None = None) -> Account:
         return Account(
             id=account_id,
             chatgpt_account_id=chatgpt_id,
+            workspace_id=workspace_id,
             email=email,
             plan_type="plus",
             access_token_encrypted=encryptor.encrypt("access"),
@@ -292,6 +293,8 @@ async def test_list_accounts_flags_email_duplicates(async_client):
         repo = AccountsRepository(session)
         await repo.upsert(_account("dup-stale", "dup@example.com", "chatgpt_same"), merge_by_email=False)
         await repo.upsert(_account("dup-fresh", "dup@example.com", "chatgpt_same"), merge_by_email=False)
+        await repo.upsert(_account("workspace-a", "multi@example.com", "chatgpt_multi", "ws_a"), merge_by_email=False)
+        await repo.upsert(_account("workspace-b", "multi@example.com", "chatgpt_multi", "ws_b"), merge_by_email=False)
         await repo.upsert(_account("workspace-other", "dup@example.com", "chatgpt_other"), merge_by_email=False)
         await repo.upsert(_account("solo", "solo@example.com", "chatgpt_solo"), merge_by_email=False)
         await repo.upsert(_account("placeholder-a", DEFAULT_EMAIL, "chatgpt_placeholder_a"), merge_by_email=False)
@@ -305,6 +308,8 @@ async def test_list_accounts_flags_email_duplicates(async_client):
 
     assert accounts_by_id["dup-stale"]["isEmailDuplicate"] is True
     assert accounts_by_id["dup-fresh"]["isEmailDuplicate"] is True
+    assert accounts_by_id["workspace-a"]["isEmailDuplicate"] is False
+    assert accounts_by_id["workspace-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["workspace-other"]["isEmailDuplicate"] is False
     assert accounts_by_id["solo"]["isEmailDuplicate"] is False
     assert accounts_by_id["placeholder-a"]["isEmailDuplicate"] is False

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AccountOpenCodeAuthExportResponseSchema,
+  AccountAuthExportResponseSchema,
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -52,16 +52,33 @@ describe("AccountSummarySchema", () => {
   });
 });
 
-describe("AccountOpenCodeAuthExportResponseSchema", () => {
-  it("parses stock OpenCode auth export payloads", () => {
-    const parsed = AccountOpenCodeAuthExportResponseSchema.parse({
+describe("AccountAuthExportResponseSchema", () => {
+  it("parses combined auth export payloads with raw Codex keys", () => {
+    const parsed = AccountAuthExportResponseSchema.parse({
       filename: "opencode-auth-user.json",
       account: {
         accountId: "acc-1",
         chatgptAccountId: "chatgpt-acc-1",
         email: "user@example.com",
       },
-      authJson: {
+      tokens: {
+        idToken: "id-token",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresAtMs: 2_000_000_000_000,
+      },
+      codexAuthJson: {
+        auth_mode: "chatgpt",
+        OPENAI_API_KEY: null,
+        tokens: {
+          id_token: "id-token",
+          access_token: "access-token",
+          refresh_token: "refresh-token",
+          account_id: "chatgpt-acc-1",
+        },
+        last_refresh: "2026-01-01T00:00:00.000000Z",
+      },
+      opencodeAuthJson: {
         openai: {
           type: "oauth",
           refresh: "refresh-token",
@@ -72,8 +89,8 @@ describe("AccountOpenCodeAuthExportResponseSchema", () => {
       },
     });
 
-    expect(parsed.authJson.openai.type).toBe("oauth");
-    expect(parsed.authJson.openai.expires).toBe(2_000_000_000_000);
+    expect(parsed.codexAuthJson.tokens.account_id).toBe("chatgpt-acc-1");
+    expect(parsed.codexAuthJson.OPENAI_API_KEY).toBeNull();
   });
 });
 

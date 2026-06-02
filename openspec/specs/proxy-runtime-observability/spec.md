@@ -65,3 +65,60 @@ The service MUST expose metrics and structured logs for HTTP bridge routing deci
 - **THEN** the service emits locality miss and local rebind observability
 - **AND** it logs a structured bridge event indicating soft locality rebind
 
+### Requirement: Responses concurrency pressure is observable
+
+The service MUST expose low-cardinality logs and metrics for account-local in-flight create count, active stream count, leased token/cost pressure, cap rejections, lease stale reclaims, soft-affinity reroutes, and local-vs-upstream 429 classification. Observability MUST avoid raw prompt text, raw affinity keys, API keys, and request payload content.
+
+#### Scenario: Local and upstream 429s are separated
+
+- **WHEN** local admission rejects a request and upstream later returns a rate limit for another request
+- **THEN** logs and metrics distinguish local overload reasons from normalized upstream `upstream_rate_limit`
+- **AND** preserved upstream wire payloads may retain upstream codes such as `rate_limit_exceeded`, `usage_limit_reached`, or `insufficient_quota`
+
+### Requirement: Streaming timeout diagnostics are emitted
+
+For `/v1/responses` HTTP/SSE streams, the service MUST log low-cardinality diagnostics for early heartbeat emission, keepalive emission, startup wait timeout, downstream disconnect, and stream idle timeout. The diagnostics MUST include request id, route family, account id when known, timeout stage, and elapsed seconds where available, without exposing payload content or raw affinity keys.
+
+#### Scenario: Keepalive path is diagnosable
+
+- **WHEN** a streaming Responses request waits for upstream events long enough to emit keepalive data
+- **THEN** the service records heartbeat or keepalive diagnostics
+- **AND** the diagnostic does not include raw prompt-cache keys or request payloads
+
+### Requirement: HTTP bridge startup wait timeouts are logged
+
+When an HTTP bridge startup wait times out locally, the service MUST log the request id, timeout stage, timeout seconds, and low-cardinality bridge affinity family. The log MUST NOT include raw prompt-cache keys, session ids, turn-state ids, API keys, or request payload content.
+
+#### Scenario: Bridge startup admission timeout is diagnosable
+
+- **WHEN** a HTTP bridge startup wait exceeds the configured proxy admission wait timeout
+- **THEN** the console log includes the timeout stage and request id
+- **AND** the log includes only low-cardinality affinity metadata, not raw affinity key values
+
+
+### Requirement: Runtime continuity canary reports raw-error exposure and build parity
+Operators MUST have a local verifier that reports whether the running `codex-lb` runtime is built from the expected code and whether recent Codex client logs contain raw `previous_response_not_found` errors.
+
+#### Scenario: live runtime is checked after a continuity patch
+- **WHEN** an operator runs the verifier on the Mac host
+- **THEN** the verifier reports the repo commit, the running container image/id, local `/health` status, and recent raw `previous_response_not_found` count
+- **AND** the verifier exits nonzero if raw errors are still present after the verification window
+- **AND** the verifier redacts response ids by default unless `--show-ids` is passed
+
+### Requirement: Request-log persistence failures are operator-visible
+If request-log persistence fails for Responses WebSocket requests, the runtime MUST surface that condition in logs or verifier output so operators do not mistake HTTP `/health` success for continuity safety.
+
+#### Scenario: request-log persistence fails during WebSocket traffic
+- **WHEN** the runtime logs a request-log persistence failure
+- **THEN** the verifier reports the failure count
+- **AND** the continuity closeout cannot be marked green until persistence failures are absent or explicitly explained
+
+### Requirement: Stale pending HTTP bridge retirement is logged
+
+When the service retires an HTTP bridge session because pending precreated replay cannot make progress after upstream close or timeout, the service MUST emit a `retire_stale_pending` bridge event with low-cardinality bridge metadata and the terminal detail code.
+
+#### Scenario: Failed precreated replay emits retirement event
+
+- **WHEN** precreated HTTP bridge replay fails after upstream close or timeout
+- **THEN** the console log includes a HTTP bridge event with `event=retire_stale_pending`
+- **AND** the event includes only hashed bridge identity and low-cardinality metadata

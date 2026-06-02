@@ -20,6 +20,7 @@ export const DashboardSettingsSchema = z.object({
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional().default(43200),
+  warmupModel: z.string().trim().min(1).optional().default("gpt-5.4-mini"),
   importWithoutOverwrite: z.boolean(),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
@@ -33,14 +34,15 @@ export const DashboardSettingsSchema = z.object({
 });
 
 export const SettingsUpdateRequestSchema = z.object({
-  stickyThreadsEnabled: z.boolean(),
+  stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
-  preferEarlierResetAccounts: z.boolean(),
+  preferEarlierResetAccounts: z.boolean().optional(),
   routingStrategy: RoutingStrategySchema.optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
+  warmupModel: z.string().trim().min(1).optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),

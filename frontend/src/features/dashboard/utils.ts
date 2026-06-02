@@ -9,7 +9,7 @@ import type {
   TrendPoint,
   UsageWindow,
 } from "@/features/dashboard/schemas";
-import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
+import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { buildDonutPalette } from "@/utils/colors";
 import {
   formatCachedTokensMeta,
@@ -179,8 +179,6 @@ export function buildRemainingItems(
 ): RemainingItem[] {
   const usageIndex = buildWindowIndex(window);
   const palette = buildDonutPalette(accounts.length, isDark);
-  const duplicateAccountIds = buildDuplicateAccountIdSet(accounts);
-
   return accounts
     .map((account, index) => {
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
@@ -189,7 +187,7 @@ export function buildRemainingItems(
       const remaining = usageIndex.get(account.accountId) ?? 0;
       const rawLabel = account.displayName || account.email || account.accountId;
       const labelIsEmail = !!account.email && rawLabel === account.email;
-      const labelSuffix = duplicateAccountIds.has(account.accountId)
+      const labelSuffix = account.isEmailDuplicate === true
         ? ` (${formatCompactAccountId(account.accountId, 5, 4)})`
         : "";
       return {

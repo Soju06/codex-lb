@@ -118,6 +118,7 @@ class TestSubmitClosedSessionWithPreviousResponseId:
         websocket reconnect since there's no server-side state to preserve."""
         service = proxy_service.ProxyService(cast(Any, nullcontext()))
         session = _make_session(closed=True)
+        service._http_bridge_sessions[session.key] = session
         request_state = _make_request_state(previous_response_id=None)
 
         # Mock the retry to succeed (reconnect works)

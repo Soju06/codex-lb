@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
+const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
 
@@ -24,6 +25,7 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+  const [warmupModel, setWarmupModel] = useState(settings.warmupModel);
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
   );
@@ -38,12 +40,14 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
-    void onSave(buildSettingsUpdateRequest(settings, patch));
+    void onSave(buildSettingsUpdateRequest(patch));
 
   const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const warmupModelChanged = warmupModel.trim() !== settings.warmupModel;
+  const warmupModelValid = warmupModel.trim().length > 0 && warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const limitWarmupFieldsChanged =
@@ -91,6 +95,37 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
         </div>
 
         <div className="divide-y rounded-lg border">
+          <div className="space-y-3 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium">Warmup model</p>
+                <p className="text-xs text-muted-foreground">
+                  Set the model used by the normal warmup endpoint.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={warmupModel}
+                disabled={busy}
+                maxLength={WARMUP_MODEL_MAX_LENGTH}
+                onChange={(event) => setWarmupModel(event.target.value)}
+                className="h-8 text-xs"
+                aria-label="Warmup model"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs sm:w-24"
+                disabled={busy || !warmupModelChanged || !warmupModelValid}
+                onClick={() => void save({ warmupModel: warmupModel.trim() })}
+              >
+                Save warmup model
+              </Button>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between gap-4 p-3">
             <div>
               <p className="text-sm font-medium">Upstream stream transport</p>
@@ -361,6 +396,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               </Button>
             </div>
           </div>
+
         </div>
       </div>
     </section>

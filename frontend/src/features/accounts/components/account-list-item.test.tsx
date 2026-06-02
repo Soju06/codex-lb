@@ -119,4 +119,21 @@ describe("AccountListItem", () => {
 
     expect(screen.getByTestId("mini-quota-track-weekly-fill")).toHaveStyle({ width: "73%" });
   });
+
+  it("keeps workspace context visible when a display alias uses the email subtitle", () => {
+    const account = createAccountSummary({
+      displayName: "Work seat",
+      email: "work@example.com",
+      planType: "team",
+      workspaceLabel: "Design Workspace",
+      seatType: "member",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Work seat")).toBeInTheDocument();
+    expect(
+      screen.getByText((_, element) => element?.textContent === "work@example.com | Team | Design Workspace | Member"),
+    ).toBeInTheDocument();
+  });
 });

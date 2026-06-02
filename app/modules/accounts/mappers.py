@@ -52,8 +52,8 @@ def build_account_summaries(
     ]
 
 
-def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str]]:
-    """Return duplicate (email, ChatGPT account id) keys in this list.
+def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str, str | None]]:
+    """Return duplicate (email, ChatGPT account id, workspace id) keys in this list.
 
     Emails are compared case-sensitively to match the storage normalization
     already performed at OAuth-import time. Blank/None emails, the legacy
@@ -61,7 +61,7 @@ def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) 
     ChatGPT account identity are excluded so valid same-email accounts in
     different workspaces are not flagged as stale/fresh duplicates.
     """
-    counts: dict[tuple[str, str], int] = {}
+    counts: dict[tuple[str, str, str | None], int] = {}
     for account in accounts:
         key = _duplicate_detection_key(account)
         if key is None:
@@ -70,12 +70,12 @@ def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) 
     return {key for key, count in counts.items() if count > 1}
 
 
-def _duplicate_detection_key(account: Account) -> tuple[str, str] | None:
+def _duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | None:
     email = account.email
     chatgpt_account_id = account.chatgpt_account_id
     if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
         return None
-    return email, chatgpt_account_id
+    return email, chatgpt_account_id, account.workspace_id
 
 
 def _is_duplicate_detection_email(email: str | None) -> bool:
@@ -157,6 +157,9 @@ def _account_to_summary(
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,
+        workspace_id=account.workspace_id,
+        workspace_label=account.workspace_label,
+        seat_type=account.seat_type,
         plan_type=plan_type,
         status=effective_status.value,
         usage=AccountUsage(

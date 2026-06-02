@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -17,6 +17,7 @@ class DashboardSettingsResponse(DashboardModel):
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
+    warmup_model: str = Field(min_length=1)
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_configured: bool
@@ -30,12 +31,12 @@ class DashboardSettingsResponse(DashboardModel):
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
-    sticky_threads_enabled: bool
+    sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
     )
-    prefer_earlier_reset_accounts: bool
+    prefer_earlier_reset_accounts: bool | None = None
     routing_strategy: str | None = Field(
         default=None,
         pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$",
@@ -47,6 +48,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    warmup_model: str | None = Field(default=None, min_length=1)
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
@@ -56,6 +58,16 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int | None = Field(default=None, ge=60)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
+
+    @field_validator("warmup_model")
+    @classmethod
+    def _normalize_warmup_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("warmup_model must not be blank")
+        return normalized
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

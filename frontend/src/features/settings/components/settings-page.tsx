@@ -72,6 +72,7 @@ export function SettingsPage() {
             <RoutingSettings
               key={[
                 settings.openaiCacheAffinityMaxAgeSeconds,
+                settings.warmupModel,
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupCooldownSeconds,
@@ -95,7 +96,7 @@ export function SettingsPage() {
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
               disabled={busy}
               onApiKeyAuthEnabledChange={(enabled) =>
-                void handleSave(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: enabled }))
+                void handleSave(buildSettingsUpdateRequest({ apiKeyAuthEnabled: enabled }))
               }
             />
             <FirewallSection />

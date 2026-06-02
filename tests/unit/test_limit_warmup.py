@@ -170,6 +170,13 @@ class FakeRequestLogsRepo:
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+        failure_exception_type: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        bridge_stage: str | None = None,
+        request_kind: str = "normal",
     ) -> None:
         self.logs.append(
             {
@@ -195,6 +202,13 @@ class FakeRequestLogsRepo:
                 "session_id": session_id,
                 "plan_type": plan_type,
                 "source": source,
+                "failure_phase": failure_phase,
+                "failure_detail": failure_detail,
+                "failure_exception_type": failure_exception_type,
+                "upstream_status_code": upstream_status_code,
+                "upstream_error_code": upstream_error_code,
+                "bridge_stage": bridge_stage,
+                "request_kind": request_kind,
             }
         )
 
@@ -301,7 +315,7 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert len(sender.calls) == 1
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "succeeded"
-    assert logs.logs[0]["source"] == "limit_warmup"
+    assert logs.logs[0]["request_kind"] == "warmup"
 
 
 @pytest.mark.asyncio

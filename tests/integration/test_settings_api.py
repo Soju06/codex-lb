@@ -21,6 +21,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
+    assert payload["warmupModel"] == "gpt-5.4-mini"
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -46,6 +47,7 @@ async def test_settings_api_get_and_update(async_client):
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
             "httpResponsesSessionBridgeGatewaySafeMode": True,
             "stickyReallocationBudgetThresholdPct": 90.0,
+            "warmupModel": "gpt-5.4-nano",
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
@@ -70,6 +72,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert updated["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert updated["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert updated["warmupModel"] == "gpt-5.4-nano"
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
@@ -95,6 +98,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is True
     assert payload["stickyReallocationBudgetThresholdPct"] == 90.0
+    assert payload["warmupModel"] == "gpt-5.4-nano"
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
@@ -105,3 +109,21 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_allows_partial_updates(async_client):
+    original_response = await async_client.get("/api/settings")
+    assert original_response.status_code == 200
+    original = original_response.json()
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"warmupModel": "gpt-5.4-pro"},
+    )
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["warmupModel"] == "gpt-5.4-pro"
+    assert updated["stickyThreadsEnabled"] == original["stickyThreadsEnabled"]
+    assert updated["preferEarlierResetAccounts"] == original["preferEarlierResetAccounts"]
+    assert updated["routingStrategy"] == original["routingStrategy"]

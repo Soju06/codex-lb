@@ -544,6 +544,56 @@
       ]
     },
     {
+      "login": "Pablosinyores",
+      "name": "Nikhil",
+      "avatar_url": "https://avatars.githubusercontent.com/u/150948502?v=4",
+      "profile": "https://github.com/Pablosinyores",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "kramarb",
+      "name": "Miha Orazem",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9120027?v=4",
+      "profile": "https://github.com/kramarb",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "minh-dng",
+      "name": "Steven (Minh) Dang",
+      "avatar_url": "https://avatars.githubusercontent.com/u/73318601?v=4",
+      "profile": "https://github.com/minh-dng",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "onlysdesign-ui",
+      "name": "onlysdesign-ui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/251030415?v=4",
+      "profile": "https://github.com/onlysdesign-ui",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mahirozdin",
+      "name": "Mahir Taha Özdin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9491185?v=4",
+      "profile": "https://www.linkedin.com/in/mahir-ozdin/",
+      "contributions": [
+        "ideas",
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "datfooldive",
       "name": "hikki",
       "avatar_url": "https://avatars.githubusercontent.com/u/110718021?v=4",
@@ -551,6 +601,26 @@
       "contributions": [
         "code",
         "design"
+      ]
+    },
+    {
+      "login": "1llu5ion",
+      "name": "Nataprom",
+      "avatar_url": "https://avatars.githubusercontent.com/u/23450032?v=4",
+      "profile": "https://github.com/1llu5ion",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "Iweisc",
+      "name": "Iweisc",
+      "avatar_url": "https://avatars.githubusercontent.com/u/179300695?v=4",
+      "profile": "https://github.com/Iweisc",
+      "contributions": [
+        "code",
+        "test"
       ]
     }
   ],

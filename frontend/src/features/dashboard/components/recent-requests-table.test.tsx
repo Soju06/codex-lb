@@ -4,6 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
 const ISO = "2026-01-01T12:00:00+00:00";
+const NULL_FAILURE_METADATA = {
+  failurePhase: null,
+  failureDetail: null,
+  failureExceptionType: null,
+  upstreamStatusCode: null,
+  upstreamErrorCode: null,
+  bridgeStage: null,
+};
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -90,6 +98,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Alpha",
             apiKeyId: "key-alpha",
             requestId: "req-1",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: "default",
@@ -99,6 +108,7 @@ describe("RecentRequestsTable", () => {
              status: "rate_limit",
              errorCode: "rate_limit_exceeded",
              errorMessage: longError,
+            ...NULL_FAILURE_METADATA,
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -156,6 +166,76 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
+  it("shows warmup marker only for warmup rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        hasMore
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-normal",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-normal",
+            requestKind: "normal",
+            source: null,
+            ...NULL_FAILURE_METADATA,
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+          {
+            requestedAt: ISO,
+            accountId: "acc-warmup",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-warmup",
+            requestKind: "warmup",
+            source: null,
+            ...NULL_FAILURE_METADATA,
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Warmup")).toBeInTheDocument();
+    expect(screen.queryByText("Normal")).not.toBeInTheDocument();
+  });
+
   it("renders placeholder transport for legacy rows", () => {
     render(
       <RecentRequestsTable
@@ -169,6 +249,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-legacy",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -178,6 +259,7 @@ describe("RecentRequestsTable", () => {
              status: "ok",
              errorCode: null,
              errorMessage: null,
+            ...NULL_FAILURE_METADATA,
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
@@ -209,6 +291,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-error-code",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -218,6 +301,7 @@ describe("RecentRequestsTable", () => {
              status: "error",
              errorCode: "upstream_error",
              errorMessage: null,
+            ...NULL_FAILURE_METADATA,
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
@@ -250,6 +334,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Cost",
             apiKeyId: "key-cost",
             requestId: "req-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -259,6 +344,7 @@ describe("RecentRequestsTable", () => {
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 1400,
             inputTokens: 1000,
             outputTokens: 400,
@@ -300,6 +386,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-no-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -309,6 +396,7 @@ describe("RecentRequestsTable", () => {
             status: "error",
             errorCode: "upstream_error",
             errorMessage: "boom",
+            ...NULL_FAILURE_METADATA,
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
@@ -345,6 +433,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial",
             apiKeyId: "key-partial",
             requestId: "req-partial-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -354,6 +443,7 @@ describe("RecentRequestsTable", () => {
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 700,
             inputTokens: 700,
             outputTokens: null,
@@ -395,6 +485,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial No Total",
             apiKeyId: "key-partial-no-total",
             requestId: "req-partial-no-total",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -404,6 +495,7 @@ describe("RecentRequestsTable", () => {
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: null,
             inputTokens: 1000,
             outputTokens: null,
@@ -445,6 +537,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Total Only",
             apiKeyId: "key-total-only",
             requestId: "req-total-only-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
@@ -454,6 +547,7 @@ describe("RecentRequestsTable", () => {
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 1500,
             inputTokens: 1000,
             outputTokens: 500,

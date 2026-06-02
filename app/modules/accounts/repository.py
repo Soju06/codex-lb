@@ -14,7 +14,6 @@ from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog,
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 _UNSET = object()
-_INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +62,7 @@ class AccountsRepository:
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             )
-            .where((RequestLog.source.is_(None)) | (RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE))
+            .where(RequestLog.request_kind.not_in(("warmup", "limit_warmup")))
             .group_by(RequestLog.account_id)
         )
         if account_ids:

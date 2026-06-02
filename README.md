@@ -535,6 +535,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/1llu5ion"><img src="https://avatars.githubusercontent.com/u/23450032?v=4?s=100" width="100px;" alt="Nataprom"/><br /><sub><b>Nataprom</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=1llu5ion" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=1llu5ion" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Iweisc"><img src="https://avatars.githubusercontent.com/u/179300695?v=4?s=100" width="100px;" alt="Iweisc"/><br /><sub><b>Iweisc</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Iweisc" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Iweisc" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

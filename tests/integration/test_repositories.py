@@ -273,6 +273,33 @@ async def test_account_slot_keeps_distinct_workspace_chatgpt_identities(db_setup
 
 
 @pytest.mark.asyncio
+async def test_account_slot_preserves_known_chatgpt_identity_on_email_fallback(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        known = _make_account("acc_known", "known-workspace@example.com")
+        known.chatgpt_account_id = "raw_known"
+        known.workspace_id = "ws_known"
+        known.workspace_label = "Known Team"
+        await repo.upsert_account_slot(known, preserve_unknown_workspace_duplicates=False)
+
+        imported = _make_account("acc_imported", "known-workspace@example.com")
+        imported.workspace_id = "ws_known"
+        imported.workspace_label = "Known Team Updated"
+        imported.plan_type = "team"
+        saved = await repo.upsert_account_slot(imported, preserve_unknown_workspace_duplicates=False)
+
+        assert saved.id == "acc_known"
+        assert saved.chatgpt_account_id == "raw_known"
+        assert saved.workspace_id == "ws_known"
+        assert saved.workspace_label == "Known Team Updated"
+        assert saved.plan_type == "team"
+
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert [(account.id, account.chatgpt_account_id) for account in accounts] == [("acc_known", "raw_known")]
+
+
+@pytest.mark.asyncio
 async def test_account_slot_does_not_promote_mismatched_legacy_row_by_email(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

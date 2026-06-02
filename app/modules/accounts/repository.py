@@ -618,7 +618,8 @@ class AccountsRepository:
 
 
 def _apply_account_updates(target: Account, source: Account) -> None:
-    target.chatgpt_account_id = source.chatgpt_account_id
+    if source.chatgpt_account_id is not None:
+        target.chatgpt_account_id = source.chatgpt_account_id
     target.email = source.email
     target.workspace_id = source.workspace_id
     target.workspace_label = source.workspace_label

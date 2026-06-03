@@ -337,6 +337,67 @@ describe("AccountList", () => {
     ]);
   });
 
+  it("keeps unknown resets last when sorting by latest reset", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-unknown",
+            email: "unknown@example.com",
+            displayName: "Unknown",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-stale",
+            email: "stale@example.com",
+            displayName: "Stale",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T11:30:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-latest",
+            email: "latest@example.com",
+            displayName: "Latest",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:40:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-earlier",
+            email: "earlier@example.com",
+            displayName: "Earlier",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        sortMode="reset_latest"
+        onSortModeChange={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Latest|Earlier|Stale|Unknown)$/).map((el) => el.textContent)).toEqual([
+      "Latest",
+      "Earlier",
+      "Stale",
+      "Unknown",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 

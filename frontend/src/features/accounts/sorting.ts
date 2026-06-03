@@ -38,6 +38,18 @@ function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuo
   return resets.length > 0 ? Math.min(...resets) : Number.POSITIVE_INFINITY;
 }
 
+function compareResetTimestamps(leftReset: number, rightReset: number, direction: "asc" | "desc"): number {
+  const leftFinite = Number.isFinite(leftReset);
+  const rightFinite = Number.isFinite(rightReset);
+  if (leftFinite !== rightFinite) {
+    return leftFinite ? -1 : 1;
+  }
+  if (leftReset === rightReset) {
+    return 0;
+  }
+  return direction === "desc" ? rightReset - leftReset : leftReset - rightReset;
+}
+
 export function sortAccountsForDisplay(
   accounts: AccountSummary[],
   quotaDisplay: AccountQuotaDisplayPreference,
@@ -49,8 +61,13 @@ export function sortAccountsForDisplay(
       if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
         const leftReset = accountResetTimestamp(left, quotaDisplay);
         const rightReset = accountResetTimestamp(right, quotaDisplay);
-        if (leftReset !== rightReset) {
-          return sortMode === "reset_latest" ? rightReset - leftReset : leftReset - rightReset;
+        const resetComparison = compareResetTimestamps(
+          leftReset,
+          rightReset,
+          sortMode === "reset_latest" ? "desc" : "asc",
+        );
+        if (resetComparison !== 0) {
+          return resetComparison;
         }
       } else {
         const leftLabel = accountSortLabel(left);
@@ -65,8 +82,9 @@ export function sortAccountsForDisplay(
 
       const leftReset = accountResetTimestamp(left, quotaDisplay);
       const rightReset = accountResetTimestamp(right, quotaDisplay);
-      if (leftReset !== rightReset) {
-        return leftReset - rightReset;
+      const resetComparison = compareResetTimestamps(leftReset, rightReset, "asc");
+      if (resetComparison !== 0) {
+        return resetComparison;
       }
       const labelComparison = accountSortLabel(left).localeCompare(accountSortLabel(right));
       if (labelComparison !== 0) {

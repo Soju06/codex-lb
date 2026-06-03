@@ -12581,11 +12581,11 @@ class ProxyService:
                 else:
                     classify_unterminated_stream(
                         error_status="error",
-                        error_code_value="client_disconnected",
-                        error_message_value="Downstream client disconnected before response.completed",
-                        failure_phase="downstream",
-                        failure_detail="stream_closed_before_terminal_event",
-                        penalize_account=False,
+                        error_code_value="stream_incomplete",
+                        error_message_value="Upstream stream ended before response.completed",
+                        failure_phase="upstream",
+                        failure_detail="upstream_eof_before_terminal_event",
+                        penalize_account=True,
                     )
             input_tokens = usage.input_tokens if usage else None
             output_tokens = usage.output_tokens if usage else None

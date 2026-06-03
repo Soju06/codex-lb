@@ -958,6 +958,51 @@ async def test_proxy_stream_classifies_first_core_generated_eof_failure(async_cl
 
 
 @pytest.mark.asyncio
+async def test_proxy_stream_exception_without_terminal_event_logs_as_stream_incomplete(async_client, monkeypatch):
+    expected_account_id = await _import_account(async_client, "acc_stream_exc", "stream-exception@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield _sse_event({"type": "response.output_text.delta", "delta": "partial"})
+        raise RuntimeError("upstream stream processing failed")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": "req_stream_exception"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    stream_lines = [line for line in lines if line.startswith("data: ") and not line.startswith("data: [DONE]")]
+    events = [json.loads(line[6:]) for line in stream_lines]
+    event = _extract_first_event(stream_lines)
+    assert event["type"] == "response.output_text.delta"
+    assert all(
+        event.get("type") != "response.failed" or event["response"]["error"]["code"] != "client_disconnected"
+        for event in events
+    )
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog)
+            .where(RequestLog.account_id == expected_account_id)
+            .order_by(RequestLog.requested_at.desc())
+        )
+        log = result.scalars().first()
+        assert log is not None
+        assert log.status == "error"
+        assert log.error_code == "stream_incomplete"
+        assert log.error_message == "Upstream stream ended before response.completed"
+        assert log.failure_phase == "upstream"
+        assert log.failure_detail == "upstream_eof_before_terminal_event"
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event(monkeypatch):
     upstream_started = asyncio.Event()
     release_upstream = asyncio.Event()

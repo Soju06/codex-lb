@@ -17,11 +17,14 @@ import {
 } from "@/features/accounts/api";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
-function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
+function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
   void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+  if (accountId) {
+    void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
+  }
 }
 
 /**
@@ -92,9 +95,9 @@ export function useAccountMutations() {
   const probeMutation = useMutation({
     mutationFn: ({ accountId, model }: { accountId: string; model?: string }) =>
       probeAccount(accountId, model ? { model } : undefined),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       toast.success("Account probed");
-      invalidateAccountRelatedQueries(queryClient);
+      invalidateAccountRelatedQueries(queryClient, variables.accountId);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Probe failed");

@@ -53,6 +53,9 @@ describe("useAccounts", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ["accounts", "trends", firstAccountId],
+      });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     });

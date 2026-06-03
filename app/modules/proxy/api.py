@@ -728,20 +728,19 @@ async def v1_usage(
         service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
         aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
+        hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
         account_pool_usage = (
             await _build_account_pool_usage(
                 session,
                 assigned_account_ids=api_key.assigned_account_ids,
                 account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
             )
-            if "account_pool_usage" in usage_sections
+            if "account_pool_usage" in usage_sections and not hide_upstream_limits
             else None
         )
 
     if usage is None:
         raise ProxyAuthError("Invalid API key")
-
-    hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
 
     return V1UsageResponse(
         request_count=usage.request_count,

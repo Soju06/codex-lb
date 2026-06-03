@@ -511,6 +511,7 @@ async def test_v1_usage_hides_upstream_limits_for_api_key_clients_when_setting_e
     payload = response.json()
     assert payload["limits"] == []
     assert payload["upstream_limits"] == []
+    assert payload["account_pool_usage"] is None
 
 
 @pytest.mark.asyncio

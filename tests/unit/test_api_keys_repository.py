@@ -284,3 +284,4 @@ async def test_cost_limit_backfill_uses_bigint_cast_for_microdollars() -> None:
     assert value > int32_max
     assert "BIGINT" in executed_sql[0]
     assert "sum(CAST(floor(coalesce(request_logs.cost_usd, 0.0) * 1000000) AS BIGINT))" in executed_sql[0]
+    assert "request_logs.request_kind NOT IN ('warmup', 'limit_warmup')" in executed_sql[0]

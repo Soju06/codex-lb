@@ -286,6 +286,7 @@ class ApiKeysRepository:
         stmt = select(func.coalesce(func.sum(value_expr), 0)).where(
             RequestLog.api_key_id == key_id,
             RequestLog.status == "success",
+            self._exclude_warmup_clause(),
             RequestLog.requested_at >= since,
             RequestLog.requested_at < until,
         )

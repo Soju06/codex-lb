@@ -441,6 +441,8 @@ The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica
 
 For external database, production config, ingress, observability, and more see the [Helm chart README](deploy/helm/codex-lb/README.md).
 
+Fast Mode and service-tier behavior is documented in [Responses API compatibility context](openspec/specs/responses-api-compat/context.md#fast-mode-and-service-tiers).
+
 ## Development
 
 ```bash

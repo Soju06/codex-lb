@@ -305,8 +305,20 @@ When a request depends on hard continuity ownership, the service MUST fail close
 ### Requirement: Request logs persist requested, actual, and billable service tiers separately
 For Responses proxy traffic, the system MUST persist the operator-requested tier, the upstream-reported actual tier when available, and the effective billable tier used for pricing as separate request-log fields.
 
+The legacy `fast` alias MUST be normalized to the canonical upstream value
+`priority` before forwarding and before it is stored as the requested tier.
+The upstream-reported `response.service_tier`, when present, remains the
+authoritative actual tier even when it differs from the requested tier.
+
 #### Scenario: Upstream reports a downgraded actual tier
 - **WHEN** a client sends a Responses request with `service_tier: "priority"`
+- **AND** the upstream response later reports `service_tier: "default"`
+- **THEN** the persisted request log entry records `requested_service_tier = "priority"`
+- **AND** the persisted request log entry records `actual_service_tier = "default"`
+- **AND** the persisted request log entry records billable `service_tier = "default"`
+
+#### Scenario: Fast alias is logged as a priority request
+- **WHEN** a client sends a Responses request with `service_tier: "fast"`
 - **AND** the upstream response later reports `service_tier: "default"`
 - **THEN** the persisted request log entry records `requested_service_tier = "priority"`
 - **AND** the persisted request log entry records `actual_service_tier = "default"`

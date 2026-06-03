@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AccountAuthExportResponseSchema,
+  AccountProbeResponseSchema,
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -160,5 +161,24 @@ describe("ImportStateSchema", () => {
         message: "Imported 1 account",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("AccountProbeResponseSchema", () => {
+  it("parses probe response payloads", () => {
+    const parsed = AccountProbeResponseSchema.parse({
+      status: "probed",
+      accountId: "acc-1",
+      probeStatusCode: 200,
+      primaryUsedPercentBefore: 80,
+      primaryUsedPercentAfter: 79,
+      secondaryUsedPercentBefore: 50,
+      secondaryUsedPercentAfter: 49,
+      accountStatusBefore: "active",
+      accountStatusAfter: "active",
+    });
+
+    expect(parsed.probeStatusCode).toBe(200);
+    expect(parsed.accountId).toBe("acc-1");
   });
 });

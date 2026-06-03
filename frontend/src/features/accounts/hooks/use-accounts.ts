@@ -9,6 +9,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  probeAccount,
   setAccountAlias,
   updateAccount,
   updateAccountLimitWarmup,
@@ -18,6 +19,7 @@ import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+  void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
 }
@@ -87,6 +89,18 @@ export function useAccountMutations() {
     },
   });
 
+  const probeMutation = useMutation({
+    mutationFn: ({ accountId, model }: { accountId: string; model?: string }) =>
+      probeAccount(accountId, model ? { model } : undefined),
+    onSuccess: () => {
+      toast.success("Account probed");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Probe failed");
+    },
+  });
+
   const limitWarmupMutation = useMutation({
     mutationFn: ({ accountId, enabled }: { accountId: string; enabled: boolean }) =>
       updateAccountLimitWarmup(accountId, enabled),
@@ -146,6 +160,7 @@ export function useAccountMutations() {
     resumeMutation,
     setAliasMutation,
     deleteMutation,
+    probeMutation,
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,

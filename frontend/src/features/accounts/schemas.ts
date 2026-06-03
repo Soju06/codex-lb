@@ -165,6 +165,22 @@ export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
 
+export const AccountProbeRequestSchema = z.object({
+  model: z.string().min(1).optional(),
+});
+
+export const AccountProbeResponseSchema = z.object({
+  status: z.string(),
+  accountId: z.string(),
+  probeStatusCode: z.number().int().nullable(),
+  primaryUsedPercentBefore: z.number().nullable(),
+  primaryUsedPercentAfter: z.number().nullable(),
+  secondaryUsedPercentBefore: z.number().nullable(),
+  secondaryUsedPercentAfter: z.number().nullable(),
+  accountStatusBefore: z.string(),
+  accountStatusAfter: z.string(),
+});
+
 export const AccountRoutingPolicySchema = z.enum(["normal", "burn_first", "preserve"]);
 
 export const AccountAliasRequestSchema = z.object({
@@ -285,6 +301,7 @@ export type AccountAdditionalWindow = z.infer<
 export type AccountAdditionalQuota = z.infer<
   typeof AccountAdditionalQuotaSchema
 >;
+export type AccountProbeResponse = z.infer<typeof AccountProbeResponseSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
 export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;

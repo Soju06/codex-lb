@@ -7,8 +7,9 @@ import ssl
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, Protocol, Self, cast
+from typing import Any, AsyncIterator, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -11006,6 +11007,97 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
     assert request_logs.calls[0]["status"] == "cancelled"
     assert request_logs.calls[0]["error_code"] == "client_disconnected"
     assert request_logs.calls[0]["session_id"] == "turn_client_disconnect_live"
+
+
+@pytest.mark.asyncio
+async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    finalized: list[dict[str, object]] = []
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        try:
+            yield repo
+        finally:
+            closed.set()
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            assert api_keys_repository is repo.api_keys
+
+        async def finalize_usage_reservation(self, reservation_id: str, **kwargs: object) -> None:
+            started.set()
+            await release.wait()
+            finalized.append({"reservation_id": reservation_id, **kwargs})
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            finalized.append({"reservation_id": reservation_id, "released": True})
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_stream_cancel",
+        name="stream cancel",
+        key_prefix="sk-cancel",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_stream_cancel",
+        key_id=api_key.id,
+        model="gpt-5.5",
+    )
+    settlement = proxy_service._StreamSettlement(
+        status="success",
+        model="gpt-5.5",
+        service_tier="default",
+        input_tokens=12,
+        output_tokens=34,
+        cached_input_tokens=5,
+    )
+
+    caller = asyncio.create_task(
+        service._settle_stream_api_key_usage(
+            api_key,
+            reservation,
+            settlement,
+            request_id="req_stream_cancel",
+        )
+    )
+    await started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert service._background_cleanup_tasks
+    release.set()
+    await asyncio.wait_for(closed.wait(), timeout=1.0)
+    for _ in range(20):
+        if not service._background_cleanup_tasks:
+            break
+        await asyncio.sleep(0)
+
+    assert service._background_cleanup_tasks == set()
+    assert finalized == [
+        {
+            "reservation_id": "resv_stream_cancel",
+            "model": "gpt-5.5",
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cached_input_tokens": 5,
+            "service_tier": "default",
+        }
+    ]
 
 
 @pytest.mark.asyncio

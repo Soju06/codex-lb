@@ -668,7 +668,7 @@ class ProxyService:
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
-        self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._background_cleanup_tasks: set[asyncio.Task[Any]] = set()
         # In-memory pin from upstream-issued file_id -> codex-lb account_id.
         # Used so ``finalize_file`` for a given ``file_id`` is routed to
         # the same account that handled ``create_file``. Cross-instance
@@ -10836,40 +10836,92 @@ class ProxyService:
         if api_key is None or api_key_reservation is None:
             return True
 
+        task = asyncio.create_task(
+            self._settle_stream_api_key_usage_owned(
+                api_key,
+                api_key_reservation,
+                settlement,
+                request_id,
+            ),
+            name=f"proxy-stream-usage-settle-{request_id}",
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_stream_usage_settlement_task(task, api_key=api_key, request_id=request_id)
+            raise
+
+    async def _settle_stream_api_key_usage_owned(
+        self,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        settlement: _StreamSettlement,
+        request_id: str,
+    ) -> bool:
+        """Settle stream reservation in a task that owns its repository session."""
+
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
 
         settled: bool = False
-        with anyio.CancelScope(shield=True):
-            try:
-                async with self._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
-                    if (
-                        settlement.status == "success"
-                        and settlement.input_tokens is not None
-                        and settlement.output_tokens is not None
-                    ):
-                        await api_keys_service.finalize_usage_reservation(
-                            reservation_id,
-                            model=model_name,
-                            input_tokens=settlement.input_tokens,
-                            output_tokens=settlement.output_tokens,
-                            cached_input_tokens=settlement.cached_input_tokens or 0,
-                            service_tier=settlement.service_tier,
-                        )
-                    else:
-                        await api_keys_service.release_usage_reservation(reservation_id)
-                settled = True
-            except Exception:
-                logger.warning(
-                    "Failed to settle stream API key reservation key_id=%s request_id=%s",
-                    api_key.id,
-                    request_id,
-                    exc_info=True,
-                )
-                settled = False
+        try:
+            async with self._repo_factory() as repos:
+                api_keys_service = ApiKeysService(repos.api_keys)
+                if (
+                    settlement.status == "success"
+                    and settlement.input_tokens is not None
+                    and settlement.output_tokens is not None
+                ):
+                    await api_keys_service.finalize_usage_reservation(
+                        reservation_id,
+                        model=model_name,
+                        input_tokens=settlement.input_tokens,
+                        output_tokens=settlement.output_tokens,
+                        cached_input_tokens=settlement.cached_input_tokens or 0,
+                        service_tier=settlement.service_tier,
+                    )
+                else:
+                    await api_keys_service.release_usage_reservation(reservation_id)
+            settled = True
+        except Exception:
+            logger.warning(
+                "Failed to settle stream API key reservation key_id=%s request_id=%s",
+                api_key.id,
+                request_id,
+                exc_info=True,
+            )
+            settled = False
 
         return settled
+
+    def _track_stream_usage_settlement_task(
+        self,
+        task: asyncio.Task[bool],
+        *,
+        api_key: ApiKeyData,
+        request_id: str,
+    ) -> None:
+        self._background_cleanup_tasks.add(task)
+
+        def _settlement_done(done_task: asyncio.Task[bool]) -> None:
+            self._background_cleanup_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Stream API key settlement task cancelled key_id=%s request_id=%s",
+                    api_key.id,
+                    request_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stream API key settlement task failed key_id=%s request_id=%s",
+                    api_key.id,
+                    request_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_settlement_done)
 
     def _schedule_cancel_safe_cleanup(
         self,

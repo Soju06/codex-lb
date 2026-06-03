@@ -185,8 +185,8 @@ describe("ApisPage", () => {
 		});
 
 		expect(screen.getByText("Overview")).toBeInTheDocument();
-		expect(screen.getByText("7-Day Cost by API Key")).toBeInTheDocument();
-		expect(screen.getByText("7-Day Tokens by API Key")).toBeInTheDocument();
+		expect(screen.getByText("Lifetime Cost by API Key")).toBeInTheDocument();
+		expect(screen.getByText("Lifetime Tokens by API Key")).toBeInTheDocument();
 		expect(
 			within(screen.getByTestId("api-keys-overview-cost-panel")).getByText("Secondary key"),
 		).toBeInTheDocument();

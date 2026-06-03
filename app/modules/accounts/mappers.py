@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
+from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -24,6 +25,7 @@ from app.modules.accounts.schemas import (
 from app.modules.usage.mappers import usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 
 def build_account_summaries(
@@ -130,6 +132,13 @@ def _account_to_summary(
     status_primary_used_percent = primary_used_percent
     status_runtime_reset = float(account.reset_at) if account.reset_at else None
     status_seed = account.status
+    long_quota_usage = monthly_usage or effective_secondary_usage
+    long_quota_available = (
+        long_quota_usage is not None
+        and _usage_entry_is_recent_enough(long_quota_usage.recorded_at)
+        and long_quota_usage.used_percent is not None
+        and float(long_quota_usage.used_percent) < 100.0
+    )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
         keep_primary_status_signal = (
             account.status == AccountStatus.RATE_LIMITED
@@ -137,7 +146,7 @@ def _account_to_summary(
                 effective_primary_usage.window_minutes if effective_primary_usage is not None else None
             )
         )
-        if not keep_primary_status_signal:
+        if not keep_primary_status_signal and long_quota_available:
             status_primary_usage = None
             status_primary_used_percent = None
             status_runtime_reset = None
@@ -329,6 +338,20 @@ def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHi
     if secondary_usage is not None:
         return getattr(secondary_usage, field)
     return None
+
+
+def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
+    if recorded_at is None:
+        return False
+    current_time = datetime.now(timezone.utc)
+    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
+
+
+def _usage_refresh_interval_seconds() -> int:
+    settings = config_settings.get_settings()
+    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _effective_usage_windows(

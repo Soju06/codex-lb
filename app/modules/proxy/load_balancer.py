@@ -1839,9 +1839,23 @@ def _state_from_account(
             secondary_used = 0.0
             secondary_reset = None
 
+    ignore_zero_capacity_primary_runtime_reset = False
+    status_seed = account.status
+    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and not usage_core.is_primary_window_minutes(
+        primary_window_minutes
+    ):
+        primary_used = None
+        primary_reset = None
+        primary_window_minutes = None
+        ignore_zero_capacity_primary_runtime_reset = account.status == AccountStatus.RATE_LIMITED
+        if account.status == AccountStatus.RATE_LIMITED:
+            status_seed = AccountStatus.ACTIVE
+
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
-    db_reset_at = float(account.reset_at) if account.reset_at else None
+    db_reset_at = (
+        None if ignore_zero_capacity_primary_runtime_reset else (float(account.reset_at) if account.reset_at else None)
+    )
     effective_runtime_reset = db_reset_at or runtime.reset_at
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
@@ -1888,7 +1902,7 @@ def _state_from_account(
                 effective_runtime_reset = None
 
     status, used_percent, reset_at = apply_usage_quota(
-        status=account.status,
+        status=status_seed,
         primary_used=primary_used,
         primary_reset=primary_reset,
         primary_window_minutes=primary_window_minutes,

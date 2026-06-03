@@ -128,10 +128,21 @@ def _account_to_summary(
 
     status_primary_usage = effective_primary_usage
     status_primary_used_percent = primary_used_percent
+    status_runtime_reset = float(account.reset_at) if account.reset_at else None
+    status_seed = account.status
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
-        if account.status != AccountStatus.RATE_LIMITED:
+        keep_primary_status_signal = (
+            account.status == AccountStatus.RATE_LIMITED
+            and usage_core.is_primary_window_minutes(
+                effective_primary_usage.window_minutes if effective_primary_usage is not None else None
+            )
+        )
+        if not keep_primary_status_signal:
             status_primary_usage = None
             status_primary_used_percent = None
+            status_runtime_reset = None
+            if account.status == AccountStatus.RATE_LIMITED:
+                status_seed = AccountStatus.ACTIVE
         effective_primary_usage = None
         primary_used_percent = None
         primary_remaining_percent = None
@@ -172,15 +183,17 @@ def _account_to_summary(
     )
     effective_status = _effective_status_from_usage(
         account,
-        status_primary_usage,
-        status_primary_used_percent,
-        effective_secondary_usage,
-        secondary_used_percent,
-        monthly_usage,
-        monthly_used_percent,
-        credits_has,
-        credits_unlimited,
-        credits_balance,
+        status_seed=status_seed,
+        primary_usage=status_primary_usage,
+        primary_used_percent=status_primary_used_percent,
+        secondary_usage=effective_secondary_usage,
+        secondary_used_percent=secondary_used_percent,
+        monthly_usage=monthly_usage,
+        monthly_used_percent=monthly_used_percent,
+        runtime_reset=status_runtime_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
     )
     return AccountSummary(
         account_id=account.id,
@@ -248,12 +261,15 @@ def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWar
 
 def _effective_status_from_usage(
     account: Account,
+    *,
+    status_seed: AccountStatus,
     primary_usage: UsageHistory | None,
     primary_used_percent: float | None,
     secondary_usage: UsageHistory | None,
     secondary_used_percent: float | None,
     monthly_usage: UsageHistory | None,
     monthly_used_percent: float | None,
+    runtime_reset: float | None,
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
@@ -266,11 +282,11 @@ def _effective_status_from_usage(
             long_window_usage,
         )
     status, _, _ = apply_usage_quota(
-        status=account.status,
+        status=status_seed,
         primary_used=primary_used_percent,
         primary_reset=primary_usage.reset_at if primary_usage is not None else None,
         primary_window_minutes=primary_usage.window_minutes if primary_usage is not None else None,
-        runtime_reset=float(account.reset_at) if account.reset_at else None,
+        runtime_reset=runtime_reset,
         secondary_used=long_window_used_percent,
         secondary_reset=long_window_usage.reset_at if long_window_usage is not None else None,
         credits_has=credits_has,
@@ -278,6 +294,8 @@ def _effective_status_from_usage(
         credits_balance=credits_balance,
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
+        if runtime_reset is None:
+            return status
         if _has_credit_override(
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,

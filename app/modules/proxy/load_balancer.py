@@ -1841,8 +1841,17 @@ def _state_from_account(
 
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
-    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and not usage_core.is_primary_window_minutes(
-        primary_window_minutes
+    weekly_quota_available = (
+        effective_secondary_entry is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and effective_secondary_entry.used_percent is not None
+        and float(effective_secondary_entry.used_percent) < 100.0
+    )
+    if (
+        usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0
+        and primary_window_minutes is not None
+        and not usage_core.is_primary_window_minutes(primary_window_minutes)
+        and weekly_quota_available
     ):
         primary_used = None
         primary_reset = None

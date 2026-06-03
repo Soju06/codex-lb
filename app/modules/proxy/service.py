@@ -342,6 +342,7 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _API_KEY_RESERVATION_HEARTBEAT_SECONDS = 300.0
 _COMPACT_SAME_CONTRACT_RETRY_BUDGET = 1
+_RAW_HTTP_UPSTREAM_EOF_MESSAGE = "Upstream closed stream without completion"
 _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -12063,6 +12064,8 @@ class ProxyService:
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = False
+        terminal_event_seen = False
+        stream_exhausted = False
         latency_first_token_ms: int | None = None
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
@@ -12072,6 +12075,35 @@ class ProxyService:
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
+
+        def mark_terminal_event_seen(event_type: str | None) -> None:
+            nonlocal terminal_event_seen
+            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                terminal_event_seen = True
+
+        def classify_unterminated_stream(
+            *,
+            error_status: str,
+            error_code_value: str,
+            error_message_value: str,
+            failure_phase: str,
+            failure_detail: str,
+            exception_type: str | None = None,
+            penalize_account: bool,
+        ) -> None:
+            nonlocal status, error_code, error_message, failure_metadata
+            status = error_status
+            error_code = error_code_value
+            error_message = error_message_value
+            failure_metadata = _RequestLogFailureMetadata(
+                failure_phase=failure_phase,
+                failure_detail=failure_detail,
+                failure_exception_type=exception_type,
+            )
+            settlement.record_success = False
+            settlement.account_health_error = penalize_account
+            settlement.error = {"message": error_message}
+
         if api_key_reservation is not None:
             api_key_reservation_heartbeat_task = asyncio.create_task(
                 self._run_api_key_reservation_heartbeat(
@@ -12168,6 +12200,7 @@ class ProxyService:
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
+            mark_terminal_event_seen(event_type)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 api_key_reservation_touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
                     api_key=api_key,
@@ -12235,6 +12268,14 @@ class ProxyService:
                 else:
                     error_code = code
                     error_message = error.message if error else None
+                    core_generated_eof = code == "stream_incomplete" and error_message == _RAW_HTTP_UPSTREAM_EOF_MESSAGE
+                    if core_generated_eof:
+                        failure_metadata = _RequestLogFailureMetadata(
+                            failure_phase="upstream",
+                            failure_detail="upstream_eof_before_terminal_event",
+                        )
+                        allow_retry = False
+                        allow_transient_retry = False
                     settlement.account_health_error = _should_penalize_stream_error(code)
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, settlement.error, exclude_account=True)
@@ -12305,6 +12346,7 @@ class ProxyService:
                         error_code="upstream_error",
                         error_message=message,
                     )
+                mark_terminal_event_seen(event_type)
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                     api_key_reservation_touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
                         api_key=api_key,
@@ -12384,8 +12426,16 @@ class ProxyService:
                             error_message = error.message if error else None
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            settlement.account_health_error = (
-                                _should_penalize_stream_error(error_code) and not saw_text_delta
+                            core_generated_eof = (
+                                error_code == "stream_incomplete" and error_message == _RAW_HTTP_UPSTREAM_EOF_MESSAGE
+                            )
+                            if core_generated_eof:
+                                failure_metadata = _RequestLogFailureMetadata(
+                                    failure_phase="upstream",
+                                    failure_detail="upstream_eof_before_terminal_event",
+                                )
+                            settlement.account_health_error = _should_penalize_stream_error(error_code) and (
+                                core_generated_eof or not saw_text_delta
                             )
                     if event_type in ("response.completed", "response.incomplete"):
                         response = event.response if event is not None else None
@@ -12422,6 +12472,37 @@ class ProxyService:
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
                 yield line
+            stream_exhausted = True
+            if status == "success" and not terminal_event_seen:
+                stream_incomplete_message = "Upstream stream ended before response.completed"
+                classify_unterminated_stream(
+                    error_status="error",
+                    error_code_value="stream_incomplete",
+                    error_message_value=stream_incomplete_message,
+                    failure_phase="upstream",
+                    failure_detail="upstream_eof_before_terminal_event",
+                    penalize_account=True,
+                )
+                terminal_event_seen = True
+                yield format_sse_event(
+                    response_failed_event(
+                        "stream_incomplete",
+                        stream_incomplete_message,
+                        response_id=response_id,
+                    )
+                )
+        except (asyncio.CancelledError, GeneratorExit) as exc:
+            if status == "success" and not terminal_event_seen:
+                classify_unterminated_stream(
+                    error_status="error",
+                    error_code_value="client_disconnected",
+                    error_message_value="Downstream client disconnected before response.completed",
+                    failure_phase="downstream",
+                    failure_detail="client_disconnected_before_terminal_event",
+                    exception_type=type(exc).__name__,
+                    penalize_account=False,
+                )
+            raise
         except ProxyResponseError as exc:
             response_create_lease.release()
             failure_metadata = _request_log_failure_metadata(exc)
@@ -12487,6 +12568,25 @@ class ProxyService:
                 self._cancel_api_key_reservation_heartbeat_task(api_key_reservation_heartbeat_task)
             response_create_lease.release()
             await self._load_balancer.release_account_lease(account_response_create_lease)
+            if status == "success" and not terminal_event_seen:
+                if stream_exhausted:
+                    classify_unterminated_stream(
+                        error_status="error",
+                        error_code_value="stream_incomplete",
+                        error_message_value="Upstream stream ended before response.completed",
+                        failure_phase="upstream",
+                        failure_detail="upstream_eof_before_terminal_event",
+                        penalize_account=True,
+                    )
+                else:
+                    classify_unterminated_stream(
+                        error_status="error",
+                        error_code_value="client_disconnected",
+                        error_message_value="Downstream client disconnected before response.completed",
+                        failure_phase="downstream",
+                        failure_detail="stream_closed_before_terminal_event",
+                        penalize_account=False,
+                    )
             input_tokens = usage.input_tokens if usage else None
             output_tokens = usage.output_tokens if usage else None
             cached_input_tokens = (

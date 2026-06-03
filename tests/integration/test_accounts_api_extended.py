@@ -1038,6 +1038,46 @@ async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_clien
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_keeps_quota_exceeded_reset_when_ignoring_monthly_primary(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_quota_exceeded_monthly", "free-quota-monthly@example.com", plan_type="free")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_quota_exceeded_monthly",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_free_quota_exceeded_monthly",
+            24.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_quota_exceeded_monthly"]
+    assert account_payload["status"] == "quota_exceeded"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     stale_reset = 1735689600

@@ -150,8 +150,8 @@ def _account_to_summary(
         if not keep_primary_status_signal and long_quota_available:
             status_primary_usage = None
             status_primary_used_percent = None
-            status_runtime_reset = None
             if account.status == AccountStatus.RATE_LIMITED:
+                status_runtime_reset = None
                 status_seed = AccountStatus.ACTIVE
                 allow_missing_runtime_reset_recovery = True
         effective_primary_usage = None

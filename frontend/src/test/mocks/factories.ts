@@ -455,12 +455,18 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		keyPrefix: "sk-test",
 		allowedModels: ["gpt-5.1"],
 		applyToCodexModel: false,
-		expiresAt: offsetIso(30 * 24 * 60),
+		expiresAt: null,
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
+		usageSummary: {
+			requestCount: 150,
+			totalTokens: 50_000,
+			cachedInputTokens: 10_000,
+			totalCostUsd: 1.23,
+		},
 		limits: [
 			{
 				id: 1,
@@ -497,6 +503,12 @@ export function createDefaultApiKeys(): ApiKey[] {
 			isActive: false,
 			expiresAt: null,
 			lastUsedAt: null,
+			usageSummary: {
+				requestCount: 42,
+				totalTokens: 12_500,
+				cachedInputTokens: 2_200,
+				totalCostUsd: 0.42,
+			},
 			limits: [],
 		}),
 	];

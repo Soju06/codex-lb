@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -1389,12 +1390,13 @@ def _make_test_account(
     status: AccountStatus = AccountStatus.ACTIVE,
     reset_at: int | None = None,
     blocked_at: int | None = None,
+    plan_type: str = "plus",
 ) -> Account:
     return Account(
         id=account_id,
         chatgpt_account_id="chatgpt-" + account_id,
         email=f"{account_id}@test.com",
-        plan_type="plus",
+        plan_type=plan_type,
         access_token_encrypted=b"a",
         refresh_token_encrypted=b"r",
         id_token_encrypted=b"i",
@@ -1476,6 +1478,31 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
 
     assert state.secondary_used_percent == 0.0
     assert state.secondary_reset_at is None
+
+
+def test_state_from_account_treats_monthly_usage_as_long_window_quota(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="free"),
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            window="monthly",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.secondary_used_percent == 100.0
+    assert state.secondary_reset_at == future_reset
+    assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(

@@ -145,11 +145,14 @@ class StubUsageRepository(UsageRepository):
         self,
         primary: dict[str, UsageHistory],
         secondary: dict[str, UsageHistory],
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
+        self._monthly = monthly or {}
         self.primary_calls = 0
         self.secondary_calls = 0
+        self.monthly_calls = 0
 
     async def latest_by_account(
         self,
@@ -161,6 +164,9 @@ class StubUsageRepository(UsageRepository):
         if window == "secondary":
             self.secondary_calls += 1
             return self._secondary
+        if window == "monthly":
+            self.monthly_calls += 1
+            return self._monthly
         self.primary_calls += 1
         return self._primary
 
@@ -1659,6 +1665,7 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
             accounts=[account],
             latest_primary={account.id: primary_entry},
             latest_secondary={account.id: secondary_entry},
+            latest_monthly={},
         )
 
     monkeypatch.setattr(balancer, "_load_selection_inputs", fake_load_selection_inputs)

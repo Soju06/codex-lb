@@ -164,13 +164,14 @@ async def reconcile_recoverable_account_statuses(
 
     latest_primary = await usage_repo.latest_by_account(window="primary")
     latest_secondary = await usage_repo.latest_by_account(window="secondary")
+    latest_monthly = await usage_repo.latest_by_account(window="monthly")
 
     recovered = 0
     for account in candidates:
         state = background_recovery_state_from_account(
             account=account,
             primary_entry=latest_primary.get(account.id),
-            secondary_entry=latest_secondary.get(account.id),
+            secondary_entry=latest_monthly.get(account.id) or latest_secondary.get(account.id),
         )
         if state.status != AccountStatus.ACTIVE:
             continue

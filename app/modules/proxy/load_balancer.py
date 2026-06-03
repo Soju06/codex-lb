@@ -145,6 +145,7 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
+    latest_monthly: dict[str, UsageHistory]
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -322,6 +323,8 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly=selection_inputs.latest_monthly,
+                        quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
@@ -330,6 +333,7 @@ class LoadBalancer:
                     accounts=authorized_accounts,
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    latest_monthly=selection_inputs.latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -346,6 +350,8 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly=selection_inputs.latest_monthly,
+                        quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
@@ -354,6 +360,7 @@ class LoadBalancer:
                     accounts=filtered_accounts,
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    latest_monthly=selection_inputs.latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -398,6 +405,7 @@ class LoadBalancer:
                         accounts=selection_inputs.accounts,
                         latest_primary=selection_inputs.latest_primary,
                         latest_secondary=selection_inputs.latest_secondary,
+                        latest_monthly=selection_inputs.latest_monthly,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -577,6 +585,7 @@ class LoadBalancer:
                         accounts=selection_inputs.accounts,
                         latest_primary=selection_inputs.latest_primary,
                         latest_secondary=selection_inputs.latest_secondary,
+                        latest_monthly=selection_inputs.latest_monthly,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -821,6 +830,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -833,6 +843,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -844,6 +855,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    latest_monthly={},
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
@@ -868,6 +880,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=additional_filter.error_message,
@@ -882,6 +895,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    latest_monthly={},
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
@@ -890,9 +904,10 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
-            standard_latest_primary, standard_latest_secondary = await asyncio.gather(
+            standard_latest_primary, standard_latest_secondary, latest_monthly = await asyncio.gather(
                 repos.usage.latest_by_account(),
                 repos.usage.latest_by_account(window="secondary"),
+                repos.usage.latest_by_account(window="monthly"),
             )
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
@@ -932,6 +947,9 @@ class LoadBalancer:
                 },
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
+                },
+                latest_monthly={
+                    account_id: _clone_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
@@ -974,6 +992,7 @@ class LoadBalancer:
                 accounts=selection_inputs.accounts,
                 latest_primary=selection_inputs.latest_primary,
                 latest_secondary=selection_inputs.latest_secondary,
+                latest_monthly=selection_inputs.latest_monthly,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -1632,6 +1651,7 @@ def _build_states(
     accounts: Iterable[Account],
     latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
+    latest_monthly: Mapping[str, UsageHistory],
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
@@ -1640,10 +1660,13 @@ def _build_states(
     account_map: dict[str, Account] = {}
 
     for account in accounts:
+        secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
+        if account.id not in ignore_standard_quota_account_ids:
+            secondary_entry = latest_monthly.get(account.id) or secondary_entry
         state = _state_from_account(
             account=account,
             primary_entry=latest_primary.get(account.id),
-            secondary_entry=latest_secondary.get(account.id),
+            secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
@@ -1924,7 +1947,10 @@ def _state_from_account(
         settings, "proxy_account_inflight_penalty_pct", 2.5
     )
     leased_token_pressure_pct = 0.0
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, "secondary") or 0.0
+    long_window_key = "secondary"
+    if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
+        long_window_key = "monthly"
+    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
         leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
@@ -2129,6 +2155,9 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         },
         latest_secondary={
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+        },
+        latest_monthly={
+            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_monthly.items()
         },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(

@@ -80,7 +80,11 @@ class AccountsRepository:
             RequestLog.id.label("request_log_id"),
             func.row_number()
             .over(
-                partition_by=(RequestLog.account_id, RequestLog.request_id),
+                partition_by=(
+                    RequestLog.account_id,
+                    RequestLog.request_id,
+                    RequestLog.requested_at,
+                ),
                 order_by=(RequestLog.requested_at.desc(), RequestLog.id.desc()),
             )
             .label("request_log_rank"),

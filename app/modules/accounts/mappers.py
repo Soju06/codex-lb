@@ -130,13 +130,17 @@ def _account_to_summary(
         and float(effective_secondary_usage.used_percent) < 100.0
     )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
+        primary_window_minutes = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
+        zero_capacity_primary_known_non_primary = (
+            primary_window_minutes is not None and not usage_core.is_primary_window_minutes(primary_window_minutes)
+        )
         keep_primary_status_signal = (
             account.status == AccountStatus.RATE_LIMITED
-            and usage_core.is_primary_window_minutes(
-                effective_primary_usage.window_minutes if effective_primary_usage is not None else None
-            )
+            and usage_core.is_primary_window_minutes(primary_window_minutes)
         )
-        can_hide_zero_capacity_primary = account.status != AccountStatus.RATE_LIMITED or weekly_quota_available
+        can_hide_zero_capacity_primary = account.status != AccountStatus.RATE_LIMITED or (
+            zero_capacity_primary_known_non_primary and weekly_quota_available
+        )
         if not keep_primary_status_signal and can_hide_zero_capacity_primary:
             status_primary_usage = None
             status_primary_used_percent = None

@@ -28,6 +28,7 @@ from app.modules.proxy.load_balancer import (
     _build_states,
     _extract_credit_status,
     _select_account_preferring_budget_safe,
+    _select_long_window_entry,
     _state_above_sticky_budget_threshold,
     _state_from_account,
     background_recovery_state_from_account,
@@ -1442,6 +1443,7 @@ def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(mon
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
     state = _state_from_account(
         account=_make_test_account(status=AccountStatus.ACTIVE),
@@ -1503,6 +1505,51 @@ def test_state_from_account_treats_monthly_usage_as_long_window_quota(monkeypatc
     assert state.secondary_used_percent == 100.0
     assert state.secondary_reset_at == future_reset
     assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")
+
+
+def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatch):
+    now = 1_700_000_000.0
+    weekly_reset = int(now + 7 * 24 * 3600)
+    monthly_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.ACTIVE, plan_type="plus")
+
+    selected_entry = _select_long_window_entry(
+        account=account,
+        monthly_entry=_make_test_usage(
+            window="monthly",
+            used_percent=100.0,
+            reset_at=monthly_reset,
+            recorded_at=_epoch_to_naive_utc(now - 120),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=20.0,
+            reset_at=weekly_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+    )
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=5.0,
+            reset_at=int(now + 5 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=300,
+        ),
+        secondary_entry=selected_entry,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.secondary_used_percent == 20.0
+    assert state.secondary_reset_at == weekly_reset
+    assert state.capacity_credits == usage_core.capacity_for_plan("plus", "secondary")
 
 
 def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
@@ -2118,6 +2165,35 @@ def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(mon
     )
 
     assert state.status == AccountStatus.ACTIVE
+
+
+def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now - 10),
+        plan_type="free",
+    )
+    fresh_monthly = _make_test_usage(
+        window="monthly",
+        used_percent=40.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=fresh_monthly,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
 
 
 def test_background_recovery_state_keeps_rate_limited_when_primary_predates_block(monkeypatch):

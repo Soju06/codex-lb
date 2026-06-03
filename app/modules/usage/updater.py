@@ -650,9 +650,11 @@ class UsageUpdater:
         if not self._auth_manager:
             return
         if account.status == AccountStatus.RATE_LIMITED:
-            if primary is None or not _window_has_available_quota(primary):
-                return
             long_window = monthly or secondary
+            if primary is not None and not _window_has_available_quota(primary):
+                return
+            if primary is None and (long_window is None or not _window_has_available_quota(long_window)):
+                return
             if long_window is not None and not _window_has_available_quota(long_window):
                 return
             target_status = AccountStatus.ACTIVE

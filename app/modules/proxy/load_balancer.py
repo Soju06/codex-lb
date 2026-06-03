@@ -1665,7 +1665,11 @@ def _build_states(
     for account in accounts:
         secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
         if account.id not in ignore_standard_quota_account_ids:
-            secondary_entry = latest_monthly.get(account.id) or secondary_entry
+            secondary_entry = _select_long_window_entry(
+                account=account,
+                monthly_entry=latest_monthly.get(account.id),
+                secondary_entry=secondary_entry,
+            )
         state = _state_from_account(
             account=account,
             primary_entry=latest_primary.get(account.id),
@@ -1809,6 +1813,12 @@ def _state_from_account(
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
+    if (
+        effective_secondary_entry is not None
+        and effective_secondary_entry.window == "monthly"
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
+    ):
+        effective_secondary_entry = None
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
     secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
     # Weekly-only accounts may not emit a dedicated secondary row; treat the
@@ -1844,7 +1854,7 @@ def _state_from_account(
 
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
-    weekly_quota_available = (
+    long_window_quota_available = (
         effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
         and effective_secondary_entry.used_percent is not None
@@ -1855,8 +1865,9 @@ def _state_from_account(
         or (
             primary_window_minutes is not None
             and not usage_core.is_primary_window_minutes(primary_window_minutes)
-            and weekly_quota_available
+            and long_window_quota_available
         )
+        or (primary_entry is None and long_window_quota_available)
     ):
         primary_used = None
         primary_reset = None
@@ -1907,7 +1918,11 @@ def _state_from_account(
         if account.status == AccountStatus.QUOTA_EXCEEDED:
             freshness_entry = effective_secondary_entry
         elif account.status == AccountStatus.RATE_LIMITED:
-            freshness_entry = primary_entry
+            freshness_entry = _rate_limited_freshness_entry(
+                account=account,
+                primary_entry=primary_entry,
+                long_window_entry=effective_secondary_entry,
+            )
         else:
             freshness_entry = None
         if freshness_entry and freshness_entry.recorded_at is not None:
@@ -2041,8 +2056,13 @@ def background_recovery_state_from_account(
         runtime=runtime,
     )
     if account.status == AccountStatus.RATE_LIMITED:
+        freshness_entry = _rate_limited_freshness_entry(
+            account=account,
+            primary_entry=primary_entry,
+            long_window_entry=secondary_entry,
+        )
         if blocked_at is not None and reset_at is not None and reset_at <= time.time():
-            if not _usage_entry_recorded_after_block(primary_entry, blocked_at):
+            if not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2051,7 +2071,7 @@ def background_recovery_state_from_account(
                     cooldown_until=reset_at,
                 )
         elif blocked_at is None and reset_at is not None and reset_at <= time.time():
-            if not _usage_entry_is_recent_available(primary_entry):
+            if not _usage_entry_is_recent_available(freshness_entry):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2068,6 +2088,34 @@ def background_recovery_state_from_account(
                 cooldown_until=None,
             )
     return state
+
+
+def _select_long_window_entry(
+    *,
+    account: Account,
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+) -> UsageHistory | AdditionalUsageHistory | None:
+    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    return secondary_entry
+
+
+def _rate_limited_freshness_entry(
+    *,
+    account: Account,
+    primary_entry: UsageHistory | None,
+    long_window_entry: UsageHistory | None,
+) -> UsageHistory | None:
+    if primary_entry is not None:
+        return primary_entry
+    if (
+        long_window_entry is not None
+        and long_window_entry.window == "monthly"
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+    ):
+        return long_window_entry
+    return None
 
 
 def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:

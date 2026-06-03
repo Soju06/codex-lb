@@ -70,8 +70,8 @@ export function AccountList({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <div className="relative min-w-0 flex-1">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="relative col-span-2 min-w-0">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
             placeholder="Search accounts..."
@@ -81,7 +81,7 @@ export function AccountList({
           />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger size="sm" className="w-32 shrink-0">
+          <SelectTrigger size="sm" className="w-full min-w-0">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
@@ -98,7 +98,7 @@ export function AccountList({
         >
           <SelectTrigger
             size="sm"
-            className="w-44 shrink-0"
+            className="w-full min-w-0"
             aria-label="Sort accounts"
           >
             <SelectValue placeholder="Sort accounts" />

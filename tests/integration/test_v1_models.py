@@ -229,6 +229,39 @@ async def test_backend_codex_models_returns_format1(async_client):
     assert isinstance(payload["models"], list)
     slugs = {m["slug"] for m in payload["models"]}
     assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(slugs)
+    assert payload["object"] == "list"
+    data_ids = {m["id"] for m in payload["data"]}
+    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(data_ids)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_data_keeps_only_list_visible_models(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-visible",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-hidden",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert {m["slug"] for m in payload["models"]} == {"gpt-visible", "gpt-hidden"}
+    assert {m["id"] for m in payload["data"]} == {"gpt-visible"}
+    assert payload["data"][0]["object"] == "model"
+    assert payload["data"][0]["owned_by"] == "codex-lb"
 
 
 @pytest.mark.asyncio
@@ -569,6 +602,9 @@ async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_popu
     payload = resp.json()
     slugs = {item["slug"] for item in payload["models"]}
     assert slugs == BOOTSTRAP_MODEL_SLUGS
+    data_ids = {item["id"] for item in payload["data"]}
+    assert data_ids.issubset(BOOTSTRAP_MODEL_SLUGS)
+    assert data_ids
     assert "gpt-5.5-pro" not in slugs
     assert all(not slug.startswith("gpt-image-") for slug in slugs)
 

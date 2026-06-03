@@ -157,10 +157,6 @@ class CodexModelEntry(BaseModel):
     visibility: str = "list"
 
 
-class CodexModelsResponse(BaseModel):
-    models: list[CodexModelEntry]
-
-
 class ModelMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -201,6 +197,12 @@ class ModelListResponse(BaseModel):
 
     object: str = "list"
     data: list[ModelListItem]
+
+
+class CodexModelsResponse(BaseModel):
+    models: list[CodexModelEntry]
+    object: str = "list"
+    data: list[ModelListItem] = []
 
 
 class V1UsageLimitResponse(BaseModel):

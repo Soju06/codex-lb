@@ -1712,25 +1712,31 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
+    created = int(time.time())
     for slug, model in models.items():
         if not model.supported_in_api:
             continue
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue
-            entries.append(_to_codex_model_entry(model))
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            if entry.visibility == "list":
+                data.append(_to_model_list_item(slug, model, created=created))
             continue
-        entries.append(
-            _to_codex_model_entry(
-                model,
-                visibility="list" if slug in visibility_allowed_models else "hide",
-            )
+        entry = _to_codex_model_entry(
+            model,
+            visibility="list" if slug in visibility_allowed_models else "hide",
         )
+        entries.append(entry)
+        if entry.visibility == "list":
+            data.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
-    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+    return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -1754,28 +1760,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(
-            ModelListItem.model_validate(
-                {
-                    "id": slug,
-                    "created": created,
-                    "owned_by": "codex-lb",
-                    "metadata": _to_model_metadata(model),
-                    "api_types": ["chat_completions"],
-                    "capabilities": _v1_model_capabilities(model),
-                    "context_length": _v1_input_context_window(model),
-                    "contextLength": _v1_input_context_window(model),
-                    "max_output_tokens": _v1_max_output_tokens(model),
-                    "maxOutputTokens": _v1_max_output_tokens(model),
-                    "supports_reasoning": _v1_supports_reasoning(model),
-                    "supportsReasoning": _v1_supports_reasoning(model),
-                    "supports_images": _v1_supports_vision(model),
-                    "supportsImages": _v1_supports_vision(model),
-                    "supports_vision": _v1_supports_vision(model),
-                    "supportsVision": _v1_supports_vision(model),
-                }
-            )
-        )
+        items.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 
@@ -1794,6 +1779,29 @@ def _canonical_model_set(models: Iterable[str]) -> set[str]:
 
 def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
+
+
+def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": slug,
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": _to_model_metadata(model),
+            "api_types": ["chat_completions"],
+            "capabilities": _v1_model_capabilities(model),
+            "context_length": _v1_input_context_window(model),
+            "contextLength": _v1_input_context_window(model),
+            "max_output_tokens": _v1_max_output_tokens(model),
+            "maxOutputTokens": _v1_max_output_tokens(model),
+            "supports_reasoning": _v1_supports_reasoning(model),
+            "supportsReasoning": _v1_supports_reasoning(model),
+            "supports_images": _v1_supports_vision(model),
+            "supportsImages": _v1_supports_vision(model),
+            "supports_vision": _v1_supports_vision(model),
+            "supportsVision": _v1_supports_vision(model),
+        }
+    )
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:

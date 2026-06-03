@@ -440,6 +440,30 @@ async def test_force_refresh_usage_recovers_rate_limited_monthly_only_account() 
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_usage_keeps_rate_limited_account_without_primary_or_monthly_quota() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_force_secondary_only", "workspace_force_secondary_only")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    account.reset_at = 12345
+    account.blocked_at = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=None,
+        secondary=usage_updater_module.UsageWindow(used_percent=80.0),
+        monthly=None,
+    )
+
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 12345
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

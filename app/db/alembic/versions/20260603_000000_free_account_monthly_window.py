@@ -32,7 +32,7 @@ def upgrade() -> None:
     free_ids = sa.select(accounts.c.id).where(accounts.c.plan_type == "free")
     op.execute(
         sa.update(usage_history)
-        .where(usage_history.c.window == "primary")
+        .where(sa.or_(usage_history.c.window == "primary", usage_history.c.window.is_(None)))
         .where(usage_history.c.account_id.in_(free_ids))
         .values(window="old-primary")
     )

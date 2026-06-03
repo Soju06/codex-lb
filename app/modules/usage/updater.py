@@ -654,6 +654,8 @@ class UsageUpdater:
             return
         if account.status == AccountStatus.RATE_LIMITED:
             long_window = monthly or secondary
+            if primary is None and monthly is None:
+                return
             if primary is not None and not _window_has_available_quota(primary):
                 return
             if primary is None and (long_window is None or not _window_has_available_quota(long_window)):

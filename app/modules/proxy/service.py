@@ -11515,13 +11515,24 @@ class ProxyService:
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
             monthly_window = _window_snapshot(monthly_summary, monthly_rows, "monthly", now_epoch)
+            limit_reached = not _has_available_usage_account(
+                primary_rows=primary_rows,
+                secondary_rows=secondary_rows,
+                monthly_rows=monthly_rows,
+                account_map=account_map,
+            )
 
             # Fetch additional rate limits
             additional_rate_limits = await self._build_additional_rate_limits(repos, account_map, now_epoch)
 
             return RateLimitStatusPayloadData(
                 plan_type=_plan_type_for_accounts(selected_accounts),
-                rate_limit=_rate_limit_details(primary_window, secondary_window, monthly_window),
+                rate_limit=_rate_limit_details(
+                    primary_window,
+                    secondary_window,
+                    monthly_window,
+                    limit_reached=limit_reached,
+                ),
                 credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
                 additional_rate_limits=additional_rate_limits,
             )
@@ -13479,7 +13490,15 @@ class ProxyService:
         if not account_map:
             return []
         latest = await repos.usage.latest_by_account()
-        return [entry for entry in latest.values() if entry.account_id in account_map]
+        entries = [entry for entry in latest.values() if entry.account_id in account_map]
+        seen_accounts = {entry.account_id for entry in entries}
+        missing_accounts = set(account_map) - seen_accounts
+        if not missing_accounts:
+            return entries
+
+        monthly_latest = await repos.usage.latest_by_account(window="monthly")
+        entries.extend(entry for entry in monthly_latest.values() if entry.account_id in missing_accounts)
+        return entries
 
     async def _build_additional_rate_limits(
         self,
@@ -18070,6 +18089,41 @@ def _sticky_key_for_compact_request(
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
     return _normalize_service_tier_value(payload.service_tier)
+
+
+def _has_available_usage_account(
+    *,
+    primary_rows: list[UsageWindowRow],
+    secondary_rows: list[UsageWindowRow],
+    monthly_rows: list[UsageWindowRow],
+    account_map: Mapping[str, Account],
+) -> bool:
+    rows_by_window = {
+        "primary": primary_rows,
+        "secondary": secondary_rows,
+        "monthly": monthly_rows,
+    }
+    rows_by_account: dict[str, dict[str, UsageWindowRow]] = {}
+    for window, rows in rows_by_window.items():
+        for row in rows:
+            rows_by_account.setdefault(row.account_id, {})[window] = row
+
+    for account_id, account in account_map.items():
+        account_rows = rows_by_account.get(account_id)
+        if not account_rows:
+            continue
+
+        known_applicable_used_percents = [
+            float(row.used_percent)
+            for window, row in account_rows.items()
+            if usage_core.capacity_for_plan(account.plan_type, window) is not None and row.used_percent is not None
+        ]
+        if known_applicable_used_percents and all(
+            used_percent < 100.0 for used_percent in known_applicable_used_percents
+        ):
+            return True
+
+    return False
 
 
 def _service_tier_from_response(

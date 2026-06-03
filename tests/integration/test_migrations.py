@@ -824,8 +824,10 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
                     VALUES
                       (:free_account_id, CURRENT_TIMESTAMP, 'primary', 10.0),
                       (:free_account_id, CURRENT_TIMESTAMP, 'secondary', 20.0),
+                      (:free_account_id, CURRENT_TIMESTAMP, NULL, 25.0),
                       (:paid_account_id, CURRENT_TIMESTAMP, 'primary', 30.0),
-                      (:paid_account_id, CURRENT_TIMESTAMP, 'secondary', 40.0)
+                      (:paid_account_id, CURRENT_TIMESTAMP, 'secondary', 40.0),
+                      (:paid_account_id, CURRENT_TIMESTAMP, NULL, 45.0)
                     """
                 ),
                 {
@@ -859,5 +861,5 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
     finally:
         await engine.dispose()
 
-    assert free_windows == ["old-primary", "old-secondary"]
-    assert paid_windows == ["primary", "secondary"]
+    assert free_windows == ["old-primary", "old-secondary", "old-primary"]
+    assert paid_windows == ["primary", "secondary", None]

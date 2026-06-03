@@ -565,6 +565,7 @@ def _make_test_usage(
     used_percent: float = 10.0,
     reset_at: int | None = None,
     recorded_at: datetime | None = None,
+    window_minutes: int = 10080,
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
@@ -576,7 +577,7 @@ def _make_test_usage(
         window=window,
         used_percent=used_percent,
         reset_at=reset_at,
-        window_minutes=10080,
+        window_minutes=window_minutes,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
@@ -629,6 +630,41 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
 
     assert state.secondary_used_percent == 0.0
     assert state.secondary_reset_at is None
+
+
+def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=10.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+    assert state.reset_at is None
+    assert state.secondary_used_percent == 10.0
+    assert state.secondary_reset_at == future_reset
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(

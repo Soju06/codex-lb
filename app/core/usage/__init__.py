@@ -178,6 +178,15 @@ def is_weekly_window_minutes(window_minutes: int | None) -> bool:
     return window_minutes == secondary_default
 
 
+def is_primary_window_minutes(window_minutes: int | None) -> bool:
+    if window_minutes is None:
+        return False
+    primary_default = default_window_minutes("primary")
+    if primary_default is None:
+        return False
+    return window_minutes == primary_default
+
+
 def should_use_weekly_primary(
     primary_row: UsageWindowRow,
     secondary_row: UsageWindowRow | None,

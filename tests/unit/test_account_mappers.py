@@ -53,10 +53,12 @@ def test_effective_status_uses_secondary_credits_to_reactivate_quota_exceeded_ac
     assert (
         _effective_status_from_usage(
             account,
-            primary,
-            primary.used_percent,
-            secondary,
-            secondary.used_percent,
+            status_seed=account.status,
+            primary_usage=primary,
+            primary_used_percent=primary.used_percent,
+            secondary_usage=secondary,
+            secondary_used_percent=secondary.used_percent,
+            runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
         == AccountStatus.ACTIVE
     )
@@ -70,10 +72,12 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
     assert (
         _effective_status_from_usage(
             account,
-            primary,
-            primary.used_percent,
-            secondary,
-            secondary.used_percent,
+            status_seed=account.status,
+            primary_usage=primary,
+            primary_used_percent=primary.used_percent,
+            secondary_usage=secondary,
+            secondary_used_percent=secondary.used_percent,
+            runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
         == AccountStatus.ACTIVE
     )
@@ -87,10 +91,12 @@ def test_effective_status_keeps_primary_rate_limit_precedence_with_usable_credit
     assert (
         _effective_status_from_usage(
             account,
-            primary,
-            primary.used_percent,
-            secondary,
-            secondary.used_percent,
+            status_seed=account.status,
+            primary_usage=primary,
+            primary_used_percent=primary.used_percent,
+            secondary_usage=secondary,
+            secondary_used_percent=secondary.used_percent,
+            runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
         == AccountStatus.RATE_LIMITED
     )
@@ -104,10 +110,12 @@ def test_effective_status_keeps_paused_account_paused_with_usable_credits() -> N
     assert (
         _effective_status_from_usage(
             account,
-            primary,
-            primary.used_percent,
-            secondary,
-            secondary.used_percent,
+            status_seed=account.status,
+            primary_usage=primary,
+            primary_used_percent=primary.used_percent,
+            secondary_usage=secondary,
+            secondary_used_percent=secondary.used_percent,
+            runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
         == AccountStatus.PAUSED
     )

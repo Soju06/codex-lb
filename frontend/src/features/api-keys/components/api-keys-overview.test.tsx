@@ -42,11 +42,11 @@ describe("ApiKeysOverview", () => {
     expect(screen.getByTestId("api-keys-overview-stat-api-keys")).toHaveTextContent("2");
     expect(screen.getByTestId("api-keys-overview-stat-active-keys")).toHaveTextContent("1");
     expect(screen.getByTestId("api-keys-overview-stat-used-keys")).toHaveTextContent("2");
-    expect(screen.getByTestId("api-keys-overview-stat-7-day-requests")).toHaveTextContent("420");
-    expect(screen.getByTestId("api-keys-overview-stat-7-day-cost")).toHaveTextContent("$3.50");
+    expect(screen.getByTestId("api-keys-overview-stat-lifetime-requests")).toHaveTextContent("420");
+    expect(screen.getByTestId("api-keys-overview-stat-lifetime-cost")).toHaveTextContent("$3.50");
 
-    expect(screen.getByText("7-Day Cost by API Key")).toBeInTheDocument();
-    expect(screen.getByText("7-Day Tokens by API Key")).toBeInTheDocument();
+    expect(screen.getByText("Lifetime Cost by API Key")).toBeInTheDocument();
+    expect(screen.getByText("Lifetime Tokens by API Key")).toBeInTheDocument();
 
     const costPanel = screen.getByTestId("api-keys-overview-cost-panel");
     expect(within(costPanel).getByText("Primary key")).toBeInTheDocument();

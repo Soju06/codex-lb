@@ -167,19 +167,23 @@ export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
         <OverviewStat label="API keys" value={formatCompactNumber(totalKeys)} meta={`${formatCompactNumber(expiredKeys)} expired`} />
         <OverviewStat label="Active keys" value={formatCompactNumber(activeKeys)} meta={`${formatCompactNumber(inactiveKeys)} inactive`} />
         <OverviewStat label="Used keys" value={formatCompactNumber(usedKeys)} meta={`${formatCompactNumber(idleKeys)} idle`} />
-        <OverviewStat label="7-day requests" value={formatCompactNumber(totalRequests)} meta={`${formatCompactNumber(totalTokens)} tokens`} />
-        <OverviewStat label="7-day cost" value={formatCurrency(totalCostUsd)} meta="Across all keys" />
+        <OverviewStat
+          label="Lifetime requests"
+          value={formatCompactNumber(totalRequests)}
+          meta={`${formatCompactNumber(totalTokens)} tokens`}
+        />
+        <OverviewStat label="Lifetime cost" value={formatCurrency(totalCostUsd)} meta="Across all keys (lifetime)" />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <BreakdownPanel
-          title="7-Day Cost by API Key"
+          title="Lifetime Cost by API Key"
           subtitle="Relative spend across all keys"
           metric="cost"
           apiKeys={apiKeys}
         />
         <BreakdownPanel
-          title="7-Day Tokens by API Key"
+          title="Lifetime Tokens by API Key"
           subtitle="Relative token volume across all keys"
           metric="tokens"
           apiKeys={apiKeys}

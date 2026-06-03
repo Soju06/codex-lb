@@ -494,6 +494,26 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
 
 
 @pytest.mark.asyncio
+async def test_v1_usage_hides_upstream_limits_for_api_key_clients_when_setting_enabled(async_client):
+    _, plain_key = await _create_api_key(name="hidden-upstream-aggregate")
+    now = utcnow()
+    await _seed_upstream_usage(now=now)
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={"hideUpstreamQuotaFromApiKeys": True},
+    )
+    assert settings.status_code == 200
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limits"] == []
+    assert payload["upstream_limits"] == []
+
+
+@pytest.mark.asyncio
 async def test_v1_usage_returns_api_key_and_upstream_credit_limits_separately(async_client):
     key_id, plain_key = await _create_api_key(
         name="credit-override",

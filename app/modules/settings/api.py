@@ -143,6 +143,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
@@ -644,6 +645,11 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                hide_upstream_quota_from_api_keys=(
+                    payload.hide_upstream_quota_from_api_keys
+                    if payload.hide_upstream_quota_from_api_keys is not None
+                    else current.hide_upstream_quota_from_api_keys
+                ),
                 limit_warmup_enabled=(
                     payload.limit_warmup_enabled
                     if payload.limit_warmup_enabled is not None
@@ -704,6 +710,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
             "limit_warmup_windows",
             "limit_warmup_model",

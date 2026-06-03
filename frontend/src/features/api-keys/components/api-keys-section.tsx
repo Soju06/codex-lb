@@ -6,6 +6,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { ApiKeyAuthToggle } from "@/features/api-keys/components/api-key-auth-toggle";
+import { ApiKeyQuotaPrivacyToggle } from "@/features/api-keys/components/api-key-quota-privacy-toggle";
 import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-created-dialog";
 import { ApiKeyTable } from "@/features/api-keys/components/api-key-table";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
@@ -21,14 +22,18 @@ const ApiKeyEditDialog = lazy(() =>
 
 export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
+  hideUpstreamQuotaFromApiKeys: boolean;
   disabled?: boolean;
   onApiKeyAuthEnabledChange: (enabled: boolean) => void;
+  onHideUpstreamQuotaFromApiKeysChange: (enabled: boolean) => void;
 };
 
 export function ApiKeysSection({
   apiKeyAuthEnabled,
+  hideUpstreamQuotaFromApiKeys,
   disabled = false,
   onApiKeyAuthEnabledChange,
+  onHideUpstreamQuotaFromApiKeysChange,
 }: ApiKeysSectionProps) {
   const {
     apiKeysQuery,
@@ -94,6 +99,12 @@ export function ApiKeysSection({
         enabled={apiKeyAuthEnabled}
         disabled={busy}
         onChange={onApiKeyAuthEnabledChange}
+      />
+
+      <ApiKeyQuotaPrivacyToggle
+        enabled={hideUpstreamQuotaFromApiKeys}
+        disabled={busy}
+        onChange={onHideUpstreamQuotaFromApiKeysChange}
       />
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}

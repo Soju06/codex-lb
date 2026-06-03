@@ -131,6 +131,7 @@ const SettingsPayloadSchema = z.looseObject({
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({

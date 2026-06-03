@@ -312,6 +312,7 @@ class LimitWarmupService:
         before_secondary: dict[str, UsageHistory],
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
+        refresh_started_at: datetime | None = None,
     ) -> None:
         if not settings.limit_warmup_enabled:
             return
@@ -359,6 +360,7 @@ class LimitWarmupService:
                         accounts=staggered_accounts,
                         now=now,
                         after_primary=after_primary,
+                        refresh_started_at=refresh_started_at,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if candidate is None:
@@ -677,10 +679,13 @@ def _build_staggered_idle_candidate(
     accounts: list[Account],
     now: datetime,
     after_primary: dict[str, UsageHistory],
+    refresh_started_at: datetime | None,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
     if after is None:
+        return None
+    if not _usage_entry_refreshed_for_cycle(after, refresh_started_at=refresh_started_at):
         return None
     if usage_core.is_weekly_window_minutes(after.window_minutes):
         return None
@@ -721,6 +726,18 @@ def _staggered_idle_due(account_id: str, account_ids: list[str], *, now: datetim
         cycle_end=cycle_start + _ROLLING_WINDOW_SECONDS,
         slot_offset_seconds=slot_offset,
     )
+
+
+def _usage_entry_refreshed_for_cycle(
+    entry: UsageHistory,
+    *,
+    refresh_started_at: datetime | None,
+) -> bool:
+    if refresh_started_at is None:
+        return True
+    if entry.recorded_at is None:
+        return False
+    return entry.recorded_at >= refresh_started_at
 
 
 def _effective_usage_entry(

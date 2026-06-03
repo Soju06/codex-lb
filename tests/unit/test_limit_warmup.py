@@ -35,14 +35,21 @@ def _account(
     )
 
 
-def _usage(account_id: str, *, used_percent: float, reset_at: int, window: str = "primary") -> UsageHistory:
+def _usage(
+    account_id: str,
+    *,
+    used_percent: float,
+    reset_at: int,
+    window: str = "primary",
+    recorded_at: datetime | None = None,
+) -> UsageHistory:
     return UsageHistory(
         account_id=account_id,
         used_percent=used_percent,
         reset_at=reset_at,
         window=window,
         window_minutes=300 if window == "primary" else 10_080,
-        recorded_at=utcnow(),
+        recorded_at=recorded_at or utcnow(),
     )
 
 
@@ -939,6 +946,37 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
     assert repo.rows[0].window == "primary_idle"
     assert repo.rows[0].reset_at == 18_000
     assert repo.rows[0].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch) -> None:
+    now = datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=1000,
+                recorded_at=now - timedelta(minutes=5),
+            )
+        },
+        after_secondary={},
+        refresh_started_at=now,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio

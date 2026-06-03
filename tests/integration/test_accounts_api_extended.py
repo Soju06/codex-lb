@@ -857,6 +857,37 @@ async def test_accounts_list_ignores_hidden_zero_capacity_primary_for_status(asy
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_ignores_hidden_zero_capacity_primary_without_weekly_for_active_account(
+    async_client, db_setup
+):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_free_active_primary_only", "free-primary-only@example.com", plan_type="free")
+        )
+        await usage_repo.add_entry(
+            "acc_free_active_primary_only",
+            100.0,
+            window="primary",
+            window_minutes=43200,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_active_primary_only"]
+    assert account["status"] == "active"
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] is None
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_client, db_setup):
     expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
     account = _make_account("acc_free_recovered_primary", "free-recovered@example.com", plan_type="free")

@@ -147,7 +147,8 @@ def _account_to_summary(
                 effective_primary_usage.window_minutes if effective_primary_usage is not None else None
             )
         )
-        if not keep_primary_status_signal and long_quota_available:
+        can_hide_zero_capacity_primary = account.status != AccountStatus.RATE_LIMITED or long_quota_available
+        if not keep_primary_status_signal and can_hide_zero_capacity_primary:
             status_primary_usage = None
             status_primary_used_percent = None
             if account.status == AccountStatus.RATE_LIMITED:

@@ -988,6 +988,51 @@ async def test_list_keys_falls_back_to_all_accounts_when_key_is_unassigned() -> 
 
 
 @pytest.mark.asyncio
+async def test_list_keys_keeps_scoped_empty_pool_when_assignments_are_missing() -> None:
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access-a",
+            refresh_token_encrypted=b"refresh-a",
+            id_token_encrypted=b"id-a",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={"acc-a": _make_usage_history("acc-a", used_percent=25.0)},
+        secondary={"acc-a": _make_usage_history("acc-a", used_percent=10.0)},
+    )
+    service = ApiKeysService(repo, usage_repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="scoped-empty",
+            allowed_models=None,
+            expires_at=None,
+            assigned_account_ids=["acc-a"],
+        )
+    )
+    repo._account_assignments[created.id] = []
+
+    account_calls_before_list = len(repo.list_accounts_by_ids_calls)
+    listed = await service.list_keys()
+    account_calls_after_list = repo.list_accounts_by_ids_calls[account_calls_before_list:]
+
+    assert listed[0].pooled_credits is not None
+    assert listed[0].pooled_credits.remaining_percent_primary is None
+    assert listed[0].pooled_credits.remaining_percent_secondary is None
+    assert listed[0].pooled_credits.capacity_credits_primary == 0.0
+    assert repo.list_all_accounts_calls == 0
+    assert account_calls_after_list == []
+    assert usage_repo.calls == []
+
+
+@pytest.mark.asyncio
 async def test_update_key_persists_apply_to_codex_model_flag() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

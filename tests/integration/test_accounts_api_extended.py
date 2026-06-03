@@ -998,6 +998,46 @@ async def test_accounts_list_ignores_zero_capacity_monthly_primary_status(async_
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_keeps_legacy_unknown_primary_rate_limited_until_known_window(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_legacy_unknown_primary", "free-legacy@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_legacy_unknown_primary",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=None,
+        )
+        await usage_repo.add_entry(
+            "acc_free_legacy_unknown_primary",
+            24.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_legacy_unknown_primary"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_keeps_free_rate_limited_until_weekly_quota_available(async_client, db_setup):
     future_reset = int((utcnow() + timedelta(days=14)).timestamp())
     account = _make_account("acc_free_monthly_without_weekly", "free-monthly-no-weekly@example.com", plan_type="free")

@@ -2473,9 +2473,7 @@ async def _stream_responses(
         )
     )
 
-    rate_limit_headers = (
-        await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
-    )
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
     downstream_turn_state = (

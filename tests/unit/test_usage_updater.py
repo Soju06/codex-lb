@@ -1153,7 +1153,8 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
                         "limit_window_seconds": 2592000,
                     },
                     "secondary_window": None,
-                }
+                },
+                "credits": {"has_credits": True, "unlimited": False, "balance": "17.25"},
             }
         )
 
@@ -1170,6 +1171,10 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
     await updater.refresh_accounts([account], latest_usage={})
 
     assert [entry.window for entry in usage_repo.entries] == ["monthly"]
+    monthly_entry = usage_repo.entries[0]
+    assert monthly_entry.credits_has is True
+    assert monthly_entry.credits_unlimited is False
+    assert monthly_entry.credits_balance == 17.25
     assert account.status == AccountStatus.ACTIVE
 
 

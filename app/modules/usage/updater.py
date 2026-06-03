@@ -561,6 +561,9 @@ class UsageUpdater:
                 window="monthly",
                 reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
                 window_minutes=_window_minutes(monthly.limit_window_seconds),
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
             )
             usage_written = usage_written or _usage_entry_written(entry)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)

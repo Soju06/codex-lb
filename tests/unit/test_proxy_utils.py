@@ -14242,6 +14242,68 @@ async def test_stream_previous_response_not_found_proxy_error_is_masked_to_strea
 
 
 @pytest.mark.asyncio
+async def test_stream_midstream_core_eof_with_previous_response_id_fails_closed(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_midstream_core_eof")
+    request_logs.response_owner_by_id[("resp_parent", None, "sid-stream")] = account.id
+    handle_stream_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield 'data: {"type":"response.created","response":{"id":"resp_child","status":"in_progress"}}\n\n'
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_child","status":"failed",'
+            '"error":{"code":"stream_incomplete","message":"Upstream closed stream without completion"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_parent",
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    created = json.loads(chunks[0].split("data: ", 1)[1])
+    failed = json.loads(chunks[1].split("data: ", 1)[1])
+    assert created["type"] == "response.created"
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"]["code"] == "stream_incomplete"
+    assert failed["response"]["error"]["message"] == "Upstream closed stream without completion"
+    assert request_logs.lookup_calls == [("resp_parent", None, "sid-stream")]
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert request_logs.calls[0]["failure_phase"] == "upstream"
+    assert request_logs.calls[0]["failure_detail"] == "upstream_eof_before_terminal_event"
+    handle_stream_error.assert_awaited_once()
+    handle_stream_error_args = handle_stream_error.await_args
+    assert handle_stream_error_args is not None
+    assert handle_stream_error_args.args[0] == account
+    assert handle_stream_error_args.args[2] == "stream_incomplete"
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomplete(monkeypatch, caplog):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

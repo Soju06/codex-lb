@@ -3416,6 +3416,57 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_websocket_broken_pipe_is_retryable_upstream_unavailable(monkeypatch):
+    logged_completions: list[dict[str, object]] = []
+
+    class _BrokenPipeWsResponse(_WsResponse):
+        async def send_json(self, payload: dict[str, object]) -> None:
+            self.sent_json.append(payload)
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def fake_log_upstream_request_complete(**kwargs: object) -> None:
+        logged_completions.append(dict(kwargs))
+
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", fake_log_upstream_request_complete)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+    )
+    websocket = _BrokenPipeWsResponse([])
+    session = _WsSession(websocket)
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_broken_pipe",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
+        )
+    ]
+
+    assert len(events) == 1
+    failed = json.loads(events[0].split("data: ", 1)[1])
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"]["code"] == "upstream_unavailable"
+    assert "Broken pipe" in failed["response"]["error"]["message"]
+    assert logged_completions
+    completion = logged_completions[-1]
+    assert completion["error_code"] == "upstream_unavailable"
+    assert completion["failure_phase"] == "upstream"
+    assert completion["failure_detail"] == "transport_error"
+    assert completion["failure_exception_type"] == "BrokenPipeError"
+    assert completion["retryable_same_contract"] is True
+
+
+@pytest.mark.asyncio
 async def test_open_upstream_websocket_preserves_error_body_on_handshake_failure():
     error_body = json.dumps(
         {"error": {"message": "quota exhausted", "type": "server_error", "code": "insufficient_quota"}}

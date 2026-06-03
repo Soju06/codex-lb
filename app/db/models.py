@@ -584,6 +584,12 @@ class DashboardSettings(Base):
         server_default=text("'0,1,2,3,4,5,6'"),
         nullable=False,
     )
+    limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     warmup_model: Mapped[str] = mapped_column(
         String,
         default="gpt-5.4-mini",

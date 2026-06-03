@@ -63,6 +63,29 @@ describe("AccountCard", () => {
     expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
   });
 
+  it("labels staggered idle warm-up attempts as 5h", () => {
+    const attemptedAt = new Date("2026-06-03T12:00:00Z").toISOString();
+    const account = createAccountSummary({
+      limitWarmupEnabled: true,
+      limitWarmup: {
+        window: "primary_idle",
+        resetAt: 18_000,
+        status: "succeeded",
+        model: "gpt-5.1-codex-mini",
+        attemptedAt,
+        completedAt: attemptedAt,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(
+      screen.getByText((text) => text.includes("Succeeded | 5h | Gpt-5.1-codex-mini")),
+    ).toBeInTheDocument();
+  });
+
   it("blurs the dashboard card title when privacy mode is enabled", () => {
     act(() => {
       usePrivacyStore.setState({ blurred: true });

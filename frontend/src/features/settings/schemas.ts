@@ -103,6 +103,7 @@ export const DashboardSettingsSchema = z
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
+    limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
@@ -159,6 +160,7 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
   weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
   guestAccessEnabled: z.boolean().optional(),
+  limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
 });
 
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;

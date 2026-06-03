@@ -38,6 +38,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
       limitWarmupMinAvailablePercent: 100,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -61,6 +62,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.apiKeyAuthEnabled).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
@@ -87,6 +89,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(false);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
     expect(parsed.guestAccessEnabled).toBe(false);
@@ -163,6 +166,7 @@ describe("SettingsUpdateRequestSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 7200,
       limitWarmupMinAvailablePercent: 99,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);

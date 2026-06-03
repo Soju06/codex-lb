@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -55,6 +55,7 @@ def _settings(**overrides: object) -> DashboardSettings:
         "limit_warmup_prompt": "Say OK.",
         "limit_warmup_cooldown_seconds": 3600,
         "limit_warmup_min_available_percent": 100.0,
+        "limit_warmup_staggered_idle_enabled": False,
     }
     values.update(overrides)
     return DashboardSettings(**values)
@@ -845,6 +846,99 @@ async def test_auto_model_unavailable_records_skipped_attempt(monkeypatch) -> No
     assert len(repo.rows) == 1
     assert repo.rows[0].status == "skipped"
     assert repo.rows[0].error_code == "model_unavailable"
+
+
+def test_staggered_idle_slot_is_stable_and_spread() -> None:
+    now = datetime.fromtimestamp(0, tz=timezone.utc).replace(tzinfo=None)
+
+    first = limit_warmup_service._staggered_idle_due("acc_1", ["acc_1", "acc_2", "acc_3"], now=now)
+    same = limit_warmup_service._staggered_idle_due("acc_1", ["acc_3", "acc_1", "acc_2"], now=now)
+    other = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+
+    assert first is not None
+    assert same == first
+    assert first.slot_offset_seconds == 0
+    assert other is not None
+    assert other.slot_offset_seconds == 6000
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_disabled_by_default_does_not_prestart_idle_account() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_staggered_idle_enabled=False),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_blocks_outside_account_slot(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(60, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_2")
+
+    await service.run_after_usage_refresh(
+        accounts=[_account("acc_1"), account, _account("acc_3")],
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    for _ in range(2):
+        await service.run_after_usage_refresh(
+            accounts=accounts,
+            settings=_settings(limit_warmup_staggered_idle_enabled=True),
+            before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+            after_secondary={},
+        )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary_idle"
+    assert repo.rows[0].reset_at == 18_000
+    assert repo.rows[0].status == "succeeded"
 
 
 @pytest.mark.asyncio

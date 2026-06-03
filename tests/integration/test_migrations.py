@@ -506,6 +506,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
             assert "single_account_id" in dashboard_columns
+            assert "limit_warmup_staggered_idle_enabled" in dashboard_columns
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))

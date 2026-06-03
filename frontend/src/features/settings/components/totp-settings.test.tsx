@@ -19,7 +19,42 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
-const baseSettings = createDashboardSettings({ totpConfigured: false });
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+  limitWarmupStaggeredIdleEnabled: false,
+};
+const ADDITIONAL_QUOTA_DEFAULTS = {
+  additionalQuotaRoutingPolicies: {},
+  additionalQuotaPolicies: [],
+};
+
+const baseSettings = {
+  stickyThreadsEnabled: true,
+  upstreamStreamTransport: "default" as const,
+  upstreamProxyRoutingEnabled: false,
+  upstreamProxyDefaultPoolId: null,
+  preferEarlierResetAccounts: false,
+  preferEarlierResetWindow: "secondary" as const,
+  routingStrategy: "usage_weighted" as const,
+  relativeAvailabilityPower: 2,
+  relativeAvailabilityTopK: 5,
+  singleAccountId: null,
+  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
+  openaiCacheAffinityMaxAgeSeconds: 300,
+  dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
+  importWithoutOverwrite: false,
+  totpRequiredOnLogin: false,
+  totpConfigured: false,
+  apiKeyAuthEnabled: true,
+  ...LIMIT_WARMUP_DEFAULTS,
+  ...ADDITIONAL_QUOTA_DEFAULTS,
+};
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 function renderWithClient(ui: React.ReactElement) {

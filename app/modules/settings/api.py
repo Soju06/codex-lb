@@ -152,6 +152,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         weekly_pace_working_days=settings.weekly_pace_working_days,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
+        limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
     )
 
 
@@ -672,6 +673,11 @@ async def update_settings(
                     if payload.guest_access_enabled is not None
                     else current.guest_access_enabled
                 ),
+                limit_warmup_staggered_idle_enabled=(
+                    payload.limit_warmup_staggered_idle_enabled
+                    if payload.limit_warmup_staggered_idle_enabled is not None
+                    else current.limit_warmup_staggered_idle_enabled
+                ),
             )
         )
     except ValueError as exc:
@@ -711,8 +717,8 @@ async def update_settings(
             "limit_warmup_cooldown_seconds",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
-            "weekly_pace_working_days",
             "guest_access_enabled",
+            "limit_warmup_staggered_idle_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

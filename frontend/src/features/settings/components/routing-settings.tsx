@@ -749,6 +749,20 @@ export function RoutingSettings({
                 onCheckedChange={(checked) => save({ limitWarmupEnabled: checked })}
               />
             </div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Stagger idle warm-up</p>
+                <p className="text-xs text-muted-foreground">
+                  Spread opted-in account warm-ups across the rolling 5h window.
+                </p>
+              </div>
+              <Switch
+                aria-label="Enable staggered idle warm-up"
+                checked={settings.limitWarmupStaggeredIdleEnabled}
+                disabled={busy || !settings.limitWarmupEnabled}
+                onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
+              />
+            </div>
 
             <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem]">
               <Select

@@ -63,6 +63,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_cooldown_seconds: int = Field(ge=60)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
+    limit_warmup_staggered_idle_enabled: bool
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
@@ -110,6 +111,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
     guest_access_enabled: bool | None = None
+    limit_warmup_staggered_idle_enabled: bool | None = None
 
     @field_validator("warmup_model")
     @classmethod

@@ -404,7 +404,7 @@ The dashboard SHALL expose global limit warm-up controls in Settings and per-acc
 
 #### Scenario: Configure warm-up behavior
 - **WHEN** an operator opens Settings
-- **THEN** the dashboard shows controls for enabling limit warm-up, selecting primary/secondary/both windows, setting the warm-up model, setting the prompt, and setting the cooldown
+- **THEN** the dashboard shows controls for enabling limit warm-up, enabling staggered idle warm-up, selecting primary/secondary/both windows, setting the warm-up model, setting the prompt, and setting the cooldown
 
 #### Scenario: Validate warm-up settings before save
 - **WHEN** an operator edits warm-up model, prompt, or cooldown fields

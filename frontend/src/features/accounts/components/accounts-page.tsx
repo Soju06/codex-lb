@@ -12,7 +12,11 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
-import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import {
+  DEFAULT_ACCOUNT_SORT_MODE,
+  sortAccountsForDisplay,
+  type AccountSortMode,
+} from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
@@ -26,6 +30,7 @@ const OauthDialog = lazy(() =>
 
 export function AccountsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [accountSortMode, setAccountSortMode] = useState<AccountSortMode>(DEFAULT_ACCOUNT_SORT_MODE);
   const {
     accountsQuery,
     importMutation,
@@ -50,8 +55,8 @@ export function AccountsPage() {
   );
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const sortedAccounts = useMemo(
-    () => sortAccountsForDisplay(accounts, quotaDisplay),
-    [accounts, quotaDisplay],
+    () => sortAccountsForDisplay(accounts, quotaDisplay, accountSortMode),
+    [accounts, quotaDisplay, accountSortMode],
   );
   const selectedAccountId = searchParams.get("selected");
 
@@ -128,6 +133,8 @@ export function AccountsPage() {
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
               onSelect={handleSelectAccount}
+              sortMode={accountSortMode}
+              onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
             />

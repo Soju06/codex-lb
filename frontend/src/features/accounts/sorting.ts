@@ -2,6 +2,17 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 import type { AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { parseDate } from "@/utils/formatters";
 
+export type AccountSortMode = "reset_soonest" | "reset_latest" | "name_asc" | "name_desc";
+
+export const ACCOUNT_SORT_OPTIONS: readonly { value: AccountSortMode; label: string }[] = [
+  { value: "reset_soonest", label: "Reset time (soonest)" },
+  { value: "reset_latest", label: "Reset time (latest)" },
+  { value: "name_asc", label: "Name (A-Z)" },
+  { value: "name_desc", label: "Name (Z-A)" },
+] as const;
+
+export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "reset_soonest";
+
 function visibleQuotaResetTimestamps(
   account: AccountSummary,
   quotaDisplay: AccountQuotaDisplayPreference,
@@ -30,10 +41,28 @@ function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuo
 export function sortAccountsForDisplay(
   accounts: AccountSummary[],
   quotaDisplay: AccountQuotaDisplayPreference,
+  sortMode: AccountSortMode = DEFAULT_ACCOUNT_SORT_MODE,
 ): AccountSummary[] {
   return accounts
     .slice()
     .sort((left, right) => {
+      if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
+        const leftReset = accountResetTimestamp(left, quotaDisplay);
+        const rightReset = accountResetTimestamp(right, quotaDisplay);
+        if (leftReset !== rightReset) {
+          return sortMode === "reset_latest" ? rightReset - leftReset : leftReset - rightReset;
+        }
+      } else {
+        const leftLabel = accountSortLabel(left);
+        const rightLabel = accountSortLabel(right);
+        const labelComparison = sortMode === "name_asc"
+          ? leftLabel.localeCompare(rightLabel)
+          : rightLabel.localeCompare(leftLabel);
+        if (labelComparison !== 0) {
+          return labelComparison;
+        }
+      }
+
       const leftReset = accountResetTimestamp(left, quotaDisplay);
       const rightReset = accountResetTimestamp(right, quotaDisplay);
       if (leftReset !== rightReset) {

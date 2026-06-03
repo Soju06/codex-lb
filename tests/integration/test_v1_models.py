@@ -340,6 +340,14 @@ async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_clie
                 "visibility": "list",
             },
         ),
+        _make_upstream_model(
+            "gpt-hidden",
+            supported_in_api=False,
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
     ]
     await registry.update({"plus": models, "pro": models})
 
@@ -358,7 +366,7 @@ async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_clie
         "/api/api-keys/",
         json={
             "name": "codex-visibility",
-            "allowedModels": ["gpt-5.2"],
+            "allowedModels": ["gpt-5.2", "gpt-hidden"],
             "applyToCodexModel": True,
         },
     )

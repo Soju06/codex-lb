@@ -1716,6 +1716,8 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     entries: list[CodexModelEntry] = []
     for slug, model in models.items():
+        if not model.supported_in_api:
+            continue
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue

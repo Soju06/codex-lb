@@ -994,8 +994,8 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 )
+                _fresh_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 del _fresh_request_state
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
@@ -1034,8 +1034,8 @@ class ProxyService:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
+        request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
         if previous_response_trimmed_input_count is not None:
@@ -1163,8 +1163,8 @@ class ProxyService:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 request_id=request_id,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             if downstream_turn_state is not None:
                 request_state.session_id = _normalize_session_id(downstream_turn_state)
             request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1326,8 +1326,8 @@ class ProxyService:
                         api_key=api_key,
                         api_key_reservation=retry_api_key_reservation,
                         request_id=request_id,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     )
+                    retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1420,8 +1420,8 @@ class ProxyService:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 request_id=request_id,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -1471,8 +1471,8 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 )
+                request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1743,8 +1743,8 @@ class ProxyService:
                     api_key=api_key,
                     api_key_reservation=retry_api_key_reservation,
                     request_id=request_id,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 )
+                retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:
                     retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP

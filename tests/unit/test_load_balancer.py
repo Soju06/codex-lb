@@ -1541,6 +1541,34 @@ def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeyp
     assert state.secondary_reset_at == future_reset
 
 
+def test_state_from_account_ignores_zero_capacity_primary_for_active_free_account(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.ACTIVE, reset_at=None)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+    assert state.reset_at is None
+
+
 def test_state_from_account_preserves_free_rate_limit_without_weekly_usage_signal(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)

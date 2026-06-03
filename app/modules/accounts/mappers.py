@@ -141,7 +141,13 @@ def _account_to_summary(
         and float(long_quota_usage.used_percent) < 100.0
     )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
-        primary_window_minutes = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
+        primary_window_minutes = (
+            effective_primary_usage.window_minutes
+            if effective_primary_usage is not None
+            else primary_usage.window_minutes
+            if weekly_only_usage and primary_usage is not None
+            else None
+        )
         zero_capacity_primary_known_non_primary = (
             primary_window_minutes is not None and not usage_core.is_primary_window_minutes(primary_window_minutes)
         )

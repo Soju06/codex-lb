@@ -1850,11 +1850,13 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
-    if (
-        usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0
-        and primary_window_minutes is not None
-        and not usage_core.is_primary_window_minutes(primary_window_minutes)
-        and weekly_quota_available
+    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
+        account.status != AccountStatus.RATE_LIMITED
+        or (
+            primary_window_minutes is not None
+            and not usage_core.is_primary_window_minutes(primary_window_minutes)
+            and weekly_quota_available
+        )
     ):
         primary_used = None
         primary_reset = None

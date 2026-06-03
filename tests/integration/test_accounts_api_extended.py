@@ -1000,6 +1000,44 @@ async def test_accounts_list_keeps_free_rate_limited_until_weekly_quota_availabl
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_client, db_setup):
+    account = _make_account("acc_free_rate_limited_no_reset", "free-no-reset@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = None
+    account.blocked_at = int(utcnow().timestamp())
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_rate_limited_no_reset",
+            24.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_free_rate_limited_no_reset",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_rate_limited_no_reset"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(async_client, db_setup):
     now = utcnow()
     stale_reset = 1735689600

@@ -132,6 +132,7 @@ def _account_to_summary(
     status_primary_used_percent = primary_used_percent
     status_runtime_reset = float(account.reset_at) if account.reset_at else None
     status_seed = account.status
+    allow_missing_runtime_reset_recovery = False
     long_quota_usage = monthly_usage or effective_secondary_usage
     long_quota_available = (
         long_quota_usage is not None
@@ -152,6 +153,7 @@ def _account_to_summary(
             status_runtime_reset = None
             if account.status == AccountStatus.RATE_LIMITED:
                 status_seed = AccountStatus.ACTIVE
+                allow_missing_runtime_reset_recovery = True
         effective_primary_usage = None
         primary_used_percent = None
         primary_remaining_percent = None
@@ -203,6 +205,7 @@ def _account_to_summary(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+        allow_missing_runtime_reset_recovery=allow_missing_runtime_reset_recovery,
     )
     return AccountSummary(
         account_id=account.id,
@@ -282,6 +285,7 @@ def _effective_status_from_usage(
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
+    allow_missing_runtime_reset_recovery: bool = False,
 ) -> AccountStatus:
     long_window_usage = monthly_usage or secondary_usage
     long_window_used_percent = monthly_used_percent if monthly_usage is not None else secondary_used_percent
@@ -303,7 +307,7 @@ def _effective_status_from_usage(
         credits_balance=credits_balance,
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
-        if runtime_reset is None:
+        if runtime_reset is None and allow_missing_runtime_reset_recovery:
             return status
         if _has_credit_override(
             credits_has=credits_has,

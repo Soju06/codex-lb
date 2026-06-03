@@ -20,11 +20,14 @@ describe("AccountSummarySchema", () => {
       usage: {
         primaryRemainingPercent: 85,
         secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 95,
       },
       resetAtPrimary: ISO,
       resetAtSecondary: null,
+      resetAtMonthly: ISO,
       windowMinutesPrimary: null,
       windowMinutesSecondary: 10080,
+      windowMinutesMonthly: 43200,
       requestUsage: {
         requestCount: 3,
         totalTokens: 1500,
@@ -48,7 +51,9 @@ describe("AccountSummarySchema", () => {
     expect(parsed.accountId).toBe("acc-1");
     expect(parsed.routingPolicy ?? "normal").toBe("normal");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
+    expect(parsed.usage?.monthlyRemainingPercent).toBe(95);
     expect(parsed.windowMinutesSecondary).toBe(10080);
+    expect(parsed.windowMinutesMonthly).toBe(43200);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
   });
 

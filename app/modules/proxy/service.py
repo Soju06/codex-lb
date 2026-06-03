@@ -11468,6 +11468,7 @@ class ProxyService:
                 self._latest_usage_rows(repos, account_map, "primary"),
                 self._latest_usage_rows(repos, account_map, "secondary"),
             )
+            monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,
@@ -11480,6 +11481,9 @@ class ProxyService:
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
             if secondary_summary is not None:
                 headers.update(_rate_limit_headers("secondary", secondary_summary))
+            monthly_summary = _summarize_window(monthly_rows, account_map, "monthly")
+            if monthly_summary is not None:
+                headers.update(_rate_limit_headers("monthly", monthly_summary))
 
             headers.update(_credits_headers(await self._latest_usage_entries(repos, account_map)))
         return headers
@@ -11497,6 +11501,7 @@ class ProxyService:
                 self._latest_usage_rows(repos, account_map, "primary"),
                 self._latest_usage_rows(repos, account_map, "secondary"),
             )
+            monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,
@@ -11504,17 +11509,19 @@ class ProxyService:
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
+            monthly_summary = _summarize_window(monthly_rows, account_map, "monthly")
 
             now_epoch = int(time.time())
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
+            monthly_window = _window_snapshot(monthly_summary, monthly_rows, "monthly", now_epoch)
 
             # Fetch additional rate limits
             additional_rate_limits = await self._build_additional_rate_limits(repos, account_map, now_epoch)
 
             return RateLimitStatusPayloadData(
                 plan_type=_plan_type_for_accounts(selected_accounts),
-                rate_limit=_rate_limit_details(primary_window, secondary_window),
+                rate_limit=_rate_limit_details(primary_window, secondary_window, monthly_window),
                 credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
                 additional_rate_limits=additional_rate_limits,
             )

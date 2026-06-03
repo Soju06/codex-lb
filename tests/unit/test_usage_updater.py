@@ -1099,8 +1099,46 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
 
     await updater.refresh_accounts([account], latest_usage={})
 
+    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert usage_repo.entries[-1].window == "primary"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 24.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 2592000,
+                    },
+                    "secondary_window": None,
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_free_monthly", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.plan_type = "free"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert [entry.window for entry in usage_repo.entries] == ["monthly"]
     assert account.status == AccountStatus.ACTIVE
-    assert usage_repo.entries[-1].window == "secondary"
 
 
 @pytest.mark.asyncio

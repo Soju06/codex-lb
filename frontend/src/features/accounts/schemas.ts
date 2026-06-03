@@ -14,6 +14,7 @@ export const AccountUsageTrendSchema = z.object({
 export const AccountUsageSchema = z.object({
   primaryRemainingPercent: z.number().nullable(),
   secondaryRemainingPercent: z.number().nullable(),
+  monthlyRemainingPercent: z.number().nullable().optional(),
 });
 
 export const AccountRequestUsageSchema = z.object({
@@ -76,12 +77,16 @@ export const AccountSummarySchema = z.object({
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
+  resetAtMonthly: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  windowMinutesMonthly: z.number().nullable().optional(),
   capacityCreditsPrimary: z.number().nullable().optional(),
   remainingCreditsPrimary: z.number().nullable().optional(),
   capacityCreditsSecondary: z.number().nullable().optional(),
   remainingCreditsSecondary: z.number().nullable().optional(),
+  capacityCreditsMonthly: z.number().nullable().optional(),
+  remainingCreditsMonthly: z.number().nullable().optional(),
   creditsHas: z.boolean().nullable().optional(),
   creditsUnlimited: z.boolean().nullable().optional(),
   creditsBalance: z.number().nullable().optional(),

@@ -54,6 +54,7 @@ class RateLimitStatusDetails(BaseModel):
     limit_reached: bool
     primary_window: RateLimitWindowSnapshot | None = None
     secondary_window: RateLimitWindowSnapshot | None = None
+    monthly_window: RateLimitWindowSnapshot | None = None
 
     @classmethod
     def from_data(cls, data: RateLimitStatusDetailsData) -> "RateLimitStatusDetails":
@@ -64,6 +65,7 @@ class RateLimitStatusDetails(BaseModel):
             secondary_window=RateLimitWindowSnapshot.from_data(data.secondary_window)
             if data.secondary_window
             else None,
+            monthly_window=RateLimitWindowSnapshot.from_data(data.monthly_window) if data.monthly_window else None,
         )
 
 

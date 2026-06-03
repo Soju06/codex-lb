@@ -385,6 +385,47 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_codex_usage_api_key_exposes_monthly_credit_window(async_client, db_setup):
+    key_id, plain_key = await _create_api_key(
+        name="codex-usage-api-key-monthly",
+        limits=[
+            LimitRuleInput(limit_type="credits", limit_window="monthly", max_value=1000),
+        ],
+    )
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.MONTHLY,
+                    max_value=1000,
+                    current_value=250,
+                    model_filter=None,
+                    reset_at=now + timedelta(days=30),
+                ),
+            ],
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["primary_window"] is None
+    assert payload["rate_limit"]["secondary_window"] is None
+    assert payload["rate_limit"]["monthly_window"]["used_percent"] == 25
+    assert payload["credits"]["balance"] == "750"
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_client, db_setup):
     now = utcnow()
     suffix = str(int(now.timestamp() * 1_000_000))

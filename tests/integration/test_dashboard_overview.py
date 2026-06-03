@@ -231,6 +231,36 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_exposes_monthly_only_free_account(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_monthly", "free-monthly@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_monthly",
+            20.0,
+            window="monthly",
+            window_minutes=43200,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+    account = accounts["acc_free_monthly"]
+    assert payload["lastSyncAt"] == (now - timedelta(minutes=1)).isoformat() + "Z"
+    assert account["usage"]["monthlyRemainingPercent"] == pytest.approx(80.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
+    assert account["windowMinutesMonthly"] == 43200
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

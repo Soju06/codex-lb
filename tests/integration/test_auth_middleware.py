@@ -116,6 +116,50 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_export.status_code == 403
     assert blocked_export.json()["error"]["code"] == "read_only_access"
 
+    blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
+    assert blocked_auth_export.status_code == 403
+    assert blocked_auth_export.json()["error"]["code"] == "read_only_access"
+
+    blocked_opencode_export = await client.post("/api/accounts/missing/export/opencode-auth")
+    assert blocked_opencode_export.status_code == 403
+    assert blocked_opencode_export.json()["error"]["code"] == "read_only_access"
+
+    blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
+    assert blocked_alias.status_code == 403
+    assert blocked_alias.json()["error"]["code"] == "read_only_access"
+
+    blocked_limit_warmup = await client.put("/api/accounts/missing/limit-warmup", json={"enabled": True})
+    assert blocked_limit_warmup.status_code == 403
+    assert blocked_limit_warmup.json()["error"]["code"] == "read_only_access"
+
+    blocked_proxy_endpoint = await client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "Guest Proxy", "scheme": "http", "host": "proxy.internal", "port": 8080},
+    )
+    assert blocked_proxy_endpoint.status_code == 403
+    assert blocked_proxy_endpoint.json()["error"]["code"] == "read_only_access"
+
+    blocked_proxy_pool = await client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Guest Pool", "endpointIds": []},
+    )
+    assert blocked_proxy_pool.status_code == 403
+    assert blocked_proxy_pool.json()["error"]["code"] == "read_only_access"
+
+    blocked_proxy_member = await client.post(
+        "/api/settings/upstream-proxy/pools/missing-pool/members",
+        json={"endpointId": "missing-endpoint"},
+    )
+    assert blocked_proxy_member.status_code == 403
+    assert blocked_proxy_member.json()["error"]["code"] == "read_only_access"
+
+    blocked_proxy_binding = await client.put(
+        "/api/settings/upstream-proxy/accounts/missing-account/binding",
+        json={"poolId": "missing-pool", "isActive": True},
+    )
+    assert blocked_proxy_binding.status_code == 403
+    assert blocked_proxy_binding.json()["error"]["code"] == "read_only_access"
+
 
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):

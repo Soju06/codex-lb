@@ -88,6 +88,7 @@ async def export_account_auth(
     request: Request,
     response: Response,
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAuthExportResponse:
     result = await context.service.export_auth(account_id)
@@ -109,6 +110,7 @@ async def export_account_opencode_auth(
     request: Request,
     response: Response,
     account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountOpenCodeAuthExportResponse:
     result = await context.service.export_opencode_auth(account_id)

@@ -195,6 +195,7 @@ async def get_upstream_proxy_admin(
 @router.post("/upstream-proxy/endpoints", response_model=UpstreamProxyEndpointResponse)
 async def create_upstream_proxy_endpoint(
     payload: UpstreamProxyEndpointCreateRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
     encryptor = TokenEncryptor()
@@ -216,6 +217,7 @@ async def create_upstream_proxy_endpoint(
 @router.post("/upstream-proxy/pools", response_model=UpstreamProxyPoolResponse)
 async def create_upstream_proxy_pool(
     payload: UpstreamProxyPoolCreateRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyPoolResponse:
     endpoint_ids = list(dict.fromkeys(payload.endpoint_ids))
@@ -245,6 +247,7 @@ async def create_upstream_proxy_pool(
 async def add_upstream_proxy_pool_member(
     pool_id: str,
     payload: UpstreamProxyPoolMemberRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyPoolResponse:
     pool = await context.session.get(ProxyPool, pool_id)
@@ -359,6 +362,7 @@ def _duplicate_proxy_pool_member_error() -> DashboardBadRequestError:
 async def put_account_proxy_binding(
     account_id: str,
     payload: AccountProxyBindingRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> AccountProxyBindingResponse:
     await _validate_account_id(context, account_id)

@@ -824,6 +824,49 @@ async def test_accounts_list_exposes_monthly_only_free_quota(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_ignores_stale_monthly_quota_after_upgrade(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_upgraded_monthly", "upgraded-monthly@example.com", plan_type="plus")
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            100.0,
+            window="monthly",
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            10.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            20.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_upgraded_monthly"]
+    assert account["status"] == AccountStatus.ACTIVE.value
+    assert account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(80.0)
+    assert account["usage"]["monthlyRemainingPercent"] is None
+    assert account["windowMinutesPrimary"] == 300
+    assert account["windowMinutesSecondary"] == 10080
+    assert account["windowMinutesMonthly"] is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_ignores_hidden_zero_capacity_primary_for_status(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

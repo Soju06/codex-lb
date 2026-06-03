@@ -107,6 +107,8 @@ def _account_to_summary(
         secondary_usage,
     )
 
+    if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
+        monthly_usage = None
     monthly_used_percent = _normalize_used_percent(monthly_usage)
     monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)
     if monthly_usage is not None:

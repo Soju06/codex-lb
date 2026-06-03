@@ -998,6 +998,211 @@ def test_ws_transport_payload_budget_uses_settings_limit() -> None:
     )
 
 
+def test_responses_request_contains_input_image_detects_supported_shapes() -> None:
+    top_level = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+        }
+    )
+    content_object = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                }
+            ],
+        }
+    )
+    tool_output = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "tool saw an image"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                    ],
+                }
+            ],
+        }
+    )
+    text_only = ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "hi", "input": "hello"})
+
+    assert proxy_service._responses_request_contains_input_image(top_level) is True
+    assert proxy_service._responses_request_contains_input_image(content_object) is True
+    assert proxy_service._responses_request_contains_input_image(tool_output) is True
+    assert proxy_service._responses_request_contains_input_image(text_only) is False
+
+
+@pytest.mark.asyncio
+async def test_core_inline_input_image_urls_converts_top_level_input_image(monkeypatch):
+    data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+
+    async def fake_fetch_image_data_url(_session, image_url, _timeout):
+        assert image_url == "https://example.com/top.png"
+        return data_url
+
+    monkeypatch.setattr(proxy_module, "_fetch_image_data_url", fake_fetch_image_data_url)
+
+    payload: proxy_module.JsonObject = {
+        "model": "gpt-5.5",
+        "input": [{"type": "input_image", "image_url": "https://example.com/top.png"}],
+    }
+
+    inlined = await proxy_module._inline_input_image_urls(payload, cast(proxy_module.ImageFetchSession, object()), 5.0)
+
+    assert inlined["input"] == [{"type": "input_image", "image_url": data_url}]
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 180.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    calls: list[tuple[str, object, str | None, float | None, str | None]] = []
+
+    async def fake_stream_with_retry(
+        payload,
+        headers,
+        *,
+        rewritten_file_account_id: str | None = None,
+        **kwargs,
+    ):
+        del headers
+        budget = proxy_service._stream_request_budget_seconds(
+            settings,
+            request_transport=kwargs["request_transport"],
+        )
+        calls.append(
+            (
+                "retry",
+                payload,
+                rewritten_file_account_id,
+                budget,
+                kwargs.get("upstream_stream_transport_override"),
+            )
+        )
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append(("bridge", None, None, None, None))
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    assert calls == [("retry", payload, None, 180.0, "http")]
+
+    text_payload = ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "hi", "input": "hello"})
+    text_output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=text_payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert text_output == ["data: bridge\n\n"]
+    assert calls[-1] == ("bridge", None, None, None, None)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    calls.clear()
+    disabled_bridge_output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert disabled_bridge_output == ["data: retry\n\n"]
+    assert calls == [("retry", payload, None, 180.0, "http")]
+
+
 @pytest.mark.asyncio
 async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -5144,6 +5349,68 @@ async def test_service_stream_responses_forces_http_upstream_for_http_stream_cli
     )
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert chunks
+    assert captured["override"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_honors_explicit_upstream_transport_override(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    setattr(settings, "upstream_stream_transport", "default")
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_explicit_stream_transport_override")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        captured["override"] = upstream_stream_transport_override
+        yield 'data: {"type":"response.completed","response":{"id":"resp_transport_override"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-stream"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
 
     assert chunks
     assert captured["override"] == "http"
@@ -16131,6 +16398,80 @@ async def test_stream_http_bridge_or_retry_rejects_input_image_file_id(monkeypat
     assert info.value.status_code == 400
     assert _proxy_error_code(info.value) == "unsupported_input_image_format"
     assert "data: URLs" in (_proxy_error_message(info.value) or "")
+
+
+def test_raise_for_unsupported_input_image_references_rejects_tool_output_file_id():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [{"type": "input_image", "file_id": "file_pic"}],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        service._raise_for_unsupported_input_image_references(payload)
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "unsupported_input_image_format"
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_rejects_tool_output_input_image_file_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [{"type": "input_image", "file_id": "file_pic"}],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as info:
+        async for _ in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        ):
+            pass
+
+    assert info.value.status_code == 400
+    assert _proxy_error_code(info.value) == "unsupported_input_image_format"
 
 
 @pytest.mark.asyncio

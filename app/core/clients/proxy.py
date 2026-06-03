@@ -1846,6 +1846,11 @@ async def _inline_input_image_urls(
         if not isinstance(item, dict):
             updated_input.append(item)
             continue
+        if item.get("type") == "input_image":
+            updated_item, item_changed = await _inline_content_images(item, session, connect_timeout)
+            updated_input.append(updated_item)
+            changed = changed or item_changed
+            continue
         content = item.get("content")
         updated_content, content_changed = await _inline_content_images(content, session, connect_timeout)
         if content_changed:

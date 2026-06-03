@@ -117,6 +117,33 @@ async def test_fetch_image_data_url_size_limit(monkeypatch):
     assert data_url is None
 
 
+@pytest.mark.asyncio
+async def test_inline_input_image_urls_rewrites_top_level_external_image(monkeypatch):
+    async def resolve_ips(host: str, *, timeout_seconds: float):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(proxy_module, "_resolve_global_ips", resolve_ips)
+    response = FakeResponse(200, {"Content-Type": "image/png"}, [b"abc"])
+    session = FakeSession(response)
+
+    inlined = await proxy_module._inline_input_image_urls(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.com/a.png",
+                }
+            ],
+        },
+        cast(proxy_module.ImageFetchSession, session),
+        1.0,
+    )
+
+    image_item = cast(dict[str, object], cast(list[object], inlined["input"])[0])
+    assert image_item["image_url"] == "data:image/png;base64," + base64.b64encode(b"abc").decode("ascii")
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [

@@ -539,6 +539,28 @@ def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _input_part_is_image(part: JsonValue) -> bool:
+    return is_json_mapping(part) and part.get("type") == "input_image"
+
+
+def _json_value_contains_input_image_part(value: JsonValue) -> bool:
+    if _input_part_is_image(value):
+        return True
+    if isinstance(value, list):
+        return any(_json_value_contains_input_image_part(item) for item in value)
+    if is_json_mapping(value):
+        return any(_json_value_contains_input_image_part(child) for child in value.values())
+    return False
+
+
+def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
+    """Return whether a Responses request carries any ``input_image`` part."""
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    return any(_json_value_contains_input_image_part(item) for item in input_value)
+
+
 def _response_create_text(
     payload: ResponsesRequest,
     *,
@@ -796,6 +818,14 @@ class ProxyService:
                 request_id,
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
+        image_request = _responses_request_contains_input_image(payload)
+        force_upstream_stream_transport = "http" if image_request else None
+        if runtime_config.enabled and image_request:
+            logger.info(
+                "stream_responses bypassing http bridge for input_image request_id=%s",
+                request_id,
+            )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if not runtime_config.enabled:
             async for line in self._stream_with_retry(
                 payload,
@@ -808,6 +838,7 @@ class ProxyService:
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
+                upstream_stream_transport_override=force_upstream_stream_transport,
             ):
                 yield line
             return
@@ -11004,6 +11035,7 @@ class ProxyService:
         suppress_text_done_events: bool,
         request_transport: str,
         rewritten_file_account_id: str | None = None,
+        upstream_stream_transport_override: str | None = None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
@@ -11014,7 +11046,9 @@ class ProxyService:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
+        upstream_stream_transport = upstream_stream_transport_override
+        if upstream_stream_transport is None:
+            upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
         if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
             # HTTP/SSE clients can retry a half-rendered turn after an upstream
             # websocket close, making the same visible message restart. Keep

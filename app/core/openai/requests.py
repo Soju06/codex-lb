@@ -185,6 +185,41 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     return file_ids
 
 
+def _append_input_image_file_references(
+    references: list[InputImageFileReference],
+    value: JsonValue,
+    *,
+    item_index: int,
+    content_index: int | None,
+) -> None:
+    if is_json_mapping(value):
+        file_id = _input_image_file_reference(value)
+        if file_id is not None:
+            references.append(
+                InputImageFileReference(
+                    item_index=item_index,
+                    content_index=content_index,
+                    file_id=file_id,
+                )
+            )
+        for child in value.values():
+            _append_input_image_file_references(
+                references,
+                child,
+                item_index=item_index,
+                content_index=content_index,
+            )
+        return
+    if is_json_list(value):
+        for child in value:
+            _append_input_image_file_references(
+                references,
+                child,
+                item_index=item_index,
+                content_index=content_index,
+            )
+
+
 def extract_input_image_file_references(input_value: JsonValue) -> list[InputImageFileReference]:
     if not is_json_list(input_value):
         return []
@@ -210,17 +245,19 @@ def extract_input_image_file_references(input_value: JsonValue) -> list[InputIma
         else:
             parts = []
         for content_index, part in enumerate(parts):
-            if not is_json_mapping(part):
-                continue
-            file_id = _input_image_file_reference(part)
-            if file_id is not None:
-                references.append(
-                    InputImageFileReference(
-                        item_index=item_index,
-                        content_index=content_index,
-                        file_id=file_id,
-                    )
-                )
+            _append_input_image_file_references(
+                references,
+                part,
+                item_index=item_index,
+                content_index=content_index,
+            )
+        output = item_mapping.get("output")
+        _append_input_image_file_references(
+            references,
+            output,
+            item_index=item_index,
+            content_index=None,
+        )
     return references
 
 

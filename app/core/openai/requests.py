@@ -466,7 +466,9 @@ class ResponsesRequest(BaseModel):
     def _validate_truncation(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        raise ValueError("truncation is not supported")
+        if value not in {"auto", "disabled"}:
+            raise ValueError("truncation must be 'auto' or 'disabled'")
+        return value
 
     @field_validator("store")
     @classmethod
@@ -563,6 +565,7 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "safety_identifier",
     "temperature",
     "top_p",
+    "truncation",
     "user",
 }
 

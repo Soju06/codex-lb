@@ -337,10 +337,11 @@ async def test_v1_responses_coerces_store_true_to_false(async_client):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("truncation", ["auto", "disabled"])
-async def test_v1_responses_rejects_truncation(async_client, truncation):
+async def test_v1_responses_accepts_truncation(async_client, truncation):
     payload = {"model": "gpt-5.2", "input": "hi", "truncation": truncation}
     resp = await async_client.post("/v1/responses", json=payload)
-    assert resp.status_code == 400
+    # 503 means it passed validation (no 400) but there are no upstream accounts in test
+    assert resp.status_code != 400
 
 
 @pytest.mark.asyncio

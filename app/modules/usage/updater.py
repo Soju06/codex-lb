@@ -516,8 +516,7 @@ class UsageUpdater:
         if primary is None and secondary is None:
             if monthly is None:
                 additional_synced = (
-                    self._additional_usage_repo is not None
-                    and payload.additional_rate_limits is not None
+                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
                 )
                 return AccountRefreshResult(usage_written=additional_synced)
         if primary is None and secondary is None and monthly is None:

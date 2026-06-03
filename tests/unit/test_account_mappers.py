@@ -92,6 +92,8 @@ def test_effective_status_uses_secondary_credits_to_reactivate_quota_exceeded_ac
             primary.used_percent,
             secondary,
             secondary.used_percent,
+            None,
+            None,
         )
         == AccountStatus.ACTIVE
     )
@@ -109,6 +111,8 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
             primary.used_percent,
             secondary,
             secondary.used_percent,
+            None,
+            None,
         )
         == AccountStatus.ACTIVE
     )
@@ -126,6 +130,8 @@ def test_effective_status_keeps_primary_exhaustion_rate_limited_with_credits() -
             primary.used_percent,
             secondary,
             secondary.used_percent,
+            None,
+            None,
         )
         == AccountStatus.RATE_LIMITED
     )
@@ -143,6 +149,8 @@ def test_effective_status_keeps_paused_account_paused_with_usable_credits() -> N
             primary.used_percent,
             secondary,
             secondary.used_percent,
+            None,
+            None,
         )
         == AccountStatus.PAUSED
     )

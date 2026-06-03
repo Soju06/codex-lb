@@ -205,9 +205,7 @@ def build_usage_summary_response(
     account_map = {account.id: account for account in accounts}
     primary_window = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
     secondary_window = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
-    monthly_window = (
-        usage_core.summarize_usage_window(monthly_rows, account_map, "monthly") if monthly_rows else None
-    )
+    monthly_window = usage_core.summarize_usage_window(monthly_rows, account_map, "monthly") if monthly_rows else None
 
     if cost_override is not None:
         cost = cost_override

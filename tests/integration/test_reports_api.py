@@ -100,6 +100,63 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
     ]
 
 
+async def test_reports_api_includes_preserved_deleted_account_history(async_client, db_setup):
+    start_at = _naive_utc(datetime(2026, 6, 1, 11, 0, 0, tzinfo=timezone.utc))
+    deleted_at = _naive_utc(datetime(2026, 6, 2, 9, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(
+            RequestLog(
+                account_id=None,
+                request_id="report-deleted-account-history",
+                requested_at=start_at,
+                model="gpt-5.1",
+                status="success",
+                input_tokens=13,
+                output_tokens=7,
+                cached_input_tokens=3,
+                cost_usd=0.42,
+                deleted_at=deleted_at,
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": start_at.date().isoformat(),
+            "end_date": start_at.date().isoformat(),
+        },
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["summary"]["totalRequests"] == 1
+    assert payload["summary"]["totalInputTokens"] == 13
+    assert payload["summary"]["totalOutputTokens"] == 7
+    assert payload["summary"]["totalCostUsd"] == 0.42
+    assert payload["daily"] == [
+        {
+            "activeAccounts": 0,
+            "costUsd": 0.42,
+            "cachedInputTokens": 3,
+            "date": start_at.date().isoformat(),
+            "errorCount": 0,
+            "requests": 1,
+            "inputTokens": 13,
+            "outputTokens": 7,
+        }
+    ]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "percentage": 100.0}]
+    assert payload["byAccount"] == [
+        {
+            "accountId": None,
+            "alias": None,
+            "costUsd": 0.42,
+            "requests": 1,
+        }
+    ]
+
+
 async def test_reports_api_includes_end_date_until_next_midnight(async_client, db_setup):
     end_day_last_second = _naive_utc(datetime(2026, 6, 1, 23, 59, 59, tzinfo=timezone.utc))
     next_day_midnight = _naive_utc(datetime(2026, 6, 2, 0, 0, 0, tzinfo=timezone.utc))

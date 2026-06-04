@@ -60,7 +60,6 @@ class ReportsRepository:
         conditions = [
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
-            RequestLog.deleted_at.is_(None),
             _normal_traffic_clause(),
         ]
         if account_ids:
@@ -111,7 +110,6 @@ class ReportsRepository:
         conditions = [
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
-            RequestLog.deleted_at.is_(None),
             _normal_traffic_clause(),
             RequestLog.model.is_not(None),
         ]
@@ -148,7 +146,6 @@ class ReportsRepository:
         conditions = [
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
-            RequestLog.deleted_at.is_(None),
             _normal_traffic_clause(),
         ]
         if account_ids:
@@ -197,7 +194,6 @@ class ReportsRepository:
         conditions = [
             RequestLog.requested_at >= start_date,
             RequestLog.requested_at < end_date,
-            RequestLog.deleted_at.is_(None),
             _normal_traffic_clause(),
             RequestLog.account_id.is_not(None),
         ]

@@ -19,15 +19,6 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-};
-
 const BASE_SETTINGS = createDashboardSettings({
   stickyThreadsEnabled: false,
   preferEarlierResetAccounts: true,
@@ -356,23 +347,8 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("checkbox", { name: "Use Sat in weekly pace" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
+      ...BASE_UPDATE_PAYLOAD,
       weeklyPaceWorkingDays: "0,1,2,3,4,6",
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

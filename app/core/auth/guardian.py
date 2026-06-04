@@ -93,7 +93,10 @@ class AuthGuardianScheduler:
                     break
                 except asyncio.TimeoutError:
                     pass
-            await self._refresh_once()
+            try:
+                await self._refresh_once()
+            except Exception:
+                logger.exception("Auth Guardian refresh pass failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
             except asyncio.TimeoutError:
@@ -109,8 +112,10 @@ class AuthGuardianScheduler:
                     accounts,
                     now=self.now(),
                     max_age_seconds=self.max_age_seconds,
-                    limit=self.batch_size,
+                    limit=len(accounts),
                 )
+                candidates = [account for account in candidates if not self._in_backoff(account.id)]
+                candidates = candidates[: max(0, self.batch_size)]
             if not candidates:
                 return
             semaphore = asyncio.Semaphore(max(1, self.concurrency))

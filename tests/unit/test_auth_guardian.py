@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -148,6 +150,83 @@ async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
     assert calls == [account.id]
     assert account.status == AccountStatus.ACTIVE
     assert account.deactivation_reason is None
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    calls = 0
+    scheduler: AuthGuardianScheduler
+
+    class _FlakyRepo(_Repo):
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("database is briefly unavailable")
+            scheduler._stop.set()
+            return await super().list_accounts(refresh_existing=refresh_existing)
+
+    repo = _FlakyRepo([])
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_FlakyRepo]:
+        yield repo
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=1,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager([]),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.core.auth.guardian"):
+        await asyncio.wait_for(scheduler._run_loop(), timeout=2)
+
+    assert calls == 2
+    assert "Auth Guardian refresh pass failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    accounts = [
+        _account("backoff-oldest", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=30)),
+        _account("runnable-older", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=20)),
+        _account("runnable-newer", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
+    ]
+    repo = _Repo(accounts)
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=2,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+    scheduler._record_failure("backoff-oldest")
+
+    await scheduler._refresh_once()
+
+    assert calls == ["runnable-older", "runnable-newer"]
 
 
 async def _noop_sleep() -> None:

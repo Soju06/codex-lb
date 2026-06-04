@@ -5,12 +5,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from typing import cast
 
 import pytest
 
+from app.core.auth import guardian as guardian_module
 from app.core.auth.guardian import AuthGuardianScheduler, select_auth_guardian_candidates
 from app.core.auth.refresh import RefreshError
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.auth_manager import AuthManager
 
 pytestmark = pytest.mark.unit
 
@@ -76,6 +79,14 @@ def test_select_auth_guardian_candidates_returns_stale_active_only() -> None:
     selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=2)
 
     assert [account.id for account in selected] == ["oldest-active", "stale-active"]
+
+
+def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
+    repo = _Repo([])
+
+    manager = cast(AuthManager, guardian_module._default_auth_manager_factory(repo))
+
+    assert manager._refresh_repo_factory is guardian_module._default_accounts_repo_factory
 
 
 @pytest.mark.asyncio

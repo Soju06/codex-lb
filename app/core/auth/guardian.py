@@ -242,13 +242,13 @@ def _get_leader_election() -> _LeaderElectionLike:
 
 
 @asynccontextmanager
-async def _default_accounts_repo_factory() -> AsyncIterator[_AccountsRepositoryLike]:
+async def _default_accounts_repo_factory() -> AsyncIterator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
 
 
 def _default_auth_manager_factory(repo: _AccountsRepositoryLike) -> _AuthManagerLike:
-    return AuthManager(cast(AccountsRepository, repo))
+    return AuthManager(cast(AccountsRepository, repo), refresh_repo_factory=_default_accounts_repo_factory)
 
 
 def _jitter_delay(max_seconds: float) -> float:

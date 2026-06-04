@@ -756,6 +756,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "geoHeil",
+      "name": "geoHeil",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1694964?v=4",
+      "profile": "https://github.com/geoHeil",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

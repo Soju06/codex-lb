@@ -89,7 +89,7 @@ export const DashboardSettingsSchema = z
     totpRequiredOnLogin: z.boolean(),
     totpConfigured: z.boolean(),
     apiKeyAuthEnabled: z.boolean(),
-    hideUpstreamQuotaFromApiKeys: z.boolean(),
+    hideUpstreamQuotaFromApiKeys: z.boolean().optional().default(false),
     limitWarmupEnabled: z.boolean().optional().default(false),
     limitWarmupWindows: LimitWarmupWindowsSchema.optional().default("both"),
     limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),

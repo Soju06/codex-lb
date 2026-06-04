@@ -222,7 +222,7 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
     settings = get_settings()
     return AuthGuardianScheduler(
         interval_seconds=settings.auth_guardian_interval_seconds,
-        enabled=settings.auth_guardian_enabled,
+        enabled=settings.auth_guardian_enabled and settings.leader_election_enabled,
         max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
         batch_size=settings.auth_guardian_batch_size,
         concurrency=settings.auth_guardian_concurrency,

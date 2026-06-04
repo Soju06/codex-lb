@@ -179,7 +179,7 @@ class Settings(BaseSettings):
     oauth_callback_host: str = _default_oauth_callback_host()
     oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 8.0
-    auth_guardian_enabled: bool = True
+    auth_guardian_enabled: bool = False
     auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
     auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)
     auth_guardian_batch_size: int = Field(default=100, gt=0)

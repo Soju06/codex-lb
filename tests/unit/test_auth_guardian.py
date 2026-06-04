@@ -5,13 +5,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
 from app.core.auth import guardian as guardian_module
-from app.core.auth.guardian import AuthGuardianScheduler, select_auth_guardian_candidates
+from app.core.auth.guardian import AuthGuardianScheduler, build_auth_guardian_scheduler, select_auth_guardian_candidates
 from app.core.auth.refresh import RefreshError
+from app.core.config import settings as settings_module
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.auth_manager import AuthManager
 
@@ -95,6 +97,25 @@ def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
     manager = cast(AuthManager, guardian_module._default_auth_manager_factory(repo))
 
     assert manager._refresh_repo_factory is guardian_module._default_accounts_repo_factory
+
+
+def test_build_auth_guardian_scheduler_requires_leader_election(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(auth_guardian_enabled=True, leader_election_enabled=False)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is False
+
+    settings.leader_election_enabled = True
+    scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+
+    settings.auth_guardian_enabled = False
+    scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is False
 
 
 @pytest.mark.asyncio
@@ -347,3 +368,17 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
 
 async def _noop_sleep() -> None:
     return None
+
+
+def _settings(*, auth_guardian_enabled: bool, leader_election_enabled: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        auth_guardian_enabled=auth_guardian_enabled,
+        leader_election_enabled=leader_election_enabled,
+        auth_guardian_interval_seconds=21600,
+        auth_guardian_max_refresh_age_seconds=12 * 3600,
+        auth_guardian_batch_size=10,
+        auth_guardian_concurrency=1,
+        auth_guardian_jitter_seconds=0.0,
+        auth_guardian_failure_backoff_base_seconds=300.0,
+        auth_guardian_failure_backoff_max_seconds=3600.0,
+    )

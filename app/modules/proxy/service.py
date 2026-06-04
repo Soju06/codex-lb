@@ -16397,7 +16397,7 @@ def _summarize_response_create_payload(payload: dict[str, JsonValue]) -> dict[st
     )
     summary: dict[str, JsonValue] = {
         "top_level_keys": list(payload.keys()),
-        "top_level_field_sizes": field_sizes,
+        "top_level_field_sizes": cast(JsonValue, field_sizes),
     }
     input_summary = _summarize_response_create_input(payload.get("input"))
     if input_summary is not None:

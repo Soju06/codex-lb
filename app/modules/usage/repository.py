@@ -374,7 +374,7 @@ def _additional_latest_by_account_sqlite(
           and {scope_clause}
           and window = ?
           {since_filter}
-        order by recorded_at desc, id desc
+        order by recorded_at desc, used_percent desc, id desc
         limit 1
     """
 

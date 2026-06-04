@@ -59,7 +59,7 @@ services:
           path: ./frontend/bun.lock
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     profiles: ["postgres"]
     environment:
       POSTGRES_USER: codex_lb

@@ -160,6 +160,21 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_proxy_binding.status_code == 403
     assert blocked_proxy_binding.json()["error"]["code"] == "read_only_access"
 
+    blocked_quota_planner_settings = await client.put("/api/quota-planner/settings", json={"mode": "shadow"})
+    assert blocked_quota_planner_settings.status_code == 403
+    assert blocked_quota_planner_settings.json()["error"]["code"] == "read_only_access"
+
+    blocked_quota_planner_warm_now = await client.post(
+        "/api/quota-planner/warm-now",
+        json={"accountId": "missing", "forceProbe": False},
+    )
+    assert blocked_quota_planner_warm_now.status_code == 403
+    assert blocked_quota_planner_warm_now.json()["error"]["code"] == "read_only_access"
+
+    blocked_quota_planner_cancel = await client.post("/api/quota-planner/decisions/missing/cancel")
+    assert blocked_quota_planner_cancel.status_code == 403
+    assert blocked_quota_planner_cancel.json()["error"]["code"] == "read_only_access"
+
 
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):

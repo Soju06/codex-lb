@@ -3,12 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 
 from app.core.audit.service import AuditService
-from app.core.auth.refresh import RefreshError
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.auth.refresh import RefreshError
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError

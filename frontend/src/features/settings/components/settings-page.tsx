@@ -150,7 +150,7 @@ export function SettingsPage() {
               }
             />
             <FirewallSection disabled={controlsDisabled} />
-            <QuotaPlannerSection />
+            <QuotaPlannerSection disabled={controlsDisabled} />
             <StickySessionsSection disabled={controlsDisabled} />
           </div>
 

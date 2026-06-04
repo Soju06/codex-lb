@@ -22,7 +22,6 @@ import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>

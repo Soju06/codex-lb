@@ -32,6 +32,14 @@ const BASE_SETTINGS = createDashboardSettings({
   preferEarlierResetAccounts: true,
   totpConfigured: false,
 });
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: BASE_SETTINGS.limitWarmupEnabled,
+  limitWarmupWindows: BASE_SETTINGS.limitWarmupWindows,
+  limitWarmupModel: BASE_SETTINGS.limitWarmupModel,
+  limitWarmupPrompt: BASE_SETTINGS.limitWarmupPrompt,
+  limitWarmupCooldownSeconds: BASE_SETTINGS.limitWarmupCooldownSeconds,
+  limitWarmupMinAvailablePercent: BASE_SETTINGS.limitWarmupMinAvailablePercent,
+};
 const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...BASE_UPDATE_PAYLOAD } =
   BASE_SETTINGS;
 void _guestPasswordConfigured;

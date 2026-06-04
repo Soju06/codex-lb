@@ -58,7 +58,11 @@ function settingsDraft(settings: QuotaPlannerSettings): QuotaPlannerSettings {
   return { ...settings, workingDays: [...settings.workingDays] };
 }
 
-export function QuotaPlannerSection() {
+interface QuotaPlannerSectionProps {
+  disabled?: boolean;
+}
+
+export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionProps) {
   const {
     settingsQuery,
     decisionsQuery,
@@ -91,9 +95,9 @@ export function QuotaPlannerSection() {
     ],
   );
 
-  const settingsBusy = updateSettingsMutation.isPending;
-  const warmupBusy = warmNowMutation.isPending;
-  const cancelBusy = cancelDecisionMutation.isPending;
+  const settingsBusy = updateSettingsMutation.isPending || disabled;
+  const warmupBusy = warmNowMutation.isPending || disabled;
+  const cancelBusy = cancelDecisionMutation.isPending || disabled;
   const changed = settings && effectiveDraft ? JSON.stringify(settings) !== JSON.stringify(effectiveDraft) : false;
   const forecast = forecastQuery.data;
   const decisions = decisionsQuery.data ?? [];

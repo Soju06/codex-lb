@@ -10,6 +10,8 @@ The Compose configuration SHALL provide an explicit one-shot upgrade profile for
 
 The normal Postgres service SHALL fail before starting Postgres 18 when it detects a pre-18 root-level `PG_VERSION` marker in the mounted named volume.
 
+The normal Postgres service SHALL preserve runtime command arguments when it delegates to the official Postgres entrypoint.
+
 The operator documentation SHALL describe how to stop the old service, back up the named volume, run the upgrade profile, start Postgres, and verify the upgraded database.
 
 #### Scenario: Existing Postgres 16 volume is guarded
@@ -25,3 +27,9 @@ The operator documentation SHALL describe how to stop the old service, back up t
 - **WHEN** the operator starts the normal `postgres` service
 - **THEN** the service delegates to the official Postgres entrypoint
 - **AND** the Postgres 18 image initializes or opens the versioned data directory under `/var/lib/postgresql`
+
+#### Scenario: Runtime command arguments are preserved
+
+- **GIVEN** the named Compose volume does not contain a root-level `PG_VERSION` file
+- **WHEN** the operator starts the normal `postgres` service with runtime PostgreSQL command arguments
+- **THEN** the guard delegates those arguments to the official Postgres entrypoint

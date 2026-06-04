@@ -71,7 +71,11 @@ services:
           echo >&2 "Refusing to start postgres:18-alpine before the named volume is upgraded."
           exit 1
         fi
-        exec docker-entrypoint.sh postgres
+        if [ "$#" -eq 0 ]; then
+          set -- postgres
+        fi
+        exec docker-entrypoint.sh "$@"
+      - codex-lb-postgres-entrypoint-guard
     environment:
       POSTGRES_USER: codex_lb
       POSTGRES_PASSWORD: codex_lb

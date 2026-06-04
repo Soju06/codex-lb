@@ -6697,6 +6697,77 @@ async def test_stream_responses_treats_missing_security_work_pool_as_optional(mo
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_security_work_retry_exhaustion_logs_useragent(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_regular_security_exhausted")
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts"),
+        ]
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_cyber_exhausted",
+                        "error": {
+                            "code": "invalid_request_error",
+                            "type": "invalid_request_error",
+                            "message": cyber_message,
+                        },
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"session_id": "sid-stream", "User-Agent": "CodexCLI/1.2.3 linux"},
+        )
+    ]
+
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert request_logs.calls[-1]["account_id"] is None
+    assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
+    assert request_logs.calls[-1]["useragent"] == "CodexCLI/1.2.3 linux"
+    assert request_logs.calls[-1]["useragent_group"] == "CodexCLI"
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_missing_security_work_pool_preserves_failover_budget(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

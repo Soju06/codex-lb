@@ -11909,6 +11909,8 @@ class ProxyService:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"

@@ -148,6 +148,8 @@ class AuthGuardianScheduler:
                         raise
                 except RefreshError as exc:
                     self._record_failure(account_id)
+                    if exc.is_permanent:
+                        get_account_selection_cache().invalidate()
                     logger.warning(
                         "Auth Guardian refresh failed account_id=%s account_alias=%s code=%s permanent=%s transport=%s",
                         account.id,

@@ -229,6 +229,49 @@ async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auth_guardian_permanent_refresh_failure_invalidates_account_selection_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("permanent-failure", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+    cache = _AccountSelectionCache()
+    failures = {
+        account.id: RefreshError(
+            "refresh_token_invalidated",
+            "Refresh token was revoked",
+            True,
+        )
+    }
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    monkeypatch.setattr(guardian_module, "get_account_selection_cache", lambda: cache)
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls, failures),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == [account.id]
+    assert cache.invalidate_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: pytest.LogCaptureFixture) -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
     calls = 0

@@ -139,6 +139,7 @@ class UsageRefreshScheduler:
                             after_primary=after_primary,
                             after_secondary=after_secondary,
                             refresh_started_at=refresh_started_at,
+                            usage_refresh_interval_seconds=self.interval_seconds,
                         )
                         await reconcile_recoverable_account_statuses(
                             accounts_repo=accounts_repo,

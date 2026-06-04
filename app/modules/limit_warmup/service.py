@@ -313,6 +313,7 @@ class LimitWarmupService:
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
         refresh_started_at: datetime | None = None,
+        usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     ) -> None:
         if not settings.limit_warmup_enabled:
             return
@@ -361,6 +362,7 @@ class LimitWarmupService:
                         now=now,
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
+                        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if candidate is None:
@@ -680,6 +682,7 @@ def _build_staggered_idle_candidate(
     now: datetime,
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
+    usage_refresh_interval_seconds: int,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
@@ -695,7 +698,12 @@ def _build_staggered_idle_candidate(
     if min_available_percent >= 100.0 and after.used_percent > 0.0:
         return None
 
-    due = _staggered_idle_due(account.id, [candidate.id for candidate in accounts], now=now)
+    due = _staggered_idle_due(
+        account.id,
+        [candidate.id for candidate in accounts],
+        now=now,
+        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
+    )
     if due is None:
         return None
     return _WarmupCandidate(reset_at=due.cycle_end, window=_IDLE_PRIMARY_WINDOW)
@@ -707,7 +715,13 @@ class _StaggeredIdleDue:
     slot_offset_seconds: int
 
 
-def _staggered_idle_due(account_id: str, account_ids: list[str], *, now: datetime) -> _StaggeredIdleDue | None:
+def _staggered_idle_due(
+    account_id: str,
+    account_ids: list[str],
+    *,
+    now: datetime,
+    usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
+) -> _StaggeredIdleDue | None:
     if not account_ids:
         return None
     ordered_account_ids = sorted(set(account_ids))
@@ -720,7 +734,8 @@ def _staggered_idle_due(account_id: str, account_ids: list[str], *, now: datetim
     cycle_start = (now_epoch // _ROLLING_WINDOW_SECONDS) * _ROLLING_WINDOW_SECONDS
     elapsed = now_epoch - cycle_start
     slot_offset = int(account_index * _ROLLING_WINDOW_SECONDS / len(ordered_account_ids))
-    if not slot_offset <= elapsed < slot_offset + _STAGGER_SLOT_GRACE_SECONDS:
+    grace_seconds = max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
+    if not slot_offset <= elapsed < slot_offset + grace_seconds:
         return None
     return _StaggeredIdleDue(
         cycle_end=cycle_start + _ROLLING_WINDOW_SECONDS,

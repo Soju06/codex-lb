@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+
+import pytest
+
+from app.core.auth.guardian import AuthGuardianScheduler, select_auth_guardian_candidates
+from app.core.auth.refresh import RefreshError
+from app.db.models import Account, AccountStatus
+
+pytestmark = pytest.mark.unit
+
+
+def _account(account_id: str, *, status: AccountStatus, last_refresh: datetime) -> Account:
+    return Account(
+        id=account_id,
+        chatgpt_account_id=f"workspace-{account_id}",
+        email=f"{account_id}@example.com",
+        alias=None,
+        plan_type="plus",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=last_refresh,
+        status=status,
+        deactivation_reason=None,
+    )
+
+
+class _Repo:
+    def __init__(self, accounts: list[Account]) -> None:
+        self._accounts = {account.id: account for account in accounts}
+
+    async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+        del refresh_existing
+        return list(self._accounts.values())
+
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return self._accounts.get(account_id)
+
+
+class _Leader:
+    async def try_acquire(self) -> bool:
+        return True
+
+
+class _AuthManager:
+    def __init__(self, calls: list[str], failures: dict[str, RefreshError] | None = None) -> None:
+        self._calls = calls
+        self._failures = failures or {}
+
+    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+        assert force is True
+        self._calls.append(account.id)
+        failure = self._failures.get(account.id)
+        if failure is not None:
+            raise failure
+        account.last_refresh = datetime(2026, 1, 2, 12, 0, 0)
+        return account
+
+
+def test_select_auth_guardian_candidates_returns_stale_active_only() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    accounts = [
+        _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
+        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
+        _account("oldest-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=20)),
+        _account("paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=20)),
+        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=20)),
+    ]
+
+    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=2)
+
+    assert [account.id for account in selected] == ["oldest-active", "stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_others() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    accounts = [
+        _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
+        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
+        _account("paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=13)),
+    ]
+    repo = _Repo(accounts)
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=2,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("transport-failure", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+    failures = {
+        account.id: RefreshError(
+            "transport_error",
+            "Transport error during token refresh",
+            False,
+            transport_error=True,
+        )
+    }
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls, failures),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == [account.id]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
+
+
+async def _noop_sleep() -> None:
+    return None

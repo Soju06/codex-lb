@@ -17,6 +17,7 @@ import aiohttp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
@@ -135,11 +136,13 @@ async def lifespan(app: FastAPI):
     model_scheduler = build_model_refresh_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     quota_planner_scheduler = build_quota_planner_scheduler()
+    auth_guardian_scheduler = build_auth_guardian_scheduler()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
     await quota_planner_scheduler.start()
+    await auth_guardian_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -295,6 +298,7 @@ async def lifespan(app: FastAPI):
 
         await cache_poller.stop()
         await quota_planner_scheduler.stop()
+        await auth_guardian_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await api_key_limit_reset_scheduler.stop()

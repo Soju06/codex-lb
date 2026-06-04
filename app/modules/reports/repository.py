@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Account, RequestLog
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
+_INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 
 
 @dataclass(frozen=True)
@@ -212,4 +213,10 @@ class ReportsRepository:
 
 
 def _normal_traffic_clause():
-    return or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE)
+    return and_(
+        or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE),
+        or_(
+            RequestLog.request_kind.is_(None),
+            RequestLog.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
+        ),
+    )

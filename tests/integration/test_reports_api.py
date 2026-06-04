@@ -210,7 +210,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days(async_cli
     assert payload["daily"][1]["date"] == "2026-06-08"
 
 
-async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
+async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
     start_at = _naive_utc(datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports_warmup", "reports-warmup@example.com"))
@@ -230,7 +230,7 @@ async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
                 ),
                 RequestLog(
                     account_id="acc_reports_warmup",
-                    request_id="report-warmup-traffic",
+                    request_id="report-warmup-source-traffic",
                     requested_at=start_at,
                     model="gpt-5.1",
                     status="success",
@@ -239,6 +239,32 @@ async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
                     cached_input_tokens=0,
                     cost_usd=4.0,
                     source="limit_warmup",
+                ),
+                RequestLog(
+                    account_id="acc_reports_warmup",
+                    request_id="report-warmup-kind-traffic",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=70,
+                    output_tokens=50,
+                    cached_input_tokens=0,
+                    cost_usd=5.0,
+                    source=None,
+                    request_kind="warmup",
+                ),
+                RequestLog(
+                    account_id="acc_reports_warmup",
+                    request_id="report-limit-warmup-kind-traffic",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=80,
+                    output_tokens=60,
+                    cached_input_tokens=0,
+                    cost_usd=6.0,
+                    source=None,
+                    request_kind="limit_warmup",
                 ),
             ]
         )
@@ -254,6 +280,15 @@ async def test_reports_api_excludes_limit_warmup_logs(async_client, db_setup):
     assert payload["summary"]["totalRequests"] == 1
     assert payload["summary"]["totalInputTokens"] == 6
     assert payload["summary"]["totalCostUsd"] == 0.4
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "percentage": 100.0}]
+    assert payload["byAccount"] == [
+        {
+            "accountId": "acc_reports_warmup",
+            "alias": None,
+            "costUsd": 0.4,
+            "requests": 1,
+        }
+    ]
 
 
 async def test_reports_api_applies_account_and_model_filters(async_client, db_setup):

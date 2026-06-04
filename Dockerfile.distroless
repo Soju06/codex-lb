@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 COPY frontend ./
 RUN bun run build
 
-FROM python:3.13-slim-bookworm AS python-build
+FROM python:3.14-slim-bookworm AS python-build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

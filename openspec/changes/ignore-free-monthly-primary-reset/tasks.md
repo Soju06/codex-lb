@@ -8,7 +8,7 @@
 
 - [x] 2.1 Add a shared helper that identifies the canonical primary-window duration.
 - [x] 2.2 Use that helper when deciding whether zero-capacity primary rows may still drive rate-limit recovery.
-- [x] 2.3 Keep the existing free-plan weekly remap behavior unchanged.
+- [x] 2.3 Keep stale primary-row recovery aligned with the free-account monthly-only quota model.
 
 ## 3. Verification
 

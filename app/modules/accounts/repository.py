@@ -26,6 +26,7 @@ from app.db.models import (
 )
 from app.db.session import sqlite_writer_section
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
+from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
@@ -420,6 +421,7 @@ class AccountsRepository:
         await self._session.execute(
             update(UsageHistory).where(UsageHistory.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
+        _clear_bulk_history_since_sqlite_cache()
         await self._session.execute(
             update(AdditionalUsageHistory)
             .where(AdditionalUsageHistory.account_id.in_(duplicate_ids))
@@ -578,6 +580,7 @@ class AccountsRepository:
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
+            _clear_bulk_history_since_sqlite_cache()
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
             else:

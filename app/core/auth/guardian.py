@@ -18,6 +18,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,13 @@ class AuthGuardianScheduler:
                     return
                 manager = self.auth_manager_factory(repo)
                 try:
-                    await manager.ensure_fresh(account, force=True)
+                    refresh_task = asyncio.create_task(manager.ensure_fresh(account, force=True))
+                    try:
+                        await asyncio.shield(refresh_task)
+                    except asyncio.CancelledError:
+                        with contextlib.suppress(Exception):
+                            await refresh_task
+                        raise
                 except RefreshError as exc:
                     self._record_failure(account_id)
                     logger.warning(
@@ -161,6 +168,7 @@ class AuthGuardianScheduler:
                     )
                     return
                 self._failures.pop(account_id, None)
+                get_account_selection_cache().invalidate()
                 logger.info(
                     "Auth Guardian refreshed account_id=%s account_alias=%s",
                     account.id,

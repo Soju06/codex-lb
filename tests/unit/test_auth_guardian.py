@@ -66,6 +66,14 @@ class _AuthManager:
         return account
 
 
+class _AccountSelectionCache:
+    def __init__(self) -> None:
+        self.invalidate_calls = 0
+
+    def invalidate(self) -> None:
+        self.invalidate_calls += 1
+
+
 def test_select_auth_guardian_candidates_returns_stale_active_only() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
@@ -121,6 +129,42 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     await scheduler._refresh_once()
 
     assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+    cache = _AccountSelectionCache()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    monkeypatch.setattr(guardian_module, "get_account_selection_cache", lambda: cache)
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == [account.id]
+    assert cache.invalidate_calls == 1
 
 
 @pytest.mark.asyncio
@@ -238,6 +282,67 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
     await scheduler._refresh_once()
 
     assert calls == ["runnable-older", "runnable-newer"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    started = asyncio.Event()
+    allow_finish = asyncio.Event()
+    completed = False
+    repo_exited = False
+
+    class _DelayedAuthManager:
+        async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+            nonlocal completed
+            assert force is True
+            assert account.id == "stale-active"
+            started.set()
+            await allow_finish.wait()
+            completed = True
+            account.last_refresh = now
+            return account
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        nonlocal repo_exited
+        try:
+            yield repo
+        finally:
+            if started.is_set():
+                repo_exited = True
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _DelayedAuthManager(),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    task = asyncio.create_task(scheduler._refresh_once())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert completed is False
+    assert repo_exited is False
+
+    allow_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert completed is True
+    assert repo_exited is True
 
 
 async def _noop_sleep() -> None:

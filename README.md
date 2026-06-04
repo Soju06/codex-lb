@@ -542,6 +542,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://rtx09x.github.io/"><img src="https://avatars.githubusercontent.com/u/187954595?v=4?s=100" width="100px;" alt="Rudra Tiwari"/><br /><sub><b>Rudra Tiwari</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Rtx09x" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/wuchao05"><img src="https://avatars.githubusercontent.com/u/97175999?v=4?s=100" width="100px;" alt="Wu Chao"/><br /><sub><b>Wu Chao</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=wuchao05" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/zwd0313"><img src="https://avatars.githubusercontent.com/u/159164983?v=4?s=100" width="100px;" alt="zwd0313"/><br /><sub><b>zwd0313</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=zwd0313" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jhordanjw123"><img src="https://avatars.githubusercontent.com/u/123907587?v=4?s=100" width="100px;" alt="jhordanjw123"/><br /><sub><b>jhordanjw123</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=jhordanjw123" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=jhordanjw123" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

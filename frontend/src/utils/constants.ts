@@ -3,6 +3,7 @@ export const STATUS_LABELS = {
   paused: "Paused",
   limited: "Rate limited",
   exceeded: "Quota exceeded",
+  reauth: "Re-auth required",
   deactivated: "Deactivated",
 } as const;
 

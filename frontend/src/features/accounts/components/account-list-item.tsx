@@ -59,6 +59,7 @@ export function AccountListItem({
     hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow =
     hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
 
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
@@ -87,9 +88,11 @@ export function AccountListItem({
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
-        <RoutingPolicyBadge
-          policy={account.routingPolicy as AccountRoutingPolicy | undefined}
-        />
+        {showRoutingPolicy ? (
+          <RoutingPolicyBadge
+            policy={account.routingPolicy as AccountRoutingPolicy | undefined}
+          />
+        ) : null}
         {account.securityWorkAuthorized === true ? (
           <ShieldCheck
             className="h-3.5 w-3.5 text-emerald-600"

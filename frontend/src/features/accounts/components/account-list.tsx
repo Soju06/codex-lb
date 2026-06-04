@@ -17,7 +17,7 @@ import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { formatSlug } from "@/utils/formatters";
 
-const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "deactivated"];
+const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"];
 
 export type AccountListProps = {
   accounts: AccountSummary[];

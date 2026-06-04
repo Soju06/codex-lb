@@ -575,6 +575,18 @@ def test_select_account_skips_rate_limited_until_reset():
     assert result.account.account_id == "b"
 
 
+def test_select_account_reports_paused_and_deactivated_without_reauth_reason():
+    states = [
+        AccountState("paused", AccountStatus.PAUSED, used_percent=5.0),
+        AccountState("deactivated", AccountStatus.DEACTIVATED, used_percent=5.0),
+    ]
+
+    result = select_account(states)
+
+    assert result.account is None
+    assert result.error_message == "All accounts are paused or deactivated"
+
+
 def test_select_account_round_robin_prefers_least_recently_selected():
     now = 1_700_000_000.0
     states = [
@@ -992,8 +1004,15 @@ def test_handle_quota_exceeded_sets_used_percent_and_cooldown():
 def test_handle_permanent_failure_sets_reason():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_permanent_failure(state, "refresh_token_expired")
-    assert state.status == AccountStatus.DEACTIVATED
+    assert state.status == AccountStatus.REAUTH_REQUIRED
     assert state.deactivation_reason is not None
+
+
+def test_handle_permanent_failure_sets_reauth_required_for_token_invalidated():
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(state, "token_invalidated")
+    assert state.status == AccountStatus.REAUTH_REQUIRED
+    assert state.deactivation_reason == "Authentication token invalidated - re-login required"
 
 
 def test_handle_permanent_failure_sets_reason_for_account_deactivated():
@@ -1352,14 +1371,15 @@ def test_requested_limit_relative_availability_uses_requested_reset_window():
 
 
 def test_bypass_quota_exceeded_does_not_affect_other_statuses():
-    """bypass_quota_exceeded should only affect QUOTA_EXCEEDED, not PAUSED/DEACTIVATED."""
+    """bypass_quota_exceeded should only affect QUOTA_EXCEEDED, not hard-blocked states."""
     now = 1_700_000_000.0
     paused = AccountState("p", AccountStatus.PAUSED, used_percent=5.0)
+    reauth = AccountState("r", AccountStatus.REAUTH_REQUIRED, used_percent=5.0)
     deactivated = AccountState("d", AccountStatus.DEACTIVATED, used_percent=5.0)
     quota = AccountState("q", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now) + 3600)
 
-    result = select_account([paused, deactivated, quota], now=now, bypass_quota_exceeded=True)
-    # PAUSED and DEACTIVATED still excluded; QUOTA_EXCEEDED is kept.
+    result = select_account([paused, reauth, deactivated, quota], now=now, bypass_quota_exceeded=True)
+    # Hard-blocked states still excluded; QUOTA_EXCEEDED is kept.
     assert result.account is not None
     assert result.account.account_id == "q"
 

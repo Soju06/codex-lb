@@ -6884,6 +6884,196 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_token_invalidated_retries_then_fails_over(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    first_account = _make_account("acc_bridge_token_invalidated_first")
+    second_account = _make_account("acc_bridge_token_invalidated_second")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "compact-ish"}]}],
+        },
+        separators=(",", ":"),
+    )
+
+    class _FakeUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+    retry_upstreams = [_FakeUpstreamWebSocket(), _FakeUpstreamWebSocket()]
+    reconnect_observations: list[dict[str, object]] = []
+
+    async def fake_reconnect_http_bridge_session(
+        session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_security_work_authorized=False,
+    ):
+        reconnect_observations.append(
+            {
+                "force_refresh_account_id": request_state.force_refresh_account_id,
+                "preferred_account_id": request_state.preferred_account_id,
+                "excluded_account_ids": set(request_state.excluded_account_ids),
+                "restart_reader": restart_reader,
+                "require_security_work_authorized": require_security_work_authorized,
+            }
+        )
+        retry_index = len(reconnect_observations) - 1
+        session.account = first_account if retry_index == 0 else second_account
+        session.upstream = retry_upstreams[retry_index]
+        session.upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    mark_permanent_failure = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_token_invalidated",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-token-invalidated", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=first_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    token_invalidated_text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_token_invalidated",
+                "status": "failed",
+                "error": {
+                    "code": "token_invalidated",
+                    "type": "invalid_request_error",
+                    "message": "Your authentication token has been invalidated. Please try signing in again.",
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, token_invalidated_text)
+    await service._process_http_bridge_upstream_text(session, token_invalidated_text)
+
+    assert reconnect_observations == [
+        {
+            "force_refresh_account_id": first_account.id,
+            "preferred_account_id": first_account.id,
+            "excluded_account_ids": set(),
+            "restart_reader": False,
+            "require_security_work_authorized": False,
+        },
+        {
+            "force_refresh_account_id": None,
+            "preferred_account_id": None,
+            "excluded_account_ids": {first_account.id},
+            "restart_reader": False,
+            "require_security_work_authorized": False,
+        },
+    ]
+    mark_permanent_failure.assert_awaited_once_with(first_account, "account_auth_invalidated")
+    assert retry_upstreams[0].sent_text == [request_text]
+    assert retry_upstreams[1].sent_text == [request_text]
+    assert session.account is second_account
+    assert list(session.pending_requests) == [request_state]
+    assert session.queued_request_count == 1
+    assert request_state.replay_count == 2
+    assert request_state.auth_replay_count == 2
+    assert request_state.excluded_account_ids == {first_account.id}
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_bridge_token_invalidated_pinned")
+    reconnect = AsyncMock()
+    mark_permanent_failure = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_token_invalidated_pinned",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":"tail"}',
+        previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-token-invalidated-pinned", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, AsyncMock()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    token_invalidated_text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_token_invalidated_pinned",
+                "status": "failed",
+                "error": {
+                    "code": "token_invalidated",
+                    "type": "invalid_request_error",
+                    "message": "Your authentication token has been invalidated. Please try signing in again.",
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, token_invalidated_text)
+
+    reconnect.assert_not_awaited()
+    mark_permanent_failure.assert_awaited_once_with(account, "account_auth_invalidated")
+    assert request_state.replay_count == 0
+    assert request_state.previous_response_id == "resp_anchor"
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {account.id}
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_keeps_previous_response_pinned_security_work_error(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

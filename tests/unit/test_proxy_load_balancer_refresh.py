@@ -1532,8 +1532,8 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
     await record_task
     await fail_task
 
-    assert account.status == AccountStatus.DEACTIVATED
-    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
     assert all(update["status"] != AccountStatus.ACTIVE for update in accounts_repo.status_updates)
 
 
@@ -1742,7 +1742,7 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
     release_persist.set()
     selection = await select_task
 
-    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
     assert selection.account is None
 
 
@@ -1790,7 +1790,7 @@ async def test_select_account_retries_after_post_persist_permanent_failure(monke
 
     selection = await balancer.select_account()
 
-    assert account.status == AccountStatus.DEACTIVATED
+    assert account.status == AccountStatus.REAUTH_REQUIRED
     assert selection.account is None
 
 
@@ -1857,7 +1857,7 @@ async def test_sync_runtime_state_bumps_version_for_status_only_updates() -> Non
 
     state = load_balancer_module.AccountState(
         account_id=account.id,
-        status=AccountStatus.DEACTIVATED,
+        status=AccountStatus.REAUTH_REQUIRED,
         deactivation_reason="Refresh token expired - re-login required",
     )
 

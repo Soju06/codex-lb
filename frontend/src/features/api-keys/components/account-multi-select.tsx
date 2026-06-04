@@ -15,7 +15,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
-import { normalizeStatus } from "@/utils/account-status";
+import { isAccountAssignmentSelectable, normalizeStatus } from "@/utils/account-status";
 import { formatPercentNullable, formatSlug, formatWindowLabel } from "@/utils/formatters";
 
 export type AccountMultiSelectProps = {
@@ -113,18 +113,22 @@ export function AccountMultiSelect({
 }: AccountMultiSelectProps) {
   const { accountsQuery } = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const selectableAccounts = useMemo(
+    () => accounts.filter((account) => isAccountAssignmentSelectable(account.status)),
+    [accounts],
+  );
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return accounts;
+    if (!search.trim()) return selectableAccounts;
     const query = search.toLowerCase();
-    return accounts.filter(
+    return selectableAccounts.filter(
       (account) =>
         account.accountId.toLowerCase().includes(query) ||
         account.email.toLowerCase().includes(query) ||
         account.displayName.toLowerCase().includes(query),
     );
-  }, [accounts, search]);
+  }, [search, selectableAccounts]);
 
   const selectedSet = useMemo(() => new Set(value), [value]);
   const selectedAccounts = useMemo(

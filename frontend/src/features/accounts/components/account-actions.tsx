@@ -51,37 +51,42 @@ export function AccountActions({
   onLimitWarmupChange,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
+  const showOperatorRecoveryAction =
+    account.status === "reauth_required" || account.status === "deactivated";
+
   return (
     <div className="space-y-3 border-t pt-4">
-      <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 p-3">
-        <div className="flex min-w-36 items-center gap-2 text-sm font-medium">
-          <Route className="h-4 w-4 text-muted-foreground" />
-          Routing policy
-        </div>
-        <Select
-          value={account.routingPolicy ?? "normal"}
-          onValueChange={(value) =>
-            onRoutingPolicyChange(
-              account.accountId,
-              value as AccountRoutingPolicy,
-            )
-          }
-          disabled={busy}
-        >
-          <SelectTrigger
-            aria-label="Routing policy"
-            size="sm"
-            className="h-8 w-44 text-xs"
+      {!showOperatorRecoveryAction ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 p-3">
+          <div className="flex min-w-36 items-center gap-2 text-sm font-medium">
+            <Route className="h-4 w-4 text-muted-foreground" />
+            Routing policy
+          </div>
+          <Select
+            value={account.routingPolicy ?? "normal"}
+            onValueChange={(value) =>
+              onRoutingPolicyChange(
+                account.accountId,
+                value as AccountRoutingPolicy,
+              )
+            }
+            disabled={busy}
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="burn_first">Burn first</SelectItem>
-            <SelectItem value="normal">Normal</SelectItem>
-            <SelectItem value="preserve">Preserve</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+            <SelectTrigger
+              aria-label="Routing policy"
+              size="sm"
+              className="h-8 w-44 text-xs"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="burn_first">Burn first</SelectItem>
+              <SelectItem value="normal">Normal</SelectItem>
+              <SelectItem value="preserve">Preserve</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       <label className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
         <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
@@ -109,7 +114,7 @@ export function AccountActions({
             <Play className="h-3.5 w-3.5" />
             Resume
           </Button>
-        ) : (
+        ) : showOperatorRecoveryAction ? null : (
           <Button
             type="button"
             size="sm"
@@ -123,7 +128,7 @@ export function AccountActions({
           </Button>
         )}
 
-        {account.status === "deactivated" ? (
+        {showOperatorRecoveryAction ? (
           <Button
             type="button"
             size="sm"

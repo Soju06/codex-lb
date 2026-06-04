@@ -644,9 +644,9 @@ async def test_paused_pinned_account_persists_fallback():
 
 
 @pytest.mark.asyncio
-async def test_deactivated_pinned_account_persists_fallback():
-    """DEACTIVATED is permanent — same rebind behaviour as PAUSED."""
-    acc_a = AccountState("a", AccountStatus.DEACTIVATED, deactivation_reason="token expired")
+async def test_reauth_required_pinned_account_persists_fallback():
+    """REAUTH_REQUIRED is hard-blocked — same rebind behaviour as PAUSED."""
+    acc_a = AccountState("a", AccountStatus.REAUTH_REQUIRED, deactivation_reason="token expired")
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 

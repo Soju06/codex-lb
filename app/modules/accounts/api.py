@@ -29,7 +29,7 @@ from app.modules.accounts.schemas import (
     AccountUpdateRequest,
     AccountUpdateResponse,
 )
-from app.modules.accounts.service import AccountNotProbableError, InvalidAuthJsonError
+from app.modules.accounts.service import AccountNotProbableError, AccountStateTransitionError, InvalidAuthJsonError
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -146,7 +146,10 @@ async def reactivate_account(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountReactivateResponse:
-    success = await context.service.reactivate_account(account_id)
+    try:
+        success = await context.service.reactivate_account(account_id)
+    except AccountStateTransitionError as exc:
+        raise DashboardConflictError(str(exc), code="account_state_transition_invalid") from exc
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
@@ -215,7 +218,10 @@ async def pause_account(
     account_id: str,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountPauseResponse:
-    success = await context.service.pause_account(account_id)
+    try:
+        success = await context.service.pause_account(account_id)
+    except AccountStateTransitionError as exc:
+        raise DashboardConflictError(str(exc), code="account_state_transition_invalid") from exc
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountPauseResponse(status="paused")

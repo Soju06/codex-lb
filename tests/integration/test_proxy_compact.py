@@ -492,6 +492,95 @@ async def test_proxy_compact_repeated_401_after_refresh_fails_over(async_client,
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_token_invalidated_marks_reauth_and_fails_over(async_client, monkeypatch):
+    first_email = "compact-token-invalidated-a@example.com"
+    first_raw_account_id = "acc_compact_token_invalidated_a"
+    first_auth_json = _make_auth_json(first_raw_account_id, first_email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth-a.json", json.dumps(first_auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    second_email = "compact-token-invalidated-b@example.com"
+    second_raw_account_id = "acc_compact_token_invalidated_b"
+    second_auth_json = _make_auth_json(second_raw_account_id, second_email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth-b.json", json.dumps(second_auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    first_account_id = generate_unique_account_id(first_raw_account_id, first_email)
+    second_account_id = generate_unique_account_id(second_raw_account_id, second_email)
+    first_upstream_account_id = "chatgpt_compact_token_invalidated_a"
+    second_upstream_account_id = "chatgpt_compact_token_invalidated_b"
+
+    async with SessionLocal() as session:
+        first_account = await session.get(Account, first_account_id)
+        assert first_account is not None
+        first_account.chatgpt_account_id = first_upstream_account_id
+        second_account = await session.get(Account, second_account_id)
+        assert second_account is not None
+        second_account.chatgpt_account_id = second_upstream_account_id
+        await session.commit()
+
+    captured_account_ids: list[str | None] = []
+    invalidated_upstream_account_id: str | None = None
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        nonlocal invalidated_upstream_account_id
+        if invalidated_upstream_account_id is None:
+            invalidated_upstream_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == invalidated_upstream_account_id:
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "token_invalidated",
+                    "Your authentication token has been invalidated. Please try signing in again.",
+                    error_type="authentication_error",
+                ),
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+    assert captured_account_ids[:2] == [invalidated_upstream_account_id, invalidated_upstream_account_id]
+    assert captured_account_ids[2] in {first_upstream_account_id, second_upstream_account_id}
+    assert captured_account_ids[2] != invalidated_upstream_account_id
+
+    invalidated_account_id = (
+        first_account_id if invalidated_upstream_account_id == first_upstream_account_id else second_account_id
+    )
+
+    async with SessionLocal() as session:
+        invalidated_account = await session.get(Account, invalidated_account_id)
+        assert invalidated_account is not None
+        assert invalidated_account.status == AccountStatus.REAUTH_REQUIRED
+        assert invalidated_account.deactivation_reason is not None
+        assert "re-login required" in invalidated_account.deactivation_reason
+
+    accounts_response = await async_client.get("/api/accounts")
+    assert accounts_response.status_code == 200
+    accounts = {account["accountId"]: account for account in accounts_response.json()["accounts"]}
+    assert accounts[invalidated_account_id]["status"] == "reauth_required"
+
+    overview_response = await async_client.get("/api/dashboard/overview")
+    assert overview_response.status_code == 200
+    overview_accounts = {account["accountId"]: account for account in overview_response.json()["accounts"]}
+    assert overview_accounts[invalidated_account_id]["status"] == "reauth_required"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_repeated_401_settles_reservation_if_error_recording_fails(async_client, monkeypatch):
     email = "compact-invalidated-settle@example.com"
     raw_account_id = "acc_compact_invalidated_settle"

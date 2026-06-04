@@ -39,6 +39,7 @@ class AccountStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
     QUOTA_EXCEEDED = "quota_exceeded"
     PAUSED = "paused"
+    REAUTH_REQUIRED = "reauth_required"
     DEACTIVATED = "deactivated"
 
 

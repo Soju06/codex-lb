@@ -403,7 +403,7 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "quota_exceeded",
     }
 )
-_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication"})
+_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication", "token_invalidated"})
 _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS = (
     "session has ended",
     "session expired",
@@ -8693,6 +8693,72 @@ class ProxyService:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
             return False
 
+    async def _retry_http_bridge_precreated_auth_request(
+        self,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        *,
+        error_message: str | None,
+    ) -> Literal["not_replayable", "retried", "failed"]:
+        permanent_failure_code = _websocket_auth_failure_permanent_code(error_message)
+        request_text = _prepare_websocket_request_state_for_auth_replay(request_state)
+        if request_text is None:
+            await self._load_balancer.mark_permanent_failure(session.account, permanent_failure_code)
+            setattr(request_state, "account_health_error_handled", True)
+            request_state.force_refresh_account_id = None
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.add(session.account.id)
+            return "not_replayable"
+
+        if _websocket_auth_failure_requires_reauth(error_message):
+            failure_code = permanent_failure_code
+        elif request_state.auth_replay_counts_by_account.get(session.account.id, 0) == 0:
+            failure_code = None
+            request_state.auth_replay_counts_by_account[session.account.id] = 1
+            request_state.force_refresh_account_id = session.account.id
+            request_state.preferred_account_id = session.account.id
+        else:
+            failure_code = _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
+
+        if failure_code is not None:
+            await self._load_balancer.mark_permanent_failure(session.account, failure_code)
+            request_state.force_refresh_account_id = None
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.add(session.account.id)
+
+        async with session.pending_lock:
+            if request_state not in session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                session.queued_request_count += 1
+
+        _log_http_bridge_event(
+            "retry_precreated_auth",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=await self._http_bridge_pending_count(session),
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        try:
+            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            await session.upstream.send_text(request_text)
+            session.last_used_at = time.monotonic()
+            return "retried"
+        except Exception as exc:
+            request_state.error_code_override, request_state.error_message_override = (
+                _http_bridge_precreated_retry_failure_error(exc)
+            )
+            if isinstance(exc, ProxyResponseError):
+                logger.info(
+                    "HTTP bridge pre-created auth retry failed with terminal proxy error code=%s message=%s",
+                    request_state.error_code_override,
+                    request_state.error_message_override,
+                )
+            else:
+                logger.warning("HTTP bridge pre-created auth retry failed", exc_info=True)
+            return "failed"
+
     async def _retry_http_bridge_security_work_request(
         self,
         session: "_HTTPBridgeSession",
@@ -8795,9 +8861,21 @@ class ProxyService:
         settings = await get_settings_cache().get()
         session.api_key = request_state.api_key
         skip_same_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        excluded_account_ids: set[str] = {session.account.id} if skip_same_account else set()
-        retry_same_account_once = not skip_same_account
-        preferred_candidate_id: str | None = None if skip_same_account else session.account.id
+        forced_refresh_account_id = request_state.force_refresh_account_id
+        excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        if skip_same_account:
+            excluded_account_ids.add(session.account.id)
+        retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
+        if skip_same_account:
+            preferred_candidate_id: str | None = None
+        elif forced_refresh_account_id is not None:
+            preferred_candidate_id = forced_refresh_account_id
+        elif request_state.preferred_account_id is not None:
+            preferred_candidate_id = request_state.preferred_account_id
+        elif session.account.id not in excluded_account_ids:
+            preferred_candidate_id = session.account.id
+        else:
+            preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
 
         async def release_selected_account_lease() -> None:
@@ -8862,11 +8940,19 @@ class ProxyService:
                 else selection.lease
             )
             selected_is_preferred = account.id == session.account.id
+            force_refresh = forced_refresh_account_id == account.id
+            if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
+                request_state.force_refresh_account_id = None
+                if request_state.preferred_account_id == forced_refresh_account_id:
+                    request_state.preferred_account_id = None
             try:
                 account = await self._ensure_fresh_with_budget(
                     account,
+                    force=force_refresh,
                     timeout_seconds=_remaining_budget_seconds(deadline),
                 )
+                if force_refresh and request_state.force_refresh_account_id == account.id:
+                    request_state.force_refresh_account_id = None
                 connect_headers = _headers_with_turn_state(
                     session.headers,
                     _preferred_http_bridge_reconnect_turn_state(session),
@@ -9287,12 +9373,43 @@ class ProxyService:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
+        auth_error_code = _websocket_precreated_auth_error_code(
+            status_request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
         owner_pinned_quota_error = _websocket_owner_pinned_quota_error_code(
             status_request_state,
             event_type=event_type,
             payload=payload,
         )
-        if owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
+        if (
+            auth_error_code is not None
+            and not is_previous_response_not_found_event
+            and status_request_state is not None
+        ):
+            auth_retry_result = await self._retry_http_bridge_precreated_auth_request(
+                session,
+                status_request_state,
+                error_message=_websocket_event_error_message(event_type, payload),
+            )
+            if auth_retry_result == "retried":
+                return
+            if auth_retry_result == "failed":
+                async with session.pending_lock:
+                    if status_request_state in session.pending_requests:
+                        session.pending_requests.remove(status_request_state)
+                        session.queued_request_count = max(0, session.queued_request_count - 1)
+                status_request_state.error_http_status_override = 502
+                (
+                    _downstream_text,
+                    event_block,
+                    event,
+                    payload,
+                    event_type,
+                ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+        elif owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
             await self._handle_stream_error(
                 session.account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
@@ -15092,6 +15209,12 @@ def _websocket_auth_failure_requires_reauth(message: str | None) -> bool:
         return False
     lowered = message.lower()
     return any(marker in lowered for marker in _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS)
+
+
+def _websocket_auth_failure_permanent_code(message: str | None) -> str:
+    if _websocket_auth_failure_requires_reauth(message):
+        return _WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
+    return _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
 
 
 def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:

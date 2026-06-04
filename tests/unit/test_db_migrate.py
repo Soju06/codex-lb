@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.util.exc import CommandError
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
@@ -198,6 +199,118 @@ def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None
 
     assert check_migration_policy(url) == ()
     assert check_schema_drift(url) == ()
+
+
+def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "reauth-status.db"
+    url = _db_url(db_path)
+    parent_revision = "20260602_080000_merge_upstream_proxy_and_quota_planner_heads"
+    reauth_revision = "20260604_000000_add_reauth_required_account_status"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO accounts "
+                    "(id, email, plan_type, access_token_encrypted, refresh_token_encrypted, "
+                    "id_token_encrypted, last_refresh, status, deactivation_reason) "
+                    "VALUES (:id, :email, :plan_type, :access_token, :refresh_token, "
+                    ":id_token, :last_refresh, :status, :deactivation_reason)"
+                ),
+                [
+                    {
+                        "id": "acc_reauth_downgrade",
+                        "email": "reauth-downgrade@example.com",
+                        "plan_type": "plus",
+                        "access_token": b"access",
+                        "refresh_token": b"refresh",
+                        "id_token": b"id",
+                        "last_refresh": "2026-06-04 00:00:00",
+                        "status": "deactivated",
+                        "deactivation_reason": "Authentication token invalidated - re-login required",
+                    },
+                    {
+                        "id": "acc_usage_reauth_downgrade",
+                        "email": "usage-reauth-downgrade@example.com",
+                        "plan_type": "plus",
+                        "access_token": b"access",
+                        "refresh_token": b"refresh",
+                        "id_token": b"id",
+                        "last_refresh": "2026-06-04 00:00:00",
+                        "status": "deactivated",
+                        "deactivation_reason": (
+                            "Usage API error: HTTP 401 - Your authentication token has been invalidated. "
+                            "Please try signing in again."
+                        ),
+                    },
+                    {
+                        "id": "acc_disabled_downgrade",
+                        "email": "disabled-downgrade@example.com",
+                        "plan_type": "plus",
+                        "access_token": b"access",
+                        "refresh_token": b"refresh",
+                        "id_token": b"id",
+                        "last_refresh": "2026-06-04 00:00:00",
+                        "status": "deactivated",
+                        "deactivation_reason": "Usage API error: HTTP 401 - Account has been deactivated",
+                    },
+                ],
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, reauth_revision, bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            status_rows = connection.execute(
+                text("SELECT id, status FROM accounts WHERE id IN (:exact_id, :usage_id, :disabled_id) ORDER BY id"),
+                {
+                    "exact_id": "acc_reauth_downgrade",
+                    "usage_id": "acc_usage_reauth_downgrade",
+                    "disabled_id": "acc_disabled_downgrade",
+                },
+            )
+            statuses = {str(row[0]): str(row[1]) for row in status_rows}
+            status_column = next(
+                column for column in inspect(connection).get_columns("accounts") if column["name"] == "status"
+            )
+
+        assert statuses == {
+            "acc_disabled_downgrade": "deactivated",
+            "acc_reauth_downgrade": "reauth_required",
+            "acc_usage_reauth_downgrade": "reauth_required",
+        }
+        assert str(status_column["type"]).upper() == "VARCHAR(15)"
+
+        command.downgrade(_build_alembic_config(url), parent_revision)
+
+        with engine.connect() as connection:
+            status_rows = connection.execute(
+                text("SELECT id, status FROM accounts WHERE id IN (:exact_id, :usage_id, :disabled_id) ORDER BY id"),
+                {
+                    "exact_id": "acc_reauth_downgrade",
+                    "usage_id": "acc_usage_reauth_downgrade",
+                    "disabled_id": "acc_disabled_downgrade",
+                },
+            )
+            statuses = {str(row[0]): str(row[1]) for row in status_rows}
+            status_column = next(
+                column for column in inspect(connection).get_columns("accounts") if column["name"] == "status"
+            )
+    finally:
+        engine.dispose()
+
+    assert statuses == {
+        "acc_disabled_downgrade": "deactivated",
+        "acc_reauth_downgrade": "deactivated",
+        "acc_usage_reauth_downgrade": "deactivated",
+    }
+    assert str(status_column["type"]).upper() == "VARCHAR(14)"
+    assert inspect_migration_state(url).current_revision == parent_revision
 
 
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:

@@ -737,13 +737,13 @@ async def test_refresh_account_deactivates_when_repo_only_reencrypted_same_refre
 
     assert exc_info.value.is_permanent is True
     assert repo.status_payload is not None
-    assert repo.status_payload["status"] == AccountStatus.DEACTIVATED
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
 
 
 @pytest.mark.asyncio
-async def test_refresh_account_deactivates_when_upstream_returns_token_expired(monkeypatch):
+async def test_refresh_account_requires_reauth_when_upstream_returns_token_expired(monkeypatch):
     """Regression for #383: a ``token_expired`` code from the OAuth refresh
-    endpoint must classify as a permanent failure and deactivate the account,
+    endpoint must classify as a permanent failure and block the account,
     not loop retries forever while the account stays ``ACTIVE``.
     """
 
@@ -789,7 +789,7 @@ async def test_refresh_account_deactivates_when_upstream_returns_token_expired(m
     assert exc_info.value.code == "token_expired"
     assert exc_info.value.is_permanent is True
     assert repo.status_payload is not None
-    assert repo.status_payload["status"] == AccountStatus.DEACTIVATED
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
     reason = repo.status_payload["deactivation_reason"]
     assert isinstance(reason, str)
     assert "re-login" in reason.lower() or "expired" in reason.lower()

@@ -8,7 +8,9 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 describe("AccountList", () => {
   beforeEach(() => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
-    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T12:00:00.000Z").getTime());
+    vi.spyOn(Date, "now").mockReturnValue(
+      new Date("2026-01-01T12:00:00.000Z").getTime(),
+    );
   });
 
   afterEach(() => {
@@ -51,7 +53,10 @@ describe("AccountList", () => {
     expect(screen.getByText("primary@example.com")).toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText("Search accounts..."), "secondary");
+    await user.type(
+      screen.getByPlaceholderText("Search accounts..."),
+      "secondary",
+    );
     expect(screen.queryByText("primary@example.com")).not.toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
 
@@ -107,10 +112,11 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getAllByText(/^(Hidden Early|Visible Early)$/).map((el) => el.textContent)).toEqual([
-      "Visible Early",
-      "Hidden Early",
-    ]);
+    expect(
+      screen
+        .getAllByText(/^(Hidden Early|Visible Early)$/)
+        .map((el) => el.textContent),
+    ).toEqual(["Visible Early", "Hidden Early"]);
   });
 
   it("ignores elapsed reset timestamps when sorting", () => {
@@ -159,10 +165,9 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getAllByText(/^(Fresh|Stale)$/).map((el) => el.textContent)).toEqual([
-      "Fresh",
-      "Stale",
-    ]);
+    expect(
+      screen.getAllByText(/^(Fresh|Stale)$/).map((el) => el.textContent),
+    ).toEqual(["Fresh", "Stale"]);
   });
 
   it("sorts legacy primary quota rows by their reset timestamp", () => {
@@ -211,10 +216,9 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getAllByText(/^(Early|Late)$/).map((el) => el.textContent)).toEqual([
-      "Early",
-      "Late",
-    ]);
+    expect(
+      screen.getAllByText(/^(Early|Late)$/).map((el) => el.textContent),
+    ).toEqual(["Early", "Late"]);
   });
 
   it("shows empty state when no items match filter", async () => {
@@ -240,8 +244,50 @@ describe("AccountList", () => {
       />,
     );
 
-    await user.type(screen.getByPlaceholderText("Search accounts..."), "not-found");
+    await user.type(
+      screen.getByPlaceholderText("Search accounts..."),
+      "not-found",
+    );
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
+  });
+
+  it("filters re-auth required accounts by status", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "Active",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-reauth",
+            email: "reauth@example.com",
+            displayName: "Needs Reauth",
+            planType: "pro",
+            status: "reauth_required",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: "Reauth required" }));
+
+    expect(screen.queryByText("active@example.com")).not.toBeInTheDocument();
+    expect(screen.getByText("reauth@example.com")).toBeInTheDocument();
   });
 
   it("uses the backend duplicate indicator instead of recomputing by email", () => {
@@ -285,8 +331,30 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/))).not.toBeInTheDocument();
-    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
-    expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/unique@example\.com \| ID/))).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        (_content, el) =>
+          el?.tagName === "P" &&
+          !!el.textContent?.match(
+            /dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/,
+          ),
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_content, el) =>
+          el?.tagName === "P" &&
+          !!el.textContent?.match(
+            /dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/,
+          ),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        (_content, el) =>
+          el?.tagName === "P" &&
+          !!el.textContent?.match(/unique@example\.com \| ID/),
+      ),
+    ).not.toBeInTheDocument();
   });
 });

@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import PERMANENT_FAILURE_CODES, QUOTA_EXCEEDED_COOLDOWN_SECONDS
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    account_status_for_permanent_failure,
+)
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -246,7 +250,7 @@ class UsageUpdater:
         interval = settings.usage_refresh_interval_seconds
         _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
-            if account.status == AccountStatus.DEACTIVATED:
+            if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
@@ -313,7 +317,7 @@ class UsageUpdater:
         settings = get_settings()
         if not settings.usage_refresh_enabled:
             return False
-        if account.status == AccountStatus.DEACTIVATED:
+        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return False
         try:
             result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
@@ -549,15 +553,22 @@ class UsageUpdater:
         if not self._auth_manager:
             return
         reason = f"Usage API error: HTTP {exc.status_code} - {exc.message}"
+        status = (
+            account_status_for_permanent_failure(exc.code)
+            if exc.code in PERMANENT_FAILURE_CODES
+            else AccountStatus.DEACTIVATED
+        )
         logger.warning(
-            "Deactivating account due to client error account_id=%s status=%s message=%s request_id=%s",
+            "Marking account unavailable due to client error account_id=%s account_status=%s status=%s "
+            "message=%s request_id=%s",
             account.id,
+            status.value,
             exc.status_code,
             exc.message,
             get_request_id(),
         )
-        await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
-        account.status = AccountStatus.DEACTIVATED
+        await self._auth_manager._repo.update_status(account.id, status, reason)
+        account.status = status
         account.deactivation_reason = reason
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:

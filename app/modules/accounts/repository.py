@@ -118,7 +118,9 @@ class AccountsRepository:
         result = await self._session.execute(
             select(Account)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
-            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .where(
+                Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
+            )
             .limit(1)
         )
         return result.scalar_one_or_none()

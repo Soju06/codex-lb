@@ -1491,6 +1491,41 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_updater_marks_token_invalidated_as_reauth_required(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_401_token_invalidated(**_: Any) -> UsagePayload:
+        raise UsageFetchError(
+            401,
+            "Your authentication token has been invalidated. Please try signing in again.",
+            code="token_invalidated",
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_token_invalidated)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    acc = _make_account("acc_401_token_invalidated", "workspace_token_invalidated", email="reauth@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(accounts_repo.status_updates) == 1
+    update = accounts_repo.status_updates[0]
+    assert update["account_id"] == "acc_401_token_invalidated"
+    assert update["status"] == AccountStatus.REAUTH_REQUIRED
+    assert "401" in update["deactivation_reason"]
+    assert "invalidated" in update["deactivation_reason"]
+    assert acc.status == AccountStatus.REAUTH_REQUIRED
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_deactivates_on_401_account_deactivated_code(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError

@@ -18,9 +18,11 @@ describe("STATUS_LABELS", () => {
       "exceeded",
       "limited",
       "paused",
+      "reauth",
     ]);
     expect(STATUS_LABELS.active).toBe("Active");
     expect(STATUS_LABELS.exceeded).toBe("Quota exceeded");
+    expect(STATUS_LABELS.reauth).toBe("Re-auth required");
   });
 });
 

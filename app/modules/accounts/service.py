@@ -77,6 +77,10 @@ class AccountNotProbableError(Exception):
     """Raised when an account is in a status that disallows probing."""
 
 
+class AccountStateTransitionError(Exception):
+    """Raised when an operator action is not valid for the account state."""
+
+
 class AccountsService:
     def __init__(
         self,
@@ -311,13 +315,47 @@ class AccountsService:
         )
 
     async def reactivate_account(self, account_id: str) -> bool:
-        result = await self._repo.update_status(account_id, AccountStatus.ACTIVE, None, None, blocked_at=None)
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return False
+        if account.status == AccountStatus.REAUTH_REQUIRED:
+            raise AccountStateTransitionError("Account requires re-authentication and cannot be reactivated directly")
+        result = await self._repo.update_status_if_current(
+            account_id,
+            AccountStatus.ACTIVE,
+            None,
+            None,
+            blocked_at=None,
+            expected_status=account.status,
+            expected_deactivation_reason=account.deactivation_reason,
+            expected_reset_at=account.reset_at,
+            expected_blocked_at=account.blocked_at,
+        )
+        if not result:
+            raise AccountStateTransitionError("Account state changed; retry the operation")
         if result:
             get_account_selection_cache().invalidate()
         return result
 
     async def pause_account(self, account_id: str) -> bool:
-        result = await self._repo.update_status(account_id, AccountStatus.PAUSED, None, None, blocked_at=None)
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return False
+        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            raise AccountStateTransitionError(f"Account is {account.status.value} and cannot be paused")
+        result = await self._repo.update_status_if_current(
+            account_id,
+            AccountStatus.PAUSED,
+            None,
+            None,
+            blocked_at=None,
+            expected_status=account.status,
+            expected_deactivation_reason=account.deactivation_reason,
+            expected_reset_at=account.reset_at,
+            expected_blocked_at=account.blocked_at,
+        )
+        if not result:
+            raise AccountStateTransitionError("Account state changed; retry the operation")
         if result:
             get_account_selection_cache().invalidate()
         return result
@@ -403,7 +441,7 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)

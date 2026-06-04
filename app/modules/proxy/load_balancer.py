@@ -2073,7 +2073,11 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
+    return [
+        account
+        for account in accounts
+        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+    ]
 
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:

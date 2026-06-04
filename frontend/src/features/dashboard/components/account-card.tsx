@@ -180,7 +180,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             Resume
           </Button>
         )}
-        {status === "deactivated" && (
+        {(status === "reauth" || status === "deactivated") && (
           <Button
             type="button"
             size="sm"

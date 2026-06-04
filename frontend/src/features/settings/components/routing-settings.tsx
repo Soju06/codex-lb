@@ -19,6 +19,7 @@ import type {
   SettingsUpdateRequest,
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
+import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
 
 const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
@@ -127,7 +128,11 @@ export function RoutingSettings({
     relativeAvailabilityTopKValid && parsedRelativeAvailabilityTopK !== settings.relativeAvailabilityTopK;
 
   const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
-  const firstAccountId = accounts[0]?.accountId;
+  const selectableAccounts = accounts.filter((account) => isSingleAccountRoutingSelectable(account.status));
+  const selectedAccount = accounts.find((account) => account.accountId === settings.singleAccountId);
+  const blockedSelectedAccount =
+    selectedAccount !== undefined && !isSingleAccountRoutingSelectable(selectedAccount.status) ? selectedAccount : null;
+  const firstAccountId = selectableAccounts[0]?.accountId;
   const additionalQuotaOverrides = settings.additionalQuotaRoutingPolicies ?? {};
   const knownAdditionalQuotaKeys = new Set((settings.additionalQuotaPolicies ?? []).map((policy) => policy.quotaKey));
   const additionalQuotaRows = [
@@ -458,19 +463,24 @@ export function RoutingSettings({
                 <SelectTrigger
                   aria-label="Selected account"
                   className="h-8 w-full text-xs sm:w-64"
-                  disabled={busy || accountsLoading || accounts.length === 0}
+                  disabled={busy || accountsLoading || selectableAccounts.length === 0}
                 >
                   <SelectValue placeholder={accountsLoading ? "Loading accounts..." : "Choose account"} />
                 </SelectTrigger>
                 <SelectContent align="end">
-                  {accounts.map((account) => (
+                  {blockedSelectedAccount ? (
+                    <SelectItem key={blockedSelectedAccount.accountId} value={blockedSelectedAccount.accountId} disabled>
+                      {accountLabel(blockedSelectedAccount)}
+                    </SelectItem>
+                  ) : null}
+                  {selectableAccounts.map((account) => (
                     <SelectItem key={account.accountId} value={account.accountId}>
                       {accountLabel(account)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              {!accountsLoading && accounts.length === 0 ? (
+              {!accountsLoading && selectableAccounts.length === 0 ? (
                 <p className="text-xs text-muted-foreground">Import an account before enabling single-account routing.</p>
               ) : null}
             </div>

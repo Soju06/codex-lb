@@ -97,6 +97,14 @@ async def test_probe_account_rejects_deactivated_account():
 
 
 @pytest.mark.asyncio
+async def test_probe_account_rejects_reauth_required_account():
+    account = _make_account(status=AccountStatus.REAUTH_REQUIRED)
+    service = _build_service(account=account)
+    with pytest.raises(AccountNotProbableError):
+        await service.probe_account(_ACCOUNT_ID)
+
+
+@pytest.mark.asyncio
 async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     account = _make_account(status=AccountStatus.RATE_LIMITED)
     service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)

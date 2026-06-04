@@ -360,6 +360,50 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("excludes hard-blocked accounts from single-account routing choices", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "single_account" }}
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "active@example.com",
+          }),
+          createAccountSummary({
+            accountId: "acc-reauth",
+            email: "reauth@example.com",
+            displayName: "reauth@example.com",
+            status: "reauth_required",
+          }),
+          createAccountSummary({
+            accountId: "acc-paused",
+            email: "paused@example.com",
+            displayName: "paused@example.com",
+            status: "paused",
+          }),
+          createAccountSummary({
+            accountId: "acc-deactivated",
+            email: "deactivated@example.com",
+            displayName: "deactivated@example.com",
+            status: "deactivated",
+          }),
+        ]}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "Selected account" }));
+
+    expect(await screen.findByRole("option", { name: /active@example.com/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /reauth@example.com/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /paused@example.com/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /deactivated@example.com/i })).not.toBeInTheDocument();
+  });
+
   it("saves an account together with single-account routing", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

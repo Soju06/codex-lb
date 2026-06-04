@@ -87,6 +87,7 @@ describe("ImportSettings", () => {
       limitWarmupPrompt: settings.limitWarmupPrompt,
       limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
       limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
+      weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     });
   });
 

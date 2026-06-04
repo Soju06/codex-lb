@@ -552,6 +552,12 @@ class DashboardSettings(Base):
         default=100.0,
         server_default=text("100.0"),
     )
+    weekly_pace_working_days: Mapped[str] = mapped_column(
+        String,
+        default="0,1,2,3,4,5,6",
+        server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
+    )
     warmup_model: Mapped[str] = mapped_column(
         String,
         default="gpt-5.4-mini",

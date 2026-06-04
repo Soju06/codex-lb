@@ -131,6 +131,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         limit_warmup_prompt=settings.limit_warmup_prompt,
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
+        weekly_pace_working_days=settings.weekly_pace_working_days,
     )
 
 
@@ -540,6 +541,11 @@ async def update_settings(
                     if payload.limit_warmup_min_available_percent is not None
                     else current.limit_warmup_min_available_percent
                 ),
+                weekly_pace_working_days=(
+                    payload.weekly_pace_working_days
+                    if payload.weekly_pace_working_days is not None
+                    else current.weekly_pace_working_days
+                ),
             )
         )
     except ValueError as exc:
@@ -577,6 +583,7 @@ async def update_settings(
             "limit_warmup_prompt",
             "limit_warmup_cooldown_seconds",
             "limit_warmup_min_available_percent",
+            "weekly_pace_working_days",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

@@ -421,6 +421,7 @@ export function createDashboardSettings(
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
+		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
 		stickyReallocationBudgetThresholdPct: 95,

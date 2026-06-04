@@ -38,6 +38,18 @@ from app.modules.usage.depletion_service import (
 from app.modules.usage.mappers import usage_history_to_window_row
 
 
+def _parse_weekly_pace_working_days(value: str) -> set[int]:
+    try:
+        days = {int(part.strip()) for part in value.split(",") if part.strip()}
+    except ValueError:
+        return set()
+    if not days or any(day < 0 or day > 6 for day in days):
+        return set()
+    if days == set(range(7)):
+        return set()
+    return days
+
+
 class DashboardService:
     def __init__(self, repo: DashboardRepository) -> None:
         self._repo = repo
@@ -153,12 +165,14 @@ class DashboardService:
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
         settings = get_settings()
+        dashboard_settings = await self._repo.get_settings()
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
             usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
         )
         return DashboardProjectionsResponse(
             depletion_primary=pri_depletion,

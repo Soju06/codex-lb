@@ -73,7 +73,7 @@ services:
       timeout: 5s
       retries: 5
     volumes:
-      - codex-lb-postgres-data:/var/lib/postgresql/data
+      - codex-lb-postgres-data:/var/lib/postgresql
     restart: unless-stopped
 
 volumes:

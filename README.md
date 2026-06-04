@@ -367,6 +367,11 @@ The protected proxy routes covered by this setting are:
 Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
 SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
 
+The Docker Compose `postgres` profile uses the Postgres 18 image and mounts the named data volume at
+`/var/lib/postgresql`, the parent of the image's versioned `PGDATA` directory. Existing Postgres 16 compose volumes
+are not upgraded in place; dump and restore the database before switching an existing volume to the Postgres 18
+profile.
+
 ### Dashboard authentication modes
 
 `codex-lb` supports three dashboard auth modes via environment variables:

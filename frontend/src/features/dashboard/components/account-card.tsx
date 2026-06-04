@@ -157,6 +157,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
               : "text-muted-foreground hover:text-foreground",
           )}
           aria-label={warmupToggleLabel}
+          disabled={readOnly}
           onClick={() => onAction?.(account, "warmup-toggle")}
         >
           <Zap className="h-3 w-3" aria-hidden="true" />

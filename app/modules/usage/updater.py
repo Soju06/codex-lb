@@ -255,7 +255,7 @@ class UsageUpdater:
                 continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
-            latest = latest_usage.get(account.id)
+            latest = await self._freshness_usage_entry(account, latest_usage.get(account.id))
             bypass_freshness = _quota_recovery_should_bypass_freshness(account, latest=latest)
             if not bypass_freshness and _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
                 continue
@@ -351,7 +351,8 @@ class UsageUpdater:
         usage_account_id: str | None,
         interval_seconds: int,
     ) -> AccountRefreshResult:
-        latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
+        primary_latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
+        latest = await self._freshness_usage_entry(account, primary_latest)
         if not _quota_recovery_should_bypass_freshness(account, latest=latest) and _latest_usage_is_fresh(
             latest,
             now=utcnow(),
@@ -362,6 +363,13 @@ class UsageUpdater:
             account,
             usage_account_id=usage_account_id,
         )
+
+    async def _freshness_usage_entry(self, account: Account, latest: UsageHistory | None) -> UsageHistory | None:
+        if latest is not None:
+            return latest
+        if usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+            return None
+        return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
 
     async def _refresh_account(
         self,

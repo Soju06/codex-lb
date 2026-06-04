@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1200,6 +1201,37 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
     assert monthly_entry.credits_unlimited is False
     assert monthly_entry.credits_balance == 17.25
     assert account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    fetch_usage_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch_usage_mock)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_free_monthly_fresh", "workspace_shared")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.plan_type = "free"
+    accounts_repo.accounts_by_id[account.id] = account
+    await usage_repo.add_entry(
+        account.id,
+        100.0,
+        window="monthly",
+        recorded_at=datetime.now(),
+        reset_at=int(time.time()) + 3600,
+        window_minutes=43_200,
+    )
+
+    refreshed = await updater.refresh_accounts([account], latest_usage={})
+
+    assert refreshed is False
+    fetch_usage_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

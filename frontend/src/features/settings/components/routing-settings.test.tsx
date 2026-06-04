@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -32,18 +33,7 @@ const BASE_SETTINGS = createDashboardSettings({
   preferEarlierResetAccounts: true,
   totpConfigured: false,
 });
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: BASE_SETTINGS.limitWarmupEnabled,
-  limitWarmupWindows: BASE_SETTINGS.limitWarmupWindows,
-  limitWarmupModel: BASE_SETTINGS.limitWarmupModel,
-  limitWarmupPrompt: BASE_SETTINGS.limitWarmupPrompt,
-  limitWarmupCooldownSeconds: BASE_SETTINGS.limitWarmupCooldownSeconds,
-  limitWarmupMinAvailablePercent: BASE_SETTINGS.limitWarmupMinAvailablePercent,
-};
-const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...BASE_UPDATE_PAYLOAD } =
-  BASE_SETTINGS;
-void _guestPasswordConfigured;
-void _totpConfigured;
+const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
@@ -122,23 +112,9 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save power" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "relative_availability",
       relativeAvailabilityPower: 1.5,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
@@ -239,23 +215,9 @@ describe("RoutingSettings", () => {
     await user.click(saveTopK);
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "relative_availability",
-      relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 6,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -303,23 +265,9 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByRole("option", { name: /two@example.com/i }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "single_account",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       singleAccountId: "acc-two",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -383,23 +331,9 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByRole("option", { name: "Single account" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "single_account",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       singleAccountId: "acc-one",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -489,23 +423,8 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByText("5h quota"));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
+      ...BASE_UPDATE_PAYLOAD,
       preferEarlierResetWindow: "primary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

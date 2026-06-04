@@ -3,13 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 const baseSettings = createDashboardSettings();
-const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...baseUpdatePayload } =
-  baseSettings;
-void _guestPasswordConfigured;
-void _totpConfigured;
+const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("SessionSettings", () => {
   it("shows the current dashboard session lifetime in hours", () => {

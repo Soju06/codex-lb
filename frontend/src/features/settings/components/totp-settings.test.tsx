@@ -10,6 +10,7 @@ import {
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TotpSettings } from "@/features/settings/components/totp-settings";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
@@ -19,10 +20,7 @@ vi.mock("@/features/auth/api", () => ({
 }));
 
 const baseSettings = createDashboardSettings({ totpConfigured: false });
-const { guestPasswordConfigured: _guestPasswordConfigured, totpConfigured: _totpConfigured, ...baseUpdatePayload } =
-  baseSettings;
-void _guestPasswordConfigured;
-void _totpConfigured;
+const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({

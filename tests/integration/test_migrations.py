@@ -803,7 +803,7 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
     await to_thread.run_sync(
         lambda: run_upgrade(
             db_url,
-            "20260602_050000_add_upstream_proxy_routing",
+            "20260604_000000_add_reauth_required_account_status",
             bootstrap_legacy=True,
         )
     )

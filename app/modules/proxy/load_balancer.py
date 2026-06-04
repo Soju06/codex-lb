@@ -952,7 +952,7 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
                 latest_monthly={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_monthly.items()
+                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
@@ -2104,9 +2104,9 @@ def _select_long_window_entry(
 def _rate_limited_freshness_entry(
     *,
     account: Account,
-    primary_entry: UsageHistory | None,
-    long_window_entry: UsageHistory | None,
-) -> UsageHistory | None:
+    primary_entry: _UsageWindowEntry | None,
+    long_window_entry: _UsageWindowEntry | None,
+) -> _UsageWindowEntry | None:
     if primary_entry is not None:
         return primary_entry
     if (
@@ -2118,7 +2118,7 @@ def _rate_limited_freshness_entry(
     return None
 
 
-def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:
+def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
     return (
         entry is not None
         and _usage_entry_is_recent_enough(entry.recorded_at)
@@ -2127,7 +2127,7 @@ def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:
     )
 
 
-def _usage_entry_recorded_after_block(entry: UsageHistory | None, blocked_at: float) -> bool:
+def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_at: float) -> bool:
     if entry is None or entry.recorded_at is None:
         return False
     recorded_at = entry.recorded_at
@@ -2228,6 +2228,11 @@ def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageH
     return UsageHistory(**data)
 
 
+def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
+    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
+    return UsageHistory(**data)
+
+
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
@@ -2238,7 +2243,8 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
         latest_monthly={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_monthly.items()
+            account_id: _clone_standard_usage_history(entry)
+            for account_id, entry in selection_inputs.latest_monthly.items()
         },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(

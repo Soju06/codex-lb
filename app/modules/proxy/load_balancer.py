@@ -2107,14 +2107,14 @@ def _rate_limited_freshness_entry(
     primary_entry: _UsageWindowEntry | None,
     long_window_entry: _UsageWindowEntry | None,
 ) -> _UsageWindowEntry | None:
-    if primary_entry is not None:
-        return primary_entry
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
         and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
     ):
         return long_window_entry
+    if primary_entry is not None:
+        return primary_entry
     return None
 
 

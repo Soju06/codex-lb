@@ -5692,8 +5692,9 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
 
     assert response.status_code == 502
     assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
-    assert "code=upstream_error" in caplog.text
-    assert "message=provider failed" in caplog.text
+    assert "method=POST path=/v1/responses status=502" in caplog.text
+    assert "code=upstream_error" not in caplog.text
+    assert "message=provider failed" not in caplog.text
 
 
 @pytest.mark.asyncio

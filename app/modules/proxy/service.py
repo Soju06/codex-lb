@@ -8645,14 +8645,7 @@ class ProxyService:
         if not should_reconnect:
             return False
 
-        session.closed = True
-        try:
-            await session.upstream.close()
-        except Exception:
-            logger.debug(
-                "Failed to close HTTP bridge upstream for reconnect",
-                exc_info=True,
-            )
+        await self._close_http_bridge_session(session)
         return True
 
     async def _retire_stale_pending_http_bridge_session(

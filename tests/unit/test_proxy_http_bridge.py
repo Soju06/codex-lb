@@ -7986,9 +7986,20 @@ async def test_http_bridge_retire_after_drain_closes_session_on_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retire_after_drain_waits_for_queued_submission() -> None:
+async def test_http_bridge_retire_after_drain_waits_for_queued_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     close = AsyncMock()
+    release_live_session = AsyncMock()
+    release_account_lease = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace(release_live_session=release_live_session))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-retire-drain"),
+    )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_retire_queued", None),
         headers={"x-codex-turn-state": "http_turn_retire_queued"},
@@ -8010,16 +8021,35 @@ async def test_http_bridge_retire_after_drain_waits_for_queued_submission() -> N
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
     )
+    lease = proxy_service.AccountLease(
+        lease_id="lease-retire-drain",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = lease
+    session.durable_session_id = "durable-retire-drain"
+    session.durable_owner_epoch = 3
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is False
     assert session.closed is False
     close.assert_not_awaited()
+    release_live_session.assert_not_awaited()
+    release_account_lease.assert_not_awaited()
 
     async with session.pending_lock:
         session.queued_request_count = 0
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     assert session.closed is True
+    release_live_session.assert_awaited_once_with(
+        session_id="durable-retire-drain",
+        instance_id="instance-retire-drain",
+        owner_epoch=3,
+        draining=False,
+    )
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
     close.assert_awaited_once()
 
 

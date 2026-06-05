@@ -26,7 +26,9 @@ session detachment, the durable owner generation MUST advance so that a late
 cleanup from the stale local session cannot release or close the replacement
 session's durable ownership. This MUST also apply when the detached local
 session is retiring but still has visible in-flight requests and will release
-its durable ownership later after draining.
+its durable ownership later after draining. After a detached retiring session
+finishes draining its visible requests, it MUST release its durable ownership
+and account lease instead of only closing the upstream websocket.
 
 #### Scenario: wedged stale pending lock does not block fresh soft request
 
@@ -60,3 +62,13 @@ its durable ownership later after draining.
   lease
 - **AND** follow-up requests for the replacement session do not receive a
   spurious bridge owner mismatch caused by the stale close
+
+#### Scenario: detached retiring session releases resources after drain
+
+- **GIVEN** a retiring bridge session was detached while visible requests were
+  still draining
+- **WHEN** those visible requests drain and the session is retired
+- **THEN** the service releases the old session's durable ownership
+- **AND** the service releases the old session's account lease
+- **AND** the detached session no longer holds bridge capacity until process
+  exit

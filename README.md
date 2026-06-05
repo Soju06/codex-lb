@@ -386,6 +386,8 @@ data directory has been upgraded to the Postgres 18 layout. Keep the backup unti
 
 The normal `postgres` service refuses to start when it detects the old root-level `PG_VERSION` file from a pre-18
 Compose volume. If that guard fires, run the `postgres-upgrade` profile above before starting Postgres again.
+It also refuses nested `/var/lib/postgresql/data` directories that still report a pre-18 major version, because those
+layouts need an explicit pg_upgrade before the Postgres 18 container can safely open them.
 
 ### Dashboard authentication modes
 

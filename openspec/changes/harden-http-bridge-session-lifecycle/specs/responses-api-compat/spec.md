@@ -24,7 +24,9 @@ error rather than silently hanging.
 When a replacement bridge session claims the same durable key after stale local
 session detachment, the durable owner generation MUST advance so that a late
 cleanup from the stale local session cannot release or close the replacement
-session's durable ownership.
+session's durable ownership. This MUST also apply when the detached local
+session is retiring but still has visible in-flight requests and will release
+its durable ownership later after draining.
 
 #### Scenario: wedged stale pending lock does not block fresh soft request
 
@@ -50,8 +52,8 @@ session's durable ownership.
 
 #### Scenario: stale durable release cannot fence out replacement owner
 
-- **GIVEN** a stale bridge session for a durable key is replaced by a new local
-  session after local detachment
+- **GIVEN** a stale or retiring bridge session for a durable key is replaced by
+  a new local session after local detachment
 - **WHEN** the stale session's bounded background close releases durable
   ownership after the replacement has claimed the same durable key
 - **THEN** the stale release does not clear the replacement owner's durable

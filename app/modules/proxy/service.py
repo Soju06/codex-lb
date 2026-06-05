@@ -6752,9 +6752,10 @@ class ProxyService:
                         expected_session=existing,
                         mark_closed=not retiring_with_visible_requests,
                     )
-                    if detached is not None and not retiring_with_visible_requests:
+                    if detached is not None:
                         force_durable_takeover = True
-                        self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
+                        if not retiring_with_visible_requests:
+                            self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
 
                 if shutdown_state.is_bridge_drain_active() and not _http_bridge_can_recover_during_drain(
@@ -7405,10 +7406,11 @@ class ProxyService:
                             expected_session=session,
                             mark_closed=not retiring_with_visible_requests,
                         )
-                    if not retiring_with_visible_requests:
+                    if detached is not None:
                         force_durable_takeover_after_detach = True
+                    if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes(
-                            [detached or session],
+                            [detached],
                             reason="registry_detach",
                         )
                 continue

@@ -6448,6 +6448,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
     create_started = asyncio.Event()
     release_create = asyncio.Event()
     create_calls: list[list[str]] = []
+    durable_claims: list[tuple[str, bool]] = []
     stale_account_id = await _import_account(
         async_client,
         "acc_http_bridge_stale",
@@ -6490,12 +6491,32 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
             await _wait_for_event(release_create)
             session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
             cast(Any, session).account = SimpleNamespace(id=stale_account_id, status=AccountStatus.ACTIVE)
+            session.queued_request_count = 1
+            session.upstream_control.retire_after_drain = True
             return session
         session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
         cast(Any, session).account = SimpleNamespace(id=fresh_account_id, status=AccountStatus.ACTIVE)
         return session
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+
+    async def fake_claim_durable_http_bridge_session(
+        self,
+        session,
+        *,
+        allow_takeover,
+        force_owner_epoch_advance=False,
+    ):
+        del self, allow_takeover
+        durable_claims.append((session.account.id, force_owner_epoch_advance))
+        session.durable_session_id = "durable-session"
+        session.durable_owner_epoch = 2 if force_owner_epoch_advance else 1
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_claim_durable_http_bridge_session",
+        fake_claim_durable_http_bridge_session,
+    )
 
     session_header = f"shared-session-{stale_account_id}"
     key = proxy_module._HTTPBridgeSessionKey("session_header", session_header, "key-assignments")
@@ -6540,6 +6561,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         assert follower_session.account.id == fresh_account_id
         assert service._http_bridge_sessions[key] is follower_session
         assert create_calls == [[stale_account_id], [fresh_account_id]]
+        assert durable_claims == [(stale_account_id, False), (fresh_account_id, True)]
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()

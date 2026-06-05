@@ -216,13 +216,15 @@ class DurableBridgeRepository:
             previous_state = existing.state
             account_changed = existing.account_id != account_id
             owner_changed = existing.owner_instance_id != instance_id
-            if not owner_changed:
-                next_epoch = existing.owner_epoch
-            else:
+            if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
                 if not allow_takeover and not lease_expired and not state_allows_takeover:
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1
+            elif account_changed:
+                next_epoch = existing.owner_epoch + 1
+            else:
+                next_epoch = existing.owner_epoch
 
             async with sqlite_writer_section():
                 existing.owner_instance_id = instance_id

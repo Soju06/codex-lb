@@ -99,8 +99,25 @@ def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
     assert manager._refresh_repo_factory is guardian_module._default_accounts_repo_factory
 
 
-def test_build_auth_guardian_scheduler_requires_leader_election(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_auth_guardian_scheduler_allows_single_replica_without_leader_election(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = _settings(auth_guardian_enabled=True, leader_election_enabled=False)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+
+
+def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=False,
+        instance_ring=["pod-a", "pod-b"],
+    )
     monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
 
     scheduler = build_auth_guardian_scheduler()
@@ -413,10 +430,16 @@ async def _noop_sleep() -> None:
     return None
 
 
-def _settings(*, auth_guardian_enabled: bool, leader_election_enabled: bool) -> SimpleNamespace:
+def _settings(
+    *,
+    auth_guardian_enabled: bool,
+    leader_election_enabled: bool,
+    instance_ring: list[str] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         auth_guardian_enabled=auth_guardian_enabled,
         leader_election_enabled=leader_election_enabled,
+        http_responses_session_bridge_instance_ring=instance_ring or [],
         auth_guardian_interval_seconds=21600,
         auth_guardian_max_refresh_age_seconds=12 * 3600,
         auth_guardian_batch_size=10,

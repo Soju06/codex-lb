@@ -222,9 +222,10 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
     from app.core.config.settings import get_settings
 
     settings = get_settings()
+    multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
     return AuthGuardianScheduler(
         interval_seconds=settings.auth_guardian_interval_seconds,
-        enabled=settings.auth_guardian_enabled and settings.leader_election_enabled,
+        enabled=settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica),
         max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
         batch_size=settings.auth_guardian_batch_size,
         concurrency=settings.auth_guardian_concurrency,

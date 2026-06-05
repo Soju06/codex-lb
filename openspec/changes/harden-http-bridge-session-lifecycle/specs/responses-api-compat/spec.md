@@ -36,6 +36,11 @@ bounded path before the replacement selects an account, so the evicted
 session's account lease cannot cause a spurious no-account or local-capacity
 failure.
 
+If a request is cancelled while awaiting that pre-creation eviction close after
+registering replacement session creation as in-flight, the service MUST fail or
+remove the in-flight creation marker before propagating cancellation. Later
+requests MUST NOT wait on an orphaned creation future that can never complete.
+
 #### Scenario: wedged stale pending lock does not block fresh soft request
 
 - **GIVEN** the HTTP responses bridge has an idle or stale local session whose
@@ -88,3 +93,14 @@ failure.
   replacement selects an account
 - **AND** the evicted session's account lease does not cause the replacement to
   fail with a spurious no-account or local-capacity error
+
+#### Scenario: cancellation during LRU close clears in-flight creation
+
+- **GIVEN** the bridge is at local session capacity and an idle session is
+  detached for LRU eviction before replacement creation
+- **WHEN** the replacement request is cancelled while the bounded eviction close
+  is still awaiting cleanup
+- **THEN** the replacement in-flight creation marker is removed or failed before
+  cancellation is propagated
+- **AND** later requests for the same bridge key do not wait on that abandoned
+  creation marker

@@ -7301,8 +7301,13 @@ class ProxyService:
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
 
-            for session_to_close in sessions_to_close_before_create:
-                await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
+            try:
+                for session_to_close in sessions_to_close_before_create:
+                    await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
+            except BaseException as exc:
+                if owns_creation:
+                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
+                raise
 
             if session_to_return_after_close is not None:
                 return session_to_return_after_close

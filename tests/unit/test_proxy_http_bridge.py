@@ -6906,6 +6906,67 @@ async def test_get_or_create_http_bridge_session_immediate_capacity_exhaustion_i
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_closes_lru_before_replacement_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    existing_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-lru-existing", None)
+    existing = _make_bridge_session(key=existing_key, key_value="sid-lru-existing")
+    service._http_bridge_sessions[existing_key] = existing
+    new_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-lru-new", None)
+    events: list[str] = []
+
+    async def close_http_bridge_session_bounded(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        reason: str,
+    ) -> None:
+        assert session is existing
+        assert reason == "registry_detach"
+        events.append("close")
+        session.closed = True
+
+    async def create_http_bridge_session(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **_: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        assert events == ["close"]
+        events.append("create")
+        return _make_bridge_session(key=key, key_value=key.affinity_key)
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_http_bridge_session_bounded)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    result = await service._get_or_create_http_bridge_session(
+        new_key,
+        headers={"x-codex-session-id": "sid-lru-new"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-lru-new",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=1,
+    )
+
+    assert events == ["close", "create"]
+    assert result.key == new_key
+    assert existing_key not in service._http_bridge_sessions
+    assert service._http_bridge_sessions[new_key] is result
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_capacity_scan_does_not_wait_on_wedged_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

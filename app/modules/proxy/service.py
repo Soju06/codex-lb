@@ -6599,6 +6599,7 @@ class ProxyService:
             force_durable_takeover = force_durable_takeover_after_detach
             missing_turn_state_alias = False
             used_session_header_fallback = False
+            sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None
             preserve_durable_canonical_key = (
                 incoming_turn_state is not None
@@ -7272,7 +7273,7 @@ class ProxyService:
                             )
                             detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
                             if detached is not None:
-                                self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
+                                sessions_to_close_before_create.append(detached)
                         if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
                             if self._http_bridge_inflight_sessions:
                                 capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
@@ -7299,6 +7300,9 @@ class ProxyService:
                             inflight_future = asyncio.get_running_loop().create_future()
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
+
+            for session_to_close in sessions_to_close_before_create:
+                await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
 
             if session_to_return_after_close is not None:
                 return session_to_return_after_close

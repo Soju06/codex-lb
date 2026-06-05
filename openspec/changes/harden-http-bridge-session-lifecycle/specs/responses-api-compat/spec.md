@@ -30,6 +30,12 @@ its durable ownership later after draining. After a detached retiring session
 finishes draining its visible requests, it MUST release its durable ownership
 and account lease instead of only closing the upstream websocket.
 
+When bridge capacity eviction removes an idle local session to admit a
+replacement session, the evicted session's close MUST be awaited through a
+bounded path before the replacement selects an account, so the evicted
+session's account lease cannot cause a spurious no-account or local-capacity
+failure.
+
 #### Scenario: wedged stale pending lock does not block fresh soft request
 
 - **GIVEN** the HTTP responses bridge has an idle or stale local session whose
@@ -72,3 +78,13 @@ and account lease instead of only closing the upstream websocket.
 - **AND** the service releases the old session's account lease
 - **AND** the detached session no longer holds bridge capacity until process
   exit
+
+#### Scenario: LRU eviction releases lease before replacement account selection
+
+- **GIVEN** the bridge is at local session capacity and an idle session is
+  selected for LRU eviction
+- **WHEN** a replacement bridge session is created after that eviction
+- **THEN** the evicted session is closed through a bounded path before the
+  replacement selects an account
+- **AND** the evicted session's account lease does not cause the replacement to
+  fail with a spurious no-account or local-capacity error

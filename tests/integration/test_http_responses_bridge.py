@@ -6497,7 +6497,8 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
-    key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-session", "key-assignments")
+    session_header = f"shared-session-{stale_account_id}"
+    key = proxy_module._HTTPBridgeSessionKey("session_header", session_header, "key-assignments")
     stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[stale_account_id])
     refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[fresh_account_id])
 
@@ -6505,9 +6506,9 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         creator = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"session_id": "shared-session"},
+                headers={"session_id": session_header},
                 affinity=proxy_module._AffinityPolicy(
-                    key="shared-session",
+                    key=session_header,
                     kind=proxy_module.StickySessionKind.CODEX_SESSION,
                 ),
                 api_key=stale_api_key,
@@ -6520,9 +6521,9 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         follower = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"session_id": "shared-session"},
+                headers={"session_id": session_header},
                 affinity=proxy_module._AffinityPolicy(
-                    key="shared-session",
+                    key=session_header,
                     kind=proxy_module.StickySessionKind.CODEX_SESSION,
                 ),
                 api_key=refreshed_api_key,

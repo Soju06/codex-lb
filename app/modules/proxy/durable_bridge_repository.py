@@ -308,18 +308,19 @@ class DurableBridgeRepository:
         owner_epoch: int,
         draining: bool,
     ) -> DurableBridgeSessionSnapshot | None:
-        row = await self._session.get(HttpBridgeSessionRecord, session_id)
-        if row is None:
-            return None
-        if row.owner_instance_id != instance_id or row.owner_epoch != owner_epoch:
-            return _to_snapshot(row)
-        now = utcnow()
-        row.owner_instance_id = None
-        row.lease_expires_at = now
-        row.last_seen_at = now
-        row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
-        row.closed_at = None if draining else now
-        await self._commit_writer_section()
+        async with sqlite_writer_section():
+            row = await self._session.get(HttpBridgeSessionRecord, session_id, populate_existing=True)
+            if row is None:
+                return None
+            if row.owner_instance_id != instance_id or row.owner_epoch != owner_epoch:
+                return _to_snapshot(row)
+            now = utcnow()
+            row.owner_instance_id = None
+            row.lease_expires_at = now
+            row.last_seen_at = now
+            row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
+            row.closed_at = None if draining else now
+            await self._session.commit()
         await self._session.refresh(row)
         return _to_snapshot(row)
 

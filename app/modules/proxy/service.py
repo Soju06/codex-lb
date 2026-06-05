@@ -7798,20 +7798,28 @@ class ProxyService:
     ) -> None:
         current_instance = get_settings().http_responses_session_bridge_instance_id
         try:
-            lookup = await self._durable_bridge.claim_live_session(
-                session_key_kind=session.key.affinity_kind,
-                session_key_value=session.key.affinity_key,
-                api_key_id=session.key.api_key_id,
-                instance_id=current_instance,
-                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                account_id=session.account.id,
-                model=session.request_model,
-                service_tier=None,
-                latest_turn_state=session.downstream_turn_state,
-                latest_response_id=None,
-                allow_takeover=allow_takeover,
-                force_owner_epoch_advance=force_owner_epoch_advance,
-            )
+            lookup: DurableBridgeLookup | None = None
+            for claim_attempt in range(2):
+                lookup = await self._durable_bridge.claim_live_session(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                    instance_id=current_instance,
+                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    service_tier=None,
+                    latest_turn_state=session.downstream_turn_state,
+                    latest_response_id=None,
+                    allow_takeover=allow_takeover,
+                    force_owner_epoch_advance=force_owner_epoch_advance or claim_attempt > 0,
+                )
+                if lookup.owner_instance_id == current_instance:
+                    break
+                if not allow_takeover or claim_attempt > 0:
+                    break
+                await asyncio.sleep(0)
+            assert lookup is not None
             if lookup.owner_instance_id != current_instance:
                 _log_http_bridge_event(
                     "owner_mismatch_retry",

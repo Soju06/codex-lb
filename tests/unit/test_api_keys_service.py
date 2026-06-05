@@ -586,6 +586,27 @@ async def test_update_key_changes_traffic_class() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_key_read_skips_null_allowed_models() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="nullable-models",
+            allowed_models=["gpt-5.2"],
+            expires_at=None,
+        )
+    )
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    row.allowed_models = '[null, " gpt-5.2 ", 42, "", "gpt-5.5"]'
+
+    reloaded = await service.get_key_by_id(created.id)
+
+    assert reloaded.allowed_models == ["gpt-5.2", "gpt-5.5"]
+
+
+@pytest.mark.asyncio
 async def test_create_key_normalizes_timezone_aware_expiry_to_utc_naive() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

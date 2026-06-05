@@ -855,7 +855,7 @@ def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
     assert log_calls[0]["status"] == "success"
 
 
-def test_backend_responses_websocket_strips_image_generation_tool_advertisement(app_instance, monkeypatch):
+def test_backend_responses_websocket_preserves_image_generation_tool_advertisement(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(
             "text",
@@ -966,7 +966,7 @@ def test_backend_responses_websocket_strips_image_generation_tool_advertisement(
             "model": "gpt-5.4",
             "instructions": "",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
-            "tools": [function_tool],
+            "tools": [{"type": "image_generation", "output_format": "png"}, function_tool],
             "store": False,
             "include": [],
             "type": "response.create",
@@ -1597,7 +1597,7 @@ def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_insta
                         "type": "response.create",
                         "model": "gpt-5.4",
                         "input": "hi",
-                        "truncation": "auto",
+                        "truncation": "middle",
                     }
                 )
             )

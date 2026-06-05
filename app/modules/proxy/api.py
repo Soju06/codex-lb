@@ -481,7 +481,6 @@ async def responses(
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_compat_payload,
-            codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
@@ -2915,7 +2914,13 @@ def _logged_error_json_response(
     *,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    code, message = _error_details_from_content(content)
+    if isinstance(content, OpenAIErrorEnvelopeModel):
+        public_content: Mapping[str, JsonValue] | OpenAIErrorEnvelope = content.model_dump(
+            mode="json", exclude_none=True
+        )
+    else:
+        public_content = content
+    code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
@@ -2927,7 +2932,11 @@ def _logged_error_json_response(
         message,
         category="proxy_error_response",
     )
-    return JSONResponse(status_code=status_code, content=content, headers=effective_headers or None)
+    # codeql[py/stack-trace-exposure] This is an OpenAI-compatible proxy boundary:
+    # upstream/provider error envelopes intentionally preserve diagnostics for
+    # clients, while internal exception handlers construct generic error
+    # envelopes before reaching this response helper.
+    return JSONResponse(status_code=status_code, content=public_content, headers=effective_headers or None)
 
 
 def _error_details_from_content(

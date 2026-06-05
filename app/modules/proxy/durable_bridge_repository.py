@@ -165,6 +165,7 @@ class DurableBridgeRepository:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
         for attempt in range(2):
@@ -216,13 +217,15 @@ class DurableBridgeRepository:
             previous_state = existing.state
             account_changed = existing.account_id != account_id
             owner_changed = existing.owner_instance_id != instance_id
-            if not owner_changed:
-                next_epoch = existing.owner_epoch
-            else:
+            if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
                 if not allow_takeover and not lease_expired and not state_allows_takeover:
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1
+            elif account_changed or force_owner_epoch_advance:
+                next_epoch = existing.owner_epoch + 1
+            else:
+                next_epoch = existing.owner_epoch
 
             async with sqlite_writer_section():
                 existing.owner_instance_id = instance_id
@@ -305,18 +308,19 @@ class DurableBridgeRepository:
         owner_epoch: int,
         draining: bool,
     ) -> DurableBridgeSessionSnapshot | None:
-        row = await self._session.get(HttpBridgeSessionRecord, session_id)
-        if row is None:
-            return None
-        if row.owner_instance_id != instance_id or row.owner_epoch != owner_epoch:
-            return _to_snapshot(row)
-        now = utcnow()
-        row.owner_instance_id = None
-        row.lease_expires_at = now
-        row.last_seen_at = now
-        row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
-        row.closed_at = None if draining else now
-        await self._commit_writer_section()
+        async with sqlite_writer_section():
+            row = await self._session.get(HttpBridgeSessionRecord, session_id, populate_existing=True)
+            if row is None:
+                return None
+            if row.owner_instance_id != instance_id or row.owner_epoch != owner_epoch:
+                return _to_snapshot(row)
+            now = utcnow()
+            row.owner_instance_id = None
+            row.lease_expires_at = now
+            row.last_seen_at = now
+            row.state = HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED
+            row.closed_at = None if draining else now
+            await self._session.commit()
         await self._session.refresh(row)
         return _to_snapshot(row)
 

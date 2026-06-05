@@ -453,7 +453,7 @@ def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
     assert payload.reasoning.effort == "low"
 
 
-def test_normalize_responses_request_payload_strips_backend_codex_image_generation_tools():
+def test_normalize_responses_request_payload_preserves_backend_codex_image_generation_with_function_tools():
     function_tool = {
         "type": "function",
         "name": "lookup_weather",
@@ -469,11 +469,32 @@ def test_normalize_responses_request_payload_strips_backend_codex_image_generati
     request = proxy_request_policy.normalize_responses_request_payload(
         payload,
         openai_compat=True,
-        codex_tool_compat=True,
     )
 
-    assert request.tools == [function_tool]
+    assert request.tools == [{"type": "image_generation", "output_format": "png"}, function_tool]
     assert payload["tools"] == [{"type": "image_generation", "output_format": "png"}, function_tool]
+
+
+def test_normalize_responses_request_payload_preserves_backend_codex_image_generation_tools():
+    image_tool = {"type": "image_generation", "output_format": "png"}
+    function_tool = {
+        "type": "function",
+        "name": "lookup_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [],
+        "tools": [image_tool, function_tool],
+    }
+
+    request = proxy_request_policy.normalize_responses_request_payload(
+        payload,
+        openai_compat=True,
+    )
+
+    assert request.tools == [image_tool, function_tool]
 
 
 def test_normalize_responses_request_payload_without_codex_compat_preserves_image_generation():
@@ -487,7 +508,6 @@ def test_normalize_responses_request_payload_without_codex_compat_preserves_imag
     request = proxy_request_policy.normalize_responses_request_payload(
         payload,
         openai_compat=True,
-        codex_tool_compat=False,
     )
 
     assert request.tools == [{"type": "image_generation", "output_format": "png"}]
@@ -506,7 +526,6 @@ def test_normalize_responses_request_payload_preserves_explicit_image_generation
     request = proxy_request_policy.normalize_responses_request_payload(
         payload,
         openai_compat=True,
-        codex_tool_compat=True,
     )
 
     assert request.tools == [image_tool]
@@ -526,14 +545,13 @@ def test_normalize_responses_request_payload_preserves_required_image_generation
     request = proxy_request_policy.normalize_responses_request_payload(
         payload,
         openai_compat=True,
-        codex_tool_compat=True,
     )
 
     assert request.tools == [image_tool]
     assert request.tool_choice == "required"
 
 
-def test_normalize_responses_request_payload_strips_required_image_generation_advertisement_with_function_tool():
+def test_normalize_responses_request_payload_preserves_required_image_generation_with_function_tool():
     image_tool = {"type": "image_generation", "output_format": "png"}
     function_tool = {
         "type": "function",
@@ -553,10 +571,9 @@ def test_normalize_responses_request_payload_strips_required_image_generation_ad
     request = proxy_request_policy.normalize_responses_request_payload(
         payload,
         openai_compat=True,
-        codex_tool_compat=True,
     )
 
-    assert request.tools == [function_tool]
+    assert request.tools == [image_tool, function_tool]
     assert request.tool_choice == "required"
 
 
@@ -1348,6 +1365,69 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
 
     assert disabled_bridge_output == ["data: retry\n\n"]
     assert calls == [("retry", payload, None, 180.0, "http")]
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_tool(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "draw",
+            "input": [{"role": "user", "content": "draw"}],
+            "tools": [{"type": "image_generation"}],
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    calls: list[str] = []
+
+    async def fake_stream_with_retry(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append("retry")
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append("bridge")
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    assert calls == ["retry"]
 
 
 @pytest.mark.asyncio
@@ -5612,8 +5692,9 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
 
     assert response.status_code == 502
     assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
-    assert "code=upstream_error" in caplog.text
-    assert "message=provider failed" in caplog.text
+    assert "method=POST path=/v1/responses status=502" in caplog.text
+    assert "code=upstream_error" not in caplog.text
+    assert "message=provider failed" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,4 @@
+- [x] Ignore JSON null and non-string entries when reading stored API key `allowed_models`.
+- [x] Accept `truncation: "auto"` and `truncation: "disabled"` on Responses requests.
+- [x] Strip `truncation` before forwarding upstream.
+- [x] Add regression coverage for both issues.

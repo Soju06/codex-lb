@@ -3,23 +3,27 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi.responses import JSONResponse
 
 import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
-from app.core.clients.oauth import DeviceCode, OAuthTokens
+from app.core.clients.oauth import DeviceCode, OAuthError, OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.oauth import api as oauth_api_module
+from app.modules.oauth.schemas import ManualCallbackRequest
 
 pytestmark = pytest.mark.integration
 
@@ -33,6 +37,100 @@ def _encode_jwt(payload: dict) -> str:
 def _oauth_state_token(authorization_url: str) -> str:
     parsed = urlparse(authorization_url)
     return parse_qs(parsed.query)["state"][0]
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_api_sanitizes_unexpected_exception():
+    class FailingOauthService:
+        async def manual_callback(self, callback_url: str, flow_id: str | None = None):
+            raise RuntimeError("Traceback (most recent call last): password=super-secret")
+
+    response = cast(
+        JSONResponse,
+        await oauth_api_module.manual_callback(
+            ManualCallbackRequest(callback_url="http://localhost:1455/?code=c&state=s"),
+            context=cast(Any, SimpleNamespace(service=FailingOauthService())),
+        ),
+    )
+
+    assert response.status_code == 500
+    payload = json.loads(bytes(response.body))
+    assert payload == {
+        "error": {
+            "code": "manual_callback_failed",
+            "message": "An internal error occurred.",
+        }
+    }
+    assert "super-secret" not in bytes(response.body).decode()
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_api_preserves_oauth_error():
+    class FailingOauthService:
+        async def manual_callback(self, callback_url: str, flow_id: str | None = None):
+            raise OAuthError("invalid_grant", "Authorization code expired", status_code=400)
+
+    response = cast(
+        JSONResponse,
+        await oauth_api_module.manual_callback(
+            ManualCallbackRequest(callback_url="http://localhost:1455/?code=c&state=s"),
+            context=cast(Any, SimpleNamespace(service=FailingOauthService())),
+        ),
+    )
+
+    assert response.status_code == 502
+    assert json.loads(bytes(response.body)) == {
+        "error": {
+            "code": "invalid_grant",
+            "message": "Authorization code expired",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_service_sanitizes_unexpected_exception(monkeypatch, caplog):
+    await oauth_module._OAUTH_STORE.reset()
+    caplog.set_level(logging.ERROR, logger=oauth_module.logger.name)
+    async with oauth_module._OAUTH_STORE.lock:
+        oauth_module._OAUTH_STORE.remember_flow_locked(
+            oauth_module.OAuthState(
+                flow_id="flow-1",
+                status="pending",
+                method="browser",
+                state_token="state-1",
+                code_verifier="verifier-1",
+            )
+        )
+
+    async def fake_oauth_route():
+        return None
+
+    async def fake_exchange_authorization_code(**_kwargs):
+        raise RuntimeError("Unexpected error: /home/app/password.txt")
+
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+    service = oauth_module.OauthService(cast(AccountsRepository, SimpleNamespace()))
+
+    response = await service.manual_callback("http://localhost:1455/?code=code-1&state=state-1", flow_id="flow-1")
+
+    assert response.status == "error"
+    assert response.error_message == "An internal error occurred."
+    assert "RuntimeError" in caplog.text
+    assert "password.txt" not in caplog.text
+    assert "/home/app" not in caplog.text
+    assert "Traceback" not in caplog.text
+    async with oauth_module._OAUTH_STORE.lock:
+        flow = oauth_module._OAUTH_STORE.get_flow_locked("flow-1")
+        assert flow is not None
+        assert flow.error_message == "An internal error occurred."
+
+
+def test_oauth_error_html_escapes_message():
+    html = oauth_module._error_html("bad <script>alert('x')</script>")
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in html
 
 
 @pytest.mark.asyncio

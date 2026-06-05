@@ -1159,7 +1159,7 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
     parsed = json.loads(payload)
     if not isinstance(parsed, list):
         return None
-    models = [str(value).strip() for value in parsed if str(value).strip()]
+    models = [value.strip() for value in parsed if isinstance(value, str) and value.strip()]
     return models
 
 

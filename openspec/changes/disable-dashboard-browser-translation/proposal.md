@@ -4,11 +4,11 @@ Chrome's built-in Translate action and the Google Translate extension can mutate
 
 ## What Changes
 
-- Mark the dashboard HTML document, body, and React root as non-translatable.
-- Add Google's `notranslate` meta tag so browser translation tools do not rewrite dashboard DOM text nodes.
+- Allow browser translation tools to translate dashboard text.
+- Install a small startup guard around DOM `removeChild`/`insertBefore` so externally moved nodes are logged and ignored instead of crashing React reconciliation.
 
 ## Impact
 
-- Prevents browser translation from modifying the live React dashboard DOM.
+- Keeps the dashboard from crashing if browser translation or another extension mutates React-owned DOM.
 - Keeps the dashboard usable for operators affected by Google Translate injection.
 - Does not add built-in localization; a first-party i18n UI remains a separate feature.

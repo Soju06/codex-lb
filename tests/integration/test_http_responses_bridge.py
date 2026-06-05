@@ -1495,12 +1495,12 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
 
     session.last_used_at = time.monotonic() - 300.0
     async with service._http_bridge_lock:
-        await service._prune_http_bridge_sessions_locked()
+        service._prune_http_bridge_sessions_locked()
         assert key in service._http_bridge_sessions
 
     session.last_used_at = time.monotonic() - 601.0
     async with service._http_bridge_lock:
-        await service._prune_http_bridge_sessions_locked()
+        service._prune_http_bridge_sessions_locked()
         assert key not in service._http_bridge_sessions
 
 
@@ -6448,6 +6448,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
     create_started = asyncio.Event()
     release_create = asyncio.Event()
     create_calls: list[list[str]] = []
+    durable_claims: list[tuple[str, bool]] = []
     stale_account_id = await _import_account(
         async_client,
         "acc_http_bridge_stale",
@@ -6490,6 +6491,8 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
             await _wait_for_event(release_create)
             session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
             cast(Any, session).account = SimpleNamespace(id=stale_account_id, status=AccountStatus.ACTIVE)
+            session.queued_request_count = 1
+            session.upstream_control.retire_after_drain = True
             return session
         session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
         cast(Any, session).account = SimpleNamespace(id=fresh_account_id, status=AccountStatus.ACTIVE)
@@ -6497,7 +6500,26 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
-    key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-session", "key-assignments")
+    async def fake_claim_durable_http_bridge_session(
+        self,
+        session,
+        *,
+        allow_takeover,
+        force_owner_epoch_advance=False,
+    ):
+        del self, allow_takeover
+        durable_claims.append((session.account.id, force_owner_epoch_advance))
+        session.durable_session_id = "durable-session"
+        session.durable_owner_epoch = 2 if force_owner_epoch_advance else 1
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_claim_durable_http_bridge_session",
+        fake_claim_durable_http_bridge_session,
+    )
+
+    session_header = f"shared-session-{stale_account_id}"
+    key = proxy_module._HTTPBridgeSessionKey("session_header", session_header, "key-assignments")
     stale_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[stale_account_id])
     refreshed_api_key = _make_api_key_data(key_id="key-assignments", assigned_account_ids=[fresh_account_id])
 
@@ -6505,9 +6527,9 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         creator = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"session_id": "shared-session"},
+                headers={"session_id": session_header},
                 affinity=proxy_module._AffinityPolicy(
-                    key="shared-session",
+                    key=session_header,
                     kind=proxy_module.StickySessionKind.CODEX_SESSION,
                 ),
                 api_key=stale_api_key,
@@ -6520,9 +6542,9 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         follower = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"session_id": "shared-session"},
+                headers={"session_id": session_header},
                 affinity=proxy_module._AffinityPolicy(
-                    key="shared-session",
+                    key=session_header,
                     kind=proxy_module.StickySessionKind.CODEX_SESSION,
                 ),
                 api_key=refreshed_api_key,
@@ -6539,6 +6561,7 @@ async def test_v1_responses_http_bridge_singleflight_follower_replaces_session_w
         assert follower_session.account.id == fresh_account_id
         assert service._http_bridge_sessions[key] is follower_session
         assert create_calls == [[stale_account_id], [fresh_account_id]]
+        assert durable_claims == [(stale_account_id, False), (fresh_account_id, True)]
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()

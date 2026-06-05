@@ -1,0 +1,5 @@
+- [x] Add normative HTTP bridge lifecycle requirements for bounded stale cleanup and no stale cleanup awaits under the global bridge lock
+- [x] Refactor bridge stale-session pruning/close so unrelated bridge requests cannot hang behind a wedged stale session
+- [x] Add regression tests covering stale pending/session locks and fresh HTTP bridge startup progress/fail-fast behavior
+- [x] Run targeted proxy tests and OpenSpec validation
+- [x] Run final cleanup/review gates required by Ultragoal

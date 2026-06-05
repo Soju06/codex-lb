@@ -1495,12 +1495,12 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
 
     session.last_used_at = time.monotonic() - 300.0
     async with service._http_bridge_lock:
-        await service._prune_http_bridge_sessions_locked()
+        service._prune_http_bridge_sessions_locked()
         assert key in service._http_bridge_sessions
 
     session.last_used_at = time.monotonic() - 601.0
     async with service._http_bridge_lock:
-        await service._prune_http_bridge_sessions_locked()
+        service._prune_http_bridge_sessions_locked()
         assert key not in service._http_bridge_sessions
 
 

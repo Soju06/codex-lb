@@ -320,6 +320,8 @@ def _log_http_bridge_startup_wait_timeout(
 # A blocked prewarm holds the response_create_gate semaphore and prevents
 # the real request from being sent, leading to an indefinite :keepalive hang.
 _PREWARM_RESPONSE_TIMEOUT_SECONDS = 2.0
+_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
+_HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # Maximum consecutive keepalive frames sent before terminating the stream.
 # 6 × 10s (default interval) = 60s.  Combined with the 0.5s startup-probe
 # window this ensures the client sees a terminal event within ≈70s when the
@@ -6221,6 +6223,157 @@ class ProxyService:
             )
             return max(visible_pending_count, session.queued_request_count)
 
+    def _http_bridge_pending_count_nowait(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        context: str,
+    ) -> int | None:
+        try:
+            session.pending_lock.acquire_nowait()
+        except (anyio.WouldBlock, RuntimeError):
+            logger.warning(
+                "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+                context,
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                session.account.id,
+                session.request_model,
+            )
+            return None
+        try:
+            visible_pending_count = sum(
+                1
+                for request_state in session.pending_requests
+                if _http_bridge_request_counts_against_queue(request_state)
+            )
+            return max(visible_pending_count, session.queued_request_count)
+        finally:
+            session.pending_lock.release()
+
+    async def _close_http_bridge_session_bounded(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        reason: str,
+    ) -> None:
+        close_task = asyncio.create_task(
+            self._close_http_bridge_session(session),
+            name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
+        )
+
+        def _track_close_task_after_interruption(*, interruption: str) -> None:
+            if close_task.done():
+                return
+            self._background_cleanup_tasks.add(close_task)
+
+            def _close_done(done_task: asyncio.Task[None]) -> None:
+                self._background_cleanup_tasks.discard(done_task)
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "http_bridge_session_close_cancelled_after_%s reason=%s bridge_kind=%s "
+                        "bridge_key=%s account_id=%s model=%s",
+                        interruption,
+                        reason,
+                        session.key.affinity_kind,
+                        _hash_identifier(session.key.affinity_key),
+                        session.account.id,
+                        session.request_model,
+                    )
+                except Exception:
+                    logger.warning(
+                        "http_bridge_session_close_failed_after_%s reason=%s bridge_kind=%s "
+                        "bridge_key=%s account_id=%s model=%s",
+                        interruption,
+                        reason,
+                        session.key.affinity_kind,
+                        _hash_identifier(session.key.affinity_key),
+                        session.account.id,
+                        session.request_model,
+                        exc_info=True,
+                    )
+
+            close_task.add_done_callback(_close_done)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(close_task),
+                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _track_close_task_after_interruption(interruption="timeout")
+            logger.warning(
+                "http_bridge_session_close_timeout reason=%s bridge_kind=%s bridge_key=%s "
+                "account_id=%s model=%s timeout_seconds=%.1f background_cleanup_tasks=%d",
+                reason,
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                session.account.id,
+                session.request_model,
+                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+                len(self._background_cleanup_tasks),
+            )
+        except asyncio.CancelledError:
+            _track_close_task_after_interruption(interruption="cancellation")
+            raise
+        except Exception:
+            logger.warning(
+                "http_bridge_session_close_failed reason=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+                reason,
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                session.account.id,
+                session.request_model,
+                exc_info=True,
+            )
+
+    def _schedule_http_bridge_session_closes(
+        self,
+        sessions: list["_HTTPBridgeSession"],
+        *,
+        reason: str,
+    ) -> None:
+        for session in sessions:
+            if len(self._background_cleanup_tasks) >= _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD:
+                logger.warning(
+                    "http_bridge_background_cleanup_backlog action=session_close count=%d threshold=%d reason=%s",
+                    len(self._background_cleanup_tasks),
+                    _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD,
+                    reason,
+                )
+            self._schedule_cancel_safe_cleanup(
+                self._close_http_bridge_session_bounded(session, reason=reason),
+                action="http_bridge_session_close",
+                request_id=_hash_identifier(session.key.affinity_key),
+            )
+
+    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
+        tasks = [
+            task
+            for task in self._background_cleanup_tasks
+            if not task.done()
+            and (
+                task.get_name().startswith("proxy-http_bridge_session_close-")
+                or task.get_name().startswith("http-bridge-close-")
+            )
+        ]
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
+                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
+                reason,
+                len(tasks),
+                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            )
+
     async def _select_account_with_budget_compatible(
         self,
         deadline: float,
@@ -6435,15 +6588,15 @@ class ProxyService:
             else None
         )
         old_account_id: str | None = None
+        force_durable_takeover_after_detach = False
         while True:
-            sessions_to_close: list[_HTTPBridgeSession] = []
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
             owner_mismatch_error: ProxyResponseError | None = None
             owner_forward: _HTTPBridgeOwnerForward | None = None
-            force_durable_takeover = False
+            force_durable_takeover = force_durable_takeover_after_detach
             missing_turn_state_alias = False
             used_session_header_fallback = False
             session_to_return_after_close: _HTTPBridgeSession | None = None
@@ -6536,7 +6689,14 @@ class ProxyService:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
                             missing_turn_state_alias = True
 
-                await self._prune_http_bridge_sessions_locked()
+                pruned_sessions = self._prune_http_bridge_sessions_locked()
+                if pruned_sessions:
+                    if any(session.key == key for session in pruned_sessions):
+                        force_durable_takeover = True
+                    self._schedule_http_bridge_session_closes(
+                        pruned_sessions,
+                        reason="registry_detach",
+                    )
 
                 existing = self._http_bridge_sessions.get(key)
                 if (
@@ -6568,7 +6728,10 @@ class ProxyService:
                             key,
                             account_id=existing.account.id,
                             model=existing.request_model,
-                            pending_count=await self._http_bridge_pending_count(existing),
+                            pending_count=self._http_bridge_pending_count_nowait(
+                                existing,
+                                context="reuse_log",
+                            ),
                             cache_key_family=key.affinity_kind,
                             model_class=_extract_model_class(existing.request_model)
                             if existing.request_model
@@ -6576,19 +6739,22 @@ class ProxyService:
                         )
                         return existing
                     old_account_id = existing.account.id
-                    self._http_bridge_sessions.pop(key, None)
-                    self._unregister_http_bridge_turn_states_locked(existing)
-                    existing.closed = True
-                    sessions_to_close.append(existing)
+                    detached = self._detach_http_bridge_session_locked(key, expected_session=existing)
+                    if detached is not None:
+                        force_durable_takeover = True
+                        self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
                 if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
                     old_account_id = existing.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
-                    self._http_bridge_sessions.pop(key, None)
-                    self._unregister_http_bridge_turn_states_locked(existing)
-                    if not retiring_with_visible_requests:
-                        existing.closed = True
-                        sessions_to_close.append(existing)
+                    detached = self._detach_http_bridge_session_locked(
+                        key,
+                        expected_session=existing,
+                        mark_closed=not retiring_with_visible_requests,
+                    )
+                    if detached is not None and not retiring_with_visible_requests:
+                        force_durable_takeover = True
+                        self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
 
                 if shutdown_state.is_bridge_drain_active() and not _http_bridge_can_recover_during_drain(
@@ -6948,8 +7114,10 @@ class ProxyService:
                         cache_key_family=key.affinity_kind,
                         model_class=_extract_model_class(existing.request_model) if existing.request_model else None,
                     )
-                    self._http_bridge_sessions.pop(key, None)
-                    sessions_to_close.append(existing)
+                    detached = self._detach_http_bridge_session_locked(key, expected_session=existing)
+                    if detached is not None:
+                        force_durable_takeover = True
+                        self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
 
                 if owner_mismatch_error is None:
                     inflight_future = self._http_bridge_inflight_sessions.get(key)
@@ -6993,7 +7161,10 @@ class ProxyService:
                                         key,
                                         account_id=previous_session.account.id,
                                         model=previous_session.request_model,
-                                        pending_count=await self._http_bridge_pending_count(previous_session),
+                                        pending_count=self._http_bridge_pending_count_nowait(
+                                            previous_session,
+                                            context="previous_response_reuse_log",
+                                        ),
                                         cache_key_family=key.affinity_kind,
                                         model_class=_extract_model_class(previous_session.request_model)
                                         if previous_session.request_model
@@ -7073,7 +7244,12 @@ class ProxyService:
                         ):
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
                             for candidate_key, candidate_session in self._http_bridge_sessions.items():
-                                pending_count = await self._http_bridge_pending_count(candidate_session)
+                                pending_count = self._http_bridge_pending_count_nowait(
+                                    candidate_session,
+                                    context="capacity_evict_scan",
+                                )
+                                if pending_count is None:
+                                    continue
                                 if pending_count:
                                     continue
                                 evictable_sessions.append((candidate_key, candidate_session))
@@ -7093,8 +7269,9 @@ class ProxyService:
                                 if lru_session.request_model
                                 else None,
                             )
-                            self._http_bridge_sessions.pop(lru_key, None)
-                            sessions_to_close.append(lru_session)
+                            detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
+                            if detached is not None:
+                                self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                         if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
                             if self._http_bridge_inflight_sessions:
                                 capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
@@ -7121,14 +7298,6 @@ class ProxyService:
                             inflight_future = asyncio.get_running_loop().create_future()
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
-
-            try:
-                for stale_session in sessions_to_close:
-                    await self._close_http_bridge_session(stale_session)
-            except BaseException as exc:
-                if owns_creation:
-                    await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
-                raise
 
             if session_to_return_after_close is not None:
                 return session_to_return_after_close
@@ -7231,12 +7400,17 @@ class ProxyService:
                     old_account_id = session.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)
                     async with self._http_bridge_lock:
-                        if self._http_bridge_sessions.get(key) is session:
-                            self._http_bridge_sessions.pop(key, None)
-                        self._unregister_http_bridge_turn_states_locked(session)
+                        detached = self._detach_http_bridge_session_locked(
+                            key,
+                            expected_session=session,
+                            mark_closed=not retiring_with_visible_requests,
+                        )
                     if not retiring_with_visible_requests:
-                        session.closed = True
-                        await self._close_http_bridge_session(session)
+                        force_durable_takeover_after_detach = True
+                        self._schedule_http_bridge_session_closes(
+                            [detached or session],
+                            reason="registry_detach",
+                        )
                 continue
 
             created_session: _HTTPBridgeSession | None = None
@@ -7358,6 +7532,7 @@ class ProxyService:
 
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
+        await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
 
     async def mark_http_bridge_draining(self) -> None:
         try:
@@ -7367,21 +7542,44 @@ class ProxyService:
         except Exception:
             logger.warning("Failed to mark durable HTTP bridge sessions draining", exc_info=True)
 
-    async def _prune_http_bridge_sessions_locked(self) -> None:
+    def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
         now = time.monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
         for key, session in self._http_bridge_sessions.items():
             if session.closed:
                 stale_keys.append(key)
                 continue
-            pending_count = await self._http_bridge_pending_count(session)
+            pending_count = self._http_bridge_pending_count_nowait(
+                session,
+                context="idle_prune",
+            )
+            if pending_count is None:
+                visible_pending_count = sum(
+                    1
+                    for request_state in session.pending_requests
+                    if _http_bridge_request_counts_against_queue(request_state)
+                )
+                if visible_pending_count or session.queued_request_count:
+                    continue
+                if now - session.last_used_at < session.idle_ttl_seconds:
+                    continue
+                logger.warning(
+                    "http_bridge_prune_unresponsive_idle_session bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    session.account.id,
+                    session.request_model,
+                )
+                stale_keys.append(key)
+                continue
             if pending_count:
                 continue
             if now - session.last_used_at < session.idle_ttl_seconds:
                 continue
             stale_keys.append(key)
+        sessions_to_close: list[_HTTPBridgeSession] = []
         for key in stale_keys:
-            session = self._http_bridge_sessions.pop(key, None)
+            session = self._detach_http_bridge_session_locked(key)
             if session is not None:
                 _log_http_bridge_event(
                     "evict_idle",
@@ -7391,7 +7589,8 @@ class ProxyService:
                     cache_key_family=key.affinity_kind,
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
-                await self._close_http_bridge_session(session, turn_state_lock_held=True)
+                sessions_to_close.append(session)
+        return sessions_to_close
 
     async def _close_http_bridge_session(
         self,
@@ -7406,6 +7605,23 @@ class ProxyService:
         else:
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
+        account_lease = getattr(session, "account_lease", None)
+        try:
+            await self._load_balancer.release_account_lease(account_lease)
+        except Exception:
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+        finally:
+            session.account_lease = None
+        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            try:
+                await self._durable_bridge.release_live_session(
+                    session_id=session.durable_session_id,
+                    instance_id=get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                )
+            except Exception:
+                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
         if session.upstream_reader is not None:
             await _await_cancelled_task(session.upstream_reader, label="http bridge upstream reader")
         try:
@@ -7428,18 +7644,6 @@ class ProxyService:
                 api_key=None,
                 response_create_gate=response_create_gate,
             )
-        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
-            try:
-                await self._durable_bridge.release_live_session(
-                    session_id=session.durable_session_id,
-                    instance_id=get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                    draining=shutdown_state.is_bridge_drain_active(),
-                )
-            except Exception:
-                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-        await self._load_balancer.release_account_lease(getattr(session, "account_lease", None))
-        session.account_lease = None
         _log_http_bridge_event(
             "close",
             session.key,
@@ -7518,22 +7722,53 @@ class ProxyService:
         async with self._http_bridge_lock:
             self._unregister_http_bridge_previous_response_ids_locked(session)
 
+    def _detach_http_bridge_session_locked(
+        self,
+        key: "_HTTPBridgeSessionKey",
+        *,
+        expected_session: "_HTTPBridgeSession | None" = None,
+        mark_closed: bool = True,
+    ) -> "_HTTPBridgeSession | None":
+        session = self._http_bridge_sessions.get(key)
+        if session is None:
+            return None
+        if expected_session is not None and session is not expected_session:
+            return None
+        self._http_bridge_sessions.pop(key, None)
+        if mark_closed:
+            session.closed = True
+        self._unregister_http_bridge_turn_states_locked(session)
+        self._unregister_http_bridge_previous_response_ids_locked(session)
+        return session
+
     def _unregister_http_bridge_turn_states_locked(self, session: "_HTTPBridgeSession") -> None:
         aliases = tuple(session.downstream_turn_state_aliases)
+        current_session = self._http_bridge_sessions.get(session.key)
         for alias in aliases:
-            self._http_bridge_turn_state_index.pop(
-                _http_bridge_turn_state_alias_key(alias, session.key.api_key_id),
-                None,
-            )
+            alias_key = _http_bridge_turn_state_alias_key(alias, session.key.api_key_id)
+            if (
+                current_session is not None
+                and current_session is not session
+                and alias in current_session.downstream_turn_state_aliases
+            ):
+                continue
+            if self._http_bridge_turn_state_index.get(alias_key) == session.key:
+                self._http_bridge_turn_state_index.pop(alias_key, None)
         session.downstream_turn_state_aliases.clear()
 
     def _unregister_http_bridge_previous_response_ids_locked(self, session: "_HTTPBridgeSession") -> None:
         response_ids = tuple(session.previous_response_ids)
+        current_session = self._http_bridge_sessions.get(session.key)
         for response_id in response_ids:
-            self._http_bridge_previous_response_index.pop(
-                _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id),
-                None,
-            )
+            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+            if (
+                current_session is not None
+                and current_session is not session
+                and response_id in current_session.previous_response_ids
+            ):
+                continue
+            if self._http_bridge_previous_response_index.get(alias_key) == session.key:
+                self._http_bridge_previous_response_index.pop(alias_key, None)
         session.previous_response_ids.clear()
 
     def _promote_http_bridge_session_to_codex_affinity(

@@ -258,7 +258,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     assert call["route"] is route
     assert call["timeout"] == 7.0
-    assert call["max_message_size"] == 4321
+    assert call["max_msg_size"] == 4321
     assert "max_size" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
 

@@ -76,7 +76,7 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         _reject_reserved(kwargs)
-        result = self._session.ws_connect(url, proxy=route.proxy_url**kwargs)
+        result = self._session.ws_connect(url, proxy=route.proxy_url, **kwargs)
         if asyncio.iscoroutine(result):
             return await result
         return result

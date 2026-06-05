@@ -373,7 +373,7 @@ class _CodexSSEContent:
 
     def iter_chunked(self, size: int) -> "SSEChunkIteratorProtocol":
         del size
-        return cast(SSEChunkIteratorProtocol, self._response.aiter_content())
+        return cast(SSEChunkIteratorProtocol, self._response.content.iter_chunked(1024))
 
 
 class _CodexSSEResponse:
@@ -1502,7 +1502,7 @@ async def _stream_responses_via_websocket(
                     route=route,
                     headers=headers,
                     timeout=connect_timeout_seconds,
-                    max_message_size=max_event_bytes,
+                    max_msg_size=max_event_bytes,
                 )
                 websocket = result.websocket
                 websocket_context = result.context
@@ -1514,7 +1514,7 @@ async def _stream_responses_via_websocket(
                     route=route,
                     headers=headers,
                     timeout=connect_timeout_seconds,
-                    max_message_size=max_event_bytes,
+                    max_msg_size=max_event_bytes,
                 )
                 websocket = (
                     await websocket_context.__aenter__()
@@ -2232,7 +2232,6 @@ async def _stream_responses_with_session(
                     "json": payload_dict,
                     "headers": current_headers,
                     "timeout": remaining_request_timeout or request_total_timeout,
-                    "stream": True,
                 }
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):

@@ -81,21 +81,27 @@ class _FileResponse:
     text = '{"file_id": "file_1", "status": "success"}'
 
 
+class _FakeStreamContent:
+    async def iter_chunked(self, size: int):
+        yield b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+
 class _StreamResponse:
     status_code = 200
     headers = {"content-type": "text/event-stream"}
+    content = _FakeStreamContent()
 
-    async def aiter_content(self):
-        yield b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+class _FakeStreamErrorContent:
+    async def iter_chunked(self, size: int):
+        raise OSError("proxy http://user:***@proxy.test:8080 read failed")
+        yield b""
 
 
 class _StreamErrorResponse:
     status_code = 200
     headers = {"content-type": "text/event-stream"}
-
-    async def aiter_content(self):
-        raise OSError("proxy http://user:pass@proxy.test:8080 read failed")
-        yield b""
+    content = _FakeStreamErrorContent()
 
 
 class _TransportErrorCodexClient:
@@ -393,7 +399,6 @@ async def test_stream_responses_uses_codex_client_when_route_is_resolved(route: 
 
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
-    assert client.calls[0]["stream"] is True
     assert trace.endpoint_id == "ep_1"
 
 

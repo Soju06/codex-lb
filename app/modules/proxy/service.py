@@ -7450,6 +7450,7 @@ class ProxyService:
                 await self._claim_durable_http_bridge_session(
                     created_session,
                     allow_takeover=force_durable_takeover or _http_bridge_allow_durable_takeover(durable_lookup),
+                    force_owner_epoch_advance=force_durable_takeover,
                 )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)
@@ -7793,6 +7794,7 @@ class ProxyService:
         session: "_HTTPBridgeSession",
         *,
         allow_takeover: bool,
+        force_owner_epoch_advance: bool = False,
     ) -> None:
         current_instance = get_settings().http_responses_session_bridge_instance_id
         try:
@@ -7808,6 +7810,7 @@ class ProxyService:
                 latest_turn_state=session.downstream_turn_state,
                 latest_response_id=None,
                 allow_takeover=allow_takeover,
+                force_owner_epoch_advance=force_owner_epoch_advance,
             )
             if lookup.owner_instance_id != current_instance:
                 _log_http_bridge_event(

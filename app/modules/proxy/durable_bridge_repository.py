@@ -165,6 +165,7 @@ class DurableBridgeRepository:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
         for attempt in range(2):
@@ -221,7 +222,7 @@ class DurableBridgeRepository:
                 if not allow_takeover and not lease_expired and not state_allows_takeover:
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1
-            elif account_changed:
+            elif account_changed or force_owner_epoch_advance:
                 next_epoch = existing.owner_epoch + 1
             else:
                 next_epoch = existing.owner_epoch

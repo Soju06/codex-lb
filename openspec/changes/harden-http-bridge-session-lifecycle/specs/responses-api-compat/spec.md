@@ -21,10 +21,10 @@ progress. Requests that cannot safely proceed because a hard-continuity session
 is unavailable MUST fail closed with an explicit local overload or continuity
 error rather than silently hanging.
 
-When a replacement bridge session claims the same durable key with a different
-account, the durable owner generation MUST advance so that a late cleanup from
-the stale local session cannot release or close the replacement session's
-durable ownership.
+When a replacement bridge session claims the same durable key after stale local
+session detachment, the durable owner generation MUST advance so that a late
+cleanup from the stale local session cannot release or close the replacement
+session's durable ownership.
 
 #### Scenario: wedged stale pending lock does not block fresh soft request
 
@@ -51,7 +51,7 @@ durable ownership.
 #### Scenario: stale durable release cannot fence out replacement owner
 
 - **GIVEN** a stale bridge session for a durable key is replaced by a new local
-  session on a different account
+  session after local detachment
 - **WHEN** the stale session's bounded background close releases durable
   ownership after the replacement has claimed the same durable key
 - **THEN** the stale release does not clear the replacement owner's durable

@@ -7617,8 +7617,14 @@ class ProxyService:
                 )
             except Exception:
                 logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-        if session.upstream_reader is not None:
-            await _await_cancelled_task(session.upstream_reader, label="http bridge upstream reader")
+        upstream_reader = session.upstream_reader
+        if upstream_reader is not None:
+            if upstream_reader is asyncio.current_task():
+                session.upstream_reader = None
+            else:
+                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
+                if session.upstream_reader is upstream_reader:
+                    session.upstream_reader = None
         try:
             await session.upstream.close()
         except Exception:

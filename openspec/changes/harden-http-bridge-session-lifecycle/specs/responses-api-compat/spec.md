@@ -34,6 +34,9 @@ session is retiring but still has visible in-flight requests and will release
 its durable ownership later after draining. After a detached retiring session
 finishes draining its visible requests, it MUST release its durable ownership
 and account lease instead of only closing the upstream websocket.
+If that retirement is initiated by the upstream-reader task after processing
+the terminal upstream event, session close MUST NOT cancel or await the current
+upstream-reader task itself.
 
 When bridge capacity eviction removes an idle local session to admit a
 replacement session, the evicted session's close MUST be awaited through a
@@ -88,6 +91,8 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
 - **WHEN** those visible requests drain and the session is retired
 - **THEN** the service releases the old session's durable ownership
 - **AND** the service releases the old session's account lease
+- **AND** upstream-reader-owned retirement does not self-cancel the current
+  upstream reader task
 - **AND** the detached session no longer holds bridge capacity until process
   exit
 

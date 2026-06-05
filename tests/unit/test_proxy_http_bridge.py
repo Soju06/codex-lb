@@ -8173,6 +8173,70 @@ async def test_http_bridge_retire_after_drain_waits_for_queued_submission(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retire_after_drain_does_not_cancel_current_upstream_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    close = AsyncMock()
+    release_live_session = AsyncMock()
+    release_account_lease = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace(release_live_session=release_live_session))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-reader-retire"),
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_reader_retire", None),
+        headers={"x-codex-turn-state": "http_turn_reader_retire"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_reader_retire",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-reader-retire", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=close)),
+        upstream_control=proxy_service._WebSocketUpstreamControl(
+            reconnect_requested=True,
+            retire_after_drain=True,
+        ),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    lease = proxy_service.AccountLease(
+        lease_id="lease-reader-retire",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    session.account_lease = lease
+    session.durable_session_id = "durable-reader-retire"
+    session.durable_owner_epoch = 7
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    session.upstream_reader = current_task
+
+    assert await service._retire_http_bridge_after_drain_if_ready(session) is True
+
+    assert session.closed is True
+    assert session.upstream_reader is None
+    close.assert_awaited_once()
+    release_live_session.assert_awaited_once_with(
+        session_id="durable-reader-retire",
+        instance_id="instance-reader-retire",
+        owner_epoch=7,
+        draining=False,
+    )
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

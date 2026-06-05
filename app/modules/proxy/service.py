@@ -585,6 +585,13 @@ def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
     return any(_json_value_contains_input_image_part(item) for item in input_value)
 
 
+def _responses_request_uses_image_generation(payload: ResponsesRequest) -> bool:
+    tools = payload.tools
+    if not isinstance(tools, list):
+        return False
+    return any(is_json_mapping(tool) and tool.get("type") == "image_generation" for tool in tools)
+
+
 def _response_create_text(
     payload: ResponsesRequest,
     *,
@@ -843,10 +850,14 @@ class ProxyService:
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
+        image_generation_request = _responses_request_uses_image_generation(payload)
         force_upstream_stream_transport = "http" if image_request else None
-        if runtime_config.enabled and image_request:
+        if runtime_config.enabled and (image_request or image_generation_request):
             logger.info(
-                "stream_responses bypassing http bridge for input_image request_id=%s",
+                "stream_responses bypassing http bridge for image-capable request input_image=%s "
+                "image_generation=%s request_id=%s",
+                image_request,
+                image_generation_request,
                 request_id,
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
@@ -5052,7 +5063,6 @@ class ProxyService:
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,
-            codex_tool_compat=codex_session_affinity,
         )
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None

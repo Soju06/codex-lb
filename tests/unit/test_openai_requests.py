@@ -81,6 +81,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
         "safety_identifier": "safe_123",
         "temperature": 0.2,
         "top_p": 0.9,
+        "truncation": "auto",
         "user": "cursor-user",
         "custom_field": "kept",
     }
@@ -93,6 +94,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
     assert "top_p" not in dumped
+    assert "truncation" not in dumped
     assert "user" not in dumped
     assert dumped["custom_field"] == "kept"
 

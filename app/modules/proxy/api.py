@@ -481,7 +481,6 @@ async def responses(
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_compat_payload,
-            codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)

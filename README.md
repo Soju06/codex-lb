@@ -91,6 +91,8 @@ docker run -d --name codex-lb \
 
 Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authentication) is enabled, pass a key from the dashboard as a Bearer token.
 
+Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
+
 | Logo | Client | Endpoint | Config |
 |---|--------|----------|--------|
 | <img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="32" alt="OpenAI"> | **Codex CLI** | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
@@ -318,6 +320,8 @@ opencode
 Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled,
 local requests can omit the key, but non-local requests are still rejected until proxy authentication is configured.
 
+The `/v1` route is the simplest OpenAI-compatible setup. If your OpenClaw build uses a Codex-native provider path such as `openai-codex-responses` and needs Codex-style usage/accounting behavior, point that provider at `http://127.0.0.1:2455/backend-api/codex` instead. For third-party Codex-compatible backends, the client must allow opaque bearer-token passthrough and should only send `chatgpt-account-id` when it actually decoded one from an official ChatGPT/Codex token.
+
 </details>
 
 <details>
@@ -542,6 +546,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://rtx09x.github.io/"><img src="https://avatars.githubusercontent.com/u/187954595?v=4?s=100" width="100px;" alt="Rudra Tiwari"/><br /><sub><b>Rudra Tiwari</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Rtx09x" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/wuchao05"><img src="https://avatars.githubusercontent.com/u/97175999?v=4?s=100" width="100px;" alt="Wu Chao"/><br /><sub><b>Wu Chao</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=wuchao05" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/zwd0313"><img src="https://avatars.githubusercontent.com/u/159164983?v=4?s=100" width="100px;" alt="zwd0313"/><br /><sub><b>zwd0313</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=zwd0313" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mastertyko"><img src="https://avatars.githubusercontent.com/u/11311479?v=4?s=100" width="100px;" alt="mastertyko"/><br /><sub><b>mastertyko</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mastertyko" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mastertyko" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

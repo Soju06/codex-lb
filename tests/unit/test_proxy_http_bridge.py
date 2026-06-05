@@ -516,36 +516,30 @@ async def test_get_or_create_http_bridge_session_reuses_live_local_session_witho
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_http_bridge_session_prunes_wedged_idle_session_without_hanging(
+async def test_get_or_create_http_bridge_session_skips_prune_when_pending_lock_is_wedged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("request", "bridge-wedged-idle", None)
-    stale_session = _make_bridge_session(key=key, key_value="bridge-wedged-idle")
-    stale_session.last_used_at = time.monotonic() - 300.0
-    stale_session.idle_ttl_seconds = 1.0
-    replacement_session = _make_bridge_session(key=key, key_value="bridge-wedged-idle")
-    replacement_session.last_used_at = time.monotonic()
-    service._http_bridge_sessions[key] = stale_session
+    existing_session = _make_bridge_session(key=key, key_value="bridge-wedged-idle")
+    existing_session.last_used_at = time.monotonic() - 300.0
+    existing_session.idle_ttl_seconds = 1.0
+    service._http_bridge_sessions[key] = existing_session
     lock_acquired = asyncio.Event()
     release_lock = asyncio.Event()
 
     async def hold_pending_lock() -> None:
-        async with stale_session.pending_lock:
+        async with existing_session.pending_lock:
             lock_acquired.set()
             await release_lock.wait()
 
     lock_holder = asyncio.create_task(hold_pending_lock())
     await asyncio.wait_for(lock_acquired.wait(), timeout=1.0)
 
-    monkeypatch.setattr(
-        service,
-        "_create_http_bridge_session",
-        AsyncMock(return_value=replacement_session),
-    )
+    create_http_bridge_session = AsyncMock()
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
-    close_started = asyncio.Event()
-    close_http_bridge_session = AsyncMock(side_effect=lambda *_args, **_kwargs: close_started.set())
+    close_http_bridge_session = AsyncMock()
     monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
     monkeypatch.setattr(
         proxy_service,
@@ -570,11 +564,11 @@ async def test_get_or_create_http_bridge_session_prunes_wedged_idle_session_with
         release_lock.set()
         await asyncio.wait_for(lock_holder, timeout=1.0)
 
-    await asyncio.wait_for(close_started.wait(), timeout=1.0)
-    assert resolved is replacement_session
-    assert stale_session.closed is True
-    assert service._http_bridge_sessions[key] is replacement_session
-    close_http_bridge_session.assert_awaited_once_with(stale_session)
+    assert resolved is existing_session
+    assert existing_session.closed is False
+    assert service._http_bridge_sessions[key] is existing_session
+    close_http_bridge_session.assert_not_awaited()
+    create_http_bridge_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

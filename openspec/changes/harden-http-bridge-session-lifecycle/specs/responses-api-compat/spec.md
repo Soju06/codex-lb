@@ -15,6 +15,11 @@ session close/fail-pending work MUST run after the lock is released or under a
 bounded cleanup path. A wedged stale session MUST NOT prevent unrelated soft
 HTTP Responses work from creating or reusing another bridge session.
 
+Idle pruning MUST make pending-request decisions only while holding the
+session's pending-request lock. If that lock cannot be acquired immediately,
+the service MUST skip pruning that session instead of inferring that it is idle
+from unlocked pending-request state.
+
 If cleanup cannot complete within the bounded cleanup path, the service MUST log
 a low-cardinality local bridge cleanup warning and continue protecting registry
 progress. Requests that cannot safely proceed because a hard-continuity session
@@ -49,6 +54,8 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
   selection
 - **THEN** the global bridge registry lock is not held indefinitely by stale
   cleanup
+- **AND** the stale session is not pruned based on unlocked pending-request
+  state
 - **AND** the new request either creates/reuses an eligible bridge session or
   returns an explicit bounded local error
 - **AND** it does not hang before account selection or bridge create/reuse

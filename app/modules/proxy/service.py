@@ -7566,23 +7566,6 @@ class ProxyService:
                 context="idle_prune",
             )
             if pending_count is None:
-                visible_pending_count = sum(
-                    1
-                    for request_state in session.pending_requests
-                    if _http_bridge_request_counts_against_queue(request_state)
-                )
-                if visible_pending_count or session.queued_request_count:
-                    continue
-                if now - session.last_used_at < session.idle_ttl_seconds:
-                    continue
-                logger.warning(
-                    "http_bridge_prune_unresponsive_idle_session bridge_kind=%s bridge_key=%s account_id=%s model=%s",
-                    key.affinity_kind,
-                    _hash_identifier(key.affinity_key),
-                    session.account.id,
-                    session.request_model,
-                )
-                stale_keys.append(key)
                 continue
             if pending_count:
                 continue

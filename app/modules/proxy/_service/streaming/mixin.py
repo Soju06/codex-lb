@@ -1097,4 +1097,53 @@ class _StreamingMixin(_StreamingRetryMixin):
                 "stream",
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
+                response_id=response_id,
+                model=model,
+                transport=request_transport,
+                status=status,
             )
+
+    async def _handle_stream_error(
+        self,
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+        phase: str = "first_event",
+    ) -> ClassifiedFailure:
+        proxy = cast(_StreamingServiceProtocol, self)
+        classified = classify_upstream_failure(
+            error_code=code,
+            error=error,
+            http_status=http_status,
+            phase=phase,
+        )
+        if _facade()._is_account_neutral_error_code(code):
+            return classified
+        if classified["failure_class"] == "rate_limit":
+            await proxy._load_balancer.mark_rate_limit(account, error)
+        elif classified["failure_class"] == "quota":
+            await proxy._load_balancer.mark_quota_exceeded(account, error)
+        elif code in PERMANENT_FAILURE_CODES:
+            await proxy._load_balancer.mark_permanent_failure(account, code)
+        elif phase == "connect" and http_status == 403:
+            cooldown_seconds = max(0.0, float(_facade().get_settings().proxy_connect_forbidden_cooldown_seconds))
+            await proxy._load_balancer.mark_temporary_cooldown(account, cooldown_seconds)
+            _facade().logger.info(
+                "Applied connect-phase forbidden cooldown account_id=%s request_id=%s code=%s "
+                "status=%s cooldown_seconds=%.1f",
+                account.id,
+                get_request_id(),
+                code,
+                http_status,
+                cooldown_seconds,
+            )
+        else:
+            await proxy._load_balancer.record_error(account)
+            _facade().logger.info(
+                "Recorded transient account error account_id=%s request_id=%s code=%s",
+                account.id,
+                get_request_id(),
+                code,
+            )
+        return classified

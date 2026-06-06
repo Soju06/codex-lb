@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import Integer, and_, cast, func, literal, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
@@ -126,9 +127,18 @@ class QuotaPlannerRepository:
             idempotency_key=idempotency_key,
         )
         self._session.add(row)
-        async with sqlite_writer_section():
-            await self._session.commit()
-            await self._session.refresh(row)
+        try:
+            async with sqlite_writer_section():
+                await self._session.commit()
+                await self._session.refresh(row)
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._session.scalar(
+                select(QuotaPlannerDecision).where(QuotaPlannerDecision.idempotency_key == idempotency_key)
+            )
+            if existing is not None:
+                return existing
+            raise
         return row
 
     async def recent_decisions(self, limit: int = 50) -> list[QuotaPlannerDecision]:
@@ -179,7 +189,7 @@ class QuotaPlannerRepository:
             and_(
                 QuotaPlannerDecision.action == "warmup",
                 QuotaPlannerDecision.status == "executed",
-                QuotaPlannerDecision.executed_at >= since,
+                QuotaPlannerDecision.executed_at >= to_utc_naive(since),
             )
         )
         return int(await self._session.scalar(stmt) or 0)
@@ -230,7 +240,7 @@ class QuotaPlannerRepository:
     ) -> QuotaWindowObservation:
         row = QuotaWindowObservation(
             account_id=account_id,
-            observed_at=observed_at or utcnow(),
+            observed_at=_optional_utc_naive(observed_at) or utcnow(),
             model=model,
             primary_remaining_percent=primary_remaining_percent,
             primary_reset_at=primary_reset_at,
@@ -251,7 +261,7 @@ class QuotaPlannerRepository:
         since: datetime | None = None,
         bucket_seconds: int = 900,
     ) -> list[DemandBin]:
-        since = since or (utcnow() - timedelta(days=28))
+        since = _optional_utc_naive(since) or (utcnow() - timedelta(days=28))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
@@ -309,6 +319,12 @@ class QuotaPlannerRepository:
             )
             for row in result.all()
         ]
+
+
+def _optional_utc_naive(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return to_utc_naive(value)
 
 
 def _settings_from_row(row: QuotaPlannerSettings) -> PlannerSettings:

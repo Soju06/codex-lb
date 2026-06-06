@@ -55,6 +55,18 @@ def _api_key_reservation_heartbeat_seconds() -> float:
     return _API_KEY_RESERVATION_HEARTBEAT_SECONDS
 
 
+async def _await_cleanup_through_cancellation(coro: Coroutine[Any, Any, None], *, label: str) -> None:
+    task = asyncio.create_task(coro, name=f"proxy-{label}")
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            logger.warning("%s failed after caller cancellation", label, exc_info=True)
+        raise
+
+
 class _ApiKeyUsageServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
     _background_cleanup_tasks: set[asyncio.Task[None]]
@@ -117,11 +129,17 @@ class _ApiKeyUsageMixin:
     ) -> None:
         if reservation is None:
             return
-        proxy = cast(_ApiKeyUsageServiceProtocol, self)
-        with anyio.CancelScope(shield=True):
+
+        async def _release_once() -> None:
+            proxy = cast(_ApiKeyUsageServiceProtocol, self)
             async with proxy._repo_factory() as repos:
                 service = _service_api_keys_service()(repos.api_keys)
                 await service.release_usage_reservation(reservation.reservation_id)
+
+        await _await_cleanup_through_cancellation(
+            _release_once(),
+            label="websocket API key reservation release",
+        )
 
     async def _release_websocket_request_state_reservation(
         self,

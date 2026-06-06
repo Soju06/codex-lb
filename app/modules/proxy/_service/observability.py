@@ -13,6 +13,7 @@ from app.core.metrics.prometheus import (
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
     upstream_transport_decisions_total,
+    service_tier_mismatch_total,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
@@ -141,18 +142,73 @@ def _maybe_log_proxy_service_tier_trace(
     *,
     requested_service_tier: str | None,
     actual_service_tier: str | None,
+    response_id: str | None = None,
+    model: str | None = None,
+    transport: str | None = None,
+    status: str | None = None,
 ) -> None:
+    _record_service_tier_mismatch(
+        kind,
+        requested_service_tier=requested_service_tier,
+        actual_service_tier=actual_service_tier,
+    )
     settings = _service_get_settings()
     if not settings.log_proxy_service_tier_trace:
         return
 
     logger.warning(
-        "proxy_service_tier_trace request_id=%s kind=%s requested_service_tier=%s actual_service_tier=%s",
+        "proxy_service_tier_trace request_id=%s response_id=%s kind=%s model=%s transport=%s status=%s "
+        "requested_service_tier=%s actual_service_tier=%s",
         get_request_id(),
+        response_id,
         kind,
+        model,
+        transport,
+        status,
         requested_service_tier,
         actual_service_tier,
     )
+
+
+def _record_service_tier_mismatch(
+    kind: str,
+    *,
+    requested_service_tier: str | None,
+    actual_service_tier: str | None,
+) -> None:
+    requested_tier = _service_tier_metric_label(requested_service_tier)
+    actual_tier = _service_tier_metric_label(actual_service_tier)
+    if requested_tier == "none" or actual_tier == "none" or requested_tier == actual_tier:
+        return
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("service_tier_mismatch_total", service_tier_mismatch_total)
+    if prometheus_available and counter is not None:
+        counter.labels(
+            kind=kind,
+            requested_tier=requested_tier,
+            actual_tier=actual_tier,
+        ).inc()
+
+
+def _service_tier_metric_label(value: str | None) -> str:
+    normalized = _normalize_service_tier_value(value)
+    if normalized is None:
+        return "none"
+    label = normalized.lower()
+    if label in {"auto", "default", "priority", "flex", "ultrafast"}:
+        return label
+    return "other"
+
+
+def _normalize_service_tier_value(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped
 
 
 def _hash_identifier_or_none(value: str | None) -> str | None:

@@ -315,6 +315,7 @@ class _WebSocketRequestState:
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
+    replay_excluded_account_ids: set[str] = field(default_factory=set)
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None

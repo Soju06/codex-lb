@@ -473,6 +473,7 @@ async def test_connect_responses_websocket_marks_open_timeout_for_request_logs(m
             {"openai-beta": "responses_websockets=2026-02-06"},
             "access-token",
             "account-123",
+            allow_direct_egress=True,
         )
 
     assert exc_info.value.status_code == 502

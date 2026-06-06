@@ -121,8 +121,8 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
             plan_type="plus",
         )
 
-    assert log.request_id == "req"
-    assert log.cost_usd is not None
+        assert log.request_id == "req"
+        assert log.cost_usd is not None
 
 
 @pytest.mark.asyncio

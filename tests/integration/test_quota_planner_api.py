@@ -208,6 +208,89 @@ async def test_quota_planner_repository_preserves_naive_decision_datetimes(db_se
 
 
 @pytest.mark.asyncio
+async def test_quota_planner_decisions_store_aware_datetimes_as_utc_naive(db_setup):
+    del db_setup
+    scheduled_at = datetime(2026, 6, 10, 15, 30, tzinfo=timezone(timedelta(hours=4)))
+    executed_at = datetime(2026, 6, 10, 8, 45, tzinfo=timezone(timedelta(hours=-2)))
+    expected_scheduled_at = datetime(2026, 6, 10, 11, 30)
+    expected_executed_at = datetime(2026, 6, 10, 10, 45)
+
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        decision = await repo.log_decision(
+            mode="shadow",
+            action="reserve",
+            idempotency_key="aware-datetime-decision",
+            account_id=None,
+            scheduled_at=scheduled_at,
+            score=1.0,
+            reason="aware-input",
+            status="planned",
+        )
+        await repo.update_decision_status(
+            decision.id,
+            status="executed",
+            executed_at=executed_at,
+        )
+
+    async with SessionLocal() as session:
+        row = await session.scalar(
+            select(QuotaPlannerDecision).where(QuotaPlannerDecision.idempotency_key == "aware-datetime-decision")
+        )
+
+    assert row is not None
+    assert row.scheduled_at == expected_scheduled_at
+    assert row.scheduled_at.tzinfo is None
+    assert row.executed_at == expected_executed_at
+    assert row.executed_at.tzinfo is None
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_log_decision_returns_existing_after_duplicate_key_race(monkeypatch, db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        existing = await repo.log_decision(
+            mode="shadow",
+            action="reserve",
+            idempotency_key="duplicate-race-decision",
+            account_id=None,
+            scheduled_at=utcnow(),
+            score=1.0,
+            reason="original",
+            status="planned",
+        )
+
+    async with SessionLocal() as session:
+        original_scalar = session.scalar
+        calls = 0
+
+        async def scalar_with_race(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return await original_scalar(*args, **kwargs)
+
+        monkeypatch.setattr(session, "scalar", scalar_with_race)
+        repo = QuotaPlannerRepository(session)
+        raced = await repo.log_decision(
+            mode="shadow",
+            action="reserve",
+            idempotency_key="duplicate-race-decision",
+            account_id=None,
+            scheduled_at=utcnow(),
+            score=5.0,
+            reason="raced",
+            status="skipped",
+        )
+
+    assert raced.id == existing.id
+    assert raced.reason == "original"
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_quota_planner_forecast_api_returns_simulation(async_client, db_setup):
     del db_setup
 

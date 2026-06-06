@@ -79,6 +79,7 @@ from app.core.errors import (
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_same_account_takeover_total,
+    service_tier_mismatch_total,  # noqa: F401
 )
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import (
@@ -2108,6 +2109,12 @@ def _previous_response_id_from_payload(payload: Mapping[str, JsonValue] | None) 
     if isinstance(previous_response_id, str) and previous_response_id.strip():
         return previous_response_id.strip()
     return None
+
+
+def _websocket_connect_request_log_error_code(exc: ProxyResponseError, error_code: str) -> str:
+    if exc.failure_phase == "websocket_open_timeout" and error_code == "upstream_unavailable":
+        return "upstream_websocket_open_timeout"
+    return error_code
 
 
 def _partial_output_proxy_error_event_block(

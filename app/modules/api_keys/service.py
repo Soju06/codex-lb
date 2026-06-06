@@ -361,7 +361,8 @@ def _compute_pooled_credits(
     account_map = {
         a.id: a
         for a in all_accounts
-        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        if a.id in requested_account_ids
+        and a.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     }
     account_ids = set(account_map)
 
@@ -563,10 +564,9 @@ class ApiKeysService:
         else:
             enforced_service_tier = None
 
+        traffic_class_update: str | _Unset = _UNSET
         if payload.traffic_class_set:
-            traffic_class = _normalize_traffic_class(payload.traffic_class)
-        else:
-            traffic_class = None
+            traffic_class_update = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override_update: str | None | _Unset = _UNSET
         if payload.transport_policy_override_set:
             transport_policy_override_update = _normalize_transport_policy_override(payload.transport_policy_override)
@@ -615,7 +615,7 @@ class ApiKeysService:
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
                 ),
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
-                traffic_class=traffic_class if payload.traffic_class_set else _UNSET,
+                traffic_class=traffic_class_update,
                 transport_policy_override=transport_policy_override_update,
                 usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
@@ -1185,7 +1185,7 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
     parsed = json.loads(payload)
     if not isinstance(parsed, list):
         return None
-    models = [str(value).strip() for value in parsed if str(value).strip()]
+    models = [value.strip() for value in parsed if isinstance(value, str) and value.strip()]
     return models
 
 
@@ -1282,7 +1282,7 @@ def _normalize_traffic_class(value: str | None) -> str:
     normalized = (value or TRAFFIC_CLASS_FOREGROUND).strip().lower()
     if normalized not in _SUPPORTED_TRAFFIC_CLASSES:
         options = ", ".join(sorted(_SUPPORTED_TRAFFIC_CLASSES))
-        raise ApiKeyValidationError(f"Unsupported traffic class '{normalized}'. Expected one of: {options}")
+        raise ValueError(f"Unsupported traffic class '{normalized}'. Expected one of: {options}")
     return normalized
 
 

@@ -12,6 +12,7 @@ import aiohttp
 import anyio
 from fastapi import WebSocket
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 
 from app.core.auth.refresh import (
     RefreshError,
@@ -312,6 +313,7 @@ from app.modules.proxy._service.support import (
     _websocket_full_replay_should_wait_for_continuity,
     _WebSocketConnectFailureEmitted,
     _WebSocketContinuityState,
+    _WebSocketDownstreamSendFailure,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
@@ -609,6 +611,7 @@ class _WebSocketMixin:
         *,
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
+        allow_native_tool_types: bool = True,
         api_key: ApiKeyData | None,
         client_ip: str | None = None,
     ) -> None:
@@ -774,6 +777,7 @@ class _WebSocketMixin:
                                     headers=headers,
                                     codex_session_affinity=codex_session_affinity,
                                     openai_cache_affinity=openai_cache_affinity,
+                                    allow_native_tool_types=allow_native_tool_types,
                                     sticky_threads_enabled=sticky_threads_enabled,
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                     api_key=api_key,
@@ -809,6 +813,7 @@ class _WebSocketMixin:
                                         headers=headers,
                                         codex_session_affinity=codex_session_affinity,
                                         openai_cache_affinity=openai_cache_affinity,
+                                        allow_native_tool_types=allow_native_tool_types,
                                         sticky_threads_enabled=sticky_threads_enabled,
                                         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                         api_key=api_key,
@@ -1269,6 +1274,7 @@ class _WebSocketMixin:
         headers: Mapping[str, str],
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
+        allow_native_tool_types: bool = True,
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
@@ -1284,6 +1290,8 @@ class _WebSocketMixin:
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,
+            codex_tool_compat=codex_session_affinity,
+            allow_native_tool_types=allow_native_tool_types,
         )
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
@@ -1539,6 +1547,7 @@ class _WebSocketMixin:
         base_settings = _facade().get_settings()
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        excluded_account_ids.update(request_state.replay_excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
         last_failover_account: Account | None = None
         for attempt in range(max_attempts):
@@ -1626,6 +1635,10 @@ class _WebSocketMixin:
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
+                request_log_error_code = _facade()._websocket_connect_request_log_error_code(
+                    exc,
+                    error_code or "upstream_error",
+                )
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
                 await proxy._emit_websocket_connect_failure(
@@ -1636,7 +1649,7 @@ class _WebSocketMixin:
                     request_state=request_state,
                     status_code=exc.status_code,
                     payload=exc.payload,
-                    error_code=error_code or "upstream_error",
+                    error_code=request_log_error_code,
                     error_message=error_message or "Upstream error",
                 )
                 return None, None
@@ -1654,6 +1667,10 @@ class _WebSocketMixin:
             error = _parse_openai_error(last_failover_exc.payload)
             error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             error_message = error.message if error else None
+            request_log_error_code = _facade()._websocket_connect_request_log_error_code(
+                last_failover_exc,
+                error_code or "upstream_error",
+            )
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -1662,7 +1679,7 @@ class _WebSocketMixin:
                 request_state=request_state,
                 status_code=last_failover_exc.status_code,
                 payload=last_failover_exc.payload,
-                error_code=error_code or "upstream_error",
+                error_code=request_log_error_code,
                 error_message=error_message or "Upstream error",
             )
         return None, None
@@ -2404,12 +2421,32 @@ class _WebSocketMixin:
         _ = proxy
         error = _parse_openai_error(exc.payload)
         error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+        error_code = _facade()._websocket_connect_request_log_error_code(exc, error_code or "upstream_error")
         return await proxy._handle_stream_error(
             account,
             _upstream_error_from_openai(error),
             error_code,
             http_status=exc.status_code,
+            phase="connect",
         )
+
+    async def _mark_websocket_replay_account_failure(
+        self,
+        account: Account | None,
+        request_state: _WebSocketRequestState,
+        *,
+        error_message: str,
+    ) -> None:
+        if account is None:
+            return
+        proxy = cast(_WebSocketServiceProtocol, self)
+        await proxy._handle_stream_error(
+            account,
+            {"message": error_message},
+            "stream_incomplete",
+        )
+        if request_state.previous_response_id is None:
+            request_state.replay_excluded_account_ids.add(account.id)
 
     async def _relay_upstream_websocket_messages(
         self,
@@ -2982,9 +3019,23 @@ class _WebSocketMixin:
         if request_state is None:
             if is_previous_response_not_found_event:
                 upstream_control.reconnect_requested = True
+                _record_continuity_fail_closed(
+                    surface="websocket_stream",
+                    reason="previous_response_not_found_unmatched",
+                    previous_response_id=previous_response_id_hint,
+                    upstream_error_code=_normalize_error_code(
+                        _websocket_event_error_code(event_type, payload),
+                        _websocket_event_error_type(event_type, payload),
+                    ),
+                )
                 fallback_error_code, fallback_error_message = _websocket_continuity_error_fields(
                     reason="previous_response_not_found",
                     expose_stale_previous_response_classifier=codex_session_affinity,
+                )
+                upstream_control.downstream_send_failure = _WebSocketDownstreamSendFailure(
+                    error_code=fallback_error_code,
+                    error_message=fallback_error_message,
+                    status="error",
                 )
                 downstream_text = json.dumps(
                     cast(
@@ -3628,9 +3679,16 @@ class _WebSocketMixin:
         if response_create_gate is not None:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
-            await websocket.send_text(
-                _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
-            )
+            try:
+                await websocket.send_text(
+                    _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
+                )
+            except WebSocketDisconnect:
+                _facade().logger.debug(
+                    "client disconnected before websocket connect failure could be sent request_id=%s error_code=%s",
+                    request_state.request_id,
+                    error_code,
+                )
 
     async def _emit_websocket_proxy_request_timeout(
         self,

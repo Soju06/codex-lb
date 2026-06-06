@@ -270,11 +270,19 @@ def _maybe_log_proxy_service_tier_trace(
     *,
     requested_service_tier: str | None,
     actual_service_tier: str | None,
+    response_id: str | None = None,
+    model: str | None = None,
+    transport: str | None = None,
+    status: str | None = None,
 ) -> None:
     cast(Callable[..., None], _service_global("_maybe_log_proxy_service_tier_trace"))(
         kind,
         requested_service_tier=requested_service_tier,
         actual_service_tier=actual_service_tier,
+        response_id=response_id,
+        model=model,
+        transport=transport,
+        status=status,
     )
 
 
@@ -1158,4 +1166,8 @@ class _CompactMixin:
                 "compact",
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
+                response_id=request_id,
+                model=payload.model,
+                transport=_REQUEST_TRANSPORT_HTTP,
+                status=log_status,
             )

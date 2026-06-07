@@ -48,6 +48,10 @@ jobs:
         shell: bash
         run: python -m scripts.verify_release_version --require-channel beta
 
+      - name: Require release-candidate validation evidence
+        shell: bash
+        run: python -m scripts.guard_beta_release --mode publish
+
       - name: Create GitHub prerelease
         shell: bash
         env:

@@ -2220,6 +2220,7 @@ async def _stream_responses(
             forwarded_request=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     else:
         stream = context.service.stream_responses(
@@ -2231,10 +2232,11 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,
-        convert_event_errors=bridge_active,
+        convert_event_errors=bridge_active and enforce_openai_sdk_contract,
         timeout_seconds=(
             _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
         ),
@@ -3557,6 +3559,10 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+        if not enforce_openai_sdk_contract and event_type == "error":
+            terminal_seen = True
+            yield event_block
+            continue
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
             if event_type == "response.created":
@@ -3595,6 +3601,14 @@ async def _normalize_public_responses_stream(
                     yield formatted_payload
                 return
 
+        if enforce_openai_sdk_contract and event_type == "error":
+            for formatted_payload in _public_response_failed_event_blocks_from_error(
+                normalized_payload,
+                include_created=not created_emitted,
+            ):
+                yield formatted_payload
+            return
+
         _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
@@ -3606,7 +3620,9 @@ async def _normalize_public_responses_stream(
         if not done_seen and not enforce_openai_sdk_contract:
             yield "data: [DONE]\n\n"
         return
-    error_kind = contract_violation_kind or "upstream_stream_truncated"
+    error_kind = contract_violation_kind or (
+        "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
+    )
     include_created = enforce_openai_sdk_contract and not created_emitted
     for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
         yield formatted_payload
@@ -3648,12 +3664,22 @@ def _public_response_failed_event_blocks_from_error(
     if error is None:
         error = _default_error_envelope().error
     assert error is not None
+    message = error.message
+    raw_message = payload.get("message")
+    if isinstance(raw_message, str) and raw_message.strip():
+        if not message or message == "Upstream error":
+            message = raw_message.strip()
+    error_type = error.type
+    if not error_type:
+        raw_error_type = payload.get("error_type")
+        if isinstance(raw_error_type, str) and raw_error_type.strip():
+            error_type = raw_error_type.strip()
     failed_payload = cast(
         dict[str, JsonValue],
         response_failed_event(
             error.code or "upstream_error",
-            error.message or "Upstream error",
-            error.type or "server_error",
+            message or "Upstream error",
+            error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
             error_param=error.param,
         ),
@@ -4146,6 +4172,8 @@ def _public_contract_error_message(kind: str) -> str:
         return "Responses stream produced unsupported output items"
     if kind == "upstream_stream_truncated":
         return "Responses stream ended before a terminal event"
+    if kind == "stream_incomplete":
+        return "Upstream stream ended before response.completed"
     return "Responses stream violated the public contract"
 
 

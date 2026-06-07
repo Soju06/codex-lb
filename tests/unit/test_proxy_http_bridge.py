@@ -2939,7 +2939,7 @@ async def test_stream_via_http_bridge_trims_replayed_tool_call_items_with_previo
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
-    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
@@ -4948,6 +4948,100 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
         surface="http_bridge",
     )
     assert captured_preferred["value"] == "acc-owner-from-logs"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_missing_with_single_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "follow-up",
+            "previous_response_id": "resp_owner_miss",
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-owner-miss",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_owner_miss",
+        session_id="turn_owner_miss",
+    )
+
+    def fake_prepare(
+        _prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id
+        return request_state, '{"type":"response.create"}'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    load_selection_inputs = AsyncMock(
+        return_value=SimpleNamespace(
+            accounts=[SimpleNamespace(id="acc-only", status=AccountStatus.ACTIVE)],
+        )
+    )
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        load_selection_inputs,
+    )
+    get_or_create = AsyncMock()
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-turn-state": "turn_owner_miss"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    get_or_create.assert_not_awaited()
+    load_selection_inputs.assert_not_awaited()
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
 
 
 @pytest.mark.asyncio
@@ -9507,11 +9601,13 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
+        apply_gate_timeout: bool = True,
     ) -> None:
         del bridge_session
         del compact
         del account_id
         del surface
+        del apply_gate_timeout
         nonlocal admission_saw_heartbeat
         admission_saw_heartbeat = state.api_key_reservation_heartbeat_task is not None
         state.response_create_gate = response_create_gate
@@ -9539,6 +9635,100 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
     send_text.assert_awaited_once_with(request_state.request_text)
 
     service._cancel_request_state_api_key_reservation_heartbeat(request_state)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_releases_gate_state_when_gate_already_acquired() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    admission = cast(Any, SimpleNamespace(release=Mock()))
+    release_lease = AsyncMock()
+    lease = proxy_service.AccountLease(
+        lease_id="lease-held",
+        account_id="acc-bridge",
+        kind="stream",
+        acquired_at=1.0,
+    )
+    gate = asyncio.Semaphore(0)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-leak",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+        response_create_admission=admission,
+        account_response_create_lease=lease,
+        account_response_create_release=release_lease,
+        awaiting_response_created=True,
+    )
+    session = _make_bridge_session(key_value="bridge-held-acquire")
+    session.response_create_gate = gate
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    release_lease.assert_awaited_once_with(lease)
+    assert admission.release.call_count == 1
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_admission is None
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_create_gate_acquired is False
+    assert gate._value == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_does_not_release_unacquired_gate() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    release_lease = AsyncMock()
+    lease = proxy_service.AccountLease(
+        lease_id="lease-held",
+        account_id="acc-bridge",
+        kind="stream",
+        acquired_at=1.0,
+    )
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-overload",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_create_gate=gate,
+        response_create_gate_acquired=False,
+        account_response_create_lease=lease,
+        account_response_create_release=release_lease,
+        awaiting_response_created=True,
+    )
+    session = _make_bridge_session(key_value="bridge-held-unacquired")
+    session.response_create_gate = gate
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    release_lease.assert_awaited_once_with(lease)
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+    assert request_state.response_create_gate is None
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_create_gate_acquired is False
+    assert gate.locked() is True
+    gate.release()
 
 
 def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_release() -> None:
@@ -10821,6 +11011,75 @@ async def test_create_http_bridge_session_fails_closed_when_previous_response_ow
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     open_upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    await service._pin_file_account("file_from_other_account", "acc-file")
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_missing_owner",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "continue with this file"},
+                        {"type": "input_file", "file_id": "file_from_other_account"},
+                    ],
+                }
+            ],
+        }
+    )
+    get_or_create = AsyncMock()
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    get_or_create.assert_not_awaited()
 
 
 @pytest.mark.asyncio

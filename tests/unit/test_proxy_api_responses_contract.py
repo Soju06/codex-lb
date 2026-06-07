@@ -882,6 +882,23 @@ async def test_normalize_public_responses_stream_codex_route_preserves_codex_eve
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_preserves_raw_error_frame() -> None:
+    raw_error = (
+        'data: {"type":"error","sequence_number":"error","error_type":"server_error",'
+        '"message":"OpenCode stream failed"}\n\n'
+    )
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(raw_error),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks == [raw_error, "data: [DONE]\n\n"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_codex_route_truncated_stream_does_not_synthesize_created() -> None:
     """`enforce_openai_sdk_contract=False` appends a terminal failure for
     truncated upstream streams without injecting an SDK-only created envelope."""

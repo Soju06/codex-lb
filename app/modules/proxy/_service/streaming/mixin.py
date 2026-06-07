@@ -434,6 +434,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         _maybe_log_proxy_request_payload("stream", payload, headers)
@@ -448,6 +449,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             request_transport=request_transport,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
 
     async def _resolve_upstream_route_for_account(
@@ -510,6 +512,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         useragent_group: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         account_id_value = account.id
@@ -532,6 +535,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = False
+        terminal_event_seen = False
         latency_first_token_ms: int | None = None
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
@@ -573,6 +577,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
                         "codex_installation_id": account.codex_installation_id,
+                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
                     },
                     raise_for_status=True,
                     upstream_stream_transport_override=upstream_stream_transport,
@@ -589,6 +594,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
                         "codex_installation_id": account.codex_installation_id,
+                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
                     },
                     raise_for_status=True,
                 )
@@ -639,6 +645,13 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event(first)
             event_type = _event_type_from_payload(event, first_payload)
+            terminal_event_seen = event_type in {
+                "response.completed",
+                "response.failed",
+                "response.incomplete",
+                "error",
+            }
+            preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
                     api_key=api_key,
@@ -706,6 +719,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     error_code = code
                     error_message = error.message if error else None
+                    if error_code == "stream_incomplete":
+                        failure_metadata = _RequestLogFailureMetadata(
+                            failure_phase="upstream",
+                            failure_detail="upstream_eof_before_terminal_event",
+                        )
                     settlement.account_health_error = _facade()._should_penalize_stream_error(code)
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, settlement.error, exclude_account=True)
@@ -730,6 +748,17 @@ class _StreamingMixin(_StreamingRetryMixin):
                         account_id_value,
                         error_code or code,
                     )
+            elif preserve_raw_sse_line:
+                code = _normalize_error_code(
+                    _websocket_event_error_code(event_type, first_payload),
+                    _websocket_event_error_type(event_type, first_payload),
+                )
+                error_message = _websocket_event_error_message(event_type, first_payload)
+                status = "error"
+                error_code = code
+                settlement.error = {"message": error_message or "Upstream error"}
+                settlement.record_success = False
+                settlement.account_health_error = False
 
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
@@ -755,7 +784,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 ):
                     suppressed_duplicate_tool_call = True
                 else:
-                    if first_payload is not None:
+                    if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
                     if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
@@ -770,7 +799,15 @@ class _StreamingMixin(_StreamingRetryMixin):
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)
                 event_type = _event_type_from_payload(event, event_payload)
-                if event_type == "error" and (event is None or event.error is None) and isinstance(event_payload, dict):
+                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    terminal_event_seen = True
+                preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
+                if (
+                    enforce_openai_sdk_contract
+                    and event_type == "error"
+                    and (event is None or event.error is None)
+                    and isinstance(event_payload, dict)
+                ):
                     message_value = event_payload.get("message")
                     message = (
                         message_value.strip()
@@ -815,10 +852,20 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
-                        raw_error_code = _normalize_error_code(
-                            error.code if error else None,
-                            error.type if error else None,
-                        )
+                        if preserve_raw_sse_line and error is None:
+                            raw_error_code = _normalize_error_code(
+                                _websocket_event_error_code(event_type, event_payload),
+                                _websocket_event_error_type(event_type, event_payload),
+                            )
+                            raw_error_message = _websocket_event_error_message(event_type, event_payload)
+                            upstream_error = {"message": raw_error_message or "Upstream error"}
+                        else:
+                            raw_error_code = _normalize_error_code(
+                                error.code if error else None,
+                                error.type if error else None,
+                            )
+                            raw_error_message = error.message if error else None
+                            upstream_error = _upstream_error_from_openai(error)
                         if (
                             event_type == "error"
                             and raw_error_code == "error"
@@ -863,36 +910,56 @@ class _StreamingMixin(_StreamingRetryMixin):
                             settlement.account_health_error = False
                         else:
                             error_code = raw_error_code
-                            error_message = error.message if error else None
-                            settlement.error = _upstream_error_from_openai(error)
+                            error_message = raw_error_message
+                            settlement.error = upstream_error
                             settlement.record_success = False
-                            settlement.account_health_error = (
-                                _facade()._should_penalize_stream_error(error_code) and not saw_text_delta
-                            )
-                    if event_type in ("response.completed", "response.incomplete"):
-                        response = event.response if event is not None else None
-                        usage = response.usage if response else None
-                        if response and response.id:
-                            response_id = response.id
-                            settlement.response_id = response_id
-                        if event_type == "response.incomplete":
-                            status = "error"
-                    if event_type == "response.completed" and suppressed_duplicate_tool_call:
-                        (
-                            line,
-                            event,
-                            event_payload,
-                            event_type,
-                        ) = _facade()._build_rewritten_stream_response_failed_event(
-                            response_id=response_id,
-                            error_code="stream_incomplete",
-                            error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
-                        )
+                            if error_code == "stream_incomplete":
+                                failure_metadata = _RequestLogFailureMetadata(
+                                    failure_phase="upstream",
+                                    failure_detail="upstream_eof_before_terminal_event",
+                                )
+                            if preserve_raw_sse_line and error is None:
+                                settlement.account_health_error = not saw_text_delta
+                            else:
+                                settlement.account_health_error = (
+                                    _facade()._should_penalize_stream_error(error_code) and not saw_text_delta
+                                )
+                elif preserve_raw_sse_line:
+                    raw_error_code = _normalize_error_code(
+                        _websocket_event_error_code(event_type, event_payload),
+                        _websocket_event_error_type(event_type, event_payload),
+                    )
+                    raw_error_message = _websocket_event_error_message(event_type, event_payload)
+                    status = "error"
+                    error_code = raw_error_code
+                    error_message = raw_error_message
+                    settlement.error = {"message": raw_error_message or "Upstream error"}
+                    settlement.record_success = False
+                    settlement.account_health_error = not saw_text_delta
+                if event_type in ("response.completed", "response.incomplete"):
+                    response = event.response if event is not None else None
+                    usage = response.usage if response else None
+                    if response and response.id:
+                        response_id = response.id
+                        settlement.response_id = response_id
+                    if event_type == "response.incomplete":
                         status = "error"
-                        error_code = "stream_incomplete"
-                        error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
-                        settlement.record_success = False
-                        settlement.account_health_error = False
+                if event_type == "response.completed" and suppressed_duplicate_tool_call:
+                    (
+                        line,
+                        event,
+                        event_payload,
+                        event_type,
+                    ) = _facade()._build_rewritten_stream_response_failed_event(
+                        response_id=response_id,
+                        error_code="stream_incomplete",
+                        error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
+                    )
+                    status = "error"
+                    error_code = "stream_incomplete"
+                    error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
+                    settlement.record_success = False
+                    settlement.account_health_error = False
                 if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 if mark_duplicate_tool_call_downstream_event(
@@ -903,12 +970,23 @@ class _StreamingMixin(_StreamingRetryMixin):
                 ):
                     suppressed_duplicate_tool_call = True
                     continue
-                if event_payload is not None:
+                if event_payload is not None and not preserve_raw_sse_line:
                     line = format_sse_event(event_payload)
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
                 yield line
+            if not terminal_event_seen:
+                status = "error"
+                error_code = "stream_incomplete"
+                error_message = "Upstream stream ended before response.completed"
+                failure_metadata = _RequestLogFailureMetadata(
+                    failure_phase="upstream",
+                    failure_detail="upstream_eof_before_terminal_event",
+                )
+                settlement.record_success = False
+                settlement.account_health_error = False
+                settlement.error = {"message": error_message}
         except ProxyResponseError as exc:
             response_create_lease.release()
             failure_metadata = _facade()._request_log_failure_metadata(exc)
@@ -968,6 +1046,21 @@ class _StreamingMixin(_StreamingRetryMixin):
                 )
             )
             return
+        except _TerminalStreamError:
+            raise
+        except Exception:
+            if settlement.downstream_visible:
+                status = "error"
+                error_code = "stream_incomplete"
+                error_message = "Upstream stream ended before response.completed"
+                failure_metadata = _RequestLogFailureMetadata(
+                    failure_phase="upstream",
+                    failure_detail="upstream_eof_before_terminal_event",
+                )
+                settlement.record_success = False
+                settlement.account_health_error = False
+                settlement.error = {"message": error_message}
+            raise
         finally:
             api_key_reservation_heartbeat_stop.set()
             if api_key_reservation_heartbeat_task is not None:

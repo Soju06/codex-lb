@@ -73,6 +73,7 @@ class _StreamingRetryMixin:
         request_transport: str,
         rewritten_file_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         useragent, useragent_group = _request_log_useragent_fields(headers)
@@ -680,6 +681,7 @@ class _StreamingRetryMixin:
                                 useragent_group=useragent_group,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
+                                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
@@ -1056,6 +1058,7 @@ class _StreamingRetryMixin:
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                                 tool_call_dedupe=tool_call_dedupe,
+                                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
                         except ProxyResponseError as retry_exc:
@@ -1312,7 +1315,12 @@ class _StreamingRetryMixin:
         finally:
             for account_lease in account_leases:
                 await proxy._load_balancer.release_account_lease(account_lease)
-            if not settled and api_key is not None and api_key_reservation is not None:
+            if (
+                not settled
+                and not settlement.usage_settlement_transferred
+                and api_key is not None
+                and api_key_reservation is not None
+            ):
                 release_coro = proxy._release_unsettled_stream_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,

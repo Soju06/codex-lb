@@ -72,7 +72,7 @@ from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event
+from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 
@@ -107,6 +107,13 @@ _RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
         "response.incomplete",
     }
 )
+
+
+def _is_response_stream_terminal_event_type(event_type: str, *, enforce_openai_sdk_contract: bool) -> bool:
+    if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        return True
+    return event_type == "error" and not enforce_openai_sdk_contract
+
 
 _SSE_READ_CHUNK_SIZE = 1 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
@@ -1102,6 +1109,30 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
     return payload
 
 
+def _normalize_stream_payload_for_http_block(
+    event_block: str,
+    *,
+    enforce_openai_sdk_contract: bool = True,
+) -> tuple[str, str | None]:
+    if not enforce_openai_sdk_contract:
+        payload = parse_sse_data_json(event_block)
+        if payload is None:
+            return event_block, None
+        event_type = payload.get("type")
+        return event_block, event_type if isinstance(event_type, str) else None
+
+    payload = parse_sse_data_json(event_block)
+    if payload is None:
+        return event_block, None
+    normalized = _normalize_stream_event_payload(payload)
+    if normalized is payload:
+        event_type = normalized.get("type")
+        return event_block, event_type if isinstance(event_type, str) else None
+    normalized_type = normalized.get("type")
+    event_type = normalized_type if isinstance(normalized_type, str) else None
+    return format_sse_event(normalized), event_type
+
+
 def _to_websocket_upstream_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme == "https":
@@ -1355,6 +1386,7 @@ async def _stream_websocket_events(
     idle_timeout_seconds: float,
     total_timeout_seconds: float | None,
     max_event_bytes: int,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
@@ -1397,10 +1429,13 @@ async def _stream_websocket_events(
             continue
         if not isinstance(payload, dict):
             continue
-        normalized = _normalize_stream_event_payload(payload)
+        normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         event_type = normalized.get("type")
         yield format_sse_event(normalized)
-        if isinstance(event_type, str) and event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+            event_type,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        ):
             break
 
 
@@ -1410,6 +1445,7 @@ async def _stream_codex_websocket_events(
     idle_timeout_seconds: float,
     total_timeout_seconds: float | None,
     max_event_bytes: int,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
@@ -1452,10 +1488,13 @@ async def _stream_codex_websocket_events(
             continue
         if not isinstance(payload, dict):
             continue
-        normalized = _normalize_stream_event_payload(payload)
+        normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         event_type = normalized.get("type")
         yield format_sse_event(normalized)
-        if isinstance(event_type, str) and event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+            event_type,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        ):
             break
 
 
@@ -1486,6 +1525,7 @@ async def _stream_responses_via_websocket(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
@@ -1622,6 +1662,7 @@ async def _stream_responses_via_websocket(
                 idle_timeout_seconds=effective_idle_timeout,
                 total_timeout_seconds=remaining_total_timeout,
                 max_event_bytes=max_event_bytes,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
             if route is not None
             else _stream_websocket_events(
@@ -1629,6 +1670,7 @@ async def _stream_responses_via_websocket(
                 idle_timeout_seconds=effective_idle_timeout,
                 total_timeout_seconds=remaining_total_timeout,
                 max_event_bytes=max_event_bytes,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
         )
         async for event in event_iter:
@@ -1644,7 +1686,10 @@ async def _stream_responses_via_websocket(
                 extra={"event_format": "sse"},
             )
             parsed_event = parse_sse_event(event)
-            if parsed_event and parsed_event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+            if parsed_event and _is_response_stream_terminal_event_type(
+                parsed_event.type,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
                 seen_terminal = True
                 await _record_lifecycle_success()
             yield event
@@ -2148,6 +2193,7 @@ async def stream_responses(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2165,6 +2211,7 @@ async def stream_responses(
             route_trace=route_trace,
             allow_direct_egress=effective_allow_direct_egress,
             codex_installation_id=codex_installation_id,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
             yield event_block
 
@@ -2183,6 +2230,7 @@ async def _stream_responses_with_session(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2215,6 +2263,10 @@ async def _stream_responses_with_session(
     last_stream_activity_at: float | None = None
     error_code: str | None = None
     error_message: str | None = None
+    failure_phase: str | None = None
+    failure_detail: str | None = None
+    failure_exception_type: str | None = None
+    retryable_same_contract: bool | None = None
     client_session = session
     payload_dict = dict(payload.to_payload())
     apply_codex_installation_metadata(payload_dict, codex_installation_id)
@@ -2327,8 +2379,20 @@ async def _stream_responses_with_session(
                 ):
                     last_stream_activity_at = time.monotonic()
                     event_block = _normalize_sse_event_block(event_block)
+                    event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                        event_block,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    )
                     event = parse_sse_event(event_block)
-                    if event and event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                    if event:
+                        if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
+                            event.type == "error" and not enforce_openai_sdk_contract
+                        ):
+                            seen_terminal = True
+                    elif isinstance(normalized_event_type, str) and (
+                        normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                        or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                    ):
                         seen_terminal = True
                     archive_text(
                         direction="server_to_codex",
@@ -2403,11 +2467,21 @@ async def _stream_responses_with_session(
             ):
                 last_stream_activity_at = time.monotonic()
                 event_block = _normalize_sse_event_block(event_block)
+                event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                    event_block,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                )
                 event = parse_sse_event(event_block)
                 if event:
-                    event_type = event.type
-                    if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                    if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
+                        event.type == "error" and not enforce_openai_sdk_contract
+                    ):
                         seen_terminal = True
+                elif isinstance(normalized_event_type, str) and (
+                    normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                    or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                ):
+                    seen_terminal = True
                 archive_text(
                     direction="server_to_codex",
                     kind="responses",
@@ -2520,13 +2594,17 @@ async def _stream_responses_with_session(
                     route=route,
                     codex_client=codex_client,
                     route_trace=route_trace,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 ):
                     if status_code is None:
                         status_code = 101
                     event = parse_sse_event(event_block)
                     if event:
                         event_type = event.type
-                        if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                        if _is_response_stream_terminal_event_type(
+                            event_type,
+                            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        ):
                             seen_terminal = True
                     yield event_block
             except aiohttp.WSServerHandshakeError as exc:
@@ -2569,6 +2647,10 @@ async def _stream_responses_with_session(
     except StreamIdleTimeoutError:
         error_code = "stream_idle_timeout"
         error_message = "Upstream stream idle timeout"
+        failure_phase = "upstream"
+        failure_detail = "stream_idle_timeout"
+        failure_exception_type = "StreamIdleTimeoutError"
+        retryable_same_contract = False
         yield format_sse_event(
             response_failed_event(
                 "stream_idle_timeout",
@@ -2608,6 +2690,10 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
         yield format_sse_event(
             response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
@@ -2621,6 +2707,10 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
         yield format_sse_event(
             response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
@@ -2641,6 +2731,10 @@ async def _stream_responses_with_session(
                 else str(exc) or "Request to upstream timed out"
             )
             response_error_message = cast(str, error_message)
+            failure_phase = "upstream"
+            failure_detail = "transport_error"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
             yield format_sse_event(
                 response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
             )
@@ -2654,6 +2748,10 @@ async def _stream_responses_with_session(
         ):
             error_code = "stream_idle_timeout"
             error_message = "Upstream stream idle timeout"
+            failure_phase = "upstream"
+            failure_detail = "stream_idle_timeout"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = False
             yield format_sse_event(
                 response_failed_event(
                     "stream_idle_timeout",
@@ -2676,6 +2774,10 @@ async def _stream_responses_with_session(
                 else str(exc) or "Request to upstream timed out"
             )
             response_error_message = cast(str, error_message)
+            failure_phase = "upstream"
+            failure_detail = "transport_error"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
             yield format_sse_event(
                 response_failed_event(
                     "upstream_unavailable",
@@ -2686,12 +2788,41 @@ async def _stream_responses_with_session(
             return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
+        failure_phase = "upstream"
+        failure_detail = "request_timeout"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = False
         yield format_sse_event(
             response_failed_event(
                 "upstream_request_timeout",
                 "Proxy request budget exhausted",
                 response_id=get_request_id(),
             ),
+        )
+        return
+    except GeneratorExit:
+        error_code = "client_disconnected"
+        error_message = "Downstream client disconnected before response.completed"
+        failure_phase = "downstream"
+        failure_detail = "client_disconnected_before_terminal_event"
+        failure_exception_type = "GeneratorExit"
+        retryable_same_contract = False
+        raise
+    except OSError as exc:
+        error_code = "upstream_unavailable"
+        error_message = _codex_route_transport_error_message(
+            route=route,
+            route_trace=route_trace,
+            operation="stream",
+            exc=exc,
+        )
+        response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
+        yield format_sse_event(
+            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
         return
     except Exception as exc:
@@ -2728,6 +2859,10 @@ async def _stream_responses_with_session(
             status_code=status_code,
             error_code=error_code,
             error_message=error_message,
+            failure_phase=failure_phase,
+            failure_detail=failure_detail,
+            failure_exception_type=failure_exception_type,
+            retryable_same_contract=retryable_same_contract,
         )
 
 

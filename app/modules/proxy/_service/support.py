@@ -247,6 +247,7 @@ class _StreamSettlement:
     downstream_visible: bool = False
     downstream_text_visible: bool = False
     response_id: str | None = None
+    usage_settlement_transferred: bool = False
 
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
@@ -301,6 +302,7 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    enforce_openai_sdk_contract: bool = True
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None

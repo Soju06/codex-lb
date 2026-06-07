@@ -232,6 +232,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -244,6 +245,7 @@ class _HTTPBridgeRequestSubmitMixin:
             headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
         return request_state, text_data
@@ -262,6 +264,7 @@ class _HTTPBridgeRequestSubmitMixin:
         session_id: str | None = None,
         request_id: str | None = None,
         request_log_id: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -305,6 +308,7 @@ class _HTTPBridgeRequestSubmitMixin:
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             transport=transport,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
@@ -875,7 +879,23 @@ class _HTTPBridgeRequestSubmitMixin:
             if counted_in_queue:
                 session.queued_request_count = max(0, session.queued_request_count - 1)
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        if gate_acquired:
+        if request_state.response_create_gate is not None:
+            if gate_acquired or request_state.response_create_gate_acquired:
+                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            else:
+                account_response_create_lease = request_state.account_response_create_lease
+                account_response_create_release = request_state.account_response_create_release
+                request_state.account_response_create_lease = None
+                request_state.account_response_create_release = None
+                if account_response_create_lease is not None and account_response_create_release is not None:
+                    await account_response_create_release(account_response_create_lease)
+                if request_state.response_create_admission is not None:
+                    request_state.response_create_admission.release()
+                    request_state.response_create_admission = None
+                request_state.awaiting_response_created = False
+                request_state.response_create_gate = None
+                request_state.response_create_gate_acquired = False
+        elif gate_acquired:
             await _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
     async def _detach_http_bridge_request(

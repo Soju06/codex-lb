@@ -32,6 +32,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
+    weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     ...patch,
   };
   if (

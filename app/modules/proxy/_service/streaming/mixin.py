@@ -506,6 +506,8 @@ class _StreamingMixin(_StreamingRetryMixin):
         suppress_text_done_events: bool,
         upstream_stream_transport: str | None,
         request_transport: str,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
     ) -> AsyncIterator[str]:
@@ -1025,6 +1027,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",

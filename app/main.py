@@ -3,19 +3,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import stat
 import sys
 import time
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from importlib import import_module
 from ipaddress import ip_address
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import aiohttp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles
 
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
@@ -60,6 +62,7 @@ from app.modules.proxy.ring_membership import (
 )
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
+from app.modules.reports import api as reports_api
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
@@ -84,6 +87,17 @@ class _RingMembershipReader(Protocol):
         *,
         require_endpoint: bool = False,
     ) -> Awaitable[list[str]]: ...
+
+
+def _resolve_static_asset_path(static_root: Path, requested_path: str) -> Path | None:
+    """Return a filesystem path for a SPA asset only when it stays under static_root."""
+    normalized = PurePosixPath(requested_path)
+    if normalized.is_absolute() or ".." in normalized.parts:
+        return None
+    full_path, stat_result = StaticFiles(directory=static_root, check_dir=False).lookup_path(normalized.as_posix())
+    if stat_result is None or not stat.S_ISREG(stat_result.st_mode):
+        return None
+    return Path(full_path)
 
 
 def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
@@ -373,6 +387,7 @@ def create_app() -> FastAPI:
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
     app.include_router(quota_planner_api.router)
+    app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)
     app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)
@@ -405,8 +420,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Not Found")
 
         if normalized:
-            candidate = (static_dir / normalized).resolve()
-            if candidate.is_relative_to(static_root) and candidate.is_file():
+            candidate = _resolve_static_asset_path(static_root, normalized)
+            if candidate is not None:
                 return FileResponse(candidate)
             if _is_static_asset_path(normalized):
                 raise HTTPException(status_code=404, detail="Not Found")

@@ -26,6 +26,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
+    _request_log_useragent_fields,
     _RetryableStreamError,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -71,6 +72,7 @@ class _StreamingRetryMixin:
         upstream_stream_transport_override: str | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = ensure_request_id()
         start = time.monotonic()
         base_settings = _facade().get_settings()
@@ -190,6 +192,8 @@ class _StreamingRetryMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         return
             file_required_preferred_account = False
@@ -228,6 +232,8 @@ class _StreamingRetryMixin:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                     )
                     yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                     return
@@ -269,6 +275,8 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -344,6 +352,8 @@ class _StreamingRetryMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -372,6 +382,8 @@ class _StreamingRetryMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         return
                     if last_security_work_retry_error is not None:
@@ -398,6 +410,8 @@ class _StreamingRetryMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -421,6 +435,8 @@ class _StreamingRetryMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                     )
                     return
 
@@ -457,6 +473,8 @@ class _StreamingRetryMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                     )
                     return
                 try:
@@ -480,6 +498,8 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -499,6 +519,8 @@ class _StreamingRetryMixin:
                             service_tier=payload.service_tier,
                             transport=request_transport,
                             upstream_proxy_fail_closed_reason=exc.reason,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_proxy_unavailable",
@@ -545,6 +567,8 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -576,6 +600,8 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -604,6 +630,8 @@ class _StreamingRetryMixin:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
                             ):
@@ -873,6 +901,8 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -924,6 +954,8 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -953,6 +985,8 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -973,6 +1007,8 @@ class _StreamingRetryMixin:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                                 tool_call_dedupe=tool_call_dedupe,
                             ):
                                 yield line
@@ -1188,6 +1224,8 @@ class _StreamingRetryMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
@@ -1222,6 +1260,8 @@ class _StreamingRetryMixin:
                     transport=request_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
+                useragent=useragent,
+                useragent_group=useragent_group,
                 )
         finally:
             for account_lease in account_leases:

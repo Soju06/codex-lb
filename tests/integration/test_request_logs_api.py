@@ -127,6 +127,56 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_request_logs_api_returns_useragent_fields(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_logs_useragent", "ua-logs@example.com"))
+
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id="acc_logs_useragent",
+            request_id="req_logs_useragent_present",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=20,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now,
+            useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+            useragent_group="opencode",
+        )
+        await logs_repo.add_log(
+            account_id="acc_logs_useragent",
+            request_id="req_logs_useragent_absent",
+            model="gpt-5.1-mini",
+            input_tokens=5,
+            output_tokens=15,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/request-logs?limit=2")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert [entry["requestId"] for entry in payload] == [
+        "req_logs_useragent_present",
+        "req_logs_useragent_absent",
+    ]
+
+    latest = payload[0]
+    assert latest["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+    assert latest["useragentGroup"] == "opencode"
+
+    older = payload[1]
+    assert older["useragent"] is None
+    assert older["useragentGroup"] is None
+
+
+@pytest.mark.asyncio
 async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

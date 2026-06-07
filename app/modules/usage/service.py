@@ -38,6 +38,7 @@ class UsageService:
 
         primary_rows_raw = await self._latest_usage_rows("primary")
         secondary_rows_raw = await self._latest_usage_rows("secondary")
+        monthly_rows_raw = await self._latest_usage_rows("monthly")
         primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
             primary_rows_raw,
             secondary_rows_raw,
@@ -51,6 +52,7 @@ class UsageService:
             accounts=accounts,
             primary_rows=primary_rows,
             secondary_rows=secondary_rows,
+            monthly_rows=monthly_rows_raw,
             logs_secondary=logs_secondary,
         )
 

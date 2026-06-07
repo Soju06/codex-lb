@@ -27,7 +27,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.support import _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _RequestLogFailureMetadata, _request_log_useragent_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
 
@@ -167,6 +167,7 @@ class _TranscribeMixin:
     ) -> dict[str, JsonValue]:
         proxy = cast(_TranscribeServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -426,4 +427,6 @@ class _TranscribeMixin:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )

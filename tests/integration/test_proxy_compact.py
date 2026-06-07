@@ -229,6 +229,49 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_headers_include_monthly_only_credits(async_client, monkeypatch):
+    email = "compact-monthly@example.com"
+    raw_account_id = "acc_compact_monthly"
+    auth_json = _make_auth_json(raw_account_id, email, plan_type="free")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=40.0,
+            window="monthly",
+            reset_at=1735862400,
+            window_minutes=43200,
+            recorded_at=utcnow(),
+            credits_has=True,
+            credits_unlimited=False,
+            credits_balance=8.75,
+        )
+
+    await get_rate_limit_headers_cache().invalidate()
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.headers.get("x-codex-monthly-used-percent") == "40.0"
+    assert response.headers.get("x-codex-monthly-window-minutes") == "43200"
+    assert response.headers.get("x-codex-monthly-reset-at") == "1735862400"
+    assert response.headers.get("x-codex-credits-has-credits") == "true"
+    assert response.headers.get("x-codex-credits-unlimited") == "false"
+    assert response.headers.get("x-codex-credits-balance") == "8.75"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_success_preserves_compaction_payload(async_client, monkeypatch):
     email = "compact-pass-through@example.com"
     raw_account_id = "acc_compact_pass_through"

@@ -770,6 +770,109 @@ async def test_accounts_list_request_usage_uses_persisted_cost(async_client, db_
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_request_usage_deduplicates_request_id_rows(async_client, db_setup):
+    requested_at = utcnow()
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_replayed", "replayed@example.com"))
+
+        first_attempt = await logs_repo.add_log(
+            account_id="acc_replayed",
+            request_id="req_repeat_1",
+            model="gpt-5.1-codex",
+            input_tokens=50_000,
+            output_tokens=20_000,
+            cached_input_tokens=10_000,
+            latency_ms=180,
+            status="success",
+            error_code=None,
+            requested_at=requested_at,
+        )
+        second_attempt = await logs_repo.add_log(
+            account_id="acc_replayed",
+            request_id="req_repeat_1",
+            model="gpt-5.1-codex",
+            input_tokens=5_000,
+            output_tokens=1_000,
+            cached_input_tokens=0,
+            latency_ms=140,
+            status="success",
+            error_code=None,
+            requested_at=requested_at,
+        )
+        await session.execute(update(RequestLog).where(RequestLog.id == first_attempt.id).values(cost_usd=5.0))
+        await session.execute(update(RequestLog).where(RequestLog.id == second_attempt.id).values(cost_usd=2.0))
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    request_usage = accounts["acc_replayed"]["requestUsage"]
+    assert request_usage is not None
+    assert request_usage["requestCount"] == 1
+    assert request_usage["totalTokens"] == 6_000
+    assert request_usage["cachedInputTokens"] == 0
+    assert request_usage["totalCostUsd"] == pytest.approx(2.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_request_usage_counts_repeated_request_id_by_requested_at(async_client, db_setup):
+    requested_at = utcnow()
+    repeated_request_time = requested_at + timedelta(seconds=30)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_replayed_time", "replayed-time@example.com"))
+
+        newer_attempt = await logs_repo.add_log(
+            account_id="acc_replayed_time",
+            request_id="req_repeat_time",
+            model="gpt-5.1-codex",
+            input_tokens=8_000,
+            output_tokens=2_000,
+            cached_input_tokens=1_000,
+            latency_ms=180,
+            status="success",
+            error_code=None,
+            requested_at=repeated_request_time,
+        )
+        older_backfill = await logs_repo.add_log(
+            account_id="acc_replayed_time",
+            request_id="req_repeat_time",
+            model="gpt-5.1-codex",
+            input_tokens=50_000,
+            output_tokens=20_000,
+            cached_input_tokens=10_000,
+            latency_ms=140,
+            status="success",
+            error_code=None,
+            requested_at=requested_at,
+        )
+        await session.execute(update(RequestLog).where(RequestLog.id == newer_attempt.id).values(cost_usd=3.0))
+        await session.execute(update(RequestLog).where(RequestLog.id == older_backfill.id).values(cost_usd=9.0))
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    request_usage = accounts["acc_replayed_time"]["requestUsage"]
+    assert request_usage is not None
+    assert request_usage["requestCount"] == 2
+    assert request_usage["totalTokens"] == 80_000
+    assert request_usage["cachedInputTokens"] == 11_000
+    assert request_usage["totalCostUsd"] == pytest.approx(12.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -793,6 +896,77 @@ async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client,
     assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_exposes_monthly_only_free_quota(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_monthly", "free-monthly@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_monthly",
+            24.0,
+            window="monthly",
+            window_minutes=43200,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_monthly"]
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] is None
+    assert account["usage"]["monthlyRemainingPercent"] == pytest.approx(76.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
+    assert account["windowMinutesMonthly"] == 43200
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_ignores_stale_monthly_quota_after_upgrade(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_upgraded_monthly", "upgraded-monthly@example.com", plan_type="plus")
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            100.0,
+            window="monthly",
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            10.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_upgraded_monthly",
+            20.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_upgraded_monthly"]
+    assert account["status"] == AccountStatus.ACTIVE.value
+    assert account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(80.0)
+    assert account["usage"]["monthlyRemainingPercent"] is None
+    assert account["windowMinutesPrimary"] == 300
+    assert account["windowMinutesSecondary"] == 10080
+    assert account["windowMinutesMonthly"] is None
 
 
 @pytest.mark.asyncio
@@ -826,6 +1000,37 @@ async def test_accounts_list_ignores_hidden_zero_capacity_primary_for_status(asy
     assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_ignores_hidden_zero_capacity_primary_without_weekly_for_active_account(
+    async_client, db_setup
+):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_free_active_primary_only", "free-primary-only@example.com", plan_type="free")
+        )
+        await usage_repo.add_entry(
+            "acc_free_active_primary_only",
+            100.0,
+            window="primary",
+            window_minutes=43200,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account = accounts["acc_free_active_primary_only"]
+    assert account["status"] == "active"
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] is None
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
 
 
 @pytest.mark.asyncio
@@ -896,6 +1101,230 @@ async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(as
     accounts = {item["accountId"]: item for item in payload["accounts"]}
 
     assert accounts["acc_credit_rate_limited"]["status"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_ignores_zero_capacity_monthly_primary_status(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_monthly_primary", "free-monthly@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_monthly_primary",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_free_monthly_primary",
+            24.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_monthly_primary"]
+    assert account_payload["status"] == "active"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_recovers_weekly_only_primary_rate_limited_status(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=7)).timestamp())
+    account = _make_account("acc_free_weekly_primary_only", "free-weekly-primary@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_weekly_primary_only",
+            24.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_weekly_primary_only"]
+    assert account_payload["status"] == "active"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_keeps_legacy_unknown_primary_rate_limited_until_known_window(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_legacy_unknown_primary", "free-legacy@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_legacy_unknown_primary",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=None,
+        )
+        await usage_repo.add_entry(
+            "acc_free_legacy_unknown_primary",
+            24.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_legacy_unknown_primary"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_keeps_free_rate_limited_until_weekly_quota_available(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_monthly_without_weekly", "free-monthly-no-weekly@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_monthly_without_weekly",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=43200,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_monthly_without_weekly"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] is None
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] is None
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_client, db_setup):
+    account = _make_account("acc_free_rate_limited_no_reset", "free-no-reset@example.com", plan_type="free")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = None
+    account.blocked_at = int(utcnow().timestamp())
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_rate_limited_no_reset",
+            24.0,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_free_rate_limited_no_reset",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_rate_limited_no_reset"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_keeps_quota_exceeded_reset_when_ignoring_monthly_primary(async_client, db_setup):
+    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    account = _make_account("acc_free_quota_exceeded_monthly", "free-quota-monthly@example.com", plan_type="free")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = future_reset
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_free_quota_exceeded_monthly",
+            100.0,
+            window="primary",
+            reset_at=future_reset,
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_free_quota_exceeded_monthly",
+            24.0,
+            window="secondary",
+            reset_at=future_reset,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_free_quota_exceeded_monthly"]
+    assert account_payload["status"] == "quota_exceeded"
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account_payload["windowMinutesPrimary"] is None
+    assert account_payload["windowMinutesSecondary"] == 10080
 
 
 @pytest.mark.asyncio

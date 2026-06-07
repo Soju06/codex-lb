@@ -142,16 +142,21 @@ def _percent_to_int(value: float) -> int:
 def _rate_limit_details(
     primary: RateLimitWindowSnapshotData | None,
     secondary: RateLimitWindowSnapshotData | None,
+    monthly: RateLimitWindowSnapshotData | None = None,
+    *,
+    limit_reached: bool | None = None,
 ) -> RateLimitStatusDetailsData | None:
-    if not primary and not secondary:
+    if not primary and not secondary and not monthly:
         return None
-    used_percents = [window.used_percent for window in (primary, secondary) if window]
-    limit_reached = any(used >= 100 for used in used_percents)
+    if limit_reached is None:
+        used_percents = [window.used_percent for window in (primary, secondary, monthly) if window]
+        limit_reached = any(used >= 100 for used in used_percents)
     return RateLimitStatusDetailsData(
         allowed=not limit_reached,
         limit_reached=limit_reached,
         primary_window=primary,
         secondary_window=secondary,
+        monthly_window=monthly,
     )
 
 

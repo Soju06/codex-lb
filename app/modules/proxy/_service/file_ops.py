@@ -29,7 +29,11 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.support import _FilePinEntry, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import (
+    _FilePinEntry,
+    _request_log_useragent_fields,
+    _RequestLogFailureMetadata,
+)
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _prompt_cache_key_from_request_model,
@@ -445,6 +449,7 @@ class _FileOpsMixin:
         """
         proxy = cast(_FileOpsServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -712,4 +717,6 @@ class _FileOpsMixin:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )

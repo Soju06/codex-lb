@@ -12,7 +12,11 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
-import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import {
+  DEFAULT_ACCOUNT_SORT_MODE,
+  sortAccountsForDisplay,
+  type AccountSortMode,
+} from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -27,12 +31,14 @@ const OauthDialog = lazy(() =>
 
 export function AccountsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [accountSortMode, setAccountSortMode] = useState<AccountSortMode>(DEFAULT_ACCOUNT_SORT_MODE);
   const {
     accountsQuery,
     importMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
+    probeMutation,
     limitWarmupMutation,
     updateMutation,
     deleteMutation,
@@ -54,8 +60,8 @@ export function AccountsPage() {
   );
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const sortedAccounts = useMemo(
-    () => sortAccountsForDisplay(accounts, quotaDisplay),
-    [accounts, quotaDisplay],
+    () => sortAccountsForDisplay(accounts, quotaDisplay, accountSortMode),
+    [accounts, quotaDisplay, accountSortMode],
   );
   const selectedAccountId = searchParams.get("selected");
 
@@ -96,6 +102,7 @@ export function AccountsPage() {
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
+    probeMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
@@ -108,6 +115,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
+    getErrorMessageOrNull(probeMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
@@ -139,6 +147,8 @@ export function AccountsPage() {
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
               onSelect={handleSelectAccount}
+              sortMode={accountSortMode}
+              onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
             />
@@ -150,6 +160,9 @@ export function AccountsPage() {
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
+            onProbe={(accountId) =>
+              void probeMutation.mutateAsync({ accountId })
+            }
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })
             }

@@ -32,15 +32,27 @@ type LimitChip = {
 
 function buildLimitChips(account: AccountSummary): LimitChip[] {
   const chips: LimitChip[] = [];
+  const monthlyOnly =
+    account.windowMinutesMonthly != null &&
+    account.windowMinutesPrimary == null &&
+    account.windowMinutesSecondary == null;
 
-  if (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null) {
+  if (monthlyOnly || account.usage?.monthlyRemainingPercent != null) {
+    chips.push({
+      key: `${account.accountId}-monthly`,
+      label: `Monthly ${formatPercentNullable(account.usage?.monthlyRemainingPercent)} left`,
+      percent: account.usage?.monthlyRemainingPercent ?? null,
+    });
+  }
+
+  if (!monthlyOnly && (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-primary`,
       label: `${formatWindowLabel("primary", account.windowMinutesPrimary)} ${formatPercentNullable(account.usage?.primaryRemainingPercent)} left`,
       percent: account.usage?.primaryRemainingPercent ?? null,
     });
   }
-  if (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null) {
+  if (!monthlyOnly && (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-secondary`,
       label: `${formatWindowLabel("secondary", account.windowMinutesSecondary)} ${formatPercentNullable(account.usage?.secondaryRemainingPercent)} left`,

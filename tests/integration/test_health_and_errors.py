@@ -5,10 +5,45 @@ from pathlib import Path
 import pytest
 
 from app import __version__
+from app.main import _resolve_static_asset_path
 
 pytestmark = pytest.mark.integration
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "app" / "static"
+
+
+def test_resolve_static_asset_rejects_parent_traversal(tmp_path):
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    (tmp_path / "secret.txt").write_text("secret")
+
+    assert _resolve_static_asset_path(static_root.resolve(), "../secret.txt") is None
+
+
+def test_resolve_static_asset_tolerates_missing_static_root(tmp_path):
+    static_root = tmp_path / "missing-static"
+
+    assert _resolve_static_asset_path(static_root, "dashboard/settings") is None
+
+
+def test_resolve_static_asset_rejects_symlink_escape(tmp_path):
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    (static_root / "outside.txt").symlink_to(outside)
+
+    assert _resolve_static_asset_path(static_root.resolve(), "outside.txt") is None
+
+
+def test_resolve_static_asset_accepts_file_under_static_root(tmp_path):
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    asset = static_root / "assets" / "app.js"
+    asset.parent.mkdir()
+    asset.write_text("console.log('ok')")
+
+    assert _resolve_static_asset_path(static_root.resolve(), "assets/app.js") == asset.resolve()
 
 
 @pytest.mark.asyncio

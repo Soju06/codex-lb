@@ -297,6 +297,7 @@ from app.modules.proxy._service.support import (
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
+    _request_log_useragent_fields,
     _stream_settlement_error_payload,
     _StreamSettlement,
     _wait_for_websocket_continuity_gap,
@@ -478,6 +479,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -640,6 +642,8 @@ class _WebSocketMixin:
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                     api_key=api_key,
                                     continuity_state=continuity_state,
+                                    useragent=useragent,
+                                    useragent_group=useragent_group,
                                 )
                                 if await _websocket_full_replay_should_wait_for_continuity(
                                     prepared_request.request_state,
@@ -672,6 +676,8 @@ class _WebSocketMixin:
                                         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                         api_key=api_key,
                                         continuity_state=continuity_state,
+                                        useragent=useragent,
+                                        useragent_group=useragent_group,
                                     )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
@@ -1108,6 +1114,8 @@ class _WebSocketMixin:
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
         continuity_state: "_WebSocketContinuityState | None" = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> _PreparedWebSocketRequest:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -1216,6 +1224,8 @@ class _WebSocketMixin:
         except ProxyResponseError:
             await proxy._release_websocket_reservation(reservation)
             raise
+        request_state.useragent = useragent
+        request_state.useragent_group = useragent_group
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
@@ -1360,6 +1370,8 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if request_state.useragent is None and request_state.useragent_group is None:
+            request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
         deadline = _websocket_connect_deadline(request_state, _facade().get_settings().proxy_request_budget_seconds)
         base_settings = _facade().get_settings()
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
@@ -3258,6 +3270,8 @@ class _WebSocketMixin:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+            useragent=request_state.useragent,
+            useragent_group=request_state.useragent_group,
             )
 
     async def _write_websocket_connect_failure(
@@ -3296,6 +3310,8 @@ class _WebSocketMixin:
                 request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
             ),
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+        useragent=request_state.useragent,
+        useragent_group=request_state.useragent_group,
         )
 
     async def _emit_websocket_connect_failure(
@@ -3494,6 +3510,8 @@ class _WebSocketMixin:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+            useragent=request_state.useragent,
+            useragent_group=request_state.useragent_group,
             )
 
     async def _emit_websocket_terminal_error(

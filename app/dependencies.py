@@ -32,6 +32,8 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.service import ReportsService
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
@@ -126,6 +128,13 @@ class StickySessionsContext:
     repository: StickySessionsRepository
     settings_repository: SettingsRepository
     service: StickySessionsService
+
+
+@dataclass(slots=True)
+class ReportsContext:
+    session: AsyncSession
+    repository: ReportsRepository
+    service: ReportsService
 
 
 def get_accounts_context(
@@ -289,3 +298,11 @@ def get_sticky_sessions_context(
         settings_repository=settings_repository,
         service=service,
     )
+
+
+def get_reports_context(
+    session: AsyncSession = Depends(get_session),
+) -> ReportsContext:
+    repository = ReportsRepository(session)
+    service = ReportsService(repository)
+    return ReportsContext(session=session, repository=repository, service=service)

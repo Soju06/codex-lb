@@ -100,4 +100,38 @@ describe("AccountMultiSelect", () => {
     expect(screen.queryByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
   });
+
+  it("shows Monthly left for monthly-only free accounts", async () => {
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary({
+              accountId: "acc_free",
+              email: "free@example.com",
+              displayName: "Free monthly",
+              planType: "free",
+              usage: {
+                primaryRemainingPercent: null,
+                secondaryRemainingPercent: null,
+                monthlyRemainingPercent: 95,
+              },
+              windowMinutesPrimary: null,
+              windowMinutesSecondary: null,
+              windowMinutesMonthly: 43_200,
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+
+    renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "All accounts" }));
+
+    expect(await screen.findByText("Monthly 95% left")).toBeInTheDocument();
+    expect(screen.queryByText(/7d .* left/i)).not.toBeInTheDocument();
+  });
 });

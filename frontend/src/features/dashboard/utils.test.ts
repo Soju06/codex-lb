@@ -27,10 +27,16 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
+    resetAtMonthly: overrides.resetAtMonthly ?? null,
     windowMinutesPrimary: overrides.windowMinutesPrimary ?? null,
     windowMinutesSecondary: overrides.windowMinutesSecondary ?? null,
+    windowMinutesMonthly: overrides.windowMinutesMonthly ?? null,
+    capacityCreditsPrimary: overrides.capacityCreditsPrimary ?? null,
+    remainingCreditsPrimary: overrides.remainingCreditsPrimary ?? null,
     capacityCreditsSecondary: overrides.capacityCreditsSecondary ?? null,
     remainingCreditsSecondary: overrides.remainingCreditsSecondary ?? null,
+    capacityCreditsMonthly: overrides.capacityCreditsMonthly ?? null,
+    remainingCreditsMonthly: overrides.remainingCreditsMonthly ?? null,
     auth: overrides.auth ?? null,
     additionalQuotas: overrides.additionalQuotas ?? [],
     isEmailDuplicate: overrides.isEmailDuplicate,
@@ -269,6 +275,25 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+
+  it("omits monthly-only accounts from primary and secondary donuts", () => {
+    const monthly = account({
+      accountId: "acc-monthly",
+      email: "monthly@example.com",
+      planType: "free",
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 88,
+      },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+    });
+
+    expect(buildRemainingItems([monthly], null, "primary")).toEqual([]);
+    expect(buildRemainingItems([monthly], null, "secondary")).toEqual([]);
   });
 });
 

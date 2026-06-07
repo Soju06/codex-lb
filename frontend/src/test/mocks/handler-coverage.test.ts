@@ -35,6 +35,7 @@ const EXPECTED_ENDPOINTS = [
 	"PATCH /api/accounts/:accountId",
 	"POST /api/accounts/:accountId/pause",
 	"POST /api/accounts/:accountId/reactivate",
+	"POST /api/accounts/:accountId/probe",
 	"PUT /api/accounts/:accountId/alias",
 	"PUT /api/accounts/:accountId/limit-warmup",
 	"PUT /api/accounts/:accountId/routing-policy",

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Route, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -24,6 +25,29 @@ import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
 const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
+const WEEKDAYS = [
+  { value: 0, label: "Mon" },
+  { value: 1, label: "Tue" },
+  { value: 2, label: "Wed" },
+  { value: 3, label: "Thu" },
+  { value: 4, label: "Fri" },
+  { value: 5, label: "Sat" },
+  { value: 6, label: "Sun" },
+] as const;
+
+function parseWorkingDays(value: string): Set<number> {
+  const days = new Set(
+    value
+      .split(",")
+      .map((part) => Number(part.trim()))
+      .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6),
+  );
+  return days.size > 0 ? days : new Set(WEEKDAYS.map((day) => day.value));
+}
+
+function serializeWorkingDays(days: Set<number>): string {
+  return [...days].sort((a, b) => a - b).join(",");
+}
 
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
@@ -167,6 +191,16 @@ export function RoutingSettings({
   const stickySecondaryThresholdChanged =
     stickySecondaryThresholdValid &&
     parsedStickySecondaryThreshold !== (settings.stickyReallocationSecondaryBudgetThresholdPct ?? 100);
+  const workingDays = parseWorkingDays(settings.weeklyPaceWorkingDays);
+  const toggleWorkingDay = (day: number, checked: boolean) => {
+    const next = new Set(workingDays);
+    if (checked) {
+      next.add(day);
+    } else if (next.size > 1) {
+      next.delete(day);
+    }
+    save({ weeklyPaceWorkingDays: serializeWorkingDays(next) });
+  };
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -611,6 +645,29 @@ export function RoutingSettings({
                 disabled={busy}
                 onCheckedChange={(checked) => save({ preferEarlierResetAccounts: checked })}
               />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Weekly pace working days</p>
+              <p className="text-xs text-muted-foreground">Use these days for the dashboard weekly schedule.</p>
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {WEEKDAYS.map((day) => (
+                <label
+                  key={day.value}
+                  className="flex min-w-0 flex-col items-center gap-1 rounded-md border bg-background px-2 py-1.5 text-[11px] font-medium"
+                >
+                  <Checkbox
+                    aria-label={`Use ${day.label} in weekly pace`}
+                    checked={workingDays.has(day.value)}
+                    disabled={busy || (workingDays.size === 1 && workingDays.has(day.value))}
+                    onCheckedChange={(checked) => toggleWorkingDay(day.value, checked === true)}
+                  />
+                  {day.label}
+                </label>
+              ))}
             </div>
           </div>
 

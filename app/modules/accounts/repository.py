@@ -71,6 +71,27 @@ class AccountsRepository:
     ) -> dict[str, AccountRequestUsageSummary]:
         summaries: dict[str, AccountRequestUsageSummary] = {}
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        conditions: list = [
+            RequestLog.request_kind.not_in(("warmup", "limit_warmup")),
+            RequestLog.deleted_at.is_(None),
+        ]
+        if account_ids:
+            conditions.append(RequestLog.account_id.in_(account_ids))
+
+        latest_request_log_ids_stmt = select(
+            RequestLog.id.label("request_log_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    RequestLog.account_id,
+                    RequestLog.request_id,
+                    RequestLog.requested_at,
+                ),
+                order_by=(RequestLog.requested_at.desc(), RequestLog.id.desc()),
+            )
+            .label("request_log_rank"),
+        ).where(*conditions)
+        latest_request_log_ids = latest_request_log_ids_stmt.subquery("latest_request_log_ids")
         stmt = (
             select(
                 RequestLog.account_id,
@@ -80,12 +101,10 @@ class AccountsRepository:
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             )
-            .where(RequestLog.request_kind.not_in(("warmup", "limit_warmup")))
+            .join(latest_request_log_ids, RequestLog.id == latest_request_log_ids.c.request_log_id)
+            .where(latest_request_log_ids.c.request_log_rank == 1)
             .group_by(RequestLog.account_id)
         )
-        if account_ids:
-            stmt = stmt.where(RequestLog.account_id.in_(account_ids))
-
         result = await self._session.execute(stmt)
         for (
             account_id,

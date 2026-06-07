@@ -17,6 +17,15 @@ The dashboard MUST expose an admin-only endpoint that sends a single minimal `re
 - **THEN** the endpoint responds `409` with code `account_not_probable`
 - **AND** no upstream request is sent
 
+#### Scenario: Dashboard exposes Force probe only for probeable statuses
+
+- **WHEN** the dashboard renders account actions for an account
+- **AND** the account `status` is `active`, `rate_limited`, or `quota_exceeded`
+- **THEN** the dashboard exposes a Force probe action for that account
+- **AND** invoking the action refreshes the account list, dashboard overview, projections, and that account's trends
+- **BUT WHEN** the account `status` is `paused` or `deactivated`
+- **THEN** the Force probe action is disabled or hidden
+
 #### Scenario: Probe returns 404 for unknown account
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** no account with that id exists

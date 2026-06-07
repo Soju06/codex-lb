@@ -35,6 +35,8 @@ export const AdditionalQuotaPolicySchema = z.object({
 });
 const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
+const WeeklyPaceWorkingDaysValueSchema = z.string().regex(/^[0-6](,[0-6])*$/);
+const WeeklyPaceWorkingDaysSchema = WeeklyPaceWorkingDaysValueSchema.default("0,1,2,3,4,5,6");
 
 export const DashboardSettingsSchema = z
   .object({
@@ -90,6 +92,7 @@ export const DashboardSettingsSchema = z
       .max(100)
       .optional()
       .default(100),
+    weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
@@ -113,7 +116,6 @@ export const DashboardSettingsSchema = z
       __stickyReallocationSecondaryBudgetThresholdPctProvided: secondaryProvided,
     };
   });
-
 
 export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
@@ -144,6 +146,7 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
+  weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
 });
 
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;

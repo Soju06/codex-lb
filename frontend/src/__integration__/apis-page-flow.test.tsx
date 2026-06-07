@@ -25,12 +25,13 @@ describe("apis page integration", () => {
 		renderWithProviders(<App />);
 
 		expect(await screen.findByRole("heading", { name: "APIs" })).toBeInTheDocument();
+		expect(await screen.findByText("Overview")).toBeInTheDocument();
 		expect(await screen.findByRole("heading", { name: "Read only key" })).toBeInTheDocument();
 
 		const search = screen.getByPlaceholderText("Search API keys...");
 		await user.type(search, "Default");
 
-		expect(screen.getByText("Default key")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Default key/i })).toBeInTheDocument();
 
 		await user.click(screen.getByRole("button", { name: /Default key/i }));
 		expect(await screen.findByRole("heading", { name: "Default key" })).toBeInTheDocument();
@@ -50,7 +51,7 @@ describe("apis page integration", () => {
 		expect(within(dialog).getByText(/It will not be shown again/)).toBeInTheDocument();
 
 		await user.click(getDialogFooterClose(dialog));
-		expect(await screen.findByText("Created from APIs page")).toBeInTheDocument();
+		expect(await screen.findByRole("button", { name: /Created from APIs page/i })).toBeInTheDocument();
 	});
 
 	it("edits, toggles, regenerates, and deletes the selected key", async () => {
@@ -170,9 +171,10 @@ describe("apis page integration", () => {
 
 		expect(await screen.findByRole("heading", { name: "Custom analytics key" })).toBeInTheDocument();
 		expect(screen.getByText("All models")).toBeInTheDocument();
-		expect(await screen.findByText(/12K tok/)).toBeInTheDocument();
-		expect(await screen.findByText(/3K cached/)).toBeInTheDocument();
-		expect(await screen.findByText(/42 req/)).toBeInTheDocument();
-		expect(await screen.findByText(/\$0.42/)).toBeInTheDocument();
+		const apiKeyInfo = screen.getByTestId("api-key-info");
+		expect(await within(apiKeyInfo).findByText(/12K tok/)).toBeInTheDocument();
+		expect(await within(apiKeyInfo).findByText(/3K cached/)).toBeInTheDocument();
+		expect(await within(apiKeyInfo).findByText(/42 req/)).toBeInTheDocument();
+		expect(await within(apiKeyInfo).findByText(/\$0.42/)).toBeInTheDocument();
 	});
 });

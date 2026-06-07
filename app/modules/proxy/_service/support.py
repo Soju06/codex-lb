@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -31,6 +31,18 @@ _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset({"turn_state_header", "session_header"})
+
+
+def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
+    raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
+    if raw_useragent is None:
+        return None, None
+    useragent = raw_useragent.strip()
+    if not useragent:
+        return None, None
+    first_token = useragent.split(maxsplit=1)[0]
+    useragent_group = first_token.split("/", 1)[0].strip() or None
+    return useragent, useragent_group
 
 
 class _RetryableStreamError(Exception):
@@ -193,6 +205,8 @@ class _WebSocketRequestState:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+    useragent: str | None = None
+    useragent_group: str | None = None
     downstream_visible: bool = False
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None

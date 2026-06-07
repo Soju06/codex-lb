@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol, cast
 
 from app.core.config.settings import get_settings
+from app.core.usage import capacity_for_plan
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -164,13 +165,18 @@ async def reconcile_recoverable_account_statuses(
 
     latest_primary = await usage_repo.latest_by_account(window="primary")
     latest_secondary = await usage_repo.latest_by_account(window="secondary")
+    latest_monthly = await usage_repo.latest_by_account(window="monthly")
 
     recovered = 0
     for account in candidates:
         state = background_recovery_state_from_account(
             account=account,
             primary_entry=latest_primary.get(account.id),
-            secondary_entry=latest_secondary.get(account.id),
+            secondary_entry=_select_long_window_entry(
+                account=account,
+                monthly_entry=latest_monthly.get(account.id),
+                secondary_entry=latest_secondary.get(account.id),
+            ),
         )
         if state.status != AccountStatus.ACTIVE:
             continue
@@ -203,3 +209,14 @@ async def reconcile_recoverable_account_statuses(
         account.blocked_at = blocked_at
         recovered += 1
     return recovered
+
+
+def _select_long_window_entry(
+    *,
+    account: Account,
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | None,
+) -> UsageHistory | None:
+    if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    return secondary_entry

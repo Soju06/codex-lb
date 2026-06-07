@@ -131,21 +131,32 @@ const ADDITIONAL_ROUTING_POLICY_LABELS: Record<string, string> = {
 export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
+  const monthly = account.usage?.monthlyRemainingPercent ?? null;
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
   const primaryTrendPoints = trends?.primary ?? [];
   const secondaryTrendPoints = trends?.secondary ?? [];
   const secondaryScheduledTrendPoints = trends?.secondaryScheduled ?? [];
+  const monthlyOnly =
+    account.windowMinutesMonthly != null &&
+    account.windowMinutesPrimary == null &&
+    account.windowMinutesSecondary == null;
   const hasTrends =
     primaryTrendPoints.length > 0 || secondaryTrendPoints.length > 0 || secondaryScheduledTrendPoints.length > 0;
 
   return (
     <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
-      <div className={cn("grid gap-4", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
-        {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-        <QuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} />
+      <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
+        {monthlyOnly ? (
+          <QuotaRow label="Monthly" percent={monthly} resetAt={account.resetAtMonthly} />
+        ) : (
+          <>
+            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
+            <QuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} />
+          </>
+        )}
       </div>
       <div className="rounded-md border bg-background/60 px-3 py-2">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
@@ -203,12 +214,12 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-                Weekly
+                {monthlyOnly ? "Monthly" : "Weekly"}
               </span>
               {secondaryScheduledTrendPoints.length > 0 ? (
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
-                  Weekly plan
+                  {monthlyOnly ? "Monthly plan" : "Weekly plan"}
                 </span>
               ) : null}
             </div>

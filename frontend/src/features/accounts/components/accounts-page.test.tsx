@@ -104,6 +104,7 @@ describe("AccountsPage", () => {
       importMutation: idleMutation(),
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
       deleteMutation: idleMutation(),
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),

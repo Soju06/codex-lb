@@ -794,3 +794,72 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             assert row[1] in (True, 1)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_free_account_monthly_migration_renames_only_free_usage_windows(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'free-monthly-migration.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260604_000000_add_reauth_required_account_status",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            accounts_repo = AccountsRepository(session)
+            free_account = _make_account("acc_free_monthly_migration", "free-monthly@example.com", "free")
+            paid_account = _make_account("acc_paid_monthly_migration", "paid-monthly@example.com", "plus")
+            await accounts_repo.upsert(free_account)
+            await accounts_repo.upsert(paid_account)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO usage_history (account_id, recorded_at, window, used_percent)
+                    VALUES
+                      (:free_account_id, CURRENT_TIMESTAMP, 'primary', 10.0),
+                      (:free_account_id, CURRENT_TIMESTAMP, 'secondary', 20.0),
+                      (:free_account_id, CURRENT_TIMESTAMP, NULL, 25.0),
+                      (:paid_account_id, CURRENT_TIMESTAMP, 'primary', 30.0),
+                      (:paid_account_id, CURRENT_TIMESTAMP, 'secondary', 40.0),
+                      (:paid_account_id, CURRENT_TIMESTAMP, NULL, 45.0)
+                    """
+                ),
+                {
+                    "free_account_id": free_account.id,
+                    "paid_account_id": paid_account.id,
+                },
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            free_windows = [
+                row[0]
+                for row in (
+                    await session.execute(
+                        text("SELECT window FROM usage_history WHERE account_id = :account_id ORDER BY id"),
+                        {"account_id": "acc_free_monthly_migration"},
+                    )
+                ).all()
+            ]
+            paid_windows = [
+                row[0]
+                for row in (
+                    await session.execute(
+                        text("SELECT window FROM usage_history WHERE account_id = :account_id ORDER BY id"),
+                        {"account_id": "acc_paid_monthly_migration"},
+                    )
+                ).all()
+            ]
+    finally:
+        await engine.dispose()
+
+    assert free_windows == ["old-primary", "old-secondary", "old-primary"]
+    assert paid_windows == ["primary", "secondary", None]

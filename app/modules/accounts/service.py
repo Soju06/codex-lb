@@ -106,6 +106,7 @@ class AccountsService:
         account_id_set = set(account_ids)
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        monthly_usage = await self._usage_repo.latest_by_account(window="monthly") if self._usage_repo else {}
         request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
         limit_warmups_by_account = (
             await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
@@ -167,6 +168,7 @@ class AccountsService:
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
+            monthly_usage=monthly_usage,
             request_usage_by_account=request_usage_by_account,
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,

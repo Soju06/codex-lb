@@ -199,6 +199,8 @@ class RequestLogsRepository:
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,
@@ -217,6 +219,10 @@ class RequestLogsRepository:
             resolved_plan_type = plan_type
             if resolved_plan_type is None and account_id:
                 resolved_plan_type = await self._resolve_account_plan_type(account_id)
+            resolved_useragent = useragent if not isinstance(useragent, str) or useragent.strip() else None
+            resolved_useragent_group = (
+                useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
+            )
             log = RequestLog(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -226,6 +232,8 @@ class RequestLogsRepository:
                 plan_type=resolved_plan_type,
                 transport=transport,
                 request_kind=request_kind,
+                useragent=resolved_useragent,
+                useragent_group=resolved_useragent_group,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,

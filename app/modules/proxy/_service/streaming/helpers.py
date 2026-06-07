@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from collections.abc import Callable
@@ -9,6 +10,8 @@ from typing import Any, AsyncIterator, Literal, Mapping, cast
 from app.core.auth.refresh import (
     RefreshError,
 )
+from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -48,10 +51,13 @@ from app.core.errors import (
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
+    Account,
     AccountStatus,  # noqa: F401
 )
 from app.modules.proxy._service.api_key_usage import (
@@ -375,6 +381,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
+    classify_upstream_failure,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -382,6 +389,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
+from app.modules.proxy.load_balancer import AccountSelection
 
 
 def _facade() -> Any:
@@ -611,6 +619,78 @@ def _stream_request_budget_seconds(settings: object, *, request_transport: str) 
         if budget is not None:
             return float(budget)
     return float(getattr(settings, "proxy_request_budget_seconds"))
+
+
+async def _resolve_upstream_route_for_account(
+    proxy: Any,
+    account: Account,
+    *,
+    operation: str,
+) -> ResolvedUpstreamRoute | None:
+    async with _facade().SessionLocal() as session:
+        return await _facade().resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation=operation,
+            scope="account",
+            encryptor=proxy._encryptor,
+        )
+
+
+async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **kwargs: Any) -> AccountSelection:
+    selector = proxy._select_account_with_budget_compatible
+    optional_kwargs = (
+        "require_security_work_authorized",
+        "lease_kind",
+        "estimated_lease_tokens",
+        "fallback_on_preferred_account_unavailable",
+    )
+    if any(name in kwargs for name in optional_kwargs):
+        try:
+            signature = inspect.signature(selector)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_var_keyword = signature is not None and any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+        if signature is not None and not accepts_var_keyword:
+            kwargs = dict(kwargs)
+            for name in optional_kwargs:
+                if name not in signature.parameters:
+                    kwargs.pop(name, None)
+    return await selector(deadline, **kwargs)
+
+
+async def _handle_stream_error(
+    proxy: Any,
+    account: Account,
+    error: UpstreamError,
+    code: str,
+    http_status: int | None = None,
+) -> ClassifiedFailure:
+    classified = classify_upstream_failure(
+        error_code=code,
+        error=error,
+        http_status=http_status,
+        phase="first_event",
+    )
+    if _facade()._is_account_neutral_error_code(code):
+        return classified
+    if classified["failure_class"] == "rate_limit":
+        await proxy._load_balancer.mark_rate_limit(account, error)
+    elif classified["failure_class"] == "quota":
+        await proxy._load_balancer.mark_quota_exceeded(account, error)
+    elif code in PERMANENT_FAILURE_CODES:
+        await proxy._load_balancer.mark_permanent_failure(account, code)
+    else:
+        await proxy._load_balancer.record_error(account)
+        _facade().logger.info(
+            "Recorded transient account error account_id=%s request_id=%s code=%s",
+            account.id,
+            get_request_id(),
+            code,
+        )
+    return classified
 
 
 def _push_stream_attempt_timeout_overrides(

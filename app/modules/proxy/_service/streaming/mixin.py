@@ -2,17 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import sys
 import time
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
 
-from app.core.balancer import (
-    PERMANENT_FAILURE_CODES,
-)
-from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -50,7 +46,6 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
-from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
@@ -272,6 +267,15 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.helpers import (
+    _handle_stream_error as _handle_stream_error_helper,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _select_account_with_budget_for_stream as _select_account_with_budget_for_stream_helper,
+)
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
@@ -395,7 +399,6 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
-    classify_upstream_failure,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -403,7 +406,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import AccountLease
 from app.modules.proxy.tool_call_dedupe import (
     mark_duplicate_tool_call_downstream_event,
     rewrite_parallel_tool_call_sse_line,
@@ -422,6 +425,10 @@ _REQUEST_TRANSPORT_HTTP = "http"
 
 
 class _StreamingMixin(_StreamingRetryMixin):
+    _handle_stream_error = _handle_stream_error_helper
+    _resolve_upstream_route_for_account = _resolve_upstream_route_for_account_helper
+    _select_account_with_budget_for_stream = _select_account_with_budget_for_stream_helper
+
     def stream_responses(
         self,
         payload: ResponsesRequest,
@@ -451,46 +458,6 @@ class _StreamingMixin(_StreamingRetryMixin):
             request_transport=request_transport,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-
-    async def _resolve_upstream_route_for_account(
-        self,
-        account: Account,
-        *,
-        operation: str,
-    ) -> ResolvedUpstreamRoute | None:
-        proxy = cast(_StreamingServiceProtocol, self)
-        async with _facade().SessionLocal() as session:
-            return await _facade().resolve_upstream_route(
-                session,
-                account_id=account.id,
-                operation=operation,
-                scope="account",
-                encryptor=proxy._encryptor,
-            )
-
-    async def _select_account_with_budget_for_stream(self, deadline: float, **kwargs: Any) -> AccountSelection:
-        proxy = cast(_StreamingServiceProtocol, self)
-        selector = proxy._select_account_with_budget_compatible
-        optional_kwargs = (
-            "require_security_work_authorized",
-            "lease_kind",
-            "estimated_lease_tokens",
-            "fallback_on_preferred_account_unavailable",
-        )
-        if any(name in kwargs for name in optional_kwargs):
-            try:
-                signature = inspect.signature(selector)
-            except (TypeError, ValueError):
-                signature = None
-            accepts_var_keyword = signature is not None and any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
-            )
-            if signature is not None and not accepts_var_keyword:
-                kwargs = dict(kwargs)
-                for name in optional_kwargs:
-                    if name not in signature.parameters:
-                        kwargs.pop(name, None)
-        return await selector(deadline, **kwargs)
 
     async def _stream_once(
         self,
@@ -858,7 +825,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 _websocket_event_error_type(event_type, event_payload),
                             )
                             raw_error_message = _websocket_event_error_message(event_type, event_payload)
-                            upstream_error = {"message": raw_error_message or "Upstream error"}
+                            upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
                             raw_error_code = _normalize_error_code(
                                 error.code if error else None,
@@ -1130,35 +1097,3 @@ class _StreamingMixin(_StreamingRetryMixin):
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
             )
-
-    async def _handle_stream_error(
-        self,
-        account: Account,
-        error: UpstreamError,
-        code: str,
-        http_status: int | None = None,
-    ) -> ClassifiedFailure:
-        proxy = cast(_StreamingServiceProtocol, self)
-        classified = classify_upstream_failure(
-            error_code=code,
-            error=error,
-            http_status=http_status,
-            phase="first_event",
-        )
-        if _facade()._is_account_neutral_error_code(code):
-            return classified
-        if classified["failure_class"] == "rate_limit":
-            await proxy._load_balancer.mark_rate_limit(account, error)
-        elif classified["failure_class"] == "quota":
-            await proxy._load_balancer.mark_quota_exceeded(account, error)
-        elif code in PERMANENT_FAILURE_CODES:
-            await proxy._load_balancer.mark_permanent_failure(account, code)
-        else:
-            await proxy._load_balancer.record_error(account)
-            _facade().logger.info(
-                "Recorded transient account error account_id=%s request_id=%s code=%s",
-                account.id,
-                get_request_id(),
-                code,
-            )
-        return classified

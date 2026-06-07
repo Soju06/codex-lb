@@ -367,10 +367,10 @@ class _ApiKeyUsageMixin:
         request_id: str,
     ) -> None:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
-        proxy._background_cleanup_tasks.add(task)
+        proxy._background_cleanup_tasks.add(cast(asyncio.Task[None], task))
 
         def _settlement_done(done_task: asyncio.Task[bool]) -> None:
-            proxy._background_cleanup_tasks.discard(done_task)
+            proxy._background_cleanup_tasks.discard(cast(asyncio.Task[None], done_task))
             try:
                 settled = done_task.result()
             except asyncio.CancelledError:

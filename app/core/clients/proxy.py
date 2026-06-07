@@ -2167,10 +2167,15 @@ async def _stream_responses_with_session(
         route_trace.record_direct()
     pre_request_started_at = time.monotonic()
     # Keep a default total timeout so direct callers cannot hang forever before
-    # response headers or the first SSE event. ProxyService stream attempts clamp
-    # this further by installing per-attempt overrides from the remaining budget.
+    # response headers or the first SSE event. Responses streams can run much
+    # longer than control calls; ProxyService stream attempts clamp this further
+    # by installing per-attempt overrides from the remaining budget.
     request_total_timeout = _effective_stream_timeout(
-        settings.proxy_request_budget_seconds,
+        getattr(
+            settings,
+            "http_responses_stream_request_budget_seconds",
+            settings.proxy_request_budget_seconds,
+        ),
         "total",
     )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
@@ -2795,6 +2800,7 @@ async def compact_responses(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
+    chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
@@ -2807,6 +2813,7 @@ async def compact_responses(
             route=route,
             codex_client=codex_client,
             route_trace=route_trace,
+            chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
         )
         return await transport.execute()
@@ -2826,6 +2833,7 @@ class _CompactCommandTransport:
     route: ResolvedUpstreamRoute | None = None
     codex_client: CodexClient | None = None
     route_trace: UpstreamProxyRouteTrace | None = None
+    chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
 
     async def execute(self) -> CompactResponsePayload:
@@ -2839,10 +2847,11 @@ class _CompactCommandTransport:
         )
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
+        upstream_account_id = self.chatgpt_account_id or self.account_id
         upstream_headers = _build_upstream_headers(
             self.headers,
             self.access_token,
-            self.account_id,
+            upstream_account_id,
             accept="application/json",
         )
         pre_request_started_at = time.monotonic()

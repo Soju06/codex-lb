@@ -3283,6 +3283,46 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 600.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 600.0
+        http_responses_stream_request_budget_seconds = 7200.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.5", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total == pytest.approx(7200.0)
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -5890,6 +5930,44 @@ async def test_service_compact_budget_does_not_override_unbounded_read_timeout(m
     assert captured["connect_timeout"] == pytest.approx(3.0)
     assert captured["total_timeout"] is None
     assert result.model_extra == {"output": []}
+
+
+@pytest.mark.asyncio
+async def test_service_compact_passes_chatgpt_account_id_to_core(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("local_compact_account")
+    account.chatgpt_account_id = "upstream_compact_account"
+    captured: dict[str, str | None] = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id, *, chatgpt_account_id=None):
+        del payload, headers, access_token
+        captured["account_id"] = account_id
+        captured["chatgpt_account_id"] = chatgpt_account_id
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    assert result.model_extra == {"output": []}
+    assert captured == {
+        "account_id": "upstream_compact_account",
+        "chatgpt_account_id": "upstream_compact_account",
+    }
 
 
 def test_logged_error_json_response_emits_proxy_error_log(caplog):

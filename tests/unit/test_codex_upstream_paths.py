@@ -288,6 +288,46 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_uses_upstream_chatgpt_account_id_header(route: ResolvedUpstreamRoute) -> None:
+    client = _CodexClient(_CompactResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "local_account_id",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+        chatgpt_account_id="upstream_chatgpt_account_id",
+    )
+
+    assert client.calls[0]["headers"]["chatgpt-account-id"] == "upstream_chatgpt_account_id"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_preserves_legacy_account_id_header(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _CodexClient(_CompactResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "legacy_upstream_account_id",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+        chatgpt_account_id=None,
+    )
+
+    assert client.calls[0]["headers"]["chatgpt-account-id"] == "legacy_upstream_account_id"
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
     client = _CodexClient(_TranscribeResponse())
     trace = UpstreamProxyRouteTrace()

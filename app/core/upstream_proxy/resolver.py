@@ -75,9 +75,16 @@ async def resolve_upstream_route(
 
 def _is_missing_upstream_proxy_schema(exc: OperationalError) -> bool:
     message = str(exc.orig).lower() if getattr(exc, "orig", None) is not None else str(exc).lower()
+    # Upstream routing is intentionally optional during rollout and migration.
+    # PostgreSQL reports missing tables/columns with a different wording than
+    # SQLite, so we treat both families as tolerated "schema-not-ready" states.
     return (
         "no such table: account_proxy_bindings" in message
         or "no such column: dashboard_settings.upstream_proxy" in message
+        or 'relation "account_proxy_bindings" does not exist' in message
+        or 'relation "dashboard_settings" does not exist' in message
+        or ('column "dashboard_settings"' in message and "does not exist" in message)
+        or ('column "account_proxy_bindings"' in message and "does not exist" in message)
     )
 
 

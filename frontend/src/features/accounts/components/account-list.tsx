@@ -81,7 +81,11 @@ export function AccountList({
           />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger size="sm" className="w-full min-w-0">
+          <SelectTrigger
+            size="sm"
+            className="w-full min-w-0"
+            aria-label="Filter accounts by status"
+          >
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>

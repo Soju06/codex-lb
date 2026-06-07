@@ -812,28 +812,35 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
-            accounts_repo = AccountsRepository(session)
-            free_account = _make_account("acc_free_monthly_migration", "free-monthly@example.com", "free")
-            paid_account = _make_account("acc_paid_monthly_migration", "paid-monthly@example.com", "plus")
-            await accounts_repo.upsert(free_account)
-            await accounts_repo.upsert(paid_account)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, email, plan_type,
+                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                        last_refresh, status
+                    )
+                    VALUES
+                      ('acc_free_monthly_migration', 'free-monthly@example.com', 'free',
+                       x'01', x'02', x'03', '2026-01-01 00:00:00', 'active'),
+                      ('acc_paid_monthly_migration', 'paid-monthly@example.com', 'plus',
+                       x'04', x'05', x'06', '2026-01-01 00:00:00', 'active')
+                    """
+                )
+            )
             await session.execute(
                 text(
                     """
                     INSERT INTO usage_history (account_id, recorded_at, window, used_percent)
                     VALUES
-                      (:free_account_id, CURRENT_TIMESTAMP, 'primary', 10.0),
-                      (:free_account_id, CURRENT_TIMESTAMP, 'secondary', 20.0),
-                      (:free_account_id, CURRENT_TIMESTAMP, NULL, 25.0),
-                      (:paid_account_id, CURRENT_TIMESTAMP, 'primary', 30.0),
-                      (:paid_account_id, CURRENT_TIMESTAMP, 'secondary', 40.0),
-                      (:paid_account_id, CURRENT_TIMESTAMP, NULL, 45.0)
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, 'primary', 10.0),
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, 'secondary', 20.0),
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, NULL, 25.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, 'primary', 30.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, 'secondary', 40.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, NULL, 45.0)
                     """
-                ),
-                {
-                    "free_account_id": free_account.id,
-                    "paid_account_id": paid_account.id,
-                },
+                )
             )
             await session.commit()
 

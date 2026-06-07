@@ -114,6 +114,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        traffic_class: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -132,6 +133,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
+            "traffic_class": traffic_class,
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "expires_at": expires_at,
             "is_active": is_active,
@@ -540,11 +542,68 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     assert created.key.startswith("sk-clb-")
     assert created.key_prefix == created.key[:15]
     assert created.allowed_models == ["o3-pro"]
+    assert created.traffic_class == "foreground"
 
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.key_hash != created.key
     assert stored.key_prefix == created.key[:15]
+    assert stored.traffic_class == "foreground"
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_opportunistic_traffic_class() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="fixer-nucat-worker",
+            allowed_models=None,
+            traffic_class="opportunistic",
+            expires_at=None,
+        )
+    )
+
+    assert created.traffic_class == "opportunistic"
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.traffic_class == "opportunistic"
+
+
+@pytest.mark.asyncio
+async def test_update_key_changes_traffic_class() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="worker", allowed_models=None))
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(traffic_class="opportunistic", traffic_class_set=True),
+    )
+
+    assert updated.traffic_class == "opportunistic"
+
+
+@pytest.mark.asyncio
+async def test_api_key_read_skips_null_allowed_models() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="nullable-models",
+            allowed_models=["gpt-5.2"],
+            expires_at=None,
+        )
+    )
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    row.allowed_models = '[null, " gpt-5.2 ", 42, "", "gpt-5.5"]'
+
+    reloaded = await service.get_key_by_id(created.id)
+
+    assert reloaded.allowed_models == ["gpt-5.2", "gpt-5.5"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ import { EmptyState } from "@/components/empty-state";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import { MultiSelectFilter } from "@/features/dashboard/components/filters/multi-select-filter";
 import type { AccountSummary } from "@/features/dashboard/schemas";
-import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
 const DEFAULT_ACCOUNT_STATUSES = ["active", "paused", "rate_limited", "quota_exceeded"];
@@ -21,7 +20,6 @@ export type AccountCardsProps = {
 
 export function AccountCards({ accounts, onAction }: AccountCardsProps) {
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_ACCOUNT_STATUSES);
-  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
   const statusOptions = useMemo(
     () =>
       [...new Set([...DEFAULT_ACCOUNT_STATUSES, ...accounts.map((account) => account.status)])]
@@ -36,7 +34,6 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
     () => accounts.filter((account) => statusFilters.includes(account.status)),
     [accounts, statusFilters],
   );
-
   if (accounts.length === 0) {
     return (
       <EmptyState
@@ -66,7 +63,7 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
           <div key={account.accountId} className="animate-fade-in-up" style={{ animationDelay: `${index * 75}ms` }}>
             <AccountCard
               account={account}
-              showAccountId={duplicateAccountIds.has(account.accountId)}
+              showAccountId={account.isEmailDuplicate === true}
               onAction={onAction}
             />
           </div>

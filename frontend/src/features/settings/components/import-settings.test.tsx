@@ -19,7 +19,7 @@ describe("ImportSettings", () => {
     expect(screen.getByText("Allow import without overwrite")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Keep duplicate imports as separate accounts instead of replacing existing ones.",
+        "Keep separate workspace or unknown credential slots instead of replacing by email.",
       ),
     ).toBeInTheDocument();
   });
@@ -64,9 +64,20 @@ describe("ImportSettings", () => {
       stickyThreadsEnabled: settings.stickyThreadsEnabled,
       upstreamStreamTransport: settings.upstreamStreamTransport,
       preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
+      preferEarlierResetWindow: settings.preferEarlierResetWindow,
       routingStrategy: settings.routingStrategy,
+      relativeAvailabilityPower: settings.relativeAvailabilityPower,
+      relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
+      singleAccountId: settings.singleAccountId,
       openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
       dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
+      warmupModel: settings.warmupModel,
+      stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct,
+      stickyReallocationPrimaryBudgetThresholdPct:
+        settings.stickyReallocationPrimaryBudgetThresholdPct,
+      stickyReallocationSecondaryBudgetThresholdPct:
+        settings.stickyReallocationSecondaryBudgetThresholdPct,
+      additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: true,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
@@ -76,6 +87,7 @@ describe("ImportSettings", () => {
       limitWarmupPrompt: settings.limitWarmupPrompt,
       limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
       limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
+      weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     });
   });
 

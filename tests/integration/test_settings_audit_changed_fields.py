@@ -30,6 +30,7 @@ def _default_put_body() -> dict[str, Any]:
     return {
         "stickyThreadsEnabled": True,
         "preferEarlierResetAccounts": True,
+        "weeklyPaceWorkingDays": "0,1,2,3,4,5,6",
     }
 
 
@@ -63,6 +64,7 @@ def _default_put_body() -> dict[str, Any]:
         ),
         ("importWithoutOverwrite", False, "import_without_overwrite"),
         ("apiKeyAuthEnabled", True, "api_key_auth_enabled"),
+        ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
     ],
 )
 @pytest.mark.asyncio
@@ -139,4 +141,5 @@ async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
         "prefer_earlier_reset_accounts",
         "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
         "sticky_reallocation_budget_threshold_pct",
+        "sticky_reallocation_primary_budget_threshold_pct",
     }, f"unexpected changed_fields set: {changed!r}"

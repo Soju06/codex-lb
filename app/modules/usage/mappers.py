@@ -11,14 +11,14 @@ so that ``app/core/`` does not need to depend on ``app/db/models``.
 from __future__ import annotations
 
 from app.core.usage.types import UsageWindowRow
-from app.db.models import UsageHistory
+from app.db.models import AdditionalUsageHistory, UsageHistory
 
 
-def usage_history_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    """Build a ``UsageWindowRow`` from a ``UsageHistory`` ORM row.
+def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) -> UsageWindowRow:
+    """Build a ``UsageWindowRow`` from a usage ORM row.
 
     All fields map by name. Callers that need a ``UsageWindowRow`` from a
-    ``UsageHistory`` row should route through this helper.
+    usage row should route through this helper.
     """
     return UsageWindowRow(
         account_id=entry.account_id,

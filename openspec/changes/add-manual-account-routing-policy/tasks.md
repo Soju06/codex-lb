@@ -1,0 +1,6 @@
+- [x] 1. Define the manual routing policy contract.
+- [x] 2. Persist routing policy on accounts with a safe default.
+- [x] 3. Add account dashboard API and UI controls.
+- [x] 4. Apply routing policy in account selection.
+- [x] 5. Add additional-quota routing policy inheritance and overrides.
+- [x] 6. Run focused backend/frontend validation.

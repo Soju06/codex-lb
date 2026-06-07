@@ -14,6 +14,7 @@ export const AccountUsageTrendSchema = z.object({
 export const AccountUsageSchema = z.object({
   primaryRemainingPercent: z.number().nullable(),
   secondaryRemainingPercent: z.number().nullable(),
+  monthlyRemainingPercent: z.number().nullable().optional(),
 });
 
 export const AccountRequestUsageSchema = z.object({
@@ -56,6 +57,7 @@ export const AccountAdditionalQuotaSchema = z.object({
   limitName: z.string(),
   meteredFeature: z.string(),
   displayLabel: z.string().nullable().optional(),
+  routingPolicy: z.enum(["inherit", "normal", "burn_first", "preserve"]).nullable().optional(),
   primaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });
@@ -65,20 +67,35 @@ export const AccountSummarySchema = z.object({
   email: z.string(),
   alias: z.string().nullable().optional(),
   displayName: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
+  routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
+  securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
+  resetAtMonthly: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  windowMinutesMonthly: z.number().nullable().optional(),
+  capacityCreditsPrimary: z.number().nullable().optional(),
+  remainingCreditsPrimary: z.number().nullable().optional(),
   capacityCreditsSecondary: z.number().nullable().optional(),
   remainingCreditsSecondary: z.number().nullable().optional(),
+  capacityCreditsMonthly: z.number().nullable().optional(),
+  remainingCreditsMonthly: z.number().nullable().optional(),
+  creditsHas: z.boolean().nullable().optional(),
+  creditsUnlimited: z.boolean().nullable().optional(),
+  creditsBalance: z.number().nullable().optional(),
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
+  isEmailDuplicate: z.boolean().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -95,6 +112,9 @@ export const AccountsResponseSchema = z.object({
 export const AccountImportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
+  workspaceId: z.string().nullable().optional(),
+  workspaceLabel: z.string().nullable().optional(),
+  seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
 });
@@ -117,15 +137,56 @@ export const AccountOpenCodeAuthExportAccountSchema = z.object({
   email: z.string(),
 });
 
-export const AccountOpenCodeAuthExportResponseSchema = z.object({
+export const CodexAuthTokensSchema = z.object({
+  id_token: z.string(),
+  access_token: z.string(),
+  refresh_token: z.string(),
+  account_id: z.string().nullable().optional(),
+});
+
+export const CodexAuthJsonSchema = z.object({
+  auth_mode: z.string(),
+  OPENAI_API_KEY: z.string().nullable().optional(),
+  tokens: CodexAuthTokensSchema,
+  last_refresh: z.string(),
+});
+
+export const AccountAuthExportTokensSchema = z.object({
+  idToken: z.string(),
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  expiresAtMs: z.number().int().nonnegative(),
+});
+
+export const AccountAuthExportResponseSchema = z.object({
   filename: z.string(),
   account: AccountOpenCodeAuthExportAccountSchema,
-  authJson: OpenCodeAuthJsonSchema,
+  tokens: AccountAuthExportTokensSchema,
+  codexAuthJson: CodexAuthJsonSchema,
+  opencodeAuthJson: OpenCodeAuthJsonSchema,
 });
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
+
+export const AccountProbeRequestSchema = z.object({
+  model: z.string().min(1).optional(),
+});
+
+export const AccountProbeResponseSchema = z.object({
+  status: z.string(),
+  accountId: z.string(),
+  probeStatusCode: z.number().int().nullable(),
+  primaryUsedPercentBefore: z.number().nullable(),
+  primaryUsedPercentAfter: z.number().nullable(),
+  secondaryUsedPercentBefore: z.number().nullable(),
+  secondaryUsedPercentAfter: z.number().nullable(),
+  accountStatusBefore: z.string(),
+  accountStatusAfter: z.string(),
+});
+
+export const AccountRoutingPolicySchema = z.enum(["normal", "burn_first", "preserve"]);
 
 export const AccountAliasRequestSchema = z.object({
   alias: z.string().max(255).nullable(),
@@ -145,12 +206,25 @@ export const AccountLimitWarmupUpdateResponseSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const AccountRoutingPolicyUpdateRequestSchema = z.object({
+  routingPolicy: AccountRoutingPolicySchema,
+});
+
+export const AccountRoutingPolicyUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  routingPolicy: AccountRoutingPolicySchema,
+});
+
 export const AccountExportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
   planType: z.string(),
   status: z.string(),
   authJson: z.string(),
+});
+
+export const AccountUpdateRequestSchema = z.object({
+  securityWorkAuthorized: z.boolean().optional(),
 });
 
 export const OauthStartRequestSchema = z.object({
@@ -220,19 +294,29 @@ export const ImportStateSchema = z.object({
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountUsageTrend = z.infer<typeof AccountUsageTrendSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type AccountRoutingPolicy = z.infer<typeof AccountRoutingPolicySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
-export type AccountLimitWarmupStatus = z.infer<typeof AccountLimitWarmupStatusSchema>;
+export type AccountLimitWarmupStatus = z.infer<
+  typeof AccountLimitWarmupStatusSchema
+>;
 export type AccountExportResponse = z.infer<typeof AccountExportResponseSchema>;
-export type AccountAdditionalWindow = z.infer<typeof AccountAdditionalWindowSchema>;
-export type AccountAdditionalQuota = z.infer<typeof AccountAdditionalQuotaSchema>;
+export type AccountAdditionalWindow = z.infer<
+  typeof AccountAdditionalWindowSchema
+>;
+export type AccountAdditionalQuota = z.infer<
+  typeof AccountAdditionalQuotaSchema
+>;
+export type AccountProbeResponse = z.infer<typeof AccountProbeResponseSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
-export type AccountOpenCodeAuthExportResponse = z.infer<
-  typeof AccountOpenCodeAuthExportResponseSchema
->;
+export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;
+export type AccountAuthExportTokens = z.infer<typeof AccountAuthExportTokensSchema>;
+export type AccountAuthExportResponse = z.infer<typeof AccountAuthExportResponseSchema>;
 export type OauthStartResponse = z.infer<typeof OauthStartResponseSchema>;
 export type OauthStatusResponse = z.infer<typeof OauthStatusResponseSchema>;
-export type ManualOauthCallbackResponse = z.infer<typeof ManualOauthCallbackResponseSchema>;
+export type ManualOauthCallbackResponse = z.infer<
+  typeof ManualOauthCallbackResponseSchema
+>;
 export type RuntimeConnectAddressResponse = z.infer<
   typeof RuntimeConnectAddressResponseSchema
 >;

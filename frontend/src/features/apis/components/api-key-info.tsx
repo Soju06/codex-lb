@@ -42,13 +42,14 @@ export function ApiKeyInfo({
 	const models = apiKey.allowedModels?.join(", ") || "All models";
 	const enforcedModel = apiKey.enforcedModel || null;
 	const enforcedEffort = apiKey.enforcedReasoningEffort || null;
+	const trafficClass = apiKey.trafficClass === "opportunistic" ? "Opportunistic" : "Foreground";
 	const usage = allowUsageSummaryFallback
 		? (usageSummary ?? apiKey.usageSummary)
 		: (usageSummary ?? null);
 	const hasUsage = usage && usage.requestCount > 0;
 
 	return (
-		<div className="space-y-4 rounded-lg border bg-muted/30 p-4">
+		<div className="space-y-4 rounded-lg border bg-muted/30 p-4" data-testid="api-key-info">
 			<h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
 				Key Details
 			</h3>
@@ -60,6 +61,10 @@ export function ApiKeyInfo({
 				<div className="flex items-center justify-between gap-2">
 					<dt className="text-muted-foreground">Models</dt>
 					<dd className="text-right font-medium">{models}</dd>
+				</div>
+				<div className="flex items-center justify-between gap-2">
+					<dt className="text-muted-foreground">Traffic class</dt>
+					<dd className="font-medium">{trafficClass}</dd>
 				</div>
 				{enforcedModel ? (
 					<div className="flex items-center justify-between gap-2">

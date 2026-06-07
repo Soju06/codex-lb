@@ -1,13 +1,24 @@
+import { Flame, Shield, ShieldCheck } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountSummary,
+} from "@/features/accounts/schemas";
 import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSlug,
+} from "@/utils/formatters";
 
 export type AccountListItemProps = {
   account: AccountSummary;
@@ -16,7 +27,12 @@ export type AccountListItemProps = {
   onSelect: (accountId: string) => void;
 };
 
-export function AccountListItem({ account, selected, showAccountId = false, onSelect }: AccountListItemProps) {
+export function AccountListItem({
+  account,
+  selected,
+  showAccountId = false,
+  onSelect,
+}: AccountListItemProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
@@ -25,15 +41,33 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const baseSubtitle = emailSubtitle ?? formatSlug(account.planType);
+  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primary !== null || account.resetAtPrimary != null;
-  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondary !== null || account.resetAtSecondary != null;
-  const showPrimaryRow = hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
-  const showSecondaryRow = hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
-  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow);
+  const monthly = account.usage?.monthlyRemainingPercent ?? null;
+  const hasPrimaryWindow =
+    account.windowMinutesPrimary != null ||
+    primary !== null ||
+    account.resetAtPrimary != null;
+  const hasSecondaryWindow =
+    account.windowMinutesSecondary != null ||
+    secondary !== null ||
+    account.resetAtSecondary != null;
+  const hasMonthlyWindow =
+    account.windowMinutesMonthly != null ||
+    monthly !== null ||
+    account.resetAtMonthly != null;
+  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
+  const showMonthlyRow = monthlyOnly;
+  const showPrimaryRow =
+    !monthlyOnly && hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
+  const showSecondaryRow =
+    !monthlyOnly && hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow) + Number(showMonthlyRow);
+  const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
@@ -45,31 +79,105 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       onClick={() => onSelect(account.accountId)}
       className={cn(
         "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
-        selected
-          ? "bg-primary/8 ring-1 ring-primary/25"
-          : "hover:bg-muted/50",
+        selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
       <div className="flex items-center gap-2.5">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">
-            {titleIsEmail && blurred ? <span className="privacy-blur">{title}</span> : title}
+            {titleIsEmail && blurred ? (
+              <span className="privacy-blur">{title}</span>
+            ) : (
+              title
+            )}
           </p>
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
+            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
+        {showRoutingPolicy ? (
+          <RoutingPolicyBadge
+            policy={account.routingPolicy as AccountRoutingPolicy | undefined}
+          />
+        ) : null}
+        {account.securityWorkAuthorized === true ? (
+          <ShieldCheck
+            className="h-3.5 w-3.5 text-emerald-600"
+            aria-label="Trusted Access for Cyber"
+          />
+        ) : null}
         <StatusBadge status={status} />
       </div>
-      <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
-        {showPrimaryRow ? <MiniQuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} /> : null}
-        {showSecondaryRow ? <MiniQuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} /> : null}
+      <div
+        className={cn(
+          "mt-2 grid gap-2",
+          visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1",
+        )}
+      >
+        {showMonthlyRow ? (
+          <MiniQuotaRow
+            label="Monthly"
+            percent={monthly}
+            resetAt={account.resetAtMonthly}
+          />
+        ) : null}
+        {showPrimaryRow ? (
+          <MiniQuotaRow
+            label="5h"
+            percent={primary}
+            resetAt={account.resetAtPrimary}
+          />
+        ) : null}
+        {showSecondaryRow ? (
+          <MiniQuotaRow
+            label="Weekly"
+            percent={secondary}
+            resetAt={account.resetAtSecondary}
+          />
+        ) : null}
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
         <span>{warmupLabel}</span>
         <span className="truncate">{warmupMeta}</span>
       </div>
     </button>
+  );
+}
+
+function RoutingPolicyBadge({
+  policy,
+}: {
+  policy: AccountRoutingPolicy | undefined;
+}) {
+  if (policy === "burn_first") {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700"
+      >
+        <Flame className="h-3 w-3" aria-hidden="true" />
+        Burn first
+      </Badge>
+    );
+  }
+  if (policy === "preserve") {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700"
+      >
+        <Shield className="h-3 w-3" aria-hidden="true" />
+        Preserve
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="shrink-0 px-1.5 text-[11px] text-muted-foreground"
+    >
+      Normal
+    </Badge>
   );
 }
 
@@ -86,14 +194,18 @@ function MiniQuotaRow({
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
-        <span className="tabular-nums font-medium">{formatPercentNullable(percent)}</span>
+        <span className="tabular-nums font-medium">
+          {formatPercentNullable(percent)}
+        </span>
       </div>
       <MiniQuotaBar
         aria-label={`${label} credits remaining`}
         percent={percent}
         testId={`mini-quota-track-${label.toLowerCase()}`}
       />
-      <div className="text-[10px] text-muted-foreground">{formatMiniQuotaResetLabel(resetAt ?? null)}</div>
+      <div className="text-[10px] text-muted-foreground">
+        {formatMiniQuotaResetLabel(resetAt ?? null)}
+      </div>
     </div>
   );
 }

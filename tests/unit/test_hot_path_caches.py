@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -162,6 +163,15 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
         reset_at=now_epoch + 1800,
         window_minutes=30,
     )
+    monthly = UsageHistory(
+        id=3,
+        account_id=account.id,
+        recorded_at=now,
+        window="monthly",
+        used_percent=35.0,
+        reset_at=now_epoch + 30 * 24 * 3600,
+        window_minutes=43200,
+    )
 
     class _AccountsRepo:
         def __init__(self) -> None:
@@ -175,11 +185,15 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
         def __init__(self) -> None:
             self.primary_calls = 0
             self.secondary_calls = 0
+            self.monthly_calls = 0
 
         async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
             if window == "secondary":
                 self.secondary_calls += 1
                 return {account.id: secondary}
+            if window == "monthly":
+                self.monthly_calls += 1
+                return {account.id: monthly}
             self.primary_calls += 1
             return {account.id: primary}
 
@@ -211,18 +225,22 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
         inputs = await balancer._load_selection_inputs(model=None)
         assert len(inputs.accounts) == 1
         assert inputs.accounts[0].id == account.id
+        assert inputs.latest_monthly[account.id].id == monthly.id
 
     assert accounts_repo.calls == 1
     assert usage_repo.primary_calls == 1
     assert usage_repo.secondary_calls == 1
+    assert usage_repo.monthly_calls == 1
 
     cache.invalidate()
     refreshed = await balancer._load_selection_inputs(model=None)
     assert len(refreshed.accounts) == 1
     assert refreshed.accounts[0].id == account.id
+    assert refreshed.latest_monthly[account.id].id == monthly.id
     assert accounts_repo.calls == 2
     assert usage_repo.primary_calls == 2
     assert usage_repo.secondary_calls == 2
+    assert usage_repo.monthly_calls == 2
 
 
 # ---------------------------------------------------------------------------
@@ -517,11 +535,17 @@ async def test_same_model_reuses_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_different_limit_names_get_different_cache_entries() -> None:
+async def test_different_limit_names_get_different_cache_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Queries with different additional_limit_name must each get their own cache slot."""
     from app.modules.proxy.account_cache import AccountSelectionCache
 
     cache = AccountSelectionCache(ttl_seconds=5)
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+        ),
+    )
 
     class _AccountsRepo:
         def __init__(self) -> None:

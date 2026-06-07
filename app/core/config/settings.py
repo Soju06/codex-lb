@@ -10,12 +10,15 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
+from dotenv import dotenv_values
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
+from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 BASE_DIR = Path(__file__).resolve().parents[3]
+ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
 DOCKER_CALLBACK_HOST = "0.0.0.0"
@@ -26,9 +29,15 @@ def _in_container() -> bool:
 
 
 def _default_home_dir() -> Path:
+    env_dir = os.getenv("CODEX_LB_DATA_DIR")
+    if env_dir and env_dir.strip():
+        return Path(env_dir.strip())
+    home_dir = Path.home() / ".codex-lb"
+    if home_dir.exists():
+        return home_dir
     if _in_container():
         return DOCKER_DATA_DIR
-    return Path.home() / ".codex-lb"
+    return home_dir
 
 
 def _default_oauth_callback_host() -> str:
@@ -42,9 +51,23 @@ def _default_http_bridge_instance_id() -> str:
     return hostname or "codex-lb"
 
 
+def _default_upstream_websocket_trust_env() -> bool:
+    return outbound_proxy_env_configured(_configured_outbound_proxy_env())
+
+
+def _configured_outbound_proxy_env() -> dict[str, str | None]:
+    environ: dict[str, str | None] = {}
+    for env_file in ENV_FILES:
+        environ.update(dotenv_values(env_file))
+    environ.update(os.environ)
+    return environ
+
+
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+DEFAULT_CONVERSATION_ARCHIVE_DIR = DEFAULT_HOME_DIR / "conversation-archive"
+DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
 type StringListInput = str | list[str] | None
 type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
@@ -112,12 +135,13 @@ def _normalize_cidr_list(value: StringListInput, *, field_name: str, invalid_lab
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
-        env_file=(BASE_DIR / ".env", BASE_DIR / ".env.local"),
+        env_file=ENV_FILES,
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    data_dir: Path = Field(default_factory=_default_home_dir)
+    database_url: str = DEFAULT_DATABASE_URL
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
     database_background_pool_size: int | None = Field(default=None, gt=0)
@@ -133,7 +157,7 @@ class Settings(BaseSettings):
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
-    upstream_websocket_trust_env: bool = False
+    upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
@@ -155,6 +179,14 @@ class Settings(BaseSettings):
     oauth_callback_host: str = _default_oauth_callback_host()
     oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 8.0
+    auth_guardian_enabled: bool = False
+    auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
+    auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)
+    auth_guardian_batch_size: int = Field(default=100, gt=0)
+    auth_guardian_concurrency: int = Field(default=3, gt=0)
+    auth_guardian_jitter_seconds: float = Field(default=300.0, ge=0)
+    auth_guardian_failure_backoff_base_seconds: float = Field(default=300.0, ge=0)
+    auth_guardian_failure_backoff_max_seconds: float = Field(default=3600.0, ge=0)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
@@ -162,6 +194,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
+    warmup_model: str = "gpt-5.4-mini"
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
@@ -176,6 +209,8 @@ class Settings(BaseSettings):
     http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
+    quota_planner_scheduler_enabled: bool = True
+    quota_planner_tick_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False
@@ -185,7 +220,7 @@ class Settings(BaseSettings):
     log_upstream_request_summary: bool = False
     log_upstream_request_payload: bool = False
     conversation_archive_enabled: bool = False
-    conversation_archive_dir: Path = DEFAULT_HOME_DIR / "conversation-archive"
+    conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
@@ -215,6 +250,10 @@ class Settings(BaseSettings):
     )
     firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+
+    def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
+        return _configured_outbound_proxy_env()
+
     dashboard_auth_proxy_header: str = "Remote-User"
 
     # --- Multi-replica & production settings ---
@@ -258,6 +297,11 @@ class Settings(BaseSettings):
     proxy_response_create_limit: int = Field(default=256, ge=0)
     proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
+    proxy_account_response_create_limit: int = Field(default=4, ge=0)
+    proxy_account_stream_limit: int = Field(default=8, ge=0)
+    proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
+    proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
+    proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
@@ -274,6 +318,18 @@ class Settings(BaseSettings):
     # HTTP connector limits
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
+
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def _expand_data_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return _default_home_dir()
+            return Path(stripped).expanduser()
+        raise TypeError("data_dir must be a path")
 
     @field_validator("database_url")
     @classmethod
@@ -293,6 +349,15 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("conversation_archive_dir", mode="before")
+    @classmethod
+    def _expand_conversation_archive_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            return Path(value).expanduser()
+        raise TypeError("conversation_archive_dir must be a path")
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
@@ -390,6 +455,32 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
+
+    @field_validator("warmup_model", mode="before")
+    @classmethod
+    def _normalize_warmup_model(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("warmup_model must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("warmup_model must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _apply_data_dir_defaults(self) -> "Settings":
+        if self.data_dir == DEFAULT_HOME_DIR:
+            return self
+        explicitly_set = self.model_fields_set
+        if "database_url" not in explicitly_set and self.database_url == DEFAULT_DATABASE_URL:
+            self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'store.db'}"
+        if "encryption_key_file" not in explicitly_set and self.encryption_key_file == DEFAULT_ENCRYPTION_KEY_FILE:
+            self.encryption_key_file = self.data_dir / "encryption.key"
+        if (
+            "conversation_archive_dir" not in explicitly_set
+            and self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR
+        ):
+            self.conversation_archive_dir = self.data_dir / "conversation-archive"
+        return self
 
     @model_validator(mode="after")
     def _validate_http_bridge_instance_configuration(self) -> "Settings":

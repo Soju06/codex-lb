@@ -93,6 +93,17 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
     ),
     "api_keys": frozenset({"idx_api_keys_name"}),
 }
+_SQLITE_FLOAT_TYPE_COMPAT_COLUMNS = frozenset(
+    {
+        ("dashboard_settings", "sticky_reallocation_primary_budget_threshold_pct"),
+        ("dashboard_settings", "sticky_reallocation_secondary_budget_threshold_pct"),
+    }
+)
+_LEGACY_EXTRA_COLUMNS = frozenset(
+    {
+        ("request_logs", "slim_summary_json"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -529,6 +540,35 @@ def _manual_schema_drift_diffs(connection: Connection) -> tuple[str, ...]:
     return tuple(diffs)
 
 
+def _unwrap_schema_drift_diff(diff: object) -> object:
+    if isinstance(diff, list) and len(diff) == 1:
+        return diff[0]
+    return diff
+
+
+def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
+    diff = _unwrap_schema_drift_diff(diff)
+    if not isinstance(diff, tuple) or not diff:
+        return False
+
+    if diff[0] == "remove_column" and len(diff) >= 4:
+        column = diff[3]
+        column_name = getattr(column, "name", None)
+        if (str(diff[2]), str(column_name)) in _LEGACY_EXTRA_COLUMNS:
+            return True
+
+    if connection.dialect.name == "sqlite" and diff[0] == "modify_type" and len(diff) >= 7:
+        table_name = str(diff[2])
+        column_name = str(diff[3])
+        if (table_name, column_name) not in _SQLITE_FLOAT_TYPE_COMPAT_COLUMNS:
+            return False
+        existing_type = diff[5]
+        metadata_type = diff[6]
+        return str(existing_type).upper() == "REAL" and str(metadata_type).upper() in {"FLOAT", "REAL"}
+
+    return False
+
+
 def check_schema_drift(database_url: str) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
@@ -551,7 +591,11 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
                 "ignore",
                 message=r"autogenerate skipping metadata-specified expression-based index .*",
             )
-            diffs = compare_metadata(migration_context, Base.metadata)
+            diffs = [
+                diff
+                for diff in compare_metadata(migration_context, Base.metadata)
+                if not _is_ignored_schema_drift(connection, diff)
+            ]
         manual_diffs = _manual_schema_drift_diffs(connection)
 
     return tuple(repr(diff) for diff in diffs) + manual_diffs

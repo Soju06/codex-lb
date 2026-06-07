@@ -141,9 +141,17 @@ describe("RequestLogsResponseSchema", () => {
           requestId: "req-1",
           model: "gpt-5.1",
           transport: "websocket",
+          useragent: "Mozilla/5.0",
+          useragentGroup: "Mozilla",
           status: "ok",
           errorCode: null,
           errorMessage: null,
+          failurePhase: "status",
+          failureDetail: "upstream_5xx",
+          failureExceptionType: "ProxyResponseError",
+          upstreamStatusCode: 503,
+          upstreamErrorCode: "server_error",
+          bridgeStage: "owner_forward_status",
           tokens: 10,
           inputTokens: 8,
           outputTokens: 2,
@@ -165,11 +173,52 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
+    expect(parsed.requests[0]?.requestKind).toBe("normal");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");
+    expect(parsed.requests[0]?.useragentGroup).toBe("Mozilla");
+    expect(parsed.requests[0]?.failurePhase).toBe("status");
+    expect(parsed.requests[0]?.failureDetail).toBe("upstream_5xx");
+    expect(parsed.requests[0]?.failureExceptionType).toBe("ProxyResponseError");
+    expect(parsed.requests[0]?.upstreamStatusCode).toBe(503);
+    expect(parsed.requests[0]?.upstreamErrorCode).toBe("server_error");
+    expect(parsed.requests[0]?.bridgeStage).toBe("owner_forward_status");
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
+  });
+
+  it("accepts legacy limit warmup request kind rows", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: null,
+          apiKeyId: null,
+          requestId: "req-legacy-limit-warmup",
+          requestKind: "limit_warmup",
+          model: "gpt-5.1-codex-mini",
+          transport: "http",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
   });
 
   it("defaults omitted cost fields to null for backward compatibility", () => {
@@ -179,7 +228,6 @@ describe("RequestLogsResponseSchema", () => {
           requestedAt: ISO,
           accountId: "acc-1",
           planType: "plus",
-          apiKeyName: "Key A",
           apiKeyId: "key-1",
           requestId: "req-legacy-cost-fields",
           model: "gpt-5.1",
@@ -200,7 +248,44 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.inputTokens).toBeNull();
     expect(parsed.requests[0]?.outputTokens).toBeNull();
+    expect(parsed.requests[0]?.failurePhase).toBeNull();
+    expect(parsed.requests[0]?.upstreamStatusCode).toBeNull();
     expect(parsed.requests[0]?.costBreakdown).toBeNull();
+    expect(parsed.requests[0]?.apiKeyName).toBeNull();
+    expect(parsed.requests[0]?.useragent).toBeNull();
+    expect(parsed.requests[0]?.useragentGroup).toBeNull();
+  });
+
+  it("accepts nullable user agent fields", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-null-useragent",
+          model: "gpt-5.1",
+          transport: "websocket",
+          useragent: null,
+          useragentGroup: null,
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.useragent).toBeNull();
+    expect(parsed.requests[0]?.useragentGroup).toBeNull();
   });
 
   it("defaults omitted nested cost breakdown fields to null", () => {

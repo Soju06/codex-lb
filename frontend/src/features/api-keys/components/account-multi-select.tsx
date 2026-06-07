@@ -15,7 +15,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
-import { normalizeStatus } from "@/utils/account-status";
+import { isAccountAssignmentSelectable, normalizeStatus } from "@/utils/account-status";
 import { formatPercentNullable, formatSlug, formatWindowLabel } from "@/utils/formatters";
 
 export type AccountMultiSelectProps = {
@@ -32,15 +32,27 @@ type LimitChip = {
 
 function buildLimitChips(account: AccountSummary): LimitChip[] {
   const chips: LimitChip[] = [];
+  const monthlyOnly =
+    account.windowMinutesMonthly != null &&
+    account.windowMinutesPrimary == null &&
+    account.windowMinutesSecondary == null;
 
-  if (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null) {
+  if (monthlyOnly || account.usage?.monthlyRemainingPercent != null) {
+    chips.push({
+      key: `${account.accountId}-monthly`,
+      label: `Monthly ${formatPercentNullable(account.usage?.monthlyRemainingPercent)} left`,
+      percent: account.usage?.monthlyRemainingPercent ?? null,
+    });
+  }
+
+  if (!monthlyOnly && (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-primary`,
       label: `${formatWindowLabel("primary", account.windowMinutesPrimary)} ${formatPercentNullable(account.usage?.primaryRemainingPercent)} left`,
       percent: account.usage?.primaryRemainingPercent ?? null,
     });
   }
-  if (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null) {
+  if (!monthlyOnly && (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-secondary`,
       label: `${formatWindowLabel("secondary", account.windowMinutesSecondary)} ${formatPercentNullable(account.usage?.secondaryRemainingPercent)} left`,
@@ -113,18 +125,22 @@ export function AccountMultiSelect({
 }: AccountMultiSelectProps) {
   const { accountsQuery } = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const selectableAccounts = useMemo(
+    () => accounts.filter((account) => isAccountAssignmentSelectable(account.status)),
+    [accounts],
+  );
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return accounts;
+    if (!search.trim()) return selectableAccounts;
     const query = search.toLowerCase();
-    return accounts.filter(
+    return selectableAccounts.filter(
       (account) =>
         account.accountId.toLowerCase().includes(query) ||
         account.email.toLowerCase().includes(query) ||
         account.displayName.toLowerCase().includes(query),
     );
-  }, [accounts, search]);
+  }, [search, selectableAccounts]);
 
   const selectedSet = useMemo(() => new Set(value), [value]);
   const selectedAccounts = useMemo(

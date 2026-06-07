@@ -6,15 +6,23 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import quote, urlencode
 
 import aiohttp
 from pydantic import ValidationError
 
 from app.core.auth.models import DeviceCodePayload, OAuthTokenPayload
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
+from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
@@ -92,6 +100,9 @@ async def exchange_authorization_code(
     client_id: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> OAuthTokens:
     settings = get_settings()
     url = f"{(base_url or settings.auth_base_url).rstrip('/')}/oauth/token"
@@ -109,6 +120,27 @@ async def exchange_authorization_code(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="OAuth token exchange",
+    )
+    if route is not None:
+        resp = await _codex_post(
+            url,
+            route=route,
+            codex_client=codex_client,
+            data=encoded,
+            headers=headers,
+            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+        )
+        data = await _safe_codex_json(resp)
+        payload = _validate_oauth_token_payload(data, "OAuth token response invalid")
+        status = _codex_status(resp)
+        if status >= 400:
+            logger.warning("OAuth token request failed request_id=%s status=%s", get_request_id(), status)
+            raise _oauth_error_from_payload(payload, status)
+        return _parse_tokens(payload)
     async with lease_http_session(session) as client_session:
         async with client_session.post(
             url,
@@ -142,6 +174,9 @@ async def request_device_code(
     client_id: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> DeviceCode:
     settings = get_settings()
     auth_base = (base_url or settings.auth_base_url).rstrip("/")
@@ -155,37 +190,60 @@ async def request_device_code(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with lease_http_session(session) as client_session:
-        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            data = await _safe_json(resp)
-            if resp.status >= 400:
-                if resp.status == 404:
-                    raise OAuthError(
-                        "device_auth_unavailable",
-                        (
-                            "Device code login is not enabled for this Codex server. "
-                            "Use the browser login or verify the server URL."
-                        ),
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="device code request",
+    )
+    if route is not None:
+        resp = await _codex_post(
+            url,
+            route=route,
+            codex_client=codex_client,
+            json=payload,
+            headers=headers,
+            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+        )
+        data = await _safe_codex_json(resp)
+        status = _codex_status(resp)
+        if status >= 400:
+            if status == 404:
+                raise OAuthError(
+                    "device_auth_unavailable",
+                    (
+                        "Device code login is not enabled for this Codex server. "
+                        "Use the browser login or verify the server URL."
+                    ),
+                    status,
+                )
+            logger.warning("Device auth request failed request_id=%s status=%s", get_request_id(), status)
+            raise OAuthError("device_auth_failed", f"Device code request failed with status {status}", status)
+        payload_data = _validate_device_code_payload(data)
+    else:
+        async with lease_http_session(session) as client_session:
+            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+                data = await _safe_json(resp)
+                if resp.status >= 400:
+                    if resp.status == 404:
+                        raise OAuthError(
+                            "device_auth_unavailable",
+                            (
+                                "Device code login is not enabled for this Codex server. "
+                                "Use the browser login or verify the server URL."
+                            ),
+                            resp.status,
+                        )
+                    logger.warning(
+                        "Device auth request failed request_id=%s status=%s",
+                        get_request_id(),
                         resp.status,
                     )
-                logger.warning(
-                    "Device auth request failed request_id=%s status=%s",
-                    get_request_id(),
-                    resp.status,
-                )
-                raise OAuthError(
-                    "device_auth_failed",
-                    f"Device code request failed with status {resp.status}",
-                    resp.status,
-                )
-            try:
-                payload_data = DeviceCodePayload.model_validate(data)
-            except ValidationError as exc:
-                logger.warning(
-                    "Device auth response invalid request_id=%s",
-                    get_request_id(),
-                )
-                raise OAuthError("invalid_response", "Device auth response invalid") from exc
+                    raise OAuthError(
+                        "device_auth_failed",
+                        f"Device code request failed with status {resp.status}",
+                        resp.status,
+                    )
+                payload_data = _validate_device_code_payload(data)
     verification_url = f"{auth_base}/codex/device"
     user_code = payload_data.user_code
     device_auth_id = payload_data.device_auth_id
@@ -213,6 +271,9 @@ async def exchange_device_token(
     base_url: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> OAuthTokens | None:
     settings = get_settings()
     url = f"{(base_url or settings.auth_base_url).rstrip('/')}/api/accounts/deviceauth/token"
@@ -223,30 +284,50 @@ async def exchange_device_token(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
-    async with lease_http_session(session) as client_session:
-        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            data = await _safe_json(resp)
-            try:
-                payload_data = OAuthTokenPayload.model_validate(data)
-            except ValidationError as exc:
-                logger.warning(
-                    "Device token response invalid request_id=%s",
-                    get_request_id(),
-                )
-                raise OAuthError("invalid_response", "Device auth response invalid") from exc
-            if resp.status in (403, 404):
-                return None
-            if resp.status >= 400:
-                if _is_pending_error(payload_data):
-                    return None
-                logger.warning(
-                    "Device token request failed request_id=%s status=%s",
-                    get_request_id(),
-                    resp.status,
-                )
-                raise _oauth_error_from_payload(payload_data, resp.status)
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="device token exchange",
+    )
+    if route is not None:
+        resp = await _codex_post(
+            url,
+            route=route,
+            codex_client=codex_client,
+            json=payload,
+            headers=headers,
+            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+        )
+        data = await _safe_codex_json(resp)
+        payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")
+        status = _codex_status(resp)
+        if status in (403, 404):
+            return None
+        if status >= 400:
             if _is_pending_error(payload_data):
                 return None
+            logger.warning("Device token request failed request_id=%s status=%s", get_request_id(), status)
+            raise _oauth_error_from_payload(payload_data, status)
+        if _is_pending_error(payload_data):
+            return None
+    else:
+        async with lease_http_session(session) as client_session:
+            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+                data = await _safe_json(resp)
+                payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")
+                if resp.status in (403, 404):
+                    return None
+                if resp.status >= 400:
+                    if _is_pending_error(payload_data):
+                        return None
+                    logger.warning(
+                        "Device token request failed request_id=%s status=%s",
+                        get_request_id(),
+                        resp.status,
+                    )
+                    raise _oauth_error_from_payload(payload_data, resp.status)
+                if _is_pending_error(payload_data):
+                    return None
 
     if payload_data.authorization_code:
         if not payload_data.code_verifier:
@@ -259,6 +340,9 @@ async def exchange_device_token(
             base_url=base_url,
             client_id=settings.oauth_client_id,
             timeout_seconds=timeout_seconds,
+            route=route,
+            codex_client=codex_client,
+            allow_direct_egress=allow_direct_egress,
         )
 
     return _parse_tokens(payload_data)
@@ -287,6 +371,60 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
         text = await resp.text()
         return {"error": {"message": text.strip()}}
     return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+
+
+async def _codex_post(
+    url: str,
+    *,
+    route: ResolvedUpstreamRoute,
+    codex_client: CodexClient | None,
+    **kwargs: Any,
+) -> Any:
+    owns_codex_client = codex_client is None
+    active_codex_client = codex_client or CodexClient(create_codex_session())
+    try:
+        return await active_codex_client.request("POST", url, route=route, **kwargs)
+    except CodexTransportError as exc:
+        raise OAuthError("transport_error", str(exc)) from exc
+    finally:
+        if owns_codex_client:
+            await active_codex_client.close()
+
+
+def _codex_status(resp: Any) -> int:
+    return int(getattr(resp, "status_code", getattr(resp, "status", 0)))
+
+
+async def _safe_codex_json(resp: Any) -> JsonObject:
+    json_method = getattr(resp, "json", None)
+    try:
+        if callable(json_method):
+            data = json_method()
+            if hasattr(data, "__await__"):
+                data = await data
+        else:
+            text = getattr(resp, "text", "")
+            data = __import__("json").loads(text)
+    except Exception:
+        text = getattr(resp, "text", "")
+        return {"error": {"message": str(text).strip()}}
+    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+
+
+def _validate_oauth_token_payload(data: JsonObject, message: str) -> OAuthTokenPayload:
+    try:
+        return OAuthTokenPayload.model_validate(data)
+    except ValidationError as exc:
+        logger.warning("%s request_id=%s", message, get_request_id())
+        raise OAuthError("invalid_response", message) from exc
+
+
+def _validate_device_code_payload(data: JsonObject) -> DeviceCodePayload:
+    try:
+        return DeviceCodePayload.model_validate(data)
+    except ValidationError as exc:
+        logger.warning("Device auth response invalid request_id=%s", get_request_id())
+        raise OAuthError("invalid_response", "Device auth response invalid") from exc
 
 
 def _oauth_error_from_payload(payload: OAuthTokenPayload, status_code: int) -> OAuthError:

@@ -39,13 +39,25 @@ class AccountStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
     QUOTA_EXCEEDED = "quota_exceeded"
     PAUSED = "paused"
+    REAUTH_REQUIRED = "reauth_required"
     DEACTIVATED = "deactivated"
+
+
+class AccountRoutingPolicy(str, Enum):
+    NORMAL = "normal"
+    BURN_FIRST = "burn_first"
+    PRESERVE = "preserve"
 
 
 class StickySessionKind(str, Enum):
     CODEX_SESSION = "codex_session"
     STICKY_THREAD = "sticky_thread"
     PROMPT_CACHE = "prompt_cache"
+
+
+class RequestKind(str, Enum):
+    NORMAL = "normal"
+    WARMUP = "warmup"
 
 
 class Account(Base):
@@ -55,7 +67,16 @@ class Account(Base):
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    routing_policy: Mapped[str] = mapped_column(
+        String,
+        default="normal",
+        server_default=text("'normal'"),
+        nullable=False,
+    )
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -83,6 +104,12 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -97,6 +124,12 @@ class Account(Base):
         "AccountLimitWarmup",
         back_populates="account",
         cascade="all, delete-orphan",
+    )
+    proxy_binding: Mapped["AccountProxyBinding | None"] = relationship(
+        "AccountProxyBinding",
+        back_populates="account",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
 
 
@@ -134,6 +167,7 @@ class AdditionalUsageHistory(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
+    __table_args__ = (Index("idx_logs_useragent_group", "useragent_group"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
@@ -144,11 +178,19 @@ class RequestLog(Base):
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    request_kind: Mapped[str] = mapped_column(
+        String,
+        default=RequestKind.NORMAL.value,
+        server_default=text("'normal'"),
+        nullable=False,
+    )
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
+    useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -164,10 +206,117 @@ class RequestLog(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_exception_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upstream_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    bridge_stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_proxy_route_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_proxy_pool_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    upstream_proxy_fail_closed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
     )
+
+
+class ProxyEndpoint(Base):
+    __tablename__ = "proxy_endpoints"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    scheme: Mapped[str] = mapped_column(String, nullable=False)
+    host: Mapped[str] = mapped_column(String, nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str | None] = mapped_column(String, nullable=True)
+    password_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    pool_memberships: Mapped[list["ProxyPoolMember"]] = relationship(
+        "ProxyPoolMember",
+        back_populates="endpoint",
+        cascade="all, delete-orphan",
+    )
+
+
+class ProxyPool(Base):
+    __tablename__ = "proxy_pools"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    members: Mapped[list["ProxyPoolMember"]] = relationship(
+        "ProxyPoolMember",
+        back_populates="pool",
+        cascade="all, delete-orphan",
+    )
+    account_bindings: Mapped[list["AccountProxyBinding"]] = relationship(
+        "AccountProxyBinding",
+        back_populates="pool",
+    )
+
+
+class ProxyPoolMember(Base):
+    __tablename__ = "proxy_pool_members"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    pool_id: Mapped[str] = mapped_column(String, ForeignKey("proxy_pools.id", ondelete="CASCADE"), nullable=False)
+    endpoint_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("proxy_endpoints.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    pool: Mapped[ProxyPool] = relationship("ProxyPool", back_populates="members")
+    endpoint: Mapped[ProxyEndpoint] = relationship("ProxyEndpoint", back_populates="pool_memberships")
+
+    __table_args__ = (
+        UniqueConstraint("pool_id", "endpoint_id", name="uq_proxy_pool_members_pool_endpoint"),
+        Index("idx_proxy_pool_members_pool_order", "pool_id", "is_active", "sort_order", "id"),
+    )
+
+
+class AccountProxyBinding(Base):
+    __tablename__ = "account_proxy_bindings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    pool_id: Mapped[str] = mapped_column(String, ForeignKey("proxy_pools.id", ondelete="RESTRICT"), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account: Mapped[Account] = relationship("Account", back_populates="proxy_binding")
+    pool: Mapped[ProxyPool] = relationship("ProxyPool", back_populates="account_bindings")
+
+    __table_args__ = (UniqueConstraint("account_id", name="uq_account_proxy_bindings_account"),)
 
 
 class AccountLimitWarmup(Base):
@@ -266,12 +415,31 @@ class DashboardSettings(Base):
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
+    prefer_earlier_reset_window: Mapped[str] = mapped_column(
+        String,
+        default="secondary",
+        server_default=text("'secondary'"),
+        nullable=False,
+    )
     routing_strategy: Mapped[str] = mapped_column(
         String,
         default="capacity_weighted",
         server_default=text("'capacity_weighted'"),
         nullable=False,
     )
+    relative_availability_power: Mapped[float] = mapped_column(
+        Float,
+        default=2.0,
+        server_default=text("2.0"),
+        nullable=False,
+    )
+    relative_availability_top_k: Mapped[int] = mapped_column(
+        Integer,
+        default=5,
+        server_default=text("5"),
+        nullable=False,
+    )
+    single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -317,10 +485,39 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    upstream_proxy_default_pool_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("proxy_pools.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     sticky_reallocation_budget_threshold_pct: Mapped[float] = mapped_column(
         Float,
         default=95.0,
         server_default=text("95.0"),
+        nullable=False,
+    )
+    sticky_reallocation_primary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=95.0,
+        server_default=text("95.0"),
+        nullable=False,
+    )
+    sticky_reallocation_secondary_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
+    additional_quota_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
         nullable=False,
     )
     limit_warmup_enabled: Mapped[bool] = mapped_column(
@@ -357,6 +554,23 @@ class DashboardSettings(Base):
         Float,
         default=100.0,
         server_default=text("100.0"),
+    )
+    weekly_pace_working_days: Mapped[str] = mapped_column(
+        String,
+        default="0,1,2,3,4,5,6",
+        server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
+    )
+    warmup_model: Mapped[str] = mapped_column(
+        String,
+        default="gpt-5.4-mini",
+        server_default=text("'gpt-5.4-mini'"),
+        nullable=False,
+    )
+    additional_quota_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -392,6 +606,12 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    traffic_class: Mapped[str] = mapped_column(
+        String,
+        default="foreground",
+        server_default=text("'foreground'"),
+        nullable=False,
+    )
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -561,6 +781,96 @@ class RateLimitAttempt(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
 
 
+class QuotaPlannerSettings(Base):
+    __tablename__ = "quota_planner_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    mode: Mapped[str] = mapped_column(String, default="shadow", server_default=text("'shadow'"), nullable=False)
+    timezone: Mapped[str] = mapped_column(String, default="UTC", server_default=text("'UTC'"), nullable=False)
+    working_days_json: Mapped[str] = mapped_column(
+        Text,
+        default="[0,1,2,3,4]",
+        server_default=text("'[0,1,2,3,4]'"),
+        nullable=False,
+    )
+    working_hours_start: Mapped[str] = mapped_column(
+        String,
+        default="09:00",
+        server_default=text("'09:00'"),
+        nullable=False,
+    )
+    working_hours_end: Mapped[str] = mapped_column(
+        String,
+        default="18:00",
+        server_default=text("'18:00'"),
+        nullable=False,
+    )
+    prewarm_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    prewarm_lead_minutes: Mapped[int] = mapped_column(Integer, default=300, server_default=text("300"), nullable=False)
+    max_warmups_per_day: Mapped[int] = mapped_column(Integer, default=3, server_default=text("3"), nullable=False)
+    max_warmup_credits_per_day: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        server_default=text("0.0"),
+        nullable=False,
+    )
+    min_expected_gain: Mapped[float] = mapped_column(Float, default=1.0, server_default=text("1.0"), nullable=False)
+    forecast_quantile: Mapped[str] = mapped_column(String, default="p75", server_default=text("'p75'"), nullable=False)
+    allow_synthetic_traffic: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    warmup_model_preference: Mapped[str | None] = mapped_column(String, nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class QuotaPlannerDecision(Base):
+    __tablename__ = "quota_planner_decisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state_before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state_after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="planned", server_default=text("'planned'"), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+
+
+class QuotaWindowObservation(Base):
+    __tablename__ = "quota_window_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    primary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secondary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    confidence: Mapped[str] = mapped_column(String, default="unknown", server_default=text("'unknown'"), nullable=False)
+
+
 class CacheInvalidation(Base):
     __tablename__ = "cache_invalidation"
 
@@ -723,6 +1033,7 @@ Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
+Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -785,6 +1096,17 @@ Index(
     "idx_api_key_usage_reservations_status_updated_at", ApiKeyUsageReservation.status, ApiKeyUsageReservation.updated_at
 )
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
+Index("idx_quota_planner_decisions_status_created", QuotaPlannerDecision.status, QuotaPlannerDecision.created_at.desc())
+Index(
+    "idx_quota_planner_decisions_account_created",
+    QuotaPlannerDecision.account_id,
+    QuotaPlannerDecision.created_at.desc(),
+)
+Index(
+    "idx_quota_window_observations_account_time",
+    QuotaWindowObservation.account_id,
+    QuotaWindowObservation.observed_at.desc(),
+)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())

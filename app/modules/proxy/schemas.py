@@ -54,6 +54,7 @@ class RateLimitStatusDetails(BaseModel):
     limit_reached: bool
     primary_window: RateLimitWindowSnapshot | None = None
     secondary_window: RateLimitWindowSnapshot | None = None
+    monthly_window: RateLimitWindowSnapshot | None = None
 
     @classmethod
     def from_data(cls, data: RateLimitStatusDetailsData) -> "RateLimitStatusDetails":
@@ -64,6 +65,7 @@ class RateLimitStatusDetails(BaseModel):
             secondary_window=RateLimitWindowSnapshot.from_data(data.secondary_window)
             if data.secondary_window
             else None,
+            monthly_window=RateLimitWindowSnapshot.from_data(data.monthly_window) if data.monthly_window else None,
         )
 
 
@@ -181,7 +183,11 @@ class ModelMetadata(BaseModel):
 
 
 class ModelListItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Cursor's local-provider discovery reads OpenAI-compatible /v1/models
+    # entries and preserves provider-specific model capability fields. Keep
+    # allowing those extras so clients can learn the model context window and
+    # trigger their own compaction instead of relying on provider-side failures.
+    model_config = ConfigDict(extra="allow")
 
     id: str
     object: str = "model"
@@ -219,3 +225,42 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+
+
+class WarmupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = "normal"
+
+
+class WarmupSubmittedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    request_id: str
+    model: str
+
+
+class WarmupSkippedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    reason: str
+
+
+class WarmupFailedAccount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    error_code: str
+    error_message: str
+
+
+class WarmupResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    total_accounts: int
+    submitted: list[WarmupSubmittedAccount]
+    skipped: list[WarmupSkippedAccount]
+    failed: list[WarmupFailedAccount]

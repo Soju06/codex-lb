@@ -27,12 +27,19 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,
     resetAtSecondary: overrides.resetAtSecondary ?? null,
+    resetAtMonthly: overrides.resetAtMonthly ?? null,
     windowMinutesPrimary: overrides.windowMinutesPrimary ?? null,
     windowMinutesSecondary: overrides.windowMinutesSecondary ?? null,
+    windowMinutesMonthly: overrides.windowMinutesMonthly ?? null,
+    capacityCreditsPrimary: overrides.capacityCreditsPrimary ?? null,
+    remainingCreditsPrimary: overrides.remainingCreditsPrimary ?? null,
     capacityCreditsSecondary: overrides.capacityCreditsSecondary ?? null,
     remainingCreditsSecondary: overrides.remainingCreditsSecondary ?? null,
+    capacityCreditsMonthly: overrides.capacityCreditsMonthly ?? null,
+    remainingCreditsMonthly: overrides.remainingCreditsMonthly ?? null,
     auth: overrides.auth ?? null,
     additionalQuotas: overrides.additionalQuotas ?? [],
+    isEmailDuplicate: overrides.isEmailDuplicate,
   };
 }
 
@@ -247,13 +254,13 @@ describe("buildRemainingItems", () => {
     expect(items[1].label).toBe("two@example.com");
   });
 
-  it("appends compact account id only for duplicate emails", () => {
+  it("appends compact account id only when backend marks the slot duplicate", () => {
     const duplicateA = "d48f0bfc-8ea6-48a7-8d76-d0e5ef1816c5_6f12b5d5";
     const duplicateB = "7f9de2ad-7621-4a6f-88bc-ec7f3d914701_91a95cee";
     const items = buildRemainingItems(
       [
-        account({ accountId: duplicateA, email: "dup@example.com" }),
-        account({ accountId: duplicateB, email: "dup@example.com" }),
+        account({ accountId: duplicateA, email: "dup@example.com", isEmailDuplicate: false }),
+        account({ accountId: duplicateB, email: "dup@example.com", isEmailDuplicate: true }),
         account({ accountId: "acc-3", email: "unique@example.com" }),
       ],
       null,
@@ -261,7 +268,7 @@ describe("buildRemainingItems", () => {
     );
 
     expect(items[0].label).toBe("dup@example.com");
-    expect(items[0].labelSuffix).toBe(` (${formatCompactAccountId(duplicateA, 5, 4)})`);
+    expect(items[0].labelSuffix).toBe("");
     expect(items[0].isEmail).toBe(true);
     expect(items[1].label).toBe("dup@example.com");
     expect(items[1].labelSuffix).toBe(` (${formatCompactAccountId(duplicateB, 5, 4)})`);
@@ -269,6 +276,25 @@ describe("buildRemainingItems", () => {
     expect(items[2].label).toBe("unique@example.com");
     expect(items[2].labelSuffix).toBe("");
     expect(items[2].isEmail).toBe(true);
+  });
+
+  it("omits monthly-only accounts from primary and secondary donuts", () => {
+    const monthly = account({
+      accountId: "acc-monthly",
+      email: "monthly@example.com",
+      planType: "free",
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 88,
+      },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+    });
+
+    expect(buildRemainingItems([monthly], null, "primary")).toEqual([]);
+    expect(buildRemainingItems([monthly], null, "secondary")).toEqual([]);
   });
 });
 

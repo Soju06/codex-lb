@@ -3,20 +3,27 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi.responses import JSONResponse
 
 import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
-from app.core.clients.oauth import DeviceCode, OAuthTokens
+from app.core.clients.oauth import DeviceCode, OAuthError, OAuthTokens
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.oauth import api as oauth_api_module
+from app.modules.oauth.schemas import ManualCallbackRequest
 
 pytestmark = pytest.mark.integration
 
@@ -30,6 +37,100 @@ def _encode_jwt(payload: dict) -> str:
 def _oauth_state_token(authorization_url: str) -> str:
     parsed = urlparse(authorization_url)
     return parse_qs(parsed.query)["state"][0]
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_api_sanitizes_unexpected_exception():
+    class FailingOauthService:
+        async def manual_callback(self, callback_url: str, flow_id: str | None = None):
+            raise RuntimeError("Traceback (most recent call last): password=super-secret")
+
+    response = cast(
+        JSONResponse,
+        await oauth_api_module.manual_callback(
+            ManualCallbackRequest(callback_url="http://localhost:1455/?code=c&state=s"),
+            context=cast(Any, SimpleNamespace(service=FailingOauthService())),
+        ),
+    )
+
+    assert response.status_code == 500
+    payload = json.loads(bytes(response.body))
+    assert payload == {
+        "error": {
+            "code": "manual_callback_failed",
+            "message": "An internal error occurred.",
+        }
+    }
+    assert "super-secret" not in bytes(response.body).decode()
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_api_preserves_oauth_error():
+    class FailingOauthService:
+        async def manual_callback(self, callback_url: str, flow_id: str | None = None):
+            raise OAuthError("invalid_grant", "Authorization code expired", status_code=400)
+
+    response = cast(
+        JSONResponse,
+        await oauth_api_module.manual_callback(
+            ManualCallbackRequest(callback_url="http://localhost:1455/?code=c&state=s"),
+            context=cast(Any, SimpleNamespace(service=FailingOauthService())),
+        ),
+    )
+
+    assert response.status_code == 502
+    assert json.loads(bytes(response.body)) == {
+        "error": {
+            "code": "invalid_grant",
+            "message": "Authorization code expired",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_callback_service_sanitizes_unexpected_exception(monkeypatch, caplog):
+    await oauth_module._OAUTH_STORE.reset()
+    caplog.set_level(logging.ERROR, logger=oauth_module.logger.name)
+    async with oauth_module._OAUTH_STORE.lock:
+        oauth_module._OAUTH_STORE.remember_flow_locked(
+            oauth_module.OAuthState(
+                flow_id="flow-1",
+                status="pending",
+                method="browser",
+                state_token="state-1",
+                code_verifier="verifier-1",
+            )
+        )
+
+    async def fake_oauth_route():
+        return None
+
+    async def fake_exchange_authorization_code(**_kwargs):
+        raise RuntimeError("Unexpected error: /home/app/password.txt")
+
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+    service = oauth_module.OauthService(cast(AccountsRepository, SimpleNamespace()))
+
+    response = await service.manual_callback("http://localhost:1455/?code=code-1&state=state-1", flow_id="flow-1")
+
+    assert response.status == "error"
+    assert response.error_message == "An internal error occurred."
+    assert "RuntimeError" in caplog.text
+    assert "password.txt" not in caplog.text
+    assert "/home/app" not in caplog.text
+    assert "Traceback" not in caplog.text
+    async with oauth_module._OAUTH_STORE.lock:
+        flow = oauth_module._OAUTH_STORE.get_flow_locked("flow-1")
+        assert flow is not None
+        assert flow.error_message == "An internal error occurred."
+
+
+def test_oauth_error_html_escapes_message():
+    html = oauth_module._error_html("bad <script>alert('x')</script>")
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in html
 
 
 @pytest.mark.asyncio
@@ -142,10 +243,25 @@ async def test_starting_new_device_flow_cancels_previous_pending_poll(async_clie
 
 
 @pytest.mark.asyncio
-async def test_device_oauth_flow_keeps_separate_accounts_when_import_without_overwrite_enabled(
+async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity(
     async_client,
     monkeypatch,
 ):
+    """OAuth reauth for the same ChatGPT identity must reuse the existing
+    local row even when ``importWithoutOverwrite`` is enabled.
+
+    Before #788, this code path created an ``__copyN`` row whenever the
+    operator had toggled ``importWithoutOverwrite`` on, because the
+    dashboard's side-by-side import setting was incorrectly conflated
+    with reauth.
+
+    The ``importWithoutOverwrite`` setting now governs the dashboard
+    import path only (side-by-side rows when importing twice). The
+    reauth path always reconciles to one local row per upstream
+    ChatGPT identity, so a refresh-token-revoked account picks up the
+    new tokens onto its historical row instead of forking a duplicate.
+    """
+
     await oauth_module._OAUTH_STORE.reset()
 
     settings = await async_client.put(
@@ -160,8 +276,8 @@ async def test_device_oauth_flow_keeps_separate_accounts_when_import_without_ove
     assert settings.status_code == 200
     assert settings.json()["importWithoutOverwrite"] is True
 
-    email = "device-separate@example.com"
-    raw_account_id = "acc_device_separate"
+    email = "device-reauth@example.com"
+    raw_account_id = "acc_device_reauth"
 
     async def fake_device_code(**_):
         return DeviceCode(
@@ -222,15 +338,163 @@ async def test_device_oauth_flow_keeps_separate_accounts_when_import_without_ove
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
     data = [account for account in accounts.json()["accounts"] if account["email"] == email]
-    assert len(data) == 2
-    ids = {account["accountId"] for account in data}
+    assert len(data) == 1
     base_id = generate_unique_account_id(raw_account_id, email)
-    assert base_id in ids
-    assert any(account_id.startswith(f"{base_id}__copy") for account_id in ids if account_id != base_id)
+    assert data[0]["accountId"] == base_id
+    # Second reauth carried the team plan; it must be applied to the
+    # existing row rather than a new __copy row.
+    assert data[0]["planType"] == "team"
 
 
 @pytest.mark.asyncio
-async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous_in_overwrite_mode(
+async def test_device_oauth_flow_heals_deactivated_account_when_import_without_overwrite_enabled(
+    async_client,
+    monkeypatch,
+):
+    await oauth_module._OAUTH_STORE.reset()
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": True,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert settings.status_code == 200
+    assert settings.json()["importWithoutOverwrite"] is True
+
+    email = "device-reauth@example.com"
+    raw_account_id = "acc_device_reauth"
+    account_id = generate_unique_account_id(raw_account_id, email)
+
+    encryptor = TokenEncryptor()
+    existing = Account(
+        id=account_id,
+        chatgpt_account_id=raw_account_id,
+        email=email,
+        plan_type="plus",
+        routing_policy="preserve",
+        access_token_encrypted=encryptor.encrypt("old-access"),
+        refresh_token_encrypted=encryptor.encrypt("old-refresh"),
+        id_token_encrypted=encryptor.encrypt("old-id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.DEACTIVATED,
+        deactivation_reason="refresh_failed",
+    )
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(existing, merge_by_email=False)
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ABCD-EFGH",
+            device_auth_id="dev_reauth",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    async def fake_exchange_device_token(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"},
+        }
+        return OAuthTokens(
+            access_token="new-access-token",
+            refresh_token="new-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert start.status_code == 200
+
+    complete = await async_client.post("/api/oauth/complete", json={})
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "pending"
+
+    await asyncio.sleep(0)
+
+    payload = None
+    for _ in range(20):
+        status = await async_client.get("/api/oauth/status")
+        assert status.status_code == 200
+        payload = status.json()
+        if payload["status"] == "success":
+            break
+        await asyncio.sleep(0.05)
+    assert payload and payload["status"] == "success"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = [account for account in accounts.json()["accounts"] if account["email"] == email]
+    assert len(data) == 1
+    healed = data[0]
+    assert healed["accountId"] == account_id
+    assert healed["status"] == "active"
+    assert healed["deactivationReason"] is None
+    assert healed["planType"] == "pro"
+    assert healed["routingPolicy"] == "preserve"
+
+
+@pytest.mark.asyncio
+async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_merge(monkeypatch):
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    account_cache = SimpleNamespace(invalidated=False)
+
+    def _invalidate_account_cache() -> None:
+        account_cache.invalidated = True
+
+    account_cache.invalidate = _invalidate_account_cache
+    api_key_cache = SimpleNamespace(cleared=False)
+
+    def _clear_api_key_cache() -> None:
+        api_key_cache.cleared = True
+
+    api_key_cache.clear = _clear_api_key_cache
+    poller = SimpleNamespace(bumped=[])
+
+    async def _bump(namespace: str) -> None:
+        poller.bumped.append(namespace)
+
+    poller.bump = _bump
+    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: account_cache, raising=False)
+    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: api_key_cache, raising=False)
+    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: poller, raising=False)
+    monkeypatch.setattr(oauth_module, "NAMESPACE_API_KEY", "api_key", raising=False)
+
+    payload = {
+        "email": "reauth-cache@example.com",
+        "chatgpt_account_id": "acc_reauth_cache",
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+
+    await service._persist_tokens(
+        OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+    )
+
+    repo.upsert.assert_awaited_once()
+    assert account_cache.invalidated is True
+    assert api_key_cache.cleared is True
+    assert poller.bumped == ["api_key"]
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_in_overwrite_mode(
     async_client,
     monkeypatch,
 ):
@@ -249,7 +513,6 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
     assert enable_separate.json()["importWithoutOverwrite"] is True
 
     email = "oauth-conflict@example.com"
-    raw_account_id = "acc_oauth_conflict_base"
 
     async def fake_device_code(**_):
         return DeviceCode(
@@ -263,10 +526,20 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
     call_count = {"value": 0}
 
     async def fake_exchange_device_token(**_):
+        # Each of the first two flows uses a *different* upstream
+        # chatgpt_account_id so that identity-aware reauth treats them
+        # as distinct upstream identities and keeps both local rows.
+        # The third flow then introduces a third upstream id under the
+        # same email. OAuth/reauth is keyed by upstream identity rather
+        # than email, so the overwrite-by-email import setting must not
+        # collapse this credential slot.
         call_count["value"] += 1
-        if call_count["value"] <= 2:
-            account_id = raw_account_id
-            plan_type = "plus" if call_count["value"] == 1 else "team"
+        if call_count["value"] == 1:
+            account_id = "acc_oauth_conflict_one"
+            plan_type = "plus"
+        elif call_count["value"] == 2:
+            account_id = "acc_oauth_conflict_two"
+            plan_type = "team"
         else:
             account_id = "acc_oauth_conflict_new"
             plan_type = "pro"
@@ -326,9 +599,16 @@ async def test_device_oauth_flow_reports_error_when_duplicate_email_is_ambiguous
     assert enable_overwrite.json()["importWithoutOverwrite"] is False
 
     result = await _run_device_flow_once()
-    assert result["status"] == "error"
-    assert result["errorMessage"] is not None
-    assert "multiple matching accounts exist" in str(result["errorMessage"]).lower()
+    assert result["status"] == "success"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matching_accounts = [account for account in accounts.json()["accounts"] if account["email"] == email]
+    assert {account["accountId"] for account in matching_accounts} == {
+        generate_unique_account_id("acc_oauth_conflict_one", email),
+        generate_unique_account_id("acc_oauth_conflict_two", email),
+        generate_unique_account_id("acc_oauth_conflict_new", email),
+    }
 
 
 @pytest.mark.asyncio
@@ -539,6 +819,21 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_reports_proxy_route_errors(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_oauth_route(*_args, **_kwargs):
+        raise UpstreamProxyRouteError("default_pool_unconfigured", account_id=None)
+
+    monkeypatch.setattr(oauth_module, "resolve_upstream_route", fake_oauth_route)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+
+    assert start.status_code == 502
+    assert start.json()["error"]["code"] == "default_pool_unconfigured"
 
 
 @pytest.mark.asyncio

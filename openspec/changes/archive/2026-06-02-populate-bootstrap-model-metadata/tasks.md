@@ -1,0 +1,6 @@
+- [x] Add static bootstrap entries for known Codex model slugs.
+- [x] Preserve representative upstream metadata on bootstrap Codex model responses.
+- [x] Use bootstrap metadata for websocket-preference checks before refresh.
+- [x] Keep refreshed upstream registry snapshots authoritative over bootstrap data.
+- [x] Add unit/integration coverage for bootstrap model catalog behavior.
+- [x] Validate the OpenSpec change in strict mode.

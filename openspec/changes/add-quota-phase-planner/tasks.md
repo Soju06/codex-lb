@@ -1,0 +1,6 @@
+- [x] 1. Add quota planner settings, forecast, decisions, warm-now, and cancel APIs.
+- [x] 2. Keep quota planner defaults audit-only and synthetic traffic disabled.
+- [x] 3. Require warmup-effect and usage evidence before automated warmups.
+- [x] 4. Persist warmup decision lifecycle states and request-log accounting.
+- [x] 5. Claim planned warmup decisions before synthetic probe traffic and make final/cancel transitions conditional.
+- [x] 6. Cover planner settings, decisions, warmup gates, effect evidence, cancellation, and execution lifecycle with tests.

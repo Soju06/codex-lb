@@ -26,7 +26,7 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType } from "@/features/api-keys/schemas";
+import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType, TrafficClass } from "@/features/api-keys/schemas";
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -60,6 +60,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
   const [enforcedModel, setEnforcedModel] = useState("");
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
   const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
+  const [trafficClass, setTrafficClass] = useState<TrafficClass>("foreground");
   const [applyToCodexModel, setApplyToCodexModel] = useState(false);
 
   const handleSubmit = async (values: FormValues) => {
@@ -75,6 +76,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
           ? null
           : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
+      trafficClass,
       expiresAt: expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -169,6 +171,19 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="default">Default</SelectItem>
                   <SelectItem value="priority">Priority</SelectItem>
                   <SelectItem value="flex">Flex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <FormLabel htmlFor="create-api-key-traffic-class">Traffic class</FormLabel>
+              <Select value={trafficClass} onValueChange={(value) => setTrafficClass(value as TrafficClass)}>
+                <SelectTrigger id="create-api-key-traffic-class">
+                  <SelectValue placeholder="Foreground" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="foreground">Foreground</SelectItem>
+                  <SelectItem value="opportunistic">Opportunistic</SelectItem>
                 </SelectContent>
               </Select>
             </div>

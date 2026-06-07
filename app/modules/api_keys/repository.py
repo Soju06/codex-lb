@@ -133,6 +133,10 @@ class ApiKeysRepository:
         account_costs.sort(key=lambda item: item.cost_usd, reverse=True)
         return account_costs
 
+    @staticmethod
+    def _exclude_warmup_clause():
+        return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
+
     def _select_api_key(self):
         return (
             select(ApiKey)
@@ -177,7 +181,9 @@ class ApiKeysRepository:
         result = await self._session.execute(
             select(Account)
             .options(load_only(Account.id, Account.plan_type, Account.status))
-            .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .where(
+                ~Account.status.in_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
+            )
         )
         return list(result.scalars().all())
 
@@ -194,7 +200,7 @@ class ApiKeysRepository:
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             )
-            .where(RequestLog.api_key_id.is_not(None))
+            .where(RequestLog.api_key_id.is_not(None), self._exclude_warmup_clause())
             .group_by(RequestLog.api_key_id)
         )
         result = await self._session.execute(stmt)
@@ -233,7 +239,10 @@ class ApiKeysRepository:
             ).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-        ).where(RequestLog.api_key_id == key_id)
+        ).where(
+            RequestLog.api_key_id == key_id,
+            self._exclude_warmup_clause(),
+        )
         result = await self._session.execute(stmt)
         row = result.one()
         input_sum = int(row.input_tokens or 0)
@@ -257,6 +266,7 @@ class ApiKeysRepository:
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        traffic_class: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -285,6 +295,9 @@ class ApiKeysRepository:
         if enforced_service_tier is not _UNSET:
             assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
             row.enforced_service_tier = enforced_service_tier
+        if traffic_class is not _UNSET:
+            assert isinstance(traffic_class, str)
+            row.traffic_class = traffic_class
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
@@ -786,6 +799,7 @@ class ApiKeysRepository:
                 RequestLog.api_key_id == key_id,
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
+                self._exclude_warmup_clause(),
             )
             .group_by(RequestLog.account_id, Account.email, deleted_expr)
         )
@@ -822,6 +836,7 @@ class ApiKeysRepository:
                 RequestLog.api_key_id == key_id,
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
+                self._exclude_warmup_clause(),
             )
             .group_by(bucket_col)
             .order_by(bucket_col)
@@ -852,6 +867,7 @@ class ApiKeysRepository:
                 RequestLog.api_key_id == key_id,
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
+                self._exclude_warmup_clause(),
             )
             .cte("filtered_logs")
         )

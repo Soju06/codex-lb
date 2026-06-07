@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from fastapi import (
     APIRouter,
@@ -50,7 +51,13 @@ from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
-from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
+from app.core.openai.chat_responses import (
+    ChatCompletion,
+    ChatCompletionResult,
+    ChatCompletionUsage,
+    collect_chat_completion,
+    stream_chat_chunks,
+)
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
@@ -70,6 +77,7 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -82,6 +90,7 @@ from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -105,6 +114,7 @@ from app.modules.proxy.request_policy import (
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_validation_error,
+    resolve_model_alias,
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
@@ -118,6 +128,11 @@ from app.modules.proxy.schemas import (
     ReasoningLevelSchema,
     V1UsageLimitResponse,
     V1UsageResponse,
+    WarmupFailedAccount,
+    WarmupRequest,
+    WarmupResponse,
+    WarmupSkippedAccount,
+    WarmupSubmittedAccount,
 )
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
@@ -198,18 +213,23 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
     "no_plan_support_for_model",
     "additional_quota_data_unavailable",
+    "quota_exhausted",
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
+_CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,
     "gpt-5.4-mini": 128_000,
     "gpt-5.3-codex": 128_000,
 }
+_OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -231,6 +251,7 @@ _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
+_WARMUP_MODES: Final[frozenset[str]] = frozenset({"normal", "strict", "force"})
 
 
 def _accepts_event_stream(request: Request) -> bool:
@@ -460,7 +481,6 @@ async def responses(
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_compat_payload,
-            codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
@@ -482,6 +502,19 @@ async def responses(
         # compatibility route need the same SSE contract enforcement as /v1.
         enforce_openai_sdk_contract=openai_sdk_request,
     )
+
+
+@router.get("/opportunistic/admission")
+async def opportunistic_admission(
+    request: Request,
+    model: str | None = None,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    denial = await _opportunistic_admission_denial(request, context, api_key, model=model)
+    if denial is not None:
+        return denial
+    return JSONResponse({"admitted": True})
 
 
 @ws_router.websocket("/responses")
@@ -675,8 +708,99 @@ async def v1_usage(
     )
 
 
+async def _run_v1_warmup(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = None,
+    *,
+    mode: str,
+) -> Response:
+    if mode not in _WARMUP_MODES:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                "Invalid warmup mode. Supported values: normal, strict, force.",
+                error_type="invalid_request_error",
+            ),
+        )
+
+    try:
+        result = await context.service.warmup(mode=mode, headers=request.headers, api_key=api_key)
+    except ValueError as exc:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                str(exc),
+                error_type="invalid_request_error",
+            ),
+        )
+
+    response = WarmupResponse(
+        mode=result.mode,
+        total_accounts=result.total_accounts,
+        submitted=[
+            WarmupSubmittedAccount(
+                account_id=entry.account_id,
+                request_id=entry.request_id,
+                model=entry.model,
+            )
+            for entry in result.submitted
+        ],
+        skipped=[
+            WarmupSkippedAccount(
+                account_id=entry.account_id,
+                reason=entry.reason,
+            )
+            for entry in result.skipped
+        ],
+        failed=[
+            WarmupFailedAccount(
+                account_id=entry.account_id,
+                error_code=entry.error_code,
+                error_message=entry.error_message,
+            )
+            for entry in result.failed
+        ],
+    )
+    return JSONResponse(content=response.model_dump(mode="json"))
+
+
+@v1_router.post("/warmup", response_model=WarmupResponse)
+async def v1_warmup(
+    request: Request,
+    payload: WarmupRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _run_v1_warmup(
+        request,
+        context,
+        api_key,
+        mode=payload.mode.strip().lower(),
+    )
+
+
+@v1_router.post("/warmup/{mode}", response_model=WarmupResponse)
+async def v1_warmup_by_mode(
+    request: Request,
+    mode: str,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _run_v1_warmup(
+        request,
+        context,
+        api_key,
+        mode=mode.strip().lower(),
+    )
+
+
 def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse]) -> list[V1UsageLimitResponse]:
-    return [limit for window in ("5h", "7d") if (limit := aggregate_limits.get(window)) is not None]
+    return [limit for window in ("5h", "7d", "monthly") if (limit := aggregate_limits.get(window)) is not None]
 
 
 def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:
@@ -703,19 +827,19 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
 
     key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
     primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
-    secondary_credit_limit = (
-        _select_codex_usage_limit(key_limits, "7d")
-        or _select_codex_usage_limit(key_limits, "weekly")
-        or _select_codex_usage_limit(key_limits, "monthly")
+    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
+        key_limits, "weekly"
     )
+    monthly_credit_limit = _select_codex_usage_limit(key_limits, "monthly")
 
     return RateLimitStatusPayloadData(
         plan_type="api_key",
         rate_limit=_rate_limit_details(
             _codex_usage_window_snapshot(primary_credit_limit),
             _codex_usage_window_snapshot(secondary_credit_limit),
+            _codex_usage_window_snapshot(monthly_credit_limit),
         ),
-        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit),
+        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit, monthly_credit_limit),
     )
 
 
@@ -752,8 +876,9 @@ def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimi
 def _codex_usage_credit_snapshot(
     primary_limit: V1UsageLimitResponse | None,
     secondary_limit: V1UsageLimitResponse | None,
+    monthly_limit: V1UsageLimitResponse | None = None,
 ) -> CreditStatusDetailsData | None:
-    preferred = secondary_limit or primary_limit
+    preferred = monthly_limit or secondary_limit or primary_limit
     if preferred is None or preferred.limit_type != "credits":
         return None
     return CreditStatusDetailsData(
@@ -769,12 +894,18 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     usage_repository = UsageRepository(session)
     primary_latest = await usage_repository.latest_by_account(window="primary")
     secondary_latest = await usage_repository.latest_by_account(window="secondary")
+    monthly_latest = await usage_repository.latest_by_account(window="monthly")
 
     primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
+    monthly_rows = [usage_history_to_window_row(entry) for entry in monthly_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
 
-    account_ids = {row.account_id for row in primary_rows} | {row.account_id for row in secondary_rows}
+    account_ids = (
+        {row.account_id for row in primary_rows}
+        | {row.account_id for row in secondary_rows}
+        | {row.account_id for row in monthly_rows}
+    )
     if not account_ids:
         return {}
 
@@ -785,9 +916,14 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     active_account_ids = set(account_map)
     primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
     secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
+    monthly_rows = [row for row in monthly_rows if row.account_id in active_account_ids]
     limits: dict[str, V1UsageLimitResponse] = {}
 
-    for window_key, rows, label in (("primary", primary_rows, "5h"), ("secondary", secondary_rows, "7d")):
+    for window_key, rows, label in (
+        ("primary", primary_rows, "5h"),
+        ("secondary", secondary_rows, "7d"),
+        ("monthly", monthly_rows, "monthly"),
+    ):
         if not rows:
             continue
         summary = usage_core.summarize_usage_window(rows, account_map, window_key)
@@ -817,7 +953,7 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
     result = await session.execute(
         select(Account).where(
             Account.id.in_(account_ids),
-            Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
+            Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
         )
     )
     return list(result.scalars().all())
@@ -1614,11 +1750,25 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         if not is_public_model(model, allowed_models):
             continue
         items.append(
-            ModelListItem(
-                id=slug,
-                created=created,
-                owned_by="codex-lb",
-                metadata=_to_model_metadata(model),
+            ModelListItem.model_validate(
+                {
+                    "id": slug,
+                    "created": created,
+                    "owned_by": "codex-lb",
+                    "metadata": _to_model_metadata(model),
+                    "api_types": ["chat_completions"],
+                    "capabilities": _v1_model_capabilities(model),
+                    "context_length": _v1_input_context_window(model),
+                    "contextLength": _v1_input_context_window(model),
+                    "max_output_tokens": _v1_max_output_tokens(model),
+                    "maxOutputTokens": _v1_max_output_tokens(model),
+                    "supports_reasoning": _v1_supports_reasoning(model),
+                    "supportsReasoning": _v1_supports_reasoning(model),
+                    "supports_images": _v1_supports_vision(model),
+                    "supportsImages": _v1_supports_vision(model),
+                    "supports_vision": _v1_supports_vision(model),
+                    "supportsVision": _v1_supports_vision(model),
+                }
             )
         )
     await _release_reservation(reservation)
@@ -1626,11 +1776,19 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
-    allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    allowed_models = _canonical_model_set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     if api_key and api_key.enforced_model:
-        forced = {api_key.enforced_model}
+        forced = {_canonical_model_slug(api_key.enforced_model)}
         return forced if allowed_models is None else (allowed_models & forced)
     return allowed_models
+
+
+def _canonical_model_set(models: Iterable[str]) -> set[str]:
+    return {_canonical_model_slug(model) for model in models}
+
+
+def _canonical_model_slug(model: str) -> str:
+    return resolve_model_alias(model) or model
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1716,6 +1874,29 @@ def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
     return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
 
 
+def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
+    return {
+        "context_length": _v1_input_context_window(model),
+        "max_output_tokens": _v1_max_output_tokens(model),
+        "supports_reasoning": _v1_supports_reasoning(model),
+        "supports_images": _v1_supports_vision(model),
+        "supportsImages": _v1_supports_vision(model),
+        "supports_vision": _v1_supports_vision(model),
+        "supports_tool_use": True,
+        "supports_streaming": True,
+        "input_modalities": list(model.input_modalities),
+        "output_modalities": ["text"],
+    }
+
+
+def _v1_supports_reasoning(model: UpstreamModel) -> bool:
+    return bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries
+
+
+def _v1_supports_vision(model: UpstreamModel) -> bool:
+    return "image" in model.input_modalities
+
+
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
@@ -1764,26 +1945,31 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    cursor_compat_client = _is_cursor_compat_client(request, api_key)
     effective_model = _effective_model_for_api_key(api_key, payload.model)
     validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
     try:
-        # Validate strict function tool schemas against the *original* request
-        # ``tools`` list before ``to_responses_request()`` runs. The chat
-        # normalizer (``_normalize_chat_tools``) silently drops invalid
-        # entries (non-dict tools, function tools with missing/empty
-        # ``name``), so validating the normalized output would surface
-        # ``tools[i].function.parameters`` with an ``i`` that no longer maps
-        # to the client's inbound payload. Using ``payload.tools`` keeps the
-        # error envelope's ``param`` aligned with what the client sent.
-        enforce_strict_function_tools_format(
-            payload.tools,
-            param_template="tools[{index}].function.parameters",
-            nested=True,
-        )
+        responses_shaped_payload = not payload.messages and payload.input is not None
+        if not responses_shaped_payload:
+            # Validate strict function tool schemas against the *original* request
+            # ``tools`` list before ``to_responses_request()`` runs. The chat
+            # normalizer (``_normalize_chat_tools``) silently drops invalid
+            # entries (non-dict tools, function tools with missing/empty
+            # ``name``), so validating the normalized output would surface
+            # ``tools[i].function.parameters`` with an ``i`` that no longer maps
+            # to the client's inbound payload. Using ``payload.tools`` keeps the
+            # error envelope's ``param`` aligned with what the client sent.
+            enforce_strict_function_tools_format(
+                payload.tools,
+                param_template="tools[{index}].function.parameters",
+                nested=True,
+            )
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
+        if responses_shaped_payload:
+            enforce_strict_function_tools_format(responses_payload.tools)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
@@ -1791,6 +1977,9 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=responses_payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=responses_payload.model,
@@ -1808,19 +1997,38 @@ async def v1_chat_completions(
         api_key_reservation=reservation,
         suppress_text_done_events=True,
     )
-    stream, startup_error = await _probe_stream_startup_error(stream)
+    startup_probe_timeout = (
+        _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
+        if cursor_compat_client
+        else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
+    )
+    stream, startup_error = await _probe_chat_stream_startup_error(stream, timeout_seconds=startup_probe_timeout)
     if startup_error is not None:
+        if cursor_compat_client and _is_context_length_startup_error(startup_error):
+            await _release_reservation(reservation)
+            if payload.stream:
+                return _cursor_context_limit_usage_stream(
+                    payload,
+                    headers=rate_limit_headers,
+                )
+            return _cursor_context_limit_usage_completion(
+                payload,
+                headers=rate_limit_headers,
+            )
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
-        include_usage = bool(stream_options and stream_options.include_usage)
+        include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
+        chat_stream = stream_chat_chunks(
+            _stream_proxy_errors_as_response_failed(stream),
+            model=responses_payload.model,
+            include_usage=include_usage,
+        )
+        if cursor_compat_client:
+            chat_stream = _stream_with_cursor_usage_fallback(chat_stream, payload)
         return StreamingResponse(
             inject_sse_keepalives(
-                stream_chat_chunks(
-                    _stream_proxy_errors_as_response_failed(stream),
-                    model=responses_payload.model,
-                    include_usage=include_usage,
-                ),
+                chat_stream,
                 get_settings().sse_keepalive_interval_seconds,
             ),
             media_type="text/event-stream",
@@ -1846,6 +2054,8 @@ async def v1_chat_completions(
             content=result.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
+    if cursor_compat_client and isinstance(result, ChatCompletion):
+        _apply_cursor_usage_fallback(result, payload, source="non_stream")
     return JSONResponse(
         content=result.model_dump(mode="json", exclude_none=True),
         status_code=200,
@@ -1875,6 +2085,9 @@ async def _stream_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     owns_reservation = api_key_reservation_override is None
     reservation = (
         api_key_reservation_override
@@ -1952,14 +2165,27 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
+    if not enforce_openai_sdk_contract:
+        stream = _prepend_initial_sse_heartbeat(
+            stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses",
+        )
     return StreamingResponse(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME,
+            keepalive_frame=keepalive_frame,
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            **turn_state_headers,
+            **rate_limit_headers,
+        },
     )
 
 
@@ -1980,6 +2206,9 @@ async def _collect_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -2103,6 +2332,15 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    admission_denial = await _opportunistic_admission_denial(
+        request,
+        context,
+        api_key,
+        model=payload.model,
+        lease_kind="response_create",
+    )
+    if admission_denial is not None:
+        return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -2218,8 +2456,10 @@ async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
-    timeout_seconds: float = _STREAM_STARTUP_ERROR_PROBE_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
+    if timeout_seconds is None:
+        timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
     first_task = asyncio.create_task(_read_first_stream_item(stream))
     try:
         first = await asyncio.wait_for(
@@ -2242,11 +2482,354 @@ async def _probe_stream_startup_error(
     return _prepend_first(first, stream), None
 
 
+_CHAT_COMPLETIONS_STARTUP_EVENT_TYPES: Final[set[str]] = {
+    "response.created",
+    "response.in_progress",
+}
+
+
+def _is_cursor_compat_client(request: Request, api_key: ApiKeyData | None) -> bool:
+    if api_key is not None and api_key.name.strip().lower() == "cursor":
+        return True
+    user_agent = request.headers.get("user-agent", "")
+    return "cursor" in user_agent.lower()
+
+
+def _is_context_length_startup_error(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:
+    code, message = _startup_error_details(error)
+    if code == "context_length_exceeded":
+        return True
+    if message is None:
+        return False
+    normalized = message.lower()
+    return (
+        "context window" in normalized
+        or "input token limit exceeded" in normalized
+        or "token limit exceeded" in normalized
+    )
+
+
+def _startup_error_details(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> tuple[str | None, str | None]:
+    if isinstance(error, ProxyResponseError):
+        return _error_details_from_content(error.payload)
+    return _error_details_from_content(error)
+
+
+def _cursor_context_limit_usage_stream(
+    payload: ChatCompletionsRequest,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> StreamingResponse:
+    """Return a successful empty stream with over-limit usage so Cursor can compact.
+
+    Cursor's custom-provider path wraps provider errors before the agent loop can
+    classify them as its internal InputTokenLimitError. For Cursor only, preserve
+    the original request history and report token usage beyond the advertised
+    model window instead of returning an OpenAI error.
+    """
+    response_id = f"chatcmpl_{time.time_ns()}"
+    created = int(time.time())
+    model = payload.model
+    usage_tokens = _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS
+
+    def sse_data(data: dict[str, JsonValue] | str) -> str:
+        if data == "[DONE]":
+            return "data: [DONE]\n\n"
+        return f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+    async def body() -> AsyncIterator[str]:
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": usage_tokens,
+                    "completion_tokens": 0,
+                    "total_tokens": usage_tokens,
+                },
+            }
+        )
+        yield sse_data("[DONE]")
+
+    return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
+
+
+def _cursor_context_limit_usage_completion(
+    payload: ChatCompletionsRequest,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    response_id = f"chatcmpl_{time.time_ns()}"
+    created = int(time.time())
+    model = payload.model
+    usage_tokens = _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS
+    return JSONResponse(
+        content={
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage_tokens,
+                "completion_tokens": 0,
+                "total_tokens": usage_tokens,
+            },
+        },
+        status_code=200,
+        headers=headers,
+    )
+
+
+async def _stream_with_cursor_usage_fallback(
+    stream: AsyncIterator[str],
+    payload: ChatCompletionsRequest,
+) -> AsyncIterator[str]:
+    prompt_tokens = _estimate_cursor_prompt_tokens(payload)
+    completion_chars = 0
+    async for line in stream:
+        parsed = _parse_chat_completion_sse(line)
+        if parsed is None:
+            yield line
+            continue
+        completion_chars += _chat_completion_delta_chars(parsed)
+        if _is_chat_completion_usage_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
+            completion_tokens = max(1, _estimate_tokens_from_chars(completion_chars))
+            parsed["usage"] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            logger.info(
+                "cursor_usage_fallback source=stream model=%s prompt_tokens=%s completion_tokens=%s",
+                payload.model,
+                prompt_tokens,
+                completion_tokens,
+            )
+            yield f"data: {json.dumps(parsed, separators=(',', ':'))}\n\n"
+            continue
+        yield line
+
+
+def _is_chat_completion_usage_chunk(payload: dict[str, JsonValue]) -> bool:
+    return payload.get("choices") == []
+
+
+def _parse_chat_completion_sse(line: str) -> dict[str, JsonValue] | None:
+    stripped = line.strip()
+    if not stripped.startswith("data:"):
+        return None
+    data = stripped.removeprefix("data:").strip()
+    if data == "[DONE]":
+        return None
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _needs_cursor_usage_fallback(usage: JsonValue) -> bool:
+    if not isinstance(usage, dict):
+        return True
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    return not isinstance(prompt_tokens, int) or prompt_tokens <= 0 or not isinstance(completion_tokens, int)
+
+
+def _apply_cursor_usage_fallback(
+    result: ChatCompletion,
+    payload: ChatCompletionsRequest,
+    *,
+    source: str,
+) -> None:
+    usage = result.usage.model_dump(mode="json", exclude_none=True) if result.usage is not None else None
+    if not _needs_cursor_usage_fallback(usage):
+        return
+    prompt_tokens = _estimate_cursor_prompt_tokens(payload)
+    completion_tokens = max(1, _estimate_tokens_from_chars(_chat_completion_result_chars(result)))
+    result.usage = ChatCompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    logger.info(
+        "cursor_usage_fallback source=%s model=%s prompt_tokens=%s completion_tokens=%s",
+        source,
+        payload.model,
+        prompt_tokens,
+        completion_tokens,
+    )
+
+
+def _estimate_cursor_prompt_tokens(payload: ChatCompletionsRequest) -> int:
+    data = payload.model_dump(mode="json", exclude_none=True)
+    counted: dict[str, JsonValue] = {}
+    for key in ("messages", "input", "instructions", "tools", "tool_choice", "response_format"):
+        value = data.get(key)
+        if value is not None:
+            counted[key] = value
+    message_count = len(data.get("messages", [])) if isinstance(data.get("messages"), list) else 0
+    return max(1, _estimate_tokens_from_chars(_json_text_chars(counted)) + message_count * 4)
+
+
+def _estimate_tokens_from_chars(chars: int) -> int:
+    return (max(0, chars) + 3) // 4
+
+
+def _json_text_chars(value: JsonValue) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(_json_text_chars(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_json_text_chars(item) for item in value.values())
+    return 0
+
+
+def _chat_completion_delta_chars(payload: dict[str, JsonValue]) -> int:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return 0
+    total = 0
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        for key in ("content", "refusal"):
+            value = delta.get(key)
+            if isinstance(value, str):
+                total += len(value)
+        tool_calls = delta.get("tool_calls")
+        if isinstance(tool_calls, list):
+            total += _json_text_chars(tool_calls)
+    return total
+
+
+def _chat_completion_result_chars(result: ChatCompletion) -> int:
+    total = 0
+    for choice in result.choices:
+        message = choice.message
+        if isinstance(message.content, str):
+            total += len(message.content)
+        if isinstance(message.refusal, str):
+            total += len(message.refusal)
+        if message.tool_calls:
+            total += _json_text_chars(
+                [tool_call.model_dump(mode="json", exclude_none=True) for tool_call in message.tool_calls]
+            )
+    return total
+
+
+async def _probe_chat_stream_startup_error(
+    stream: AsyncIterator[str],
+    *,
+    timeout_seconds: float = _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS,
+    max_startup_events: int = 8,
+) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
+    buffered: list[str] = []
+    for _ in range(max_startup_events):
+        first_task = asyncio.create_task(_read_first_stream_item(stream))
+        try:
+            first = await asyncio.wait_for(
+                asyncio.shield(first_task),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        except StopAsyncIteration:
+            return _prepend_items(buffered, _prepend_first(None, stream)), None
+        except ProxyResponseError as exc:
+            return _prepend_items(buffered, _prepend_first(None, stream)), exc
+
+        first_error = _stream_event_error_envelope(first)
+        if first_error is not None:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            return _prepend_first(None, stream), first_error
+
+        payload = _parse_sse_payload(first)
+        event_type = payload.get("type") if payload else None
+        buffered.append(first)
+        if event_type in _CHAT_COMPLETIONS_STARTUP_EVENT_TYPES:
+            continue
+        return _prepend_items(buffered, stream), None
+    return _prepend_items(buffered, stream), None
+
+
+async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    for item in items:
+        yield item
+    async for line in stream:
+        yield line
+
+
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
         yield await first_task
     except StopAsyncIteration:
         return
+    async for line in stream:
+        yield line
+
+
+async def _prepend_initial_sse_heartbeat(
+    stream: AsyncIterator[str],
+    keepalive_frame: str,
+    *,
+    request_id: str | None = None,
+    route_family: str = "responses",
+) -> AsyncIterator[str]:
+    logger.info(
+        "responses_stream_heartbeat request_id=%s route_family=%s stage=initial elapsed_seconds=0.000",
+        request_id,
+        route_family,
+    )
+    yield keepalive_frame
     async for line in stream:
         yield line
 
@@ -2343,7 +2926,13 @@ def _logged_error_json_response(
     *,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    code, message = _error_details_from_content(content)
+    if isinstance(content, OpenAIErrorEnvelopeModel):
+        public_content: Mapping[str, JsonValue] | OpenAIErrorEnvelope = content.model_dump(
+            mode="json", exclude_none=True
+        )
+    else:
+        public_content = content
+    code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
@@ -2355,7 +2944,11 @@ def _logged_error_json_response(
         message,
         category="proxy_error_response",
     )
-    return JSONResponse(status_code=status_code, content=content, headers=effective_headers or None)
+    # codeql[py/stack-trace-exposure] This is an OpenAI-compatible proxy boundary:
+    # upstream/provider error envelopes intentionally preserve diagnostics for
+    # clients, while internal exception handlers construct generic error
+    # envelopes before reaching this response helper.
+    return JSONResponse(status_code=status_code, content=public_content, headers=effective_headers or None)
 
 
 def _error_details_from_content(
@@ -2369,6 +2962,10 @@ def _error_details_from_content(
     if not isinstance(content, Mapping):
         return None, None
     error = content.get("error")
+    if isinstance(error, str):
+        details = content.get("details")
+        message = details.get("detail") if is_json_mapping(details) else None
+        return error, message if isinstance(message, str) else None
     if not is_json_mapping(error):
         return None, None
     error_mapping = error
@@ -2477,6 +3074,34 @@ async def _enforce_request_limits(
             raise ProxyAuthError(str(exc)) from exc
 
 
+async def _opportunistic_admission_denial(
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    model: str | None,
+    lease_kind: Literal["response_create", "stream"] | None = "stream",
+) -> JSONResponse | None:
+    if api_key is None or api_key.traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
+        return None
+    selection = await context.service.check_opportunistic_admission(
+        api_key=api_key,
+        model=_effective_optional_model_for_api_key(api_key, model),
+        lease_kind=lease_kind,
+    )
+    if selection.account is not None:
+        return None
+    message = selection.error_message or "opportunistic burn window closed"
+    if not message.startswith("opportunistic burn window closed"):
+        message = f"opportunistic burn window closed: {message}"
+    return _logged_error_json_response(
+        request,
+        429,
+        openai_error("rate_limit_exceeded", message, error_type="rate_limit_error"),
+        headers={"Retry-After": str(_OPPORTUNISTIC_RETRY_AFTER_SECONDS)},
+    )
+
+
 async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -> None:
     if reservation is None:
         return
@@ -2537,6 +3162,12 @@ async def _finalize_image_reservation(
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
+
+
+def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
     if api_key is None or api_key.enforced_model is None:
         return requested_model
     return api_key.enforced_model
@@ -3446,7 +4077,7 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
         return 429
-    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication"}:
+    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication", "token_invalidated"}:
         return 401
     if error_value and error_value.code == "invalid_request_error":
         return 400

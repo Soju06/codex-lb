@@ -9,10 +9,21 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 
 LOCAL_OVERLOAD_CODE = "proxy_overloaded"
 LOCAL_OVERLOAD_RETRY_AFTER_SECONDS = "5"
+LOCAL_OVERLOAD_CODES = frozenset(
+    {
+        LOCAL_OVERLOAD_CODE,
+        "account_response_create_cap",
+        "account_stream_cap",
+        "bridge_queue_full",
+        "response_create_gate_timeout",
+        "global_admission_timeout",
+        "capacity_exhausted_active_sessions",
+    }
+)
 
 
-def local_overload_error(message: str) -> OpenAIErrorEnvelope:
-    return openai_error(LOCAL_OVERLOAD_CODE, message, error_type="rate_limit_error")
+def local_overload_error(message: str, *, code: str = LOCAL_OVERLOAD_CODE) -> OpenAIErrorEnvelope:
+    return openai_error(code, message, error_type="rate_limit_error")
 
 
 def local_unavailable_error(message: str) -> OpenAIErrorEnvelope:
@@ -20,7 +31,7 @@ def local_unavailable_error(message: str) -> OpenAIErrorEnvelope:
 
 
 def is_local_overload_error_code(code: str | None) -> bool:
-    return code == LOCAL_OVERLOAD_CODE
+    return code in LOCAL_OVERLOAD_CODES
 
 
 def merge_retry_after_headers(

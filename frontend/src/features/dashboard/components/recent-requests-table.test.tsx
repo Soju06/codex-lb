@@ -1,14 +1,28 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
 const ISO = "2026-01-01T12:00:00+00:00";
+const NULL_FAILURE_METADATA = {
+  failurePhase: null,
+  failureDetail: null,
+  failureExceptionType: null,
+  upstreamStatusCode: null,
+  upstreamErrorCode: null,
+  bridgeStage: null,
+};
+const NULL_USERAGENT_METADATA = {
+  useragent: null,
+  useragentGroup: null,
+};
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalIsSecureContext = Object.getOwnPropertyDescriptor(window, "isSecureContext");
 
 vi.mock("sonner", () => ({
   toast: {
@@ -43,10 +57,24 @@ describe("RecentRequestsTable", () => {
     toastError.mockReset();
   });
 
+  afterEach(() => {
+    if (originalClipboard) {
+      Object.defineProperty(navigator, "clipboard", originalClipboard);
+    }
+
+    if (originalIsSecureContext) {
+      Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
+    }
+  });
+
   it("renders rows with status badges and supports request details and copy actions", async () => {
     const longError = "Rate limit reached while processing this request ".repeat(3);
     const writeText = vi.fn().mockResolvedValue(undefined);
 
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -74,6 +102,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Alpha",
             apiKeyId: "key-alpha",
             requestId: "req-1",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: "default",
@@ -83,6 +112,8 @@ describe("RecentRequestsTable", () => {
              status: "rate_limit",
              errorCode: "rate_limit_exceeded",
              errorMessage: longError,
+            ...NULL_FAILURE_METADATA,
+            ...NULL_USERAGENT_METADATA,
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -140,6 +171,78 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
+  it("shows warmup marker only for warmup rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        hasMore
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-normal",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-normal",
+            requestKind: "normal",
+            source: null,
+            ...NULL_FAILURE_METADATA,
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+          {
+            requestedAt: ISO,
+            accountId: "acc-warmup",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-warmup",
+            requestKind: "warmup",
+            source: null,
+            ...NULL_FAILURE_METADATA,
+            model: "gpt-5.1",
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+             status: "ok",
+             errorCode: null,
+             errorMessage: null,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Warmup")).toBeInTheDocument();
+    expect(screen.queryByText("Normal")).not.toBeInTheDocument();
+  });
+
   it("renders placeholder transport for legacy rows", () => {
     render(
       <RecentRequestsTable
@@ -153,15 +256,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-legacy",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: null,
+            ...NULL_USERAGENT_METADATA,
              status: "ok",
              errorCode: null,
              errorMessage: null,
+            ...NULL_FAILURE_METADATA,
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
@@ -193,15 +299,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-error-code",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            ...NULL_USERAGENT_METADATA,
              status: "error",
              errorCode: "upstream_error",
              errorMessage: null,
+            ...NULL_FAILURE_METADATA,
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
@@ -234,15 +343,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Cost",
             apiKeyId: "key-cost",
             requestId: "req-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            ...NULL_USERAGENT_METADATA,
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 1400,
             inputTokens: 1000,
             outputTokens: 400,
@@ -271,6 +383,107 @@ describe("RecentRequestsTable", () => {
     expect(costSection).toHaveTextContent("400 Output ($0.00)");
   });
 
+  it("shows the full user agent in request details when present", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-useragent",
+            planType: "plus",
+            apiKeyName: "Key Agent",
+            apiKeyId: "key-agent",
+            requestId: "req-useragent",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+            useragentGroup: "Mozilla",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const dialogText = dialog.textContent ?? "";
+    const errorCodeIndex = dialogText.indexOf("Error Code");
+    const userAgentIndex = dialogText.indexOf("User Agent");
+
+    expect(within(dialog).getByText("User Agent")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(errorCodeIndex).toBeGreaterThanOrEqual(0);
+    expect(userAgentIndex).toBeGreaterThan(errorCodeIndex);
+  });
+
+  it("shows an em dash for missing user agent in request details", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-no-useragent",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-no-useragent",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const userAgentField = within(dialog).getByText("User Agent").closest("div.space-y-1");
+
+    expect(userAgentField).not.toBeNull();
+    expect(userAgentField).toHaveTextContent("User Agent");
+    expect(userAgentField).toHaveTextContent("—");
+    expect(within(dialog).queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
+  });
+
   it("hides the cost section for non-ok rows", () => {
     render(
       <RecentRequestsTable
@@ -284,15 +497,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-no-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            ...NULL_USERAGENT_METADATA,
             status: "error",
             errorCode: "upstream_error",
             errorMessage: "boom",
+            ...NULL_FAILURE_METADATA,
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
@@ -329,15 +545,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial",
             apiKeyId: "key-partial",
             requestId: "req-partial-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            ...NULL_USERAGENT_METADATA,
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 700,
             inputTokens: 700,
             outputTokens: null,
@@ -379,15 +598,18 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial No Total",
             apiKeyId: "key-partial-no-total",
             requestId: "req-partial-no-total",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            ...NULL_USERAGENT_METADATA,
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: null,
             inputTokens: 1000,
             outputTokens: null,
@@ -416,6 +638,105 @@ describe("RecentRequestsTable", () => {
     expect(costSection).not.toHaveTextContent("Output");
   });
 
+  it("shows the full user agent in request details when present", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-useragent",
+            planType: "plus",
+            apiKeyName: "Key Agent",
+            apiKeyId: "key-agent",
+            requestId: "req-useragent",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+            useragentGroup: "Mozilla",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const dialogText = dialog.textContent ?? "";
+    const errorCodeIndex = dialogText.indexOf("Error Code");
+    const userAgentIndex = dialogText.indexOf("User Agent");
+
+    expect(within(dialog).getByText("User Agent")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36"),
+    ).toBeInTheDocument();
+    expect(errorCodeIndex).toBeGreaterThanOrEqual(0);
+    expect(userAgentIndex).toBeGreaterThan(errorCodeIndex);
+  });
+
+  it("shows an em dash for missing user agent in request details", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-no-useragent",
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-no-useragent",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const userAgentField = within(dialog).getByText("User Agent").closest("div.space-y-1");
+
+    expect(userAgentField).not.toBeNull();
+    expect(userAgentField).toHaveTextContent("User Agent");
+    expect(userAgentField).toHaveTextContent("—");
+  });
+
   it("hides the cost section for total-only cost breakdown rows", () => {
     render(
       <RecentRequestsTable
@@ -429,15 +750,19 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Total Only",
             apiKeyId: "key-total-only",
             requestId: "req-total-only-cost",
+            requestKind: "normal",
             model: "gpt-5.1",
             source: null,
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
+            useragent: null,
+            useragentGroup: null,
             status: "ok",
             errorCode: null,
             errorMessage: null,
+            ...NULL_FAILURE_METADATA,
             tokens: 1500,
             inputTokens: 1000,
             outputTokens: 500,

@@ -4,7 +4,9 @@ import { Settings } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
+import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
+import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
@@ -12,9 +14,10 @@ import { PasswordSettings } from "@/features/settings/components/password-settin
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
+import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useSettings } from "@/features/settings/hooks/use-settings";
+import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -24,13 +27,30 @@ const TotpSettings = lazy(() =>
 
 export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
+  const { accountsQuery } = useAccounts();
+  const {
+    upstreamProxyQuery,
+    createEndpointMutation,
+    createPoolMutation,
+    addPoolMemberMutation,
+  } = useUpstreamProxyAdmin();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
 
   const settings = settingsQuery.data;
-  const busy = updateSettingsMutation.isPending;
-  const error = getErrorMessageOrNull(settingsQuery.error) || getErrorMessageOrNull(updateSettingsMutation.error);
+  const busy =
+    updateSettingsMutation.isPending ||
+    createEndpointMutation.isPending ||
+    createPoolMutation.isPending ||
+    addPoolMemberMutation.isPending;
+  const error =
+    getErrorMessageOrNull(settingsQuery.error) ||
+    getErrorMessageOrNull(upstreamProxyQuery.error) ||
+    getErrorMessageOrNull(updateSettingsMutation.error) ||
+    getErrorMessageOrNull(createEndpointMutation.error) ||
+    getErrorMessageOrNull(createPoolMutation.error) ||
+    getErrorMessageOrNull(addPoolMemberMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
@@ -72,14 +92,29 @@ export function SettingsPage() {
             <RoutingSettings
               key={[
                 settings.openaiCacheAffinityMaxAgeSeconds,
+                settings.warmupModel,
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupCooldownSeconds,
               ].join(":")}
               settings={settings}
+              accounts={accountsQuery.data ?? []}
+              accountsLoading={accountsQuery.isLoading}
               busy={busy}
               onSave={handleSave}
             />
+            {upstreamProxyQuery.data ? (
+              <UpstreamProxySettings
+                admin={upstreamProxyQuery.data}
+                busy={busy}
+                onSaveSettings={handleSave}
+                onCreateEndpoint={(payload) => createEndpointMutation.mutateAsync(payload)}
+                onCreatePool={(payload) => createPoolMutation.mutateAsync(payload)}
+                onAddPoolMember={(poolId, payload) =>
+                  addPoolMemberMutation.mutateAsync({ poolId, payload })
+                }
+              />
+            ) : null}
             <ImportSettings settings={settings} busy={busy} onSave={handleSave} />
             <PasswordSettings disabled={busy} />
             {passwordManagementEnabled ? (
@@ -99,6 +134,7 @@ export function SettingsPage() {
               }
             />
             <FirewallSection />
+            <QuotaPlannerSection />
             <StickySessionsSection />
           </div>
 

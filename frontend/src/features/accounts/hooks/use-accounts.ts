@@ -3,20 +3,28 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
-  exportAccount,
-  exportAccountOpenCodeAuth,
+  exportAccountAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  probeAccount,
   setAccountAlias,
+  updateAccount,
   updateAccountLimitWarmup,
+  updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
+import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
-function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
+function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+  void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+  if (accountId) {
+    void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
+  }
 }
 
 /**
@@ -84,22 +92,15 @@ export function useAccountMutations() {
     },
   });
 
-  const exportMutation = useMutation({
-    mutationFn: exportAccount,
-    onSuccess: (data) => {
-      const blob = new Blob([data.authJson], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "auth.json";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      toast.success("Account exported");
+  const probeMutation = useMutation({
+    mutationFn: ({ accountId, model }: { accountId: string; model?: string }) =>
+      probeAccount(accountId, model ? { model } : undefined),
+    onSuccess: (_data, variables) => {
+      toast.success("Account probed");
+      invalidateAccountRelatedQueries(queryClient, variables.accountId);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Export failed");
+      toast.error(error.message || "Probe failed");
     },
   });
 
@@ -115,13 +116,44 @@ export function useAccountMutations() {
     },
   });
 
-  const exportOpenCodeAuthMutation = useMutation({
-    mutationFn: exportAccountOpenCodeAuth,
+  const routingPolicyMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      routingPolicy,
+    }: {
+      accountId: string;
+      routingPolicy: AccountRoutingPolicy;
+    }) => updateAccountRoutingPolicy(accountId, routingPolicy),
+    onSuccess: (data) => {
+      const label =
+        data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
+      toast.success(`Account routing policy set to ${label}`);
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Routing policy update failed");
+    },
+  });
+
+  const exportAuthMutation = useMutation({
+    mutationFn: exportAccountAuth,
     onSuccess: () => {
-      toast.success("OpenCode auth export generated");
+      toast.success("Account exported");
     },
     onError: (error: Error) => {
       toast.error(error.message || "Export failed");
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
+      updateAccount(accountId, { securityWorkAuthorized }),
+    onSuccess: () => {
+      toast.success("Account updated");
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Update failed");
     },
   });
 
@@ -131,9 +163,11 @@ export function useAccountMutations() {
     resumeMutation,
     setAliasMutation,
     deleteMutation,
-    exportMutation,
+    probeMutation,
+    exportAuthMutation,
     limitWarmupMutation,
-    exportOpenCodeAuthMutation,
+    routingPolicyMutation,
+    updateMutation,
   };
 }
 

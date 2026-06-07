@@ -644,3 +644,59 @@ async def test_durable_bridge_closed_session_purge_drains_multiple_batches(db_se
     assert deleted == 3
     assert bridge_remaining == {"active-batched-session"}
     assert alias_remaining == {"active-batched-session"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_deletes_filtered_chunks_large_match_set(async_client):
+    """Regression test for the codex-lb #787 (D) bug: POST
+    /api/sticky-sessions/delete-filtered used to issue a single
+    DELETE...OR (key=:k AND kind=:t)... statement whose bind-parameter
+    count grew with the match-set size, and trip SQLite's
+    SQLITE_LIMIT_VARIABLE_NUMBER (999 on older libsqlite, 32766 on
+    newer) with a 500 internal_error.
+
+    Insert significantly more rows than the
+    ``_DELETE_ENTRIES_CHUNK_SIZE`` constant guards against (250 pairs ->
+    500 bind parameters per chunk) and assert the endpoint returns 200
+    with the full delete count, proving the chunk loop ran without
+    overflow.
+    """
+
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+
+    bulk_count = 600
+    async with SessionLocal() as session:
+        for i in range(bulk_count):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
+                    VALUES (:key, :account_id, :kind, :timestamp, :timestamp)
+                    """
+                ),
+                {
+                    "key": f"bulk-delete-{i:04d}",
+                    "account_id": accounts[0].id,
+                    "kind": StickySessionKind.STICKY_THREAD.value,
+                    "timestamp": utcnow() - timedelta(seconds=i),
+                },
+            )
+        await session.commit()
+
+    response = await async_client.post(
+        "/api/sticky-sessions/delete-filtered",
+        json={"accountQuery": "sticky-a", "keyQuery": "bulk-delete-"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deletedCount": bulk_count}
+
+    async with SessionLocal() as session:
+        remaining = (
+            await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM sticky_sessions WHERE key LIKE 'bulk-delete-%'",
+                )
+            )
+        ).scalar_one()
+    assert remaining == 0

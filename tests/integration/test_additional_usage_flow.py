@@ -143,9 +143,28 @@ async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
     assert quota["quotaKey"] == "codex_spark"
     assert isinstance(quota["limitName"], str)
     assert quota["displayLabel"] == "GPT-5.3-Codex-Spark"
+    assert quota["routingPolicy"] == "burn_first"
     assert quota["meteredFeature"] == "codex_bengalfox"
     assert quota["primaryWindow"] is not None
     assert quota["primaryWindow"]["usedPercent"] == pytest.approx(55.0)
+
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "additionalQuotaRoutingPolicies": {"codex_spark": "preserve"},
+        },
+    )
+    assert settings_response.status_code == 200
+
+    updated_response = await async_client.get("/api/accounts")
+    assert updated_response.status_code == 200
+    updated_account = next(item for item in updated_response.json()["accounts"] if item["accountId"] == account_id)
+    updated_quota = updated_account["additionalQuotas"][0]
+    assert updated_quota["quotaKey"] == "codex_spark"
+    assert updated_quota["routingPolicy"] == "preserve"
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -30,6 +31,9 @@ from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.service import ReportsService
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
@@ -92,6 +96,12 @@ class RequestLogsContext:
 
 
 @dataclass(slots=True)
+class QuotaPlannerContext:
+    session: AsyncSession
+    repository: QuotaPlannerRepository
+
+
+@dataclass(slots=True)
 class SettingsContext:
     session: AsyncSession
     repository: SettingsRepository
@@ -120,6 +130,13 @@ class StickySessionsContext:
     service: StickySessionsService
 
 
+@dataclass(slots=True)
+class ReportsContext:
+    session: AsyncSession
+    repository: ReportsRepository
+    service: ReportsService
+
+
 def get_accounts_context(
     session: AsyncSession = Depends(get_session),
 ) -> AccountsContext:
@@ -127,7 +144,13 @@ def get_accounts_context(
     usage_repository = UsageRepository(session)
     additional_usage_repository = AdditionalUsageRepository(session)
     limit_warmup_repository = LimitWarmupRepository(session)
-    service = AccountsService(repository, usage_repository, additional_usage_repository, limit_warmup_repository)
+    service = AccountsService(
+        repository,
+        usage_repository,
+        additional_usage_repository,
+        limit_warmup_repository,
+        auth_manager=AuthManager(repository, refresh_repo_factory=_accounts_repo_context),
+    )
     return AccountsContext(
         session=session,
         repository=repository,
@@ -177,6 +200,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             sticky_sessions=StickySessionsRepository(session),
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
+            quota_planner=QuotaPlannerRepository(session),
         )
 
 
@@ -231,6 +255,13 @@ def get_request_logs_context(
     return RequestLogsContext(session=session, repository=repository, service=service)
 
 
+def get_quota_planner_context(
+    session: AsyncSession = Depends(get_session),
+) -> QuotaPlannerContext:
+    repository = QuotaPlannerRepository(session)
+    return QuotaPlannerContext(session=session, repository=repository)
+
+
 def get_settings_context(
     session: AsyncSession = Depends(get_session),
 ) -> SettingsContext:
@@ -267,3 +298,11 @@ def get_sticky_sessions_context(
         settings_repository=settings_repository,
         service=service,
     )
+
+
+def get_reports_context(
+    session: AsyncSession = Depends(get_session),
+) -> ReportsContext:
+    repository = ReportsRepository(session)
+    service = ReportsService(repository)
+    return ReportsContext(session=session, repository=repository, service=service)

@@ -9,12 +9,24 @@ from datetime import datetime, timedelta
 import aiohttp
 from pydantic import ValidationError
 
-from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
+from app.core.auth import (
+    OpenAIAuthClaims,
+    clean_account_identity_part,
+    extract_id_token_claims,
+    normalize_seat_type,
+)
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
+from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import to_utc_naive, utcnow
 
@@ -35,15 +47,27 @@ class TokenRefreshResult:
     account_id: str | None
     plan_type: str | None
     email: str | None
+    workspace_id: str | None = None
+    workspace_label: str | None = None
+    seat_type: str | None = None
 
 
 class RefreshError(Exception):
-    def __init__(self, code: str, message: str, is_permanent: bool, *, transport_error: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        is_permanent: bool,
+        *,
+        transport_error: bool = False,
+        upstream_proxy_fail_closed_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.is_permanent = is_permanent
         self.transport_error = transport_error
+        self.upstream_proxy_fail_closed_reason = upstream_proxy_fail_closed_reason
 
 
 def should_refresh(last_refresh: datetime, now: datetime | None = None) -> bool:
@@ -63,6 +87,9 @@ async def refresh_access_token(
     refresh_token: str,
     *,
     session: aiohttp.ClientSession | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> TokenRefreshResult:
     settings = get_settings()
     url = f"{settings.auth_base_url.rstrip('/')}/oauth/token"
@@ -78,28 +105,48 @@ async def refresh_access_token(
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="token refresh",
+    )
     try:
-        async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-                data = await _safe_json(resp)
-                try:
-                    payload_data = OAuthTokenPayload.model_validate(data)
-                except ValidationError as exc:
-                    logger.warning(
-                        "Token refresh response invalid request_id=%s",
-                        get_request_id(),
-                    )
-                    raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
-                if resp.status >= 400:
-                    logger.warning(
-                        "Token refresh failed request_id=%s status=%s",
-                        get_request_id(),
-                        resp.status,
-                    )
-                    raise _refresh_error_from_payload(payload_data, resp.status)
+        if route is not None:
+            owns_codex_client = codex_client is None
+            active_codex_client = codex_client or CodexClient(create_codex_session())
+            try:
+                resp = await active_codex_client.request(
+                    "POST",
+                    url,
+                    route=route,
+                    json=payload,
+                    headers=headers,
+                    timeout=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds),
+                )
+                data = await _safe_codex_json(resp)
+                status = int(getattr(resp, "status_code", getattr(resp, "status", 0)))
+                payload_data = _validate_token_payload(data)
+                if status >= 400:
+                    logger.warning("Token refresh failed request_id=%s status=%s", get_request_id(), status)
+                    raise _refresh_error_from_payload(payload_data, status)
+            finally:
+                if owns_codex_client:
+                    await active_codex_client.close()
+        else:
+            async with lease_http_session(session) as client_session:
+                async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+                    data = await _safe_json(resp)
+                    payload_data = _validate_token_payload(data)
+                    if resp.status >= 400:
+                        logger.warning(
+                            "Token refresh failed request_id=%s status=%s",
+                            get_request_id(),
+                            resp.status,
+                        )
+                        raise _refresh_error_from_payload(payload_data, resp.status)
     except RefreshError:
         raise
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, CodexTransportError) as exc:
         message = str(exc) or exc.__class__.__name__
         raise RefreshError(
             "transport_error",
@@ -116,6 +163,9 @@ async def refresh_access_token(
     account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
     plan_type = auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type
     email = claims.email
+    workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
+    workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
+    seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
 
     return TokenRefreshResult(
         access_token=payload_data.access_token,
@@ -124,6 +174,9 @@ async def refresh_access_token(
         account_id=account_id,
         plan_type=plan_type,
         email=email,
+        workspace_id=workspace_id,
+        workspace_label=workspace_label,
+        seat_type=seat_type,
     )
 
 
@@ -142,6 +195,35 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
         text = await resp.text()
         return {"error": {"message": text.strip()}}
     return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+
+
+async def _safe_codex_json(resp: object) -> JsonObject:
+    json_method = getattr(resp, "json", None)
+    try:
+        if callable(json_method):
+            data = json_method()
+            if asyncio.iscoroutine(data):
+                data = await data
+        else:
+            text_value = getattr(resp, "text", None)
+            if not isinstance(text_value, str):
+                content = getattr(resp, "content", b"")
+                text_value = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
+            import json
+
+            data = json.loads(text_value)
+    except Exception:
+        text_value = getattr(resp, "text", "")
+        return {"error": {"message": str(text_value).strip()}}
+    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+
+
+def _validate_token_payload(data: JsonObject) -> OAuthTokenPayload:
+    try:
+        return OAuthTokenPayload.model_validate(data)
+    except ValidationError as exc:
+        logger.warning("Token refresh response invalid request_id=%s", get_request_id())
+        raise RefreshError("invalid_response", "Refresh response invalid", False) from exc
 
 
 def _refresh_error_from_payload(payload: OAuthTokenPayload, status_code: int) -> RefreshError:

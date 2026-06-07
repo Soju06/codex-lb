@@ -1,0 +1,21 @@
+# Tasks
+
+- [x] T1: Add `"fill_first"` to the `RoutingStrategy` literal in `app/core/balancer/logic.py`
+- [x] T2: Implement `_select_fill_first(pool)` returning `min(pool, key=(-(used_percent or 0.0), -(secondary_used_percent or 0.0), account_id))` with a clear docstring
+- [x] T3: Add a `fill_first` branch to `select_account()` dispatch, applying `_prefer_earlier_reset_candidates` when `prefer_earlier_reset=True` to mirror the `capacity_weighted` branch
+- [x] T4: Widen Pydantic `routing_strategy` regex in `app/modules/settings/schemas.py` (`DashboardSettingsResponse` and `DashboardSettingsUpdateRequest`) to include `fill_first`
+- [x] T5: Confirm `dashboard_settings.routing_strategy` remains a free-form `String` column in `app/db/models.py`; no alembic migration required (documented in proposal)
+- [x] T6: Extend `_routing_strategy()` in `app/modules/proxy/service.py` to pass `fill_first` through to the load balancer (default falls back to `capacity_weighted` for unknown values)
+- [x] T7: Add `"fill_first"` to `RoutingStrategySchema` in `frontend/src/features/settings/schemas.ts` and align the schema's optional default with the backend (`capacity_weighted`)
+- [x] T8: Add a `<SelectItem value="fill_first">Fill first</SelectItem>` directly under `Capacity weighted` in `frontend/src/features/settings/components/routing-settings.tsx` and widen the `onValueChange` literal cast
+- [x] T9: Add `fill_first: "fill first"` to `ROUTING_LABELS` in `frontend/src/utils/constants.ts`
+- [x] T10: Widen `getRoutingLabel(...)` in `frontend/src/components/layout/status-bar.tsx` to accept `"fill_first"` and return a stable label that composes with sticky / prefer-earlier-reset like the other strategies
+- [x] T11: Update `frontend/src/test/mocks/handlers.ts` to accept `fill_first` in its Zod definition
+- [x] T12: Add unit tests in `tests/unit/test_load_balancer.py` for `select_account` covering: highest primary `used_percent` wins, `account_id` tiebreak, `None` `used_percent` treated as zero, determinism across 50 calls, transitions when the selected account becomes `RATE_LIMITED` / `QUOTA_EXCEEDED` / enters cooldown, healthy-over-draining preference, draining fallback when no healthy account exists, `prefer_earlier_reset=True` filters before ranking, empty-pool error path, and account progression as usage changes
+- [x] T13: Add an integration test in `tests/integration/test_load_balancer_integration.py` (`test_load_balancer_fill_first_cycles_through_accounts`) demonstrating the cycle through `LoadBalancer.select_account(routing_strategy="fill_first")`
+- [x] T14: Add a settings API round-trip test in `tests/integration/test_settings_api.py` proving PUT `/api/settings` with `"routingStrategy": "fill_first"` is persisted and returned by GET, plus a rejection test for unknown strategies
+- [x] T15: Add frontend tests for the new value in `frontend/src/features/settings/schemas.test.ts`, `frontend/src/utils/constants.test.ts`, and `frontend/src/features/settings/components/routing-settings.test.tsx`
+- [x] T16: Update the public `select_account` docstring in `app/core/balancer/logic.py` to list `fill_first` alongside the other strategies
+- [x] T17: Add a spec delta in `openspec/changes/add-fill-first-routing-strategy/specs/proxy-admission-control/spec.md` describing the new routing strategy as a normative requirement (deterministic, highest primary `used_percent`, `account_id` tiebreaker, inherits the `effective_pool` ladder, no random)
+- [x] T18: Verify the existing test suite passes without regression (`uv run pytest tests/unit -q`, frontend `bun run test` rerun after the schema-default change)
+- [ ] T19: Run `openspec validate --specs` clean (deferred to CI; the local `openspec` CLI is not installed in this development environment)

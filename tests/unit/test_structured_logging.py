@@ -8,10 +8,27 @@ import pytest
 from app.core.runtime_logging import (
     JsonFormatter,
     UtcDefaultFormatter,
+    _redact_log_value,
     build_log_config,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_redact_log_value_masks_keyed_secrets_and_bearer_tokens():
+    value = "password=secret-token Authorization: Bearer abc.def api_key=abc123"
+
+    redacted = _redact_log_value(value)
+
+    assert redacted == "password=[REDACTED] Authorization: Bearer [REDACTED] api_key=[REDACTED]"
+
+
+def test_redact_log_value_masks_basic_authorization_credentials():
+    value = "Authorization: Basic dXNlcjpwYXNz, status=failed"
+
+    redacted = _redact_log_value(value)
+
+    assert redacted == "Authorization: [REDACTED], status=failed"
 
 
 @pytest.fixture
@@ -216,4 +233,19 @@ def test_build_log_config_uses_utc_access_formatter_when_text(monkeypatch):
     access_formatter = cast(dict, formatters.get("access", {}))
     assert access_formatter.get("()") == "app.core.runtime_logging.UtcAccessFormatter"
     # Restore
+    get_settings.cache_clear()
+
+
+def test_build_log_config_exposes_app_loggers_via_root_handler(monkeypatch):
+    from typing import cast
+
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "text")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    config = build_log_config()
+    root_logger = cast(dict, config.get("root", {}))
+
+    assert root_logger.get("handlers") == ["default"]
+    assert root_logger.get("level") == "INFO"
     get_settings.cache_clear()

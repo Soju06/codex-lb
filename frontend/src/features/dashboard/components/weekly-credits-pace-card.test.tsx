@@ -42,8 +42,8 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Pace gap")).toBeInTheDocument();
     expect(screen.getByText("50%")).toBeInTheDocument();
     expect(screen.getByText("14%")).toBeInTheDocument();
-    expect(screen.getByText("3.57x recent/scheduled")).toBeInTheDocument();
-    expect(screen.getByText("Recovery options")).toBeInTheDocument();
+    expect(screen.getByText("36% over planned usage")).toBeInTheDocument();
+    expect(screen.getByText("Recommendations")).toBeInTheDocument();
     expect(screen.getByText("Pause")).toBeInTheDocument();
     expect(screen.getByText("2d 12h until reset")).toBeInTheDocument();
     expect(screen.getByText("Throttle")).toBeInTheDocument();
@@ -56,7 +56,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Schedule marker")).toBeInTheDocument();
   });
 
-  it("hides recovery options when the pool is on the safe side of schedule", () => {
+  it("hides recommendations when the pool is on the safe side of schedule", () => {
     render(
       <WeeklyCreditsPaceCard
         pace={{
@@ -78,7 +78,7 @@ describe("WeeklyCreditsPaceCard", () => {
       />,
     );
 
-    expect(screen.queryByText("Recovery options")).not.toBeInTheDocument();
+    expect(screen.queryByText("Recommendations")).not.toBeInTheDocument();
     expect(screen.queryByText("No pause needed")).not.toBeInTheDocument();
     expect(screen.getByText("8% below planned usage")).toBeInTheDocument();
     expect(screen.queryByText("80K credits projected low-water mark")).not.toBeInTheDocument();
@@ -99,7 +99,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("0.53x Pro weekly pool (~1 account)")).toBeInTheDocument();
   });
 
-  it("shows schedule gap without recovery when recent forecast is safe", () => {
+  it("shows recommendations for a current schedule gap even when recent forecast is safe", () => {
     render(
       <WeeklyCreditsPaceCard
         pace={{
@@ -114,13 +114,19 @@ describe("WeeklyCreditsPaceCard", () => {
           proAccountEquivalentToCoverOverPlan: null,
           proAccountsToCoverOverPlan: null,
           forecastBurnRateCreditsPerHour: 0,
+          scheduledBurnRateCreditsPerHour: 1_032,
           status: "ahead",
         }}
       />,
     );
 
-    expect(screen.queryByText("Pause")).not.toBeInTheDocument();
+    expect(screen.getByText("Recommendations")).toBeInTheDocument();
+    expect(screen.getByText("Pause")).toBeInTheDocument();
+    expect(screen.getByText("3h to return to schedule")).toBeInTheDocument();
     expect(screen.queryByText("Throttle")).not.toBeInTheDocument();
+    expect(screen.getByText("Add capacity")).toBeInTheDocument();
+    expect(screen.getByText("0.061x Pro weekly pool (~1 account)")).toBeInTheDocument();
+    expect(screen.getByText("36% over planned usage")).toBeInTheDocument();
     expect(screen.getByText("3.1K credits over planned usage now")).toBeInTheDocument();
     expect(screen.getByText("No weekly shortfall projected at recent pace")).toBeInTheDocument();
   });

@@ -22,8 +22,7 @@ from app.core.openai.requests import ResponsesCompactRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
-from app.modules.proxy._service.compact import _call_with_supported_optional_kwargs
-from app.modules.proxy._service.support import _request_log_useragent_fields
+from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_useragent_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
 

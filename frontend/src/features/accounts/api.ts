@@ -13,6 +13,8 @@ import {
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
   AccountTrendsResponseSchema,
+  AccountProbeRequestSchema,
+  AccountProbeResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
@@ -96,6 +98,15 @@ export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
     AccountTrendsResponseSchema,
+  );
+}
+
+export function probeAccount(accountId: string, payload?: unknown) {
+  const validated = payload === undefined ? undefined : AccountProbeRequestSchema.parse(payload);
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/probe`,
+    AccountProbeResponseSchema,
+    validated ? { body: validated } : undefined,
   );
 }
 

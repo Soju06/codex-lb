@@ -47,6 +47,7 @@ export function AccountListItem({
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
+  const monthly = account.usage?.monthlyRemainingPercent ?? null;
   const hasPrimaryWindow =
     account.windowMinutesPrimary != null ||
     primary !== null ||
@@ -55,12 +56,18 @@ export function AccountListItem({
     account.windowMinutesSecondary != null ||
     secondary !== null ||
     account.resetAtSecondary != null;
+  const hasMonthlyWindow =
+    account.windowMinutesMonthly != null ||
+    monthly !== null ||
+    account.resetAtMonthly != null;
+  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
+  const showMonthlyRow = monthlyOnly;
   const showPrimaryRow =
-    hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
+    !monthlyOnly && hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow =
-    hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+    !monthlyOnly && hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow) + Number(showMonthlyRow);
   const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
-
   const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
@@ -104,9 +111,16 @@ export function AccountListItem({
       <div
         className={cn(
           "mt-2 grid gap-2",
-          showPrimaryRow && showSecondaryRow ? "grid-cols-2" : "grid-cols-1",
+          visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1",
         )}
       >
+        {showMonthlyRow ? (
+          <MiniQuotaRow
+            label="Monthly"
+            percent={monthly}
+            resetAt={account.resetAtMonthly}
+          />
+        ) : null}
         {showPrimaryRow ? (
           <MiniQuotaRow
             label="5h"

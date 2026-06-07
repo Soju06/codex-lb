@@ -14,6 +14,7 @@ export const AccountUsageTrendSchema = z.object({
 export const AccountUsageSchema = z.object({
   primaryRemainingPercent: z.number().nullable(),
   secondaryRemainingPercent: z.number().nullable(),
+  monthlyRemainingPercent: z.number().nullable().optional(),
 });
 
 export const AccountRequestUsageSchema = z.object({
@@ -76,12 +77,16 @@ export const AccountSummarySchema = z.object({
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
+  resetAtMonthly: z.string().datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
+  windowMinutesMonthly: z.number().nullable().optional(),
   capacityCreditsPrimary: z.number().nullable().optional(),
   remainingCreditsPrimary: z.number().nullable().optional(),
   capacityCreditsSecondary: z.number().nullable().optional(),
   remainingCreditsSecondary: z.number().nullable().optional(),
+  capacityCreditsMonthly: z.number().nullable().optional(),
+  remainingCreditsMonthly: z.number().nullable().optional(),
   creditsHas: z.boolean().nullable().optional(),
   creditsUnlimited: z.boolean().nullable().optional(),
   creditsBalance: z.number().nullable().optional(),
@@ -163,6 +168,22 @@ export const AccountAuthExportResponseSchema = z.object({
 
 export const AccountActionResponseSchema = z.object({
   status: z.string(),
+});
+
+export const AccountProbeRequestSchema = z.object({
+  model: z.string().min(1).optional(),
+});
+
+export const AccountProbeResponseSchema = z.object({
+  status: z.string(),
+  accountId: z.string(),
+  probeStatusCode: z.number().int().nullable(),
+  primaryUsedPercentBefore: z.number().nullable(),
+  primaryUsedPercentAfter: z.number().nullable(),
+  secondaryUsedPercentBefore: z.number().nullable(),
+  secondaryUsedPercentAfter: z.number().nullable(),
+  accountStatusBefore: z.string(),
+  accountStatusAfter: z.string(),
 });
 
 export const AccountRoutingPolicySchema = z.enum(["normal", "burn_first", "preserve"]);
@@ -285,6 +306,7 @@ export type AccountAdditionalWindow = z.infer<
 export type AccountAdditionalQuota = z.infer<
   typeof AccountAdditionalQuotaSchema
 >;
+export type AccountProbeResponse = z.infer<typeof AccountProbeResponseSchema>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
 export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;

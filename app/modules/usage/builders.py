@@ -197,6 +197,7 @@ def build_usage_summary_response(
     accounts: list[Account],
     primary_rows: list[UsageWindowRow],
     secondary_rows: list[UsageWindowRow],
+    monthly_rows: list[UsageWindowRow],
     logs_secondary: list[RequestLog],
     metrics_override: UsageMetricsSummary | None = None,
     cost_override: UsageCostSummary | None = None,
@@ -204,6 +205,7 @@ def build_usage_summary_response(
     account_map = {account.id: account for account in accounts}
     primary_window = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
     secondary_window = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
+    monthly_window = usage_core.summarize_usage_window(monthly_rows, account_map, "monthly") if monthly_rows else None
 
     if cost_override is not None:
         cost = cost_override
@@ -212,7 +214,7 @@ def build_usage_summary_response(
 
     metrics = metrics_override if metrics_override is not None else _usage_metrics(logs_secondary)
 
-    payload = usage_core.parse_usage_summary(primary_window, secondary_window, cost, metrics)
+    payload = usage_core.parse_usage_summary(primary_window, secondary_window, monthly_window, cost, metrics)
     return _summary_payload_to_response(payload)
 
 
@@ -352,6 +354,7 @@ def _summary_payload_to_response(payload: UsageSummaryPayload) -> UsageSummaryRe
         secondary_window=(
             build_usage_window_summary_model(payload.secondary_window) if payload.secondary_window else None
         ),
+        monthly_window=(build_usage_window_summary_model(payload.monthly_window) if payload.monthly_window else None),
         cost=_cost_summary_to_model(payload.cost),
         metrics=_metrics_summary_to_model(payload.metrics) if payload.metrics else None,
     )

@@ -107,6 +107,8 @@ class _RequestLogMixin:
         upstream_proxy_endpoint_id: str | None = None,
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> None:
         task = asyncio.create_task(
             self._persist_request_log(
@@ -141,6 +143,8 @@ class _RequestLogMixin:
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             ),
             name=f"proxy-request-log-{request_id}",
         )
@@ -214,6 +218,8 @@ class _RequestLogMixin:
         upstream_proxy_endpoint_id: str | None = None,
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
         try:
@@ -250,6 +256,8 @@ class _RequestLogMixin:
                     upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                     upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                     upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                 )
         except Exception:
             logger.warning(
@@ -273,6 +281,8 @@ class _RequestLogMixin:
         service_tier: str | None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
         upstream_proxy_fail_closed_reason: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -288,4 +298,6 @@ class _RequestLogMixin:
             service_tier=service_tier,
             requested_service_tier=service_tier,
             upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+            useragent=useragent,
+            useragent_group=useragent_group,
         )

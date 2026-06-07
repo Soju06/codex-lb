@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 from typing import Protocol, cast
 
 from app.core import usage as usage_core
@@ -34,6 +35,41 @@ class _RateLimitServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
 
 
+def _has_available_usage_account(
+    *,
+    primary_rows: list[UsageWindowRow],
+    secondary_rows: list[UsageWindowRow],
+    monthly_rows: list[UsageWindowRow],
+    account_map: Mapping[str, Account],
+) -> bool:
+    rows_by_window = {
+        "primary": primary_rows,
+        "secondary": secondary_rows,
+        "monthly": monthly_rows,
+    }
+    rows_by_account: dict[str, dict[str, UsageWindowRow]] = {}
+    for window, rows in rows_by_window.items():
+        for row in rows:
+            rows_by_account.setdefault(row.account_id, {})[window] = row
+
+    for account_id, account in account_map.items():
+        account_rows = rows_by_account.get(account_id)
+        if not account_rows:
+            continue
+
+        known_applicable_used_percents = [
+            float(row.used_percent)
+            for window, row in account_rows.items()
+            if usage_core.capacity_for_plan(account.plan_type, window) is not None and row.used_percent is not None
+        ]
+        if known_applicable_used_percents and all(
+            used_percent < 100.0 for used_percent in known_applicable_used_percents
+        ):
+            return True
+
+    return False
+
+
 class _RateLimitMixin:
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
@@ -52,6 +88,7 @@ class _RateLimitMixin:
                 self._latest_usage_rows(repos, account_map, "primary"),
                 self._latest_usage_rows(repos, account_map, "secondary"),
             )
+            monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,
@@ -64,6 +101,9 @@ class _RateLimitMixin:
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
             if secondary_summary is not None:
                 headers.update(_rate_limit_headers("secondary", secondary_summary))
+            monthly_summary = _summarize_window(monthly_rows, account_map, "monthly")
+            if monthly_summary is not None:
+                headers.update(_rate_limit_headers("monthly", monthly_summary))
 
             headers.update(_credits_headers(await self._latest_usage_entries(repos, account_map)))
         return headers
@@ -82,6 +122,7 @@ class _RateLimitMixin:
                 self._latest_usage_rows(repos, account_map, "primary"),
                 self._latest_usage_rows(repos, account_map, "secondary"),
             )
+            monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
                 secondary_rows_raw,
@@ -89,16 +130,29 @@ class _RateLimitMixin:
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
+            monthly_summary = _summarize_window(monthly_rows, account_map, "monthly")
 
             now_epoch = int(time.time())
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
+            monthly_window = _window_snapshot(monthly_summary, monthly_rows, "monthly", now_epoch)
+            limit_reached = not _has_available_usage_account(
+                primary_rows=primary_rows,
+                secondary_rows=secondary_rows,
+                monthly_rows=monthly_rows,
+                account_map=account_map,
+            )
 
             additional_rate_limits = await self._build_additional_rate_limits(repos, account_map, now_epoch)
 
             return RateLimitStatusPayloadData(
                 plan_type=_plan_type_for_accounts(selected_accounts),
-                rate_limit=_rate_limit_details(primary_window, secondary_window),
+                rate_limit=_rate_limit_details(
+                    primary_window,
+                    secondary_window,
+                    monthly_window,
+                    limit_reached=limit_reached,
+                ),
                 credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
                 additional_rate_limits=additional_rate_limits,
             )
@@ -127,7 +181,15 @@ class _RateLimitMixin:
         if not account_map:
             return []
         latest = await repos.usage.latest_by_account()
-        return [entry for entry in latest.values() if entry.account_id in account_map]
+        entries = [entry for entry in latest.values() if entry.account_id in account_map]
+        seen_accounts = {entry.account_id for entry in entries}
+        missing_accounts = set(account_map) - seen_accounts
+        if not missing_accounts:
+            return entries
+
+        monthly_latest = await repos.usage.latest_by_account(window="monthly")
+        entries.extend(entry for entry in monthly_latest.values() if entry.account_id in missing_accounts)
+        return entries
 
     async def _build_additional_rate_limits(
         self,

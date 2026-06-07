@@ -1,10 +1,49 @@
 from __future__ import annotations
 
-import pytest
+import json
 
-from app.core.clients.proxy import _error_event_from_response, _error_payload_from_response
+import pytest
+from starlette.requests import Request
+
+from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
+from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
 
 pytestmark = pytest.mark.unit
+
+
+def test_logged_error_json_response_preserves_upstream_diagnostic_markers():
+    message = "Provider Exception: failed while reading /tmp/upstream-cache"
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = {"error": {"code": "upstream_error", "message": message}}
+
+    response = _logged_error_json_response(request, 502, payload)
+
+    assert json.loads(bytes(response.body))["error"]["message"] == message
+
+
+@pytest.mark.asyncio
+async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
+    message = "Provider Exception: failed while reading /tmp/upstream-cache"
+
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "upstream_error", "message": message, "type": "server_error"}},
+        )
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+        )
+    ]
+
+    assert len(events) == 1
+    assert message in events[0]
 
 
 def _payload_error_code(payload) -> str | None:

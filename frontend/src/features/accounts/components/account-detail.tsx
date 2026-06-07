@@ -22,6 +22,7 @@ export type AccountDetailProps = {
   busy: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
+  onProbe: (accountId: string) => void;
   onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
@@ -42,6 +43,7 @@ export function AccountDetail({
   busy,
   onPause,
   onResume,
+  onProbe,
   onSetAlias,
   onDelete,
   onReauth,
@@ -136,6 +138,7 @@ export function AccountDetail({
         busy={busy}
         onPause={onPause}
         onResume={onResume}
+        onProbe={onProbe}
         onDelete={onDelete}
         onReauth={onReauth}
         onExportAuth={onExportAuth}

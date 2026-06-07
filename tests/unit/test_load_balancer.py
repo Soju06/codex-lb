@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -27,6 +28,7 @@ from app.modules.proxy.load_balancer import (
     _build_states,
     _extract_credit_status,
     _select_account_preferring_budget_safe,
+    _select_long_window_entry,
     _state_above_sticky_budget_threshold,
     _state_from_account,
     background_recovery_state_from_account,
@@ -1389,12 +1391,13 @@ def _make_test_account(
     status: AccountStatus = AccountStatus.ACTIVE,
     reset_at: int | None = None,
     blocked_at: int | None = None,
+    plan_type: str = "plus",
 ) -> Account:
     return Account(
         id=account_id,
         chatgpt_account_id="chatgpt-" + account_id,
         email=f"{account_id}@test.com",
-        plan_type="plus",
+        plan_type=plan_type,
         access_token_encrypted=b"a",
         refresh_token_encrypted=b"r",
         id_token_encrypted=b"i",
@@ -1440,6 +1443,7 @@ def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(mon
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
     state = _state_from_account(
         account=_make_test_account(status=AccountStatus.ACTIVE),
@@ -1476,6 +1480,199 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
 
     assert state.secondary_used_percent == 0.0
     assert state.secondary_reset_at is None
+
+
+def test_state_from_account_treats_monthly_usage_as_long_window_quota(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="free"),
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            window="monthly",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.secondary_used_percent == 100.0
+    assert state.secondary_reset_at == future_reset
+    assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")
+
+
+def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatch):
+    now = 1_700_000_000.0
+    weekly_reset = int(now + 7 * 24 * 3600)
+    monthly_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.ACTIVE, plan_type="plus")
+
+    selected_entry = _select_long_window_entry(
+        account=account,
+        monthly_entry=_make_test_usage(
+            window="monthly",
+            used_percent=100.0,
+            reset_at=monthly_reset,
+            recorded_at=_epoch_to_naive_utc(now - 120),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=20.0,
+            reset_at=weekly_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+    )
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=5.0,
+            reset_at=int(now + 5 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=300,
+        ),
+        secondary_entry=selected_entry,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.secondary_used_percent == 20.0
+    assert state.secondary_reset_at == weekly_reset
+    assert state.capacity_credits == usage_core.capacity_for_plan("plus", "secondary")
+
+
+def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=10.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+    assert state.reset_at is None
+    assert state.secondary_used_percent == 10.0
+    assert state.secondary_reset_at == future_reset
+
+
+def test_state_from_account_ignores_zero_capacity_primary_for_active_free_account(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.ACTIVE, reset_at=None)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+    assert state.reset_at is None
+
+
+def test_state_from_account_preserves_free_rate_limit_without_weekly_usage_signal(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == future_reset
+
+
+def test_state_from_account_preserves_free_rate_limit_for_legacy_unknown_primary_window(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    account.plan_type = "free"
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=None,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=10.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == future_reset
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
@@ -1970,6 +2167,74 @@ def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(mon
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now - 10),
+        plan_type="free",
+    )
+    fresh_monthly = _make_test_usage(
+        window="monthly",
+        used_percent=40.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=fresh_monthly,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+
+
+def test_background_recovery_state_prefers_fresh_monthly_over_stale_primary(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="free",
+    )
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+        window_minutes=43200,
+    )
+    fresh_monthly = _make_test_usage(
+        window="monthly",
+        used_percent=40.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=fresh_monthly,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+
+
 def test_background_recovery_state_keeps_rate_limited_when_primary_predates_block(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0
@@ -2248,6 +2513,7 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
         accounts=selection_inputs.accounts,
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -2363,6 +2629,7 @@ async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_k
         accounts=selection_inputs.accounts,
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -2421,6 +2688,7 @@ async def test_load_selection_inputs_uses_registry_additional_quota_routing_poli
         accounts=selection_inputs.accounts,
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -2480,6 +2748,7 @@ async def test_load_selection_inputs_inherits_account_policy_for_additional_quot
         accounts=selection_inputs.accounts,
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
         runtime={},
         routing_policy_override=selection_inputs.routing_policy_override,
     )

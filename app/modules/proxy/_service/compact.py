@@ -34,7 +34,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._service.support import _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _RequestLogFailureMetadata, _request_log_useragent_fields
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _owner_lookup_session_id_from_headers,
@@ -373,6 +373,7 @@ class _CompactMixin:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -902,6 +903,8 @@ class _CompactMixin:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",

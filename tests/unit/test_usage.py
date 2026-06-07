@@ -6,11 +6,13 @@ import pytest
 
 from app.core.usage import (
     capacity_for_plan,
+    normalize_rate_limit_windows,
     normalize_usage_window,
     normalize_weekly_only_rows,
     summarize_usage_window,
     used_credits_from_percent,
 )
+from app.core.usage.models import UsageWindow
 from app.core.usage.types import UsageWindowRow, UsageWindowSummary
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -121,3 +123,17 @@ def test_normalize_weekly_only_rows_keeps_newer_secondary():
 
     assert normalized_primary == []
     assert normalized_secondary == [newer_secondary]
+
+
+def test_normalize_rate_limit_windows_promotes_monthly_primary_without_secondary() -> None:
+    primary = UsageWindow(
+        used_percent=5.0,
+        limit_window_seconds=2_592_000,
+        reset_at=1_800_000_000,
+    )
+
+    normalized = normalize_rate_limit_windows(primary, None)
+
+    assert normalized.primary is None
+    assert normalized.secondary is None
+    assert normalized.monthly is primary

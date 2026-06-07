@@ -41,6 +41,7 @@ class DashboardSettingsData:
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
     limit_warmup_min_available_percent: float
+    weekly_pace_working_days: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ class DashboardSettingsUpdateData:
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
     limit_warmup_min_available_percent: float
+    weekly_pace_working_days: str
 
 
 class SettingsService:
@@ -115,6 +117,7 @@ class SettingsService:
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
+            weekly_pace_working_days=row.weekly_pace_working_days,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -154,6 +157,7 @@ class SettingsService:
             limit_warmup_prompt=payload.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
+            weekly_pace_working_days=payload.weekly_pace_working_days,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -189,6 +193,7 @@ class SettingsService:
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
+            weekly_pace_working_days=row.weekly_pace_working_days,
         )
 
 

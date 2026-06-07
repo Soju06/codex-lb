@@ -76,10 +76,12 @@ class QuotaPlannerScheduler:
             accounts = await accounts_repo.list_accounts()
             latest_primary = await usage_repo.latest_by_account()
             latest_secondary = await usage_repo.latest_by_account(window="secondary")
+            latest_monthly = await usage_repo.latest_by_account(window="monthly")
             states, _ = _build_states(
                 accounts=accounts,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
+                latest_monthly=latest_monthly,
                 runtime={},
             )
             now = datetime.now(timezone.utc)

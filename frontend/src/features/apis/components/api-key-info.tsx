@@ -49,7 +49,7 @@ export function ApiKeyInfo({
 	const hasUsage = usage && usage.requestCount > 0;
 
 	return (
-		<div className="space-y-4 rounded-lg border bg-muted/30 p-4">
+		<div className="space-y-4 rounded-lg border bg-muted/30 p-4" data-testid="api-key-info">
 			<h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
 				Key Details
 			</h3>

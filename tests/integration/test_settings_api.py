@@ -72,6 +72,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 3600
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
+    assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
 
     response = await async_client.put(
         "/api/settings",
@@ -103,6 +104,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupPrompt": "Say OK.",
             "limitWarmupCooldownSeconds": 7200,
             "limitWarmupMinAvailablePercent": 99.0,
+            "weeklyPaceWorkingDays": "0,1,2,3,4",
         },
     )
     assert response.status_code == 200
@@ -135,6 +137,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupPrompt"] == "Say OK."
     assert updated["limitWarmupCooldownSeconds"] == 7200
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
+    assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -167,6 +170,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
+    assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
 
 
 @pytest.mark.asyncio
@@ -341,6 +345,16 @@ async def test_settings_api_allows_partial_updates(async_client):
     assert updated["routingStrategy"] == original["routingStrategy"]
     assert updated["upstreamProxyRoutingEnabled"] == original["upstreamProxyRoutingEnabled"]
     assert updated["upstreamProxyDefaultPoolId"] == original["upstreamProxyDefaultPoolId"]
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_invalid_weekly_pace_working_days(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={"weeklyPaceWorkingDays": "0,1,7"},
+    )
+
+    assert response.status_code == 422
 
 
 async def test_upstream_proxy_admin_controls(async_client):

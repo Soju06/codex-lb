@@ -24,6 +24,7 @@ describe("AccountDetail", () => {
         busy={false}
         onPause={vi.fn()}
         onResume={vi.fn()}
+        onProbe={vi.fn()}
         onSetAlias={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
         onReauth={vi.fn()}

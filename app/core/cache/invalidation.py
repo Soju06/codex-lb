@@ -95,7 +95,7 @@ class CacheInvalidationPoller:
                     )
             await session.commit()
         except Exception:
-            logger.warning("cache_invalidation bump failed for %s", namespace, exc_info=True)
+            logger.warning("cache_invalidation bump failed", exc_info=True)
         finally:
             await session.close()
 

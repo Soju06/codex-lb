@@ -464,7 +464,7 @@ describe("AccountList", () => {
       />,
     );
 
-    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
     await user.click(screen.getByRole("option", { name: "Reauth required" }));
 
     expect(screen.queryByText("active@example.com")).not.toBeInTheDocument();

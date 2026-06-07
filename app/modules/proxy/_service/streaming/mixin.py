@@ -638,8 +638,8 @@ class _StreamingMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
             file_required_preferred_account = False
@@ -678,8 +678,8 @@ class _StreamingMixin:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
-                    useragent=useragent,
-                    useragent_group=useragent_group,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                     return
@@ -721,8 +721,8 @@ class _StreamingMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
-                            useragent=useragent,
-                            useragent_group=useragent_group,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -798,8 +798,8 @@ class _StreamingMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -828,8 +828,8 @@ class _StreamingMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     if last_security_work_retry_error is not None:
@@ -856,8 +856,8 @@ class _StreamingMixin:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -881,8 +881,8 @@ class _StreamingMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
-                    useragent=useragent,
-                    useragent_group=useragent_group,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     return
 
@@ -919,8 +919,8 @@ class _StreamingMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
-                    useragent=useragent,
-                    useragent_group=useragent_group,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     return
                 try:
@@ -944,8 +944,8 @@ class _StreamingMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -965,8 +965,8 @@ class _StreamingMixin:
                             service_tier=payload.service_tier,
                             transport=request_transport,
                             upstream_proxy_fail_closed_reason=exc.reason,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_proxy_unavailable",
@@ -1013,8 +1013,8 @@ class _StreamingMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -1046,8 +1046,8 @@ class _StreamingMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -1347,8 +1347,8 @@ class _StreamingMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
-                            useragent=useragent,
-                            useragent_group=useragent_group,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1400,8 +1400,8 @@ class _StreamingMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
-                            useragent=useragent,
-                            useragent_group=useragent_group,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -1431,8 +1431,8 @@ class _StreamingMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
-                            useragent=useragent,
-                            useragent_group=useragent_group,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1670,8 +1670,8 @@ class _StreamingMixin:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
-                    useragent=useragent,
-                    useragent_group=useragent_group,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
@@ -1706,8 +1706,8 @@ class _StreamingMixin:
                     transport=request_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
-                useragent=useragent,
-                useragent_group=useragent_group,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                 )
         finally:
             for account_lease in account_leases:
@@ -2265,8 +2265,8 @@ class _StreamingMixin:
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
-            useragent=useragent,
-            useragent_group=useragent_group,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",

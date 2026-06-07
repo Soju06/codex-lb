@@ -3270,8 +3270,8 @@ class _WebSocketMixin:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
-            useragent=request_state.useragent,
-            useragent_group=request_state.useragent_group,
+                useragent=request_state.useragent,
+                useragent_group=request_state.useragent_group,
             )
 
     async def _write_websocket_connect_failure(
@@ -3310,8 +3310,8 @@ class _WebSocketMixin:
                 request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
             ),
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
-        useragent=request_state.useragent,
-        useragent_group=request_state.useragent_group,
+            useragent=request_state.useragent,
+            useragent_group=request_state.useragent_group,
         )
 
     async def _emit_websocket_connect_failure(
@@ -3510,8 +3510,8 @@ class _WebSocketMixin:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
-            useragent=request_state.useragent,
-            useragent_group=request_state.useragent_group,
+                useragent=request_state.useragent,
+                useragent_group=request_state.useragent_group,
             )
 
     async def _emit_websocket_terminal_error(

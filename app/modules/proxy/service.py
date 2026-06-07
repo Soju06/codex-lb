@@ -2240,6 +2240,7 @@ class ProxyService:
     ) -> CompactResponsePayload:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -2769,6 +2770,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",
@@ -2802,6 +2805,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
     ) -> dict[str, JsonValue]:
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -3085,6 +3089,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
 
     async def codex_control_request(
@@ -3099,6 +3105,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
     ) -> CodexControlResponse:
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -3380,6 +3387,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
 
     async def warmup(
@@ -3513,6 +3522,7 @@ class ProxyService:
         allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         live_account = _materialize_warmup_account(account)
         request_id = str(uuid4())
         upstream_headers = {
@@ -3604,6 +3614,8 @@ class ProxyService:
                     reasoning_tokens=reasoning_tokens,
                     transport=_REQUEST_TRANSPORT_HTTP,
                     request_kind="warmup",
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                 )
             finally:
                 await self._release_websocket_reservation(reservation)
@@ -3628,6 +3640,7 @@ class ProxyService:
         api_key: ApiKeyData | None = None,
     ) -> dict[str, JsonValue]:
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -3887,6 +3900,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
 
     # File-account pin TTL: long enough to cover a slow client-side
@@ -4163,6 +4178,7 @@ class ProxyService:
         fails closed when the owner account is unavailable.
         """
         filtered = filter_inbound_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -4429,6 +4445,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=route_endpoint_id,
                 upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
 
     async def proxy_responses_websocket(
@@ -4441,6 +4459,7 @@ class ProxyService:
         api_key: ApiKeyData | None,
     ) -> None:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         runtime_settings = get_settings()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -4595,6 +4614,8 @@ class ProxyService:
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                     api_key=api_key,
                                     continuity_state=continuity_state,
+                                    useragent=useragent,
+                                    useragent_group=useragent_group,
                                 )
                                 if await _websocket_full_replay_should_wait_for_continuity(
                                     prepared_request.request_state,
@@ -4627,6 +4648,8 @@ class ProxyService:
                                         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                         api_key=api_key,
                                         continuity_state=continuity_state,
+                                        useragent=useragent,
+                                        useragent_group=useragent_group,
                                     )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
@@ -5059,6 +5082,8 @@ class ProxyService:
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
         continuity_state: "_WebSocketContinuityState | None" = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
@@ -5163,6 +5188,8 @@ class ProxyService:
         except ProxyResponseError:
             await self._release_websocket_reservation(reservation)
             raise
+        request_state.useragent = useragent
+        request_state.useragent_group = useragent_group
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
@@ -5297,7 +5324,7 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
-        return self._prepare_response_bridge_request_state(
+        request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
@@ -5308,6 +5335,8 @@ class ProxyService:
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
+        request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        return request_state, text_data
 
     def _prepare_response_bridge_request_state(
         self,
@@ -5574,6 +5603,8 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
+        if request_state.useragent is None and request_state.useragent_group is None:
+            request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         base_settings = get_settings()
         max_attempts = _WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
@@ -11052,6 +11083,8 @@ class ProxyService:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+                useragent=request_state.useragent,
+                useragent_group=request_state.useragent_group,
             )
 
     async def _write_websocket_connect_failure(
@@ -11088,6 +11121,8 @@ class ProxyService:
                 request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
             ),
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+            useragent=request_state.useragent,
+            useragent_group=request_state.useragent_group,
         )
 
     async def _emit_websocket_connect_failure(
@@ -11278,6 +11313,8 @@ class ProxyService:
                     request_state.upstream_proxy_fallback_used if request_state.upstream_proxy_endpoint_id else None
                 ),
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
+                useragent=request_state.useragent,
+                useragent_group=request_state.useragent_group,
             )
 
     async def _emit_websocket_terminal_error(
@@ -11783,6 +11820,7 @@ class ProxyService:
         rewritten_file_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
     ) -> AsyncIterator[str]:
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         request_id = ensure_request_id()
         start = time.monotonic()
         base_settings = get_settings()
@@ -11902,6 +11940,8 @@ class ProxyService:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
             file_required_preferred_account = False
@@ -11940,6 +11980,8 @@ class ProxyService:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     yield format_sse_event(_proxy_request_timeout_event(request_id))
                     return
@@ -11981,6 +12023,8 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -12056,6 +12100,8 @@ class ProxyService:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -12084,6 +12130,8 @@ class ProxyService:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     if last_security_work_retry_error is not None:
@@ -12110,6 +12158,8 @@ class ProxyService:
                             transport=request_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -12133,6 +12183,8 @@ class ProxyService:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     return
 
@@ -12169,6 +12221,8 @@ class ProxyService:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                     return
                 try:
@@ -12192,6 +12246,8 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -12211,6 +12267,8 @@ class ProxyService:
                             service_tier=payload.service_tier,
                             transport=request_transport,
                             upstream_proxy_fail_closed_reason=exc.reason,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_proxy_unavailable",
@@ -12257,6 +12315,8 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -12288,6 +12348,8 @@ class ProxyService:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
                         )
                         yield format_sse_event(_proxy_request_timeout_event(request_id))
                         return
@@ -12584,6 +12646,8 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -12635,6 +12699,8 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -12664,6 +12730,8 @@ class ProxyService:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
                             )
                             yield format_sse_event(_proxy_request_timeout_event(request_id))
                             return
@@ -12897,6 +12965,8 @@ class ProxyService:
                         transport=request_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
@@ -12931,6 +13001,8 @@ class ProxyService:
                     transport=request_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                 )
         finally:
             for account_lease in account_leases:
@@ -12979,6 +13051,7 @@ class ProxyService:
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
+        useragent, useragent_group = _request_log_useragent_fields(headers)
         start = time.monotonic()
         status = "success"
         error_code = None
@@ -13475,6 +13548,8 @@ class ProxyService:
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                useragent=useragent,
+                useragent_group=useragent_group,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",
@@ -13510,6 +13585,8 @@ class ProxyService:
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         bridge_stage: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
         request_kind: str = "normal",
         upstream_proxy_route_mode: str | None = None,
         upstream_proxy_pool_id: str | None = None,
@@ -13544,6 +13621,8 @@ class ProxyService:
                 upstream_status_code=upstream_status_code,
                 upstream_error_code=upstream_error_code,
                 bridge_stage=bridge_stage,
+                useragent=useragent,
+                useragent_group=useragent_group,
                 request_kind=request_kind,
                 upstream_proxy_route_mode=upstream_proxy_route_mode,
                 upstream_proxy_pool_id=upstream_proxy_pool_id,
@@ -13616,6 +13695,8 @@ class ProxyService:
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         bridge_stage: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
         request_kind: str = "normal",
         upstream_proxy_route_mode: str | None = None,
         upstream_proxy_pool_id: str | None = None,
@@ -13657,6 +13738,8 @@ class ProxyService:
                     upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                     upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                     upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
                 )
         except Exception:
             logger.warning(
@@ -13680,6 +13763,8 @@ class ProxyService:
         service_tier: str | None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
         upstream_proxy_fail_closed_reason: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -13695,6 +13780,8 @@ class ProxyService:
             service_tier=service_tier,
             requested_service_tier=service_tier,
             upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+            useragent=useragent,
+            useragent_group=useragent_group,
         )
 
     async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
@@ -14653,6 +14740,8 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    useragent: str | None = None
+    useragent_group: str | None = None
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
@@ -15370,6 +15459,18 @@ def _normalize_session_id(session_id: str | None) -> str | None:
         return None
     stripped = session_id.strip()
     return stripped or None
+
+
+def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
+    raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
+    if raw_useragent is None:
+        return None, None
+    useragent = raw_useragent.strip()
+    if not useragent:
+        return None, None
+    first_token = useragent.split(maxsplit=1)[0]
+    useragent_group = first_token.split("/", 1)[0].strip() or None
+    return useragent, useragent_group
 
 
 def _websocket_precreated_retry_error_code(

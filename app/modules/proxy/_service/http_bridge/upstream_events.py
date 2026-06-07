@@ -704,12 +704,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
         normalize_error_event = (
-            terminal_request_state is None
-            or terminal_request_state.enforce_openai_sdk_contract
-        ) and (
-            matched_request_state is None
-            or matched_request_state.enforce_openai_sdk_contract
-        )
+            terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
+        ) and (matched_request_state is None or matched_request_state.enforce_openai_sdk_contract)
         if event_type == "error" and normalize_error_event:
             http_status = _http_error_status_from_payload(payload)
             if status_request_state is not None:

@@ -65,6 +65,32 @@ ALLOWED_SERVICE_INTERNAL_IMPORTS = {
     "app.modules.proxy._service.support",
 }
 
+# The proxy decomposition still has a few deliberate shared-module couplings while
+# the large websocket/HTTP/streaming slices are being split across stacked PRs.
+# Keep this allowlist explicit so the recursive ratchet below detects any new
+# cross-domain dependency instead of silently ignoring subpackages.
+ALLOWED_SERVICE_IMPORT_DOMAINS_BY_DOMAIN = {
+    "api_key_usage": {"support"},
+    "codex_control": {"support"},
+    "compact": {"support"},
+    "file_ops": {"support"},
+    "http_bridge": {"api_key_usage", "compact", "http_bridge", "observability", "support", "warmup"},
+    "response_create": {"support"},
+    "streaming": {
+        "api_key_usage",
+        "compact",
+        "http_bridge",
+        "observability",
+        "streaming",
+        "support",
+        "warmup",
+        "websocket",
+    },
+    "transcribe": {"support"},
+    "warmup": {"support"},
+    "websocket": {"api_key_usage", "compact", "http_bridge", "observability", "support", "warmup", "websocket"},
+}
+
 
 def _parse(path: Path) -> ast.Module:
     return ast.parse(path.read_text(), filename=str(path))
@@ -162,22 +188,40 @@ def _check_required_service_modules() -> None:
         raise AssertionError("missing required proxy _service modules: " + ", ".join(missing))
 
 
+def _service_domain(path: Path) -> str:
+    relative = path.relative_to(SERVICE_PACKAGE_DIR)
+    if len(relative.parts) == 1:
+        return path.stem
+    return relative.parts[0]
+
+
+def _imported_service_domain(imported_module: str) -> str | None:
+    prefix = "app.modules.proxy._service."
+    if not imported_module.startswith(prefix):
+        return None
+    return imported_module.removeprefix(prefix).split(".", 1)[0]
+
+
 def _check_no_cross_domain_service_imports() -> None:
-    for path in SERVICE_PACKAGE_DIR.glob("*.py"):
-        if path.name in {"__init__.py", "support.py"}:
+    for path in SERVICE_PACKAGE_DIR.rglob("*.py"):
+        if path.name == "__init__.py" or path == SERVICE_PACKAGE_DIR / "support.py":
             continue
+        current_domain = _service_domain(path)
+        allowed_domains = ALLOWED_SERVICE_IMPORT_DOMAINS_BY_DOMAIN.get(current_domain, {current_domain, "support"})
         module = _parse(path)
         for node in ast.walk(module):
             if not isinstance(node, ast.ImportFrom):
                 continue
             imported_module = node.module or ""
-            if not imported_module.startswith("app.modules.proxy._service."):
+            imported_domain = _imported_service_domain(imported_module)
+            if imported_domain is None:
                 continue
-            if imported_module not in ALLOWED_SERVICE_INTERNAL_IMPORTS:
-                raise AssertionError(
-                    f"{path.relative_to(ROOT)} imports cross-domain module {imported_module}; "
-                    "depend on support/protocols instead"
-                )
+            if imported_module in ALLOWED_SERVICE_INTERNAL_IMPORTS or imported_domain in allowed_domains:
+                continue
+            raise AssertionError(
+                f"{path.relative_to(ROOT)} imports cross-domain module {imported_module}; "
+                f"allowed domains for {current_domain}: {', '.join(sorted(allowed_domains))}"
+            )
 
 
 def main() -> int:

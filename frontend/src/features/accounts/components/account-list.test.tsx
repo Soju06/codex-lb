@@ -221,6 +221,187 @@ describe("AccountList", () => {
     ).toEqual(["Early", "Late"]);
   });
 
+  it("sorts accounts by name", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-z",
+            email: "z@example.com",
+            displayName: "Zeta",
+            planType: "pro",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:30:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-a",
+            email: "a@example.com",
+            displayName: "Alpha",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        sortMode="name_asc"
+        onSortModeChange={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Alpha|Zeta)$/).map((el) => el.textContent)).toEqual([
+      "Alpha",
+      "Zeta",
+    ]);
+  });
+
+  it("supports reverse name sorting", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-b",
+            email: "b@example.com",
+            displayName: "Beta",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-a",
+            email: "a@example.com",
+            displayName: "Alpha",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:20:00.000Z",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        sortMode="name_desc"
+        onSortModeChange={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Alpha|Beta)$/).map((el) => el.textContent)).toEqual([
+      "Beta",
+      "Alpha",
+    ]);
+  });
+
+  it("can sort by latest reset first", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-a",
+            email: "a@example.com",
+            displayName: "Alpha",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-z",
+            email: "z@example.com",
+            displayName: "Zeta",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:40:00.000Z",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        sortMode="reset_latest"
+        onSortModeChange={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Zeta|Alpha)$/).map((el) => el.textContent)).toEqual([
+      "Zeta",
+      "Alpha",
+    ]);
+  });
+
+  it("keeps unknown resets last when sorting by latest reset", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-unknown",
+            email: "unknown@example.com",
+            displayName: "Unknown",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-stale",
+            email: "stale@example.com",
+            displayName: "Stale",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T11:30:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-latest",
+            email: "latest@example.com",
+            displayName: "Latest",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:40:00.000Z",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-earlier",
+            email: "earlier@example.com",
+            displayName: "Earlier",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            resetAtPrimary: "2026-01-01T12:10:00.000Z",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+        sortMode="reset_latest"
+        onSortModeChange={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText(/^(Latest|Earlier|Stale|Unknown)$/).map((el) => el.textContent)).toEqual([
+      "Latest",
+      "Earlier",
+      "Stale",
+      "Unknown",
+    ]);
+  });
+
   it("shows empty state when no items match filter", async () => {
     const user = userEvent.setup();
 
@@ -283,7 +464,7 @@ describe("AccountList", () => {
       />,
     );
 
-    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
     await user.click(screen.getByRole("option", { name: "Reauth required" }));
 
     expect(screen.queryByText("active@example.com")).not.toBeInTheDocument();

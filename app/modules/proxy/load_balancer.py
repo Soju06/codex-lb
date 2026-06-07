@@ -34,6 +34,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.metrics.prometheus import (
@@ -82,6 +83,8 @@ _RECOVERABLE_STATUSES = frozenset(
         AccountStatus.QUOTA_EXCEEDED,
     }
 )
+
+_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -145,6 +148,7 @@ class _SelectionInputs:
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
+    latest_monthly: dict[str, UsageHistory]
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -322,6 +326,8 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly=selection_inputs.latest_monthly,
+                        quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
@@ -330,6 +336,7 @@ class LoadBalancer:
                     accounts=authorized_accounts,
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    latest_monthly=selection_inputs.latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -346,6 +353,8 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly=selection_inputs.latest_monthly,
+                        quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
@@ -354,6 +363,7 @@ class LoadBalancer:
                     accounts=filtered_accounts,
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
+                    latest_monthly=selection_inputs.latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -398,6 +408,7 @@ class LoadBalancer:
                         accounts=selection_inputs.accounts,
                         latest_primary=selection_inputs.latest_primary,
                         latest_secondary=selection_inputs.latest_secondary,
+                        latest_monthly=selection_inputs.latest_monthly,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -577,6 +588,7 @@ class LoadBalancer:
                         accounts=selection_inputs.accounts,
                         latest_primary=selection_inputs.latest_primary,
                         latest_secondary=selection_inputs.latest_secondary,
+                        latest_monthly=selection_inputs.latest_monthly,
                         runtime=self._runtime,
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -821,6 +833,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -833,6 +846,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -844,6 +858,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    latest_monthly={},
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
@@ -868,6 +883,7 @@ class LoadBalancer:
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
+                        latest_monthly={},
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=additional_filter.error_message,
@@ -882,6 +898,7 @@ class LoadBalancer:
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
+                    latest_monthly={},
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
@@ -890,9 +907,10 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
-            standard_latest_primary, standard_latest_secondary = await asyncio.gather(
+            standard_latest_primary, standard_latest_secondary, latest_monthly = await asyncio.gather(
                 repos.usage.latest_by_account(),
                 repos.usage.latest_by_account(window="secondary"),
+                repos.usage.latest_by_account(window="monthly"),
             )
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
@@ -932,6 +950,9 @@ class LoadBalancer:
                 },
                 latest_secondary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
+                },
+                latest_monthly={
+                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
@@ -974,6 +995,7 @@ class LoadBalancer:
                 accounts=selection_inputs.accounts,
                 latest_primary=selection_inputs.latest_primary,
                 latest_secondary=selection_inputs.latest_secondary,
+                latest_monthly=selection_inputs.latest_monthly,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -1632,6 +1654,7 @@ def _build_states(
     accounts: Iterable[Account],
     latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
+    latest_monthly: Mapping[str, UsageHistory],
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
@@ -1640,10 +1663,17 @@ def _build_states(
     account_map: dict[str, Account] = {}
 
     for account in accounts:
+        secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
+        if account.id not in ignore_standard_quota_account_ids:
+            secondary_entry = _select_long_window_entry(
+                account=account,
+                monthly_entry=latest_monthly.get(account.id),
+                secondary_entry=secondary_entry,
+            )
         state = _state_from_account(
             account=account,
             primary_entry=latest_primary.get(account.id),
-            secondary_entry=latest_secondary.get(account.id),
+            secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
@@ -1783,6 +1813,12 @@ def _state_from_account(
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
+    if (
+        effective_secondary_entry is not None
+        and effective_secondary_entry.window == "monthly"
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
+    ):
+        effective_secondary_entry = None
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
     secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
     # Weekly-only accounts may not emit a dedicated secondary row; treat the
@@ -1816,9 +1852,35 @@ def _state_from_account(
             secondary_used = 0.0
             secondary_reset = None
 
+    ignore_zero_capacity_primary_runtime_reset = False
+    status_seed = account.status
+    long_window_quota_available = (
+        effective_secondary_entry is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and effective_secondary_entry.used_percent is not None
+        and float(effective_secondary_entry.used_percent) < 100.0
+    )
+    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
+        account.status != AccountStatus.RATE_LIMITED
+        or (
+            primary_window_minutes is not None
+            and not usage_core.is_primary_window_minutes(primary_window_minutes)
+            and long_window_quota_available
+        )
+        or (primary_entry is None and long_window_quota_available)
+    ):
+        primary_used = None
+        primary_reset = None
+        primary_window_minutes = None
+        ignore_zero_capacity_primary_runtime_reset = account.status == AccountStatus.RATE_LIMITED
+        if account.status == AccountStatus.RATE_LIMITED:
+            status_seed = AccountStatus.ACTIVE
+
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
-    db_reset_at = float(account.reset_at) if account.reset_at else None
+    db_reset_at = (
+        None if ignore_zero_capacity_primary_runtime_reset else (float(account.reset_at) if account.reset_at else None)
+    )
     effective_runtime_reset = db_reset_at or runtime.reset_at
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
@@ -1856,7 +1918,11 @@ def _state_from_account(
         if account.status == AccountStatus.QUOTA_EXCEEDED:
             freshness_entry = effective_secondary_entry
         elif account.status == AccountStatus.RATE_LIMITED:
-            freshness_entry = primary_entry
+            freshness_entry = _rate_limited_freshness_entry(
+                account=account,
+                primary_entry=primary_entry,
+                long_window_entry=effective_secondary_entry,
+            )
         else:
             freshness_entry = None
         if freshness_entry and freshness_entry.recorded_at is not None:
@@ -1865,7 +1931,7 @@ def _state_from_account(
                 effective_runtime_reset = None
 
     status, used_percent, reset_at = apply_usage_quota(
-        status=account.status,
+        status=status_seed,
         primary_used=primary_used,
         primary_reset=primary_reset,
         primary_window_minutes=primary_window_minutes,
@@ -1924,7 +1990,10 @@ def _state_from_account(
         settings, "proxy_account_inflight_penalty_pct", 2.5
     )
     leased_token_pressure_pct = 0.0
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, "secondary") or 0.0
+    long_window_key = "secondary"
+    if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
+        long_window_key = "monthly"
+    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
         leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
@@ -1987,8 +2056,13 @@ def background_recovery_state_from_account(
         runtime=runtime,
     )
     if account.status == AccountStatus.RATE_LIMITED:
+        freshness_entry = _rate_limited_freshness_entry(
+            account=account,
+            primary_entry=primary_entry,
+            long_window_entry=secondary_entry,
+        )
         if blocked_at is not None and reset_at is not None and reset_at <= time.time():
-            if not _usage_entry_recorded_after_block(primary_entry, blocked_at):
+            if not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -1997,7 +2071,7 @@ def background_recovery_state_from_account(
                     cooldown_until=reset_at,
                 )
         elif blocked_at is None and reset_at is not None and reset_at <= time.time():
-            if not _usage_entry_is_recent_available(primary_entry):
+            if not _usage_entry_is_recent_available(freshness_entry):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2016,7 +2090,35 @@ def background_recovery_state_from_account(
     return state
 
 
-def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:
+def _select_long_window_entry(
+    *,
+    account: Account,
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+) -> UsageHistory | AdditionalUsageHistory | None:
+    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    return secondary_entry
+
+
+def _rate_limited_freshness_entry(
+    *,
+    account: Account,
+    primary_entry: _UsageWindowEntry | None,
+    long_window_entry: _UsageWindowEntry | None,
+) -> _UsageWindowEntry | None:
+    if (
+        long_window_entry is not None
+        and long_window_entry.window == "monthly"
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+    ):
+        return long_window_entry
+    if primary_entry is not None:
+        return primary_entry
+    return None
+
+
+def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
     return (
         entry is not None
         and _usage_entry_is_recent_enough(entry.recorded_at)
@@ -2025,7 +2127,7 @@ def _usage_entry_is_recent_available(entry: UsageHistory | None) -> bool:
     )
 
 
-def _usage_entry_recorded_after_block(entry: UsageHistory | None, blocked_at: float) -> bool:
+def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_at: float) -> bool:
     if entry is None or entry.recorded_at is None:
         return False
     recorded_at = entry.recorded_at
@@ -2060,9 +2162,14 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
     current_time = utcnow()
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=timezone.utc)
-    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
+
+
+def _usage_refresh_interval_seconds() -> int:
+    settings = config_settings.get_settings()
+    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
@@ -2121,6 +2228,11 @@ def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageH
     return UsageHistory(**data)
 
 
+def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
+    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
+    return UsageHistory(**data)
+
+
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
@@ -2129,6 +2241,10 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         },
         latest_secondary={
             account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+        },
+        latest_monthly={
+            account_id: _clone_standard_usage_history(entry)
+            for account_id, entry in selection_inputs.latest_monthly.items()
         },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
@@ -2168,10 +2284,8 @@ async def _latest_additional_by_key(
 
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
-    from app.core.config.settings import get_settings  # noqa: PLC0415
-
     current_time = now or utcnow()
-    interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
+    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
     return current_time - timedelta(seconds=interval_seconds)
 
 

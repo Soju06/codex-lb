@@ -837,3 +837,97 @@ async def test_request_logs_repository_filters(db_setup):
         assert len(results) == 1
         assert results[0].error_code == "rate_limit_exceeded"
         assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_request_logs_repository_persists_useragent_fields(db_setup):
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        await repo.add_log(
+            account_id=None,
+            request_id="req_useragent_full",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=7,
+            latency_ms=42,
+            status="success",
+            error_code=None,
+            useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+            useragent_group="opencode",
+        )
+
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_full"))
+        stored = result.scalar_one()
+        assert stored.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+        assert stored.useragent_group == "opencode"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_repository_preserves_null_useragent_fields(db_setup):
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        await repo.add_log(
+            account_id=None,
+            request_id="req_useragent_null",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=7,
+            latency_ms=42,
+            status="success",
+            error_code=None,
+            useragent="",
+            useragent_group="",
+        )
+
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_null"))
+        stored = result.scalar_one()
+        assert stored.useragent is None
+        assert stored.useragent_group is None
+
+
+@pytest.mark.asyncio
+async def test_request_logs_repository_persists_null_useragent_fields_when_omitted(db_setup):
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        await repo.add_log(
+            account_id=None,
+            request_id="req_useragent_missing",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=7,
+            latency_ms=42,
+            status="success",
+            error_code=None,
+        )
+
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_missing"))
+        stored = result.scalar_one()
+        assert stored.useragent is None
+        assert stored.useragent_group is None
+
+
+@pytest.mark.asyncio
+async def test_request_logs_repository_normalizes_whitespace_only_useragent_fields_to_null(db_setup):
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        await repo.add_log(
+            account_id=None,
+            request_id="req_useragent_whitespace",
+            model="gpt-5.1",
+            input_tokens=3,
+            output_tokens=7,
+            latency_ms=42,
+            status="success",
+            error_code=None,
+            useragent=" \t\n ",
+            useragent_group="   ",
+        )
+
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_whitespace"))
+        stored = result.scalar_one()
+        assert stored.useragent is None
+        assert stored.useragent_group is None

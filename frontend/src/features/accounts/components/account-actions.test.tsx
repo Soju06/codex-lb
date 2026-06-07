@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountActions } from "@/features/accounts/components/account-actions";
@@ -15,6 +16,7 @@ describe("AccountActions", () => {
         busy={false}
         onPause={vi.fn()}
         onResume={vi.fn()}
+        onProbe={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -40,6 +42,7 @@ describe("AccountActions", () => {
         busy={false}
         onPause={vi.fn()}
         onResume={vi.fn()}
+        onProbe={vi.fn()}
         onDelete={vi.fn()}
         onReauth={onReauth}
         onExportAuth={vi.fn()}
@@ -59,4 +62,63 @@ describe("AccountActions", () => {
       screen.queryByRole("combobox", { name: "Routing policy" }),
     ).not.toBeInTheDocument();
   });
+
+  it("fires the per-account probe callback for active accounts", async () => {
+    const user = userEvent.setup();
+    const account = createAccountSummary();
+    const onProbe = vi.fn();
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={onProbe}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Force probe" }));
+
+    expect(onProbe).toHaveBeenCalledWith(account.accountId);
+    expect(onProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["paused", "deactivated"] as const)(
+    "disables force probe for %s accounts",
+    async (status) => {
+      const user = userEvent.setup();
+      const account = createAccountSummary({ status });
+      const onProbe = vi.fn();
+
+      render(
+        <AccountActions
+          account={account}
+          busy={false}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onProbe={onProbe}
+          onDelete={vi.fn()}
+          onReauth={vi.fn()}
+          onExportAuth={vi.fn()}
+          onSecurityWorkAuthorizedChange={vi.fn()}
+          onLimitWarmupChange={vi.fn()}
+          onRoutingPolicyChange={vi.fn()}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "Force probe" });
+      expect(button).toBeDisabled();
+
+      await user.click(button);
+
+      expect(onProbe).not.toHaveBeenCalled();
+    },
+  );
 });

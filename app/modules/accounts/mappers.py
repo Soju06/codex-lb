@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
+from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -24,6 +25,7 @@ from app.modules.accounts.schemas import (
 from app.modules.usage.mappers import usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 
 def build_account_summaries(
@@ -31,6 +33,7 @@ def build_account_summaries(
     accounts: list[Account],
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    monthly_usage: dict[str, UsageHistory] | None = None,
     request_usage_by_account: dict[str, AccountRequestUsage] | None = None,
     additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] | None = None,
     limit_warmups_by_account: dict[str, AccountLimitWarmup] | None = None,
@@ -43,6 +46,7 @@ def build_account_summaries(
             account,
             primary_usage.get(account.id),
             secondary_usage.get(account.id),
+            monthly_usage.get(account.id) if monthly_usage else None,
             request_usage_by_account.get(account.id) if request_usage_by_account else None,
             additional_quotas_by_account.get(account.id) if additional_quotas_by_account else None,
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
@@ -88,6 +92,7 @@ def _account_to_summary(
     account: Account,
     primary_usage: UsageHistory | None,
     secondary_usage: UsageHistory | None,
+    monthly_usage: UsageHistory | None,
     request_usage: AccountRequestUsage | None,
     additional_quotas: list[AccountAdditionalQuota] | None,
     limit_warmup: AccountLimitWarmup | None,
@@ -101,6 +106,14 @@ def _account_to_summary(
         primary_usage,
         secondary_usage,
     )
+
+    if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
+        monthly_usage = None
+    monthly_used_percent = _normalize_used_percent(monthly_usage)
+    monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)
+    if monthly_usage is not None:
+        effective_primary_usage = None
+        effective_secondary_usage = None
 
     weekly_only_usage = (
         effective_primary_usage is None
@@ -119,10 +132,41 @@ def _account_to_summary(
 
     status_primary_usage = effective_primary_usage
     status_primary_used_percent = primary_used_percent
+    status_runtime_reset = float(account.reset_at) if account.reset_at else None
+    status_seed = account.status
+    allow_missing_runtime_reset_recovery = False
+    long_quota_usage = monthly_usage or effective_secondary_usage
+    long_quota_available = (
+        long_quota_usage is not None
+        and _usage_entry_is_recent_enough(long_quota_usage.recorded_at)
+        and long_quota_usage.used_percent is not None
+        and float(long_quota_usage.used_percent) < 100.0
+    )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
-        if account.status != AccountStatus.RATE_LIMITED:
+        primary_window_minutes = (
+            effective_primary_usage.window_minutes
+            if effective_primary_usage is not None
+            else primary_usage.window_minutes
+            if weekly_only_usage and primary_usage is not None
+            else None
+        )
+        zero_capacity_primary_known_non_primary = (
+            primary_window_minutes is not None and not usage_core.is_primary_window_minutes(primary_window_minutes)
+        )
+        keep_primary_status_signal = (
+            account.status == AccountStatus.RATE_LIMITED
+            and usage_core.is_primary_window_minutes(primary_window_minutes)
+        )
+        can_hide_zero_capacity_primary = account.status != AccountStatus.RATE_LIMITED or (
+            zero_capacity_primary_known_non_primary and long_quota_available
+        )
+        if not keep_primary_status_signal and can_hide_zero_capacity_primary:
             status_primary_usage = None
             status_primary_used_percent = None
+            if account.status == AccountStatus.RATE_LIMITED:
+                status_runtime_reset = None
+                status_seed = AccountStatus.ACTIVE
+                allow_missing_runtime_reset_recovery = True
         effective_primary_usage = None
         primary_used_percent = None
         primary_remaining_percent = None
@@ -133,12 +177,15 @@ def _account_to_summary(
     reset_at_secondary = (
         from_epoch_seconds(effective_secondary_usage.reset_at) if effective_secondary_usage is not None else None
     )
+    reset_at_monthly = from_epoch_seconds(monthly_usage.reset_at) if monthly_usage is not None else None
     window_minutes_primary = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
     window_minutes_secondary = (
         effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
     )
+    window_minutes_monthly = monthly_usage.window_minutes if monthly_usage is not None else None
     capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
     capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
+    capacity_monthly = usage_core.capacity_for_plan(plan_type, "monthly")
     remaining_credits_primary = usage_core.remaining_credits_from_percent(
         primary_used_percent,
         capacity_primary,
@@ -147,21 +194,31 @@ def _account_to_summary(
         secondary_used_percent,
         capacity_secondary,
     )
+    remaining_credits_monthly = usage_core.remaining_credits_from_percent(
+        monthly_used_percent,
+        capacity_monthly,
+    )
     credits_has, credits_unlimited, credits_balance = _extract_credit_status(
         effective_primary_usage,
         effective_secondary_usage,
+        monthly_usage,
         primary_usage,
         secondary_usage,
     )
     effective_status = _effective_status_from_usage(
         account,
-        status_primary_usage,
-        status_primary_used_percent,
-        effective_secondary_usage,
-        secondary_used_percent,
-        credits_has,
-        credits_unlimited,
-        credits_balance,
+        status_seed=status_seed,
+        primary_usage=status_primary_usage,
+        primary_used_percent=status_primary_used_percent,
+        secondary_usage=effective_secondary_usage,
+        secondary_used_percent=secondary_used_percent,
+        monthly_usage=monthly_usage,
+        monthly_used_percent=monthly_used_percent,
+        runtime_reset=status_runtime_reset,
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+        allow_missing_runtime_reset_recovery=allow_missing_runtime_reset_recovery,
     )
     return AccountSummary(
         account_id=account.id,
@@ -178,16 +235,21 @@ def _account_to_summary(
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
+            monthly_remaining_percent=monthly_remaining_percent,
         ),
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
+        reset_at_monthly=reset_at_monthly,
         window_minutes_primary=window_minutes_primary,
         window_minutes_secondary=window_minutes_secondary,
+        window_minutes_monthly=window_minutes_monthly,
         last_refresh_at=account.last_refresh,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
         remaining_credits_secondary=remaining_credits_secondary,
+        capacity_credits_monthly=capacity_monthly,
+        remaining_credits_monthly=remaining_credits_monthly,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
@@ -224,29 +286,42 @@ def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWar
 
 def _effective_status_from_usage(
     account: Account,
+    *,
+    status_seed: AccountStatus,
     primary_usage: UsageHistory | None,
     primary_used_percent: float | None,
     secondary_usage: UsageHistory | None,
     secondary_used_percent: float | None,
+    monthly_usage: UsageHistory | None,
+    monthly_used_percent: float | None,
+    runtime_reset: float | None,
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
+    allow_missing_runtime_reset_recovery: bool = False,
 ) -> AccountStatus:
+    long_window_usage = monthly_usage or secondary_usage
+    long_window_used_percent = monthly_used_percent if monthly_usage is not None else secondary_used_percent
     if credits_has is None and credits_unlimited is None and credits_balance is None:
-        credits_has, credits_unlimited, credits_balance = _extract_credit_status(primary_usage, secondary_usage)
+        credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+            primary_usage,
+            long_window_usage,
+        )
     status, _, _ = apply_usage_quota(
-        status=account.status,
+        status=status_seed,
         primary_used=primary_used_percent,
         primary_reset=primary_usage.reset_at if primary_usage is not None else None,
         primary_window_minutes=primary_usage.window_minutes if primary_usage is not None else None,
-        runtime_reset=float(account.reset_at) if account.reset_at else None,
-        secondary_used=secondary_used_percent,
-        secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+        runtime_reset=runtime_reset,
+        secondary_used=long_window_used_percent,
+        secondary_reset=long_window_usage.reset_at if long_window_usage is not None else None,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
+        if runtime_reset is None and allow_missing_runtime_reset_recovery:
+            return status
         if _has_credit_override(
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
@@ -280,6 +355,20 @@ def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHi
     if secondary_usage is not None:
         return getattr(secondary_usage, field)
     return None
+
+
+def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
+    if recorded_at is None:
+        return False
+    current_time = datetime.now(timezone.utc)
+    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
+
+
+def _usage_refresh_interval_seconds() -> int:
+    settings = config_settings.get_settings()
+    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _effective_usage_windows(
@@ -377,7 +466,7 @@ def build_account_usage_trends(
     secondary_schedule: dict[str, dict[int, tuple[int, int]]] = {}
     for b in _effective_usage_trend_buckets(buckets):
         is_weekly_primary = b.window == "primary" and usage_core.is_weekly_window_minutes(b.window_minutes)
-        window = "secondary" if is_weekly_primary else b.window
+        window = "secondary" if is_weekly_primary or b.window == "monthly" else b.window
         key = (b.account_id, window)
         grouped.setdefault(key, {})[b.bucket_epoch] = b.avg_used_percent
         if (

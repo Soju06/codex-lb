@@ -141,6 +141,8 @@ describe("RequestLogsResponseSchema", () => {
           requestId: "req-1",
           model: "gpt-5.1",
           transport: "websocket",
+          useragent: "Mozilla/5.0",
+          useragentGroup: "Mozilla",
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -174,6 +176,8 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.requestKind).toBe("normal");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");
+    expect(parsed.requests[0]?.useragentGroup).toBe("Mozilla");
     expect(parsed.requests[0]?.failurePhase).toBe("status");
     expect(parsed.requests[0]?.failureDetail).toBe("upstream_5xx");
     expect(parsed.requests[0]?.failureExceptionType).toBe("ProxyResponseError");
@@ -248,6 +252,40 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.upstreamStatusCode).toBeNull();
     expect(parsed.requests[0]?.costBreakdown).toBeNull();
     expect(parsed.requests[0]?.apiKeyName).toBeNull();
+    expect(parsed.requests[0]?.useragent).toBeNull();
+    expect(parsed.requests[0]?.useragentGroup).toBeNull();
+  });
+
+  it("accepts nullable user agent fields", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-null-useragent",
+          model: "gpt-5.1",
+          transport: "websocket",
+          useragent: null,
+          useragentGroup: null,
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.useragent).toBeNull();
+    expect(parsed.requests[0]?.useragentGroup).toBeNull();
   });
 
   it("defaults omitted nested cost breakdown fields to null", () => {

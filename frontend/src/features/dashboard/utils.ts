@@ -127,6 +127,14 @@ function isWeeklyOnlyAccount(account: AccountSummary): boolean {
   return account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
 }
 
+function isMonthlyOnlyAccount(account: AccountSummary): boolean {
+  return (
+    account.windowMinutesMonthly != null &&
+    account.windowMinutesPrimary == null &&
+    account.windowMinutesSecondary == null
+  );
+}
+
 function accountRemainingPercent(account: AccountSummary, windowKey: "primary" | "secondary"): number | null {
   if (windowKey === "secondary") {
     return account.usage?.secondaryRemainingPercent ?? null;
@@ -181,6 +189,9 @@ export function buildRemainingItems(
   const palette = buildDonutPalette(accounts.length, isDark);
   return accounts
     .map((account, index) => {
+      if (isMonthlyOnlyAccount(account)) {
+        return null;
+      }
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
         return null;
       }

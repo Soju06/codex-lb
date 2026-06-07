@@ -8337,9 +8337,9 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
 def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_release() -> None:
     source = inspect.getsource(proxy_service.ProxyService.proxy_responses_websocket)
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
-    branch = source[start_index : source.index("await self._emit_websocket_terminal_error", start_index)]
+    branch = source[start_index : source.index("await proxy._emit_websocket_terminal_error", start_index)]
 
-    assert "self._release_websocket_request_state_reservation(request_state)" in branch
+    assert "proxy._release_websocket_request_state_reservation(request_state)" in branch
     assert "_release_websocket_reservation(request_state.api_key_reservation)" not in source
 
 

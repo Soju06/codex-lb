@@ -14,7 +14,8 @@ SHELL := /bin/bash
 help:
 	@printf '%s\n' \
 	  'Common targets:' \
-	  '  make lint                    ruff check + format check' \
+	  '  make lint                    ruff check + format check + architecture checks' \
+	  '  make architecture-check      proxy architecture fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make frontend-test           vitest coverage, same as CI' \
 	  '  make test-unit               unit pytest slice, same as CI' \
@@ -39,10 +40,13 @@ frontend-test: frontend-install
 frontend-build: frontend-install
 	cd frontend && bun run build
 
-.PHONY: lint typecheck
-lint:
+.PHONY: lint typecheck architecture-check
+lint: architecture-check
 	uvx ruff check .
 	uvx ruff format --check .
+
+architecture-check:
+	python scripts/check_proxy_architecture.py
 
 typecheck:
 	uv sync --dev --frozen

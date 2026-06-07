@@ -610,6 +610,28 @@ export const handlers = [
     return HttpResponse.json(createAccountTrends(accountId));
   }),
 
+  http.post("/api/accounts/:accountId/probe", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      status: "probed",
+      accountId,
+      probeStatusCode: 200,
+      primaryUsedPercentBefore: account.usage?.primaryRemainingPercent ?? null,
+      primaryUsedPercentAfter: account.usage?.primaryRemainingPercent ?? null,
+      secondaryUsedPercentBefore: account.usage?.secondaryRemainingPercent ?? null,
+      secondaryUsedPercentAfter: account.usage?.secondaryRemainingPercent ?? null,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
+  }),
+
 	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
 		const accountId = String(params.accountId);
 		const account = findAccount(accountId);

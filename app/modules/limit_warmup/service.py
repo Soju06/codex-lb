@@ -114,6 +114,8 @@ class LimitWarmupRequestLogRepository(Protocol):
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
+        useragent: str | None = None,
+        useragent_group: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,

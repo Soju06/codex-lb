@@ -4,6 +4,23 @@ from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
+_DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
+
+
+def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
+    if value is None:
+        return None
+    tokens = [part.strip() for part in value.split(",") if part.strip()]
+    if not tokens:
+        raise ValueError("weekly_pace_working_days must include at least one day")
+    try:
+        days = sorted({int(token) for token in tokens})
+    except ValueError as exc:
+        raise ValueError("weekly_pace_working_days must contain weekday numbers") from exc
+    if any(day < 0 or day > 6 for day in days):
+        raise ValueError("weekly_pace_working_days must use 0-6 weekday numbers")
+    return ",".join(str(day) for day in days)
+
 
 class AdditionalQuotaPolicy(DashboardModel):
     quota_key: str
@@ -43,6 +60,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_prompt: str = Field(min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int = Field(ge=60)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
+    weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
 
@@ -82,6 +100,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int | None = Field(default=None, ge=60)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
+    weekly_pace_working_days: str | None = None
 
     @field_validator("warmup_model")
     @classmethod
@@ -92,6 +111,11 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         if not normalized:
             raise ValueError("warmup_model must not be blank")
         return normalized
+
+    @field_validator("weekly_pace_working_days")
+    @classmethod
+    def _normalize_weekly_pace_days(cls, value: str | None) -> str | None:
+        return _normalize_weekly_pace_working_days(value)
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

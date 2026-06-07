@@ -151,6 +151,8 @@ export const RequestLogSchema = z.object({
   model: z.string(),
   source: z.string().nullable().optional().default(null),
   transport: z.string().nullable().optional().default(null),
+  useragent: z.string().nullable().optional().default(null),
+  useragentGroup: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),
   requestedServiceTier: z.string().nullable().optional().default(null),
   actualServiceTier: z.string().nullable().optional().default(null),

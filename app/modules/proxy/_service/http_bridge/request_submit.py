@@ -109,6 +109,7 @@ from app.modules.proxy._service.support import (
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
     _HTTPBridgeSession,
+    _request_log_useragent_fields,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
 )
@@ -189,7 +190,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
-        return self._prepare_response_bridge_request_state(
+        request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
             api_key_reservation=api_key_reservation,
@@ -200,6 +201,8 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
+        request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        return request_state, text_data
 
     def _prepare_response_bridge_request_state(
         self: Any,

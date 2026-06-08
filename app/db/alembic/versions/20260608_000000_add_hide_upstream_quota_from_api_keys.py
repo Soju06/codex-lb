@@ -1,8 +1,8 @@
 """add hide upstream quota from api keys setting
 
-Revision ID: 20260603_000000_add_hide_upstream_quota_from_api_keys
-Revises: 20260602_050000_add_upstream_proxy_routing
-Create Date: 2026-06-03 00:00:00.000000
+Revision ID: 20260608_000000_add_hide_upstream_quota_from_api_keys
+Revises: 20260607_000000_merge_weekly_monthly_useragent_heads
+Create Date: 2026-06-08 00:00:00.000000
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260603_000000_add_hide_upstream_quota_from_api_keys"
-down_revision = "20260602_050000_add_upstream_proxy_routing"
+revision = "20260608_000000_add_hide_upstream_quota_from_api_keys"
+down_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
 branch_labels = None
 depends_on = None
 

@@ -1,6 +1,6 @@
 import type { TooltipContentProps } from "recharts";
 
-export type ChartTooltipProps = TooltipContentProps<number, string> & {
+export type ChartTooltipProps = Partial<TooltipContentProps<number, string>> & {
   formatValue?: (value: number, dataKey: string) => string;
   names?: Record<string, string>;
 };

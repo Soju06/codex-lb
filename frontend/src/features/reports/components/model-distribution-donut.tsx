@@ -1,5 +1,6 @@
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import type { ModelCostEntry } from "../schemas";
+import { ChartTooltip } from "./chart-tooltip";
 
 export type ModelDistributionDonutProps = {
   data: ModelCostEntry[];
@@ -30,15 +31,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                 ))}
               </Pie>
               <Tooltip
-                contentStyle={{
-                  borderRadius: "8px",
-                  border: "1px solid hsl(var(--border))",
-                  background: "hsl(var(--popover))",
-                }}
-                formatter={(value) => {
-                  if (typeof value !== "number") return [String(value), "Cost"];
-                  return [`$${value.toFixed(2)}`, "Cost"];
-                }}
+                content={<ChartTooltip names={{ costUsd: "Cost" }} formatValue={(v) => `$${v.toFixed(2)}`} />}
               />
             </PieChart>
           </ResponsiveContainer>

@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { DailyReportRow } from "../schemas";
+import { ChartTooltip } from "./chart-tooltip";
 
 export type TokensPerDayChartProps = {
   data: DailyReportRow[];
@@ -56,18 +57,7 @@ export function TokensPerDayChart({ data }: TokensPerDayChartProps) {
               tickFormatter={formatTokens}
             />
             <Tooltip
-              contentStyle={{
-                borderRadius: "8px",
-                border: "1px solid hsl(var(--border))",
-                background: "hsl(var(--popover))",
-              }}
-              formatter={(value, name) => {
-                if (typeof value !== "number") return [String(value), String(name)];
-                return [
-                  formatTokens(value),
-                  name === "input" ? "Input" : "Output",
-                ];
-              }}
+              content={<ChartTooltip names={{ input: "Input", output: "Output" }} formatValue={(v) => formatTokens(v)} />}
             />
             <Area
               type="monotone"

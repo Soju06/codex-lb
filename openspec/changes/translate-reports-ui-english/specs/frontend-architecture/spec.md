@@ -74,3 +74,13 @@ Requests from `/reports` to `GET /api/reports` SHALL use the query parameter nam
 
 - **WHEN** an authenticated operator opens `/reports` or changes a report filter
 - **THEN** the request uses `startDate`, `endDate`, `accountId`, and `model` as the query parameter names
+
+### Requirement: Reports chart tooltip uses recharts TooltipContentProps
+
+The reports `ChartTooltip` component SHALL type its props as `Partial<TooltipContentProps>` from recharts so that context-injected properties (`payload`, `active`, `label`, `coordinate`) are optional at the JSX call site while remaining correctly typed inside the component body.
+
+#### Scenario: ChartTooltip renders without context props at the JSX call site
+
+- **WHEN** a reports chart passes `<ChartTooltip names={...} formatValue={...} />` via the recharts `<Tooltip content={...}>` prop
+- **THEN** TypeScript compilation succeeds without errors about missing `payload`, `active`, `label`, or `coordinate`
+- **AND** recharts injects those properties at runtime before calling the component

@@ -145,11 +145,14 @@ class StubUsageRepository(UsageRepository):
         self,
         primary: dict[str, UsageHistory],
         secondary: dict[str, UsageHistory],
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
+        self._monthly = monthly or {}
         self.primary_calls = 0
         self.secondary_calls = 0
+        self.monthly_calls = 0
 
     async def latest_by_account(
         self,
@@ -161,6 +164,9 @@ class StubUsageRepository(UsageRepository):
         if window == "secondary":
             self.secondary_calls += 1
             return self._secondary
+        if window == "monthly":
+            self.monthly_calls += 1
+            return self._monthly
         self.primary_calls += 1
         return self._primary
 
@@ -1532,8 +1538,8 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
     await record_task
     await fail_task
 
-    assert account.status == AccountStatus.DEACTIVATED
-    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
     assert all(update["status"] != AccountStatus.ACTIVE for update in accounts_repo.status_updates)
 
 
@@ -1659,6 +1665,7 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
             accounts=[account],
             latest_primary={account.id: primary_entry},
             latest_secondary={account.id: secondary_entry},
+            latest_monthly={},
         )
 
     monkeypatch.setattr(balancer, "_load_selection_inputs", fake_load_selection_inputs)
@@ -1742,7 +1749,7 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
     release_persist.set()
     selection = await select_task
 
-    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.DEACTIVATED
+    assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
     assert selection.account is None
 
 
@@ -1790,7 +1797,7 @@ async def test_select_account_retries_after_post_persist_permanent_failure(monke
 
     selection = await balancer.select_account()
 
-    assert account.status == AccountStatus.DEACTIVATED
+    assert account.status == AccountStatus.REAUTH_REQUIRED
     assert selection.account is None
 
 
@@ -1857,7 +1864,7 @@ async def test_sync_runtime_state_bumps_version_for_status_only_updates() -> Non
 
     state = load_balancer_module.AccountState(
         account_id=account.id,
-        status=AccountStatus.DEACTIVATED,
+        status=AccountStatus.REAUTH_REQUIRED,
         deactivation_reason="Refresh token expired - re-login required",
     )
 

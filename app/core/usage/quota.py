@@ -22,7 +22,7 @@ def apply_usage_quota(
     used_percent = primary_used
     reset_at = runtime_reset
 
-    if status in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED):
+    if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED):
         return status, used_percent, reset_at
 
     has_credit_override = _has_credit_override(

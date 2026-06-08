@@ -10,8 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
 
+from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import PERMANENT_FAILURE_CODES, QUOTA_EXCEEDED_COOLDOWN_SECONDS
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    account_status_for_permanent_failure,
+)
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -246,11 +251,11 @@ class UsageUpdater:
         interval = settings.usage_refresh_interval_seconds
         _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
-            if account.status == AccountStatus.DEACTIVATED:
+            if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
-            latest = latest_usage.get(account.id)
+            latest = await self._freshness_usage_entry(account, latest_usage.get(account.id))
             bypass_freshness = _quota_recovery_should_bypass_freshness(account, latest=latest)
             if not bypass_freshness and _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
                 continue
@@ -313,7 +318,7 @@ class UsageUpdater:
         settings = get_settings()
         if not settings.usage_refresh_enabled:
             return False
-        if account.status == AccountStatus.DEACTIVATED:
+        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return False
         try:
             result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
@@ -346,7 +351,8 @@ class UsageUpdater:
         usage_account_id: str | None,
         interval_seconds: int,
     ) -> AccountRefreshResult:
-        latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
+        primary_latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
+        latest = await self._freshness_usage_entry(account, primary_latest)
         if not _quota_recovery_should_bypass_freshness(account, latest=latest) and _latest_usage_is_fresh(
             latest,
             now=utcnow(),
@@ -357,6 +363,13 @@ class UsageUpdater:
             account,
             usage_account_id=usage_account_id,
         )
+
+    async def _freshness_usage_entry(self, account: Account, latest: UsageHistory | None) -> UsageHistory | None:
+        if latest is not None:
+            return latest
+        if usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+            return None
+        return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
 
     async def _refresh_account(
         self,
@@ -501,18 +514,22 @@ class UsageUpdater:
             return AccountRefreshResult(usage_written=additional_synced)
         # Treat both None and empty rate_limit (both windows absent) as
         # additional-only to avoid falling through to window processing.
-        primary = rate_limit.primary_window
-        secondary = rate_limit.secondary_window
+        normalized_windows = usage_core.normalize_rate_limit_windows(
+            rate_limit.primary_window,
+            rate_limit.secondary_window,
+        )
+        primary = normalized_windows.primary
+        secondary = normalized_windows.secondary
+        monthly = normalized_windows.monthly
         if primary is None and secondary is None:
+            if monthly is None:
+                additional_synced = (
+                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+                )
+                return AccountRefreshResult(usage_written=additional_synced)
+        if primary is None and secondary is None and monthly is None:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
-        # This is a special case that if the account type is free (or probably go)
-        # The 7d stat is in primary window instead of secondary window
-        # (that is widely defined as 7d in the ui)
-        # This will cause the account usage trend is "primary" instead of "secondary"
-        if primary and primary.limit_window_seconds == 604800:
-            secondary = rate_limit.primary_window
-            primary = None
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         usage_written = False
 
@@ -542,22 +559,44 @@ class UsageUpdater:
                 window_minutes=_window_minutes(secondary.limit_window_seconds),
             )
             usage_written = usage_written or _usage_entry_written(entry)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary)
+
+        if monthly and monthly.used_percent is not None:
+            entry = await self._usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=float(monthly.used_percent),
+                input_tokens=None,
+                output_tokens=None,
+                window="monthly",
+                reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
+                window_minutes=_window_minutes(monthly.limit_window_seconds),
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+            )
+            usage_written = usage_written or _usage_entry_written(entry)
+        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
             return
         reason = f"Usage API error: HTTP {exc.status_code} - {exc.message}"
+        status = (
+            account_status_for_permanent_failure(exc.code)
+            if exc.code in PERMANENT_FAILURE_CODES
+            else AccountStatus.DEACTIVATED
+        )
         logger.warning(
-            "Deactivating account due to client error account_id=%s status=%s message=%s request_id=%s",
+            "Marking account unavailable due to client error account_id=%s account_status=%s status=%s "
+            "message=%s request_id=%s",
             account.id,
+            status.value,
             exc.status_code,
             exc.message,
             get_request_id(),
         )
-        await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
-        account.status = AccountStatus.DEACTIVATED
+        await self._auth_manager._repo.update_status(account.id, status, reason)
+        account.status = status
         account.deactivation_reason = reason
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
@@ -617,13 +656,19 @@ class UsageUpdater:
         *,
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
+        monthly: UsageWindow | None = None,
     ) -> None:
         if not self._auth_manager:
             return
         if account.status == AccountStatus.RATE_LIMITED:
-            if primary is None or not _window_has_available_quota(primary):
+            long_window = monthly or secondary
+            if primary is None and monthly is None:
                 return
-            if secondary is not None and not _window_has_available_quota(secondary):
+            if primary is not None and not _window_has_available_quota(primary):
+                return
+            if primary is None and (long_window is None or not _window_has_available_quota(long_window)):
+                return
+            if long_window is not None and not _window_has_available_quota(long_window):
                 return
             target_status = AccountStatus.ACTIVE
             target_reset_at = None
@@ -631,8 +676,9 @@ class UsageUpdater:
         elif account.status == AccountStatus.QUOTA_EXCEEDED:
             if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
                 return
-            windows = [window for window in (primary, secondary) if window is not None]
-            if secondary is None or not _window_has_available_quota(secondary):
+            long_window = monthly or secondary
+            windows = [window for window in (primary, long_window) if window is not None]
+            if long_window is None or not _window_has_available_quota(long_window):
                 return
             if primary is not None and _window_is_exhausted(primary):
                 target_status = AccountStatus.RATE_LIMITED

@@ -31,12 +31,15 @@ const LIMIT_WARMUP_DEFAULTS = {
 const BASE_SETTINGS: DashboardSettings = {
   stickyThreadsEnabled: false,
   upstreamStreamTransport: "default",
+  upstreamProxyRoutingEnabled: false,
+  upstreamProxyDefaultPoolId: null,
   preferEarlierResetAccounts: true,
   preferEarlierResetWindow: "secondary",
   routingStrategy: "usage_weighted",
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
   singleAccountId: null,
+  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
   warmupModel: "gpt-5.4-mini",
@@ -74,6 +77,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -104,6 +108,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 240,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -139,6 +144,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -173,6 +179,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -289,6 +296,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -352,12 +360,57 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
     });
+  });
+
+  it("excludes hard-blocked accounts from single-account routing choices", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "single_account" }}
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "active@example.com",
+          }),
+          createAccountSummary({
+            accountId: "acc-reauth",
+            email: "reauth@example.com",
+            displayName: "reauth@example.com",
+            status: "reauth_required",
+          }),
+          createAccountSummary({
+            accountId: "acc-paused",
+            email: "paused@example.com",
+            displayName: "paused@example.com",
+            status: "paused",
+          }),
+          createAccountSummary({
+            accountId: "acc-deactivated",
+            email: "deactivated@example.com",
+            displayName: "deactivated@example.com",
+            status: "deactivated",
+          }),
+        ]}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "Selected account" }));
+
+    expect(await screen.findByRole("option", { name: /active@example.com/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /reauth@example.com/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /paused@example.com/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /deactivated@example.com/i })).not.toBeInTheDocument();
   });
 
   it("saves an account together with single-account routing", async () => {
@@ -387,6 +440,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
@@ -404,6 +458,52 @@ describe("RoutingSettings", () => {
     expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
+  });
+
+  it("saves weekly pace working-day changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Use Sat in weekly pace" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      stickyThreadsEnabled: false,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+      routingStrategy: "usage_weighted",
+      relativeAvailabilityPower: 2,
+      relativeAvailabilityTopK: 5,
+      singleAccountId: null,
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: "0,1,2,3,4,6",
+      additionalQuotaRoutingPolicies: {},
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      apiKeyAuthEnabled: true,
+      ...LIMIT_WARMUP_DEFAULTS,
+    });
+  });
+
+  it("keeps at least one weekly pace working day selected", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, weeklyPaceWorkingDays: "2" }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    const onlyDay = screen.getByRole("checkbox", { name: "Use Wed in weekly pace" });
+    expect(onlyDay).toBeDisabled();
+    await user.click(onlyDay);
+
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it("does not silently truncate decimal warm-up cooldown values", async () => {
@@ -446,6 +546,7 @@ describe("RoutingSettings", () => {
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       warmupModel: BASE_SETTINGS.warmupModel,
+      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
       additionalQuotaRoutingPolicies: {},
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,

@@ -208,10 +208,12 @@ async def get_quota_planner_forecast(
     usage_repo = UsageRepository(context.session)
     latest_primary = await usage_repo.latest_by_account()
     latest_secondary = await usage_repo.latest_by_account(window="secondary")
+    latest_monthly = await usage_repo.latest_by_account(window="monthly")
     states, _ = _build_states(
         accounts=accounts,
         latest_primary=latest_primary,
         latest_secondary=latest_secondary,
+        latest_monthly=latest_monthly,
         runtime={},
     )
     simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast)

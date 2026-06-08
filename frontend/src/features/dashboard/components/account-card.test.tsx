@@ -39,6 +39,29 @@ describe("AccountCard", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
   });
 
+  it("shows Monthly only for monthly-only free accounts", () => {
+    const account = createAccountSummary({
+      planType: "free",
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 76,
+      },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+      resetAtPrimary: null,
+      resetAtSecondary: null,
+      resetAtMonthly: "2026-01-31T00:00:00.000Z",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+    expect(screen.queryByText("5h")).not.toBeInTheDocument();
+    expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
+  });
+
   it("blurs the dashboard card title when privacy mode is enabled", () => {
     act(() => {
       usePrivacyStore.setState({ blurred: true });
@@ -64,5 +87,14 @@ describe("AccountCard", () => {
 
     expect(screen.getByText("Credits:")).toBeInTheDocument();
     expect(screen.getByText("959.00")).toBeInTheDocument();
+  });
+
+  it("renders re-auth status and action for re-auth required accounts", () => {
+    const account = createAccountSummary({ status: "reauth_required" });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Re-auth required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Re-auth" })).toBeInTheDocument();
   });
 });

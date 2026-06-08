@@ -33,12 +33,15 @@ const ADDITIONAL_QUOTA_DEFAULTS = {
 const baseSettings = {
   stickyThreadsEnabled: true,
   upstreamStreamTransport: "default" as const,
+  upstreamProxyRoutingEnabled: false,
+  upstreamProxyDefaultPoolId: null,
   preferEarlierResetAccounts: false,
   preferEarlierResetWindow: "secondary" as const,
   routingStrategy: "usage_weighted" as const,
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
   singleAccountId: null,
+  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
   warmupModel: "gpt-5.4-mini",
@@ -136,6 +139,8 @@ describe("TotpSettings", () => {
     const saveSettings: Record<string, unknown> = { ...baseSettings };
     delete saveSettings.additionalQuotaPolicies;
     delete saveSettings.totpConfigured;
+    delete saveSettings.upstreamProxyRoutingEnabled;
+    delete saveSettings.upstreamProxyDefaultPoolId;
 
     renderWithClient(<TotpSettings settings={baseSettings} onSave={onSave} />);
 

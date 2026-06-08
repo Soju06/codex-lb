@@ -30,6 +30,7 @@ import {
   createQuotaPlannerSettings,
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
+  createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type DashboardAuthSession,
   type DashboardSettings,
@@ -37,6 +38,7 @@ import {
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
   type RequestLogEntry,
+  type UpstreamProxyAdmin,
 } from "@/test/mocks/factories";
 
 const MODEL_OPTION_DELIMITER = ":::";
@@ -99,6 +101,8 @@ const SettingsPayloadSchema = z
     upstreamStreamTransport: z
       .enum(["default", "auto", "http", "websocket"])
       .optional(),
+    upstreamProxyRoutingEnabled: z.boolean().optional(),
+    upstreamProxyDefaultPoolId: z.string().nullable().optional(),
     preferEarlierResetAccounts: z.boolean().optional(),
     routingStrategy: z
       .enum([
@@ -175,6 +179,7 @@ type MockState = {
   settings: DashboardSettings;
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
+  upstreamProxyAdmin: UpstreamProxyAdmin;
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
@@ -197,6 +202,7 @@ function createInitialState(): MockState {
     settings: createDashboardSettings(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
+    upstreamProxyAdmin: createUpstreamProxyAdmin(),
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
     firewallEntries: [],
@@ -604,6 +610,28 @@ export const handlers = [
     return HttpResponse.json(createAccountTrends(accountId));
   }),
 
+  http.post("/api/accounts/:accountId/probe", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      status: "probed",
+      accountId,
+      probeStatusCode: 200,
+      primaryUsedPercentBefore: account.usage?.primaryRemainingPercent ?? null,
+      primaryUsedPercentAfter: account.usage?.primaryRemainingPercent ?? null,
+      secondaryUsedPercentBefore: account.usage?.secondaryRemainingPercent ?? null,
+      secondaryUsedPercentAfter: account.usage?.secondaryRemainingPercent ?? null,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
+  }),
+
 	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
 		const accountId = String(params.accountId);
 		const account = findAccount(accountId);
@@ -746,6 +774,169 @@ export const handlers = [
     return HttpResponse.json(state.settings);
   }),
 
+
+
+  http.get("/api/settings/upstream-proxy", () => {
+    return HttpResponse.json(state.upstreamProxyAdmin);
+  }),
+
+  http.post("/api/settings/upstream-proxy/endpoints", async ({ request }) => {
+    const payload = await parseJsonBody(
+      request,
+      z
+        .object({
+          name: z.string().min(1),
+          scheme: z.enum(["http", "https", "socks5", "socks5h"]),
+          host: z.string().min(1),
+          port: z.number().int(),
+          username: z.string().nullable().optional(),
+          isActive: z.boolean().optional(),
+        })
+        .passthrough(),
+    );
+    if (!payload) {
+      return HttpResponse.json(
+        {
+          error: {
+            code: "invalid_proxy_endpoint",
+            message: "Invalid proxy endpoint",
+          },
+        },
+        { status: 400 },
+      );
+    }
+    const endpoint = {
+      id: `ep_${state.upstreamProxyAdmin.endpoints.length + 1}`,
+      name: payload.name,
+      scheme: payload.scheme,
+      host: payload.host,
+      port: payload.port,
+      username: payload.username ?? null,
+      isActive: payload.isActive ?? true,
+    };
+    state.upstreamProxyAdmin = {
+      ...state.upstreamProxyAdmin,
+      endpoints: [...state.upstreamProxyAdmin.endpoints, endpoint],
+    };
+    return HttpResponse.json(endpoint);
+  }),
+
+  http.post("/api/settings/upstream-proxy/pools", async ({ request }) => {
+    const payload = await parseJsonBody(
+      request,
+      z
+        .object({
+          name: z.string().min(1),
+          endpointIds: z.array(z.string()).optional(),
+          isActive: z.boolean().optional(),
+        })
+        .passthrough(),
+    );
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "invalid_proxy_pool", message: "Invalid proxy pool" } },
+        { status: 400 },
+      );
+    }
+    const pool = {
+      id: `pool_${state.upstreamProxyAdmin.pools.length + 1}`,
+      name: payload.name,
+      isActive: payload.isActive ?? true,
+      endpointIds: payload.endpointIds ?? [],
+    };
+    state.upstreamProxyAdmin = {
+      ...state.upstreamProxyAdmin,
+      pools: [...state.upstreamProxyAdmin.pools, pool],
+    };
+    return HttpResponse.json(pool);
+  }),
+
+  http.post(
+    "/api/settings/upstream-proxy/pools/:poolId/members",
+    async ({ params, request }) => {
+      const poolId = String(params.poolId);
+      const payload = await parseJsonBody(
+        request,
+        z.object({ endpointId: z.string().min(1) }).passthrough(),
+      );
+      const pool = state.upstreamProxyAdmin.pools.find(
+        (item) => item.id === poolId,
+      );
+      if (!pool || !payload) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "proxy_pool_not_found",
+              message: "Proxy pool not found",
+            },
+          },
+          { status: 404 },
+        );
+      }
+      if (pool.endpointIds.includes(payload.endpointId)) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "proxy_pool_member_duplicate",
+              message: "Proxy endpoint is already a member of this pool",
+            },
+          },
+          { status: 400 },
+        );
+      }
+      const updatedPool = {
+        ...pool,
+        endpointIds: [...pool.endpointIds, payload.endpointId],
+      };
+      state.upstreamProxyAdmin = {
+        ...state.upstreamProxyAdmin,
+        pools: state.upstreamProxyAdmin.pools.map((item) =>
+          item.id === poolId ? updatedPool : item,
+        ),
+      };
+      return HttpResponse.json(updatedPool);
+    },
+  ),
+
+  http.put(
+    "/api/settings/upstream-proxy/accounts/:accountId/binding",
+    async ({ params, request }) => {
+      const accountId = String(params.accountId);
+      const payload = await parseJsonBody(
+        request,
+        z
+          .object({ poolId: z.string().min(1), isActive: z.boolean().optional() })
+          .passthrough(),
+      );
+      if (!payload) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "invalid_proxy_binding",
+              message: "Invalid proxy binding",
+            },
+          },
+          { status: 400 },
+        );
+      }
+      const binding = {
+        accountId,
+        poolId: payload.poolId,
+        isActive: payload.isActive ?? true,
+      };
+      state.upstreamProxyAdmin = {
+        ...state.upstreamProxyAdmin,
+        bindings: [
+          ...state.upstreamProxyAdmin.bindings.filter(
+            (item) => item.accountId !== accountId,
+          ),
+          binding,
+        ],
+      };
+      return HttpResponse.json(binding);
+    },
+  ),
+
   http.get("/api/firewall/ips", () => {
     return HttpResponse.json({
       mode:
@@ -872,6 +1063,21 @@ export const handlers = [
       ...state.settings,
       ...payload,
     });
+    if (
+      payload.upstreamProxyRoutingEnabled !== undefined ||
+      payload.upstreamProxyDefaultPoolId !== undefined
+    ) {
+      state.upstreamProxyAdmin = {
+        ...state.upstreamProxyAdmin,
+        routingEnabled:
+          payload.upstreamProxyRoutingEnabled ??
+          state.upstreamProxyAdmin.routingEnabled,
+        defaultPoolId:
+          payload.upstreamProxyDefaultPoolId !== undefined
+            ? payload.upstreamProxyDefaultPoolId
+            : state.upstreamProxyAdmin.defaultPoolId,
+      };
+    }
     return HttpResponse.json(state.settings);
   }),
 

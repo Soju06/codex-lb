@@ -43,8 +43,8 @@ import {
 	RequestLogSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
-import type { DashboardSettings } from "@/features/settings/schemas";
-import { DashboardSettingsSchema } from "@/features/settings/schemas";
+import type { DashboardSettings, UpstreamProxyAdmin } from "@/features/settings/schemas";
+import { DashboardSettingsSchema, UpstreamProxyAdminSchema } from "@/features/settings/schemas";
 import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
@@ -72,6 +72,7 @@ export type {
 	RequestLogsResponse,
 	RequestLogFilterOptions,
 	DashboardSettings,
+	UpstreamProxyAdmin,
 	OauthStartResponse,
 	OauthStatusResponse,
 	ApiKey,
@@ -101,15 +102,20 @@ export function createAccountSummary(
 		usage: {
 			primaryRemainingPercent: 82,
 			secondaryRemainingPercent: 67,
+			monthlyRemainingPercent: null,
 		},
 		resetAtPrimary: offsetIso(60),
 		resetAtSecondary: offsetIso(24 * 60),
+		resetAtMonthly: null,
 		windowMinutesPrimary: 300,
 		windowMinutesSecondary: 10_080,
+		windowMinutesMonthly: null,
 		capacityCreditsPrimary: 225,
 		remainingCreditsPrimary: 184.5,
 		capacityCreditsSecondary: 7_560,
 		remainingCreditsSecondary: 5_065.2,
+		capacityCreditsMonthly: null,
+		remainingCreditsMonthly: null,
 		creditsHas: true,
 		creditsUnlimited: false,
 		creditsBalance: 932,
@@ -308,6 +314,8 @@ export function createRequestLogEntry(
 		model: "gpt-5.1",
 		source: null,
 		transport: "http",
+		useragent: null,
+		useragentGroup: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,
@@ -412,12 +420,15 @@ export function createDashboardSettings(
 	return DashboardSettingsSchema.parse({
 		stickyThreadsEnabled: true,
 		upstreamStreamTransport: "default",
+		upstreamProxyRoutingEnabled: false,
+		upstreamProxyDefaultPoolId: null,
 		preferEarlierResetAccounts: false,
 		preferEarlierResetWindow: "secondary",
 		routingStrategy: "usage_weighted",
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
+		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 43200,
 		stickyReallocationBudgetThresholdPct: 95,
@@ -516,6 +527,36 @@ export function createQuotaPlannerWarmupActionResponse(
 	});
 }
 
+export function createUpstreamProxyAdmin(
+	overrides: Partial<UpstreamProxyAdmin> = {},
+): UpstreamProxyAdmin {
+	return UpstreamProxyAdminSchema.parse({
+		routingEnabled: false,
+		defaultPoolId: null,
+		endpoints: [
+			{
+				id: "ep_primary",
+				name: "Primary proxy",
+				scheme: "http",
+				host: "proxy-primary.test",
+				port: 8080,
+				username: "operator",
+				isActive: true,
+			},
+		],
+		pools: [
+			{
+				id: "pool_primary",
+				name: "Primary pool",
+				isActive: true,
+				endpointIds: ["ep_primary"],
+			},
+		],
+		bindings: [],
+		...overrides,
+	});
+}
+
 export function createOauthStartResponse(
 	overrides: Partial<OauthStartResponse> = {},
 ): OauthStartResponse {
@@ -558,12 +599,18 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		keyPrefix: "sk-test",
 		allowedModels: ["gpt-5.1"],
 		applyToCodexModel: false,
-		expiresAt: offsetIso(30 * 24 * 60),
+		expiresAt: null,
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
+		usageSummary: {
+			requestCount: 150,
+			totalTokens: 50_000,
+			cachedInputTokens: 10_000,
+			totalCostUsd: 1.23,
+		},
 		limits: [
 			{
 				id: 1,
@@ -600,6 +647,12 @@ export function createDefaultApiKeys(): ApiKey[] {
 			isActive: false,
 			expiresAt: null,
 			lastUsedAt: null,
+			usageSummary: {
+				requestCount: 42,
+				totalTokens: 12_500,
+				cachedInputTokens: 2_200,
+				totalCostUsd: 0.42,
+			},
 			limits: [],
 		}),
 	];

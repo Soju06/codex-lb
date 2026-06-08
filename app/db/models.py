@@ -39,6 +39,7 @@ class AccountStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
     QUOTA_EXCEEDED = "quota_exceeded"
     PAUSED = "paused"
+    REAUTH_REQUIRED = "reauth_required"
     DEACTIVATED = "deactivated"
 
 
@@ -166,6 +167,7 @@ class AdditionalUsageHistory(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
+    __table_args__ = (Index("idx_logs_useragent_group", "useragent_group"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
@@ -187,6 +189,8 @@ class RequestLog(Base):
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
+    useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -550,6 +554,12 @@ class DashboardSettings(Base):
         Float,
         default=100.0,
         server_default=text("100.0"),
+    )
+    weekly_pace_working_days: Mapped[str] = mapped_column(
+        String,
+        default="0,1,2,3,4,5,6",
+        server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
     )
     warmup_model: Mapped[str] = mapped_column(
         String,

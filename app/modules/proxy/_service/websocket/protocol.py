@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+
+class _WebSocketServiceProtocol(Protocol):
+    _acquire_account_response_create_lease_or_overload: Any
+    _acquire_request_state_response_create_admission: Any
+    _cancel_request_state_api_key_reservation_heartbeat: Any
+    _connect_proxy_websocket: Any
+    _decide_websocket_failover_action: Any
+    _downstream_websocket_is_idle: Any
+    _emit_pending_websocket_keepalive: Any
+    _emit_websocket_connect_failure: Any
+    _emit_websocket_connect_timeout: Any
+    _emit_websocket_proxy_request_timeout: Any
+    _emit_websocket_security_work_missing_pool: Any
+    _emit_websocket_terminal_error: Any
+    _encryptor: Any
+    _ensure_fresh_with_budget: Any
+    _fail_expired_pending_websocket_requests: Any
+    _fail_pending_websocket_requests: Any
+    _finalize_websocket_request_state: Any
+    _get_work_admission: Any
+    _handle_precreated_websocket_auth_failure: Any
+    _handle_stream_error: Any
+    _handle_websocket_connect_error: Any
+    _load_balancer: Any
+    _maybe_touch_request_state_api_key_reservation: Any
+    _next_websocket_receive_timeout: Any
+    _open_upstream_websocket: Any
+    _open_upstream_websocket_with_budget: Any
+    _prepare_response_bridge_request_state: Any
+    _prepare_websocket_response_create_request: Any
+    _process_upstream_websocket_text: Any
+    _raise_for_unsupported_input_image_references: Any
+    _refresh_websocket_api_key_policy: Any
+    _relay_upstream_websocket_messages: Any
+    _release_websocket_request_state_reservation: Any
+    _release_websocket_reservation: Any
+    _remember_websocket_previous_response_owner: Any
+    _remember_websocket_previous_response_owner_miss: Any
+    _repo_factory: Any
+    _reserve_websocket_api_key_usage: Any
+    _resolve_file_account_for_responses: Any
+    _resolve_upstream_route_for_account: Any
+    _resolve_websocket_previous_response_owner: Any
+    _retry_websocket_connect_after_401: Any
+    _select_account_with_budget_compatible: Any
+    _select_websocket_connect_account: Any
+    _send_downstream_websocket_bytes: Any
+    _send_downstream_websocket_text: Any
+    _settle_stream_api_key_usage: Any
+    _start_request_state_api_key_reservation_heartbeat: Any
+    _try_open_websocket_connect_attempt: Any
+    _websocket_continuity_index: Any
+    _websocket_continuity_state_for_request: Any
+    _websocket_previous_response_account_index: Any
+    _write_request_log: Any
+    _write_websocket_connect_failure: Any
+    proxy_responses_websocket: Any

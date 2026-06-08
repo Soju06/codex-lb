@@ -481,7 +481,6 @@ async def responses(
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_compat_payload,
-            codex_tool_compat=True,
         )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
@@ -801,7 +800,7 @@ async def v1_warmup_by_mode(
 
 
 def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse]) -> list[V1UsageLimitResponse]:
-    return [limit for window in ("5h", "7d") if (limit := aggregate_limits.get(window)) is not None]
+    return [limit for window in ("5h", "7d", "monthly") if (limit := aggregate_limits.get(window)) is not None]
 
 
 def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:
@@ -828,19 +827,19 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
 
     key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
     primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
-    secondary_credit_limit = (
-        _select_codex_usage_limit(key_limits, "7d")
-        or _select_codex_usage_limit(key_limits, "weekly")
-        or _select_codex_usage_limit(key_limits, "monthly")
+    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
+        key_limits, "weekly"
     )
+    monthly_credit_limit = _select_codex_usage_limit(key_limits, "monthly")
 
     return RateLimitStatusPayloadData(
         plan_type="api_key",
         rate_limit=_rate_limit_details(
             _codex_usage_window_snapshot(primary_credit_limit),
             _codex_usage_window_snapshot(secondary_credit_limit),
+            _codex_usage_window_snapshot(monthly_credit_limit),
         ),
-        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit),
+        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit, monthly_credit_limit),
     )
 
 
@@ -877,8 +876,9 @@ def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimi
 def _codex_usage_credit_snapshot(
     primary_limit: V1UsageLimitResponse | None,
     secondary_limit: V1UsageLimitResponse | None,
+    monthly_limit: V1UsageLimitResponse | None = None,
 ) -> CreditStatusDetailsData | None:
-    preferred = secondary_limit or primary_limit
+    preferred = monthly_limit or secondary_limit or primary_limit
     if preferred is None or preferred.limit_type != "credits":
         return None
     return CreditStatusDetailsData(
@@ -894,12 +894,18 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     usage_repository = UsageRepository(session)
     primary_latest = await usage_repository.latest_by_account(window="primary")
     secondary_latest = await usage_repository.latest_by_account(window="secondary")
+    monthly_latest = await usage_repository.latest_by_account(window="monthly")
 
     primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
+    monthly_rows = [usage_history_to_window_row(entry) for entry in monthly_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
 
-    account_ids = {row.account_id for row in primary_rows} | {row.account_id for row in secondary_rows}
+    account_ids = (
+        {row.account_id for row in primary_rows}
+        | {row.account_id for row in secondary_rows}
+        | {row.account_id for row in monthly_rows}
+    )
     if not account_ids:
         return {}
 
@@ -910,9 +916,14 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     active_account_ids = set(account_map)
     primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
     secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
+    monthly_rows = [row for row in monthly_rows if row.account_id in active_account_ids]
     limits: dict[str, V1UsageLimitResponse] = {}
 
-    for window_key, rows, label in (("primary", primary_rows, "5h"), ("secondary", secondary_rows, "7d")):
+    for window_key, rows, label in (
+        ("primary", primary_rows, "5h"),
+        ("secondary", secondary_rows, "7d"),
+        ("monthly", monthly_rows, "monthly"),
+    ):
         if not rows:
             continue
         summary = usage_core.summarize_usage_window(rows, account_map, window_key)
@@ -942,7 +953,7 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
     result = await session.execute(
         select(Account).where(
             Account.id.in_(account_ids),
-            Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
+            Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
         )
     )
     return list(result.scalars().all())
@@ -2915,7 +2926,13 @@ def _logged_error_json_response(
     *,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    code, message = _error_details_from_content(content)
+    if isinstance(content, OpenAIErrorEnvelopeModel):
+        public_content: Mapping[str, JsonValue] | OpenAIErrorEnvelope = content.model_dump(
+            mode="json", exclude_none=True
+        )
+    else:
+        public_content = content
+    code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
@@ -2927,7 +2944,11 @@ def _logged_error_json_response(
         message,
         category="proxy_error_response",
     )
-    return JSONResponse(status_code=status_code, content=content, headers=effective_headers or None)
+    # codeql[py/stack-trace-exposure] This is an OpenAI-compatible proxy boundary:
+    # upstream/provider error envelopes intentionally preserve diagnostics for
+    # clients, while internal exception handlers construct generic error
+    # envelopes before reaching this response helper.
+    return JSONResponse(status_code=status_code, content=public_content, headers=effective_headers or None)
 
 
 def _error_details_from_content(
@@ -4056,7 +4077,7 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
         return 429
-    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication"}:
+    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication", "token_invalidated"}:
         return 401
     if error_value and error_value.code == "invalid_request_error":
         return 400

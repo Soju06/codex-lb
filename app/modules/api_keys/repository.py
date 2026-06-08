@@ -181,7 +181,9 @@ class ApiKeysRepository:
         result = await self._session.execute(
             select(Account)
             .options(load_only(Account.id, Account.plan_type, Account.status))
-            .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .where(
+                ~Account.status.in_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
+            )
         )
         return list(result.scalars().all())
 

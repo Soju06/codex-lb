@@ -80,7 +80,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m scripts.prepare_beta_release
+          python -m scripts.prepare_beta_release \
+            --changelog-path "${RUNNER_TEMP}/beta-release-changelog.md"
 
       - name: Detect changes
         if: steps.release_pr.outputs.found == 'true' && steps.prepare.outputs.should_create != 'false'
@@ -122,16 +123,42 @@ jobs:
           VERSION: ${{ steps.prepare.outputs.version }}
           BASE_VERSION: ${{ steps.prepare.outputs.base_version }}
           PYPI_VERSION: ${{ steps.prepare.outputs.pypi_version }}
+          PREVIOUS_TAG: ${{ steps.prepare.outputs.previous_tag }}
+          CHANGELOG_PATH: ${{ steps.prepare.outputs.changelog_path }}
           RELEASE_PR: ${{ steps.release_pr.outputs.number }}
         run: |
           set -euo pipefail
           body_file="${RUNNER_TEMP}/beta-release-pr.md"
-          cat > "${body_file}" <<EOF
+          candidate_sha="$(git rev-parse HEAD)"
+          if [ ! -s "${CHANGELOG_PATH}" ]; then
+            echo "::error::Missing generated beta changelog at ${CHANGELOG_PATH}"
+            exit 1
+          fi
+
+          {
+          cat <<EOF
           ## Summary
           - Prepares beta release ${TAG} for the ${BASE_VERSION} stable train.
           - Updates release-managed version files only; release-please remains the stable release owner.
-          - Merging this PR will publish ${TAG} as a GitHub prerelease and trigger package/image/chart publishing.
+          - Merging this PR will publish ${TAG} only after the release-candidate validation checklist below is completed for this exact candidate SHA.
           - Synced automatically from release-please PR #${RELEASE_PR}; no manual beta workflow dispatch is required.
+
+          ## Changes since ${PREVIOUS_TAG:-the previous release}
+          EOF
+          cat "${CHANGELOG_PATH}"
+          cat <<EOF
+
+          ## Release-candidate validation
+          Validated candidate: ${candidate_sha}
+
+          Complete these checks on the exact candidate SHA above before merging. The beta release guard and publish workflow fail while any item remains unchecked or the SHA is stale.
+
+          - [ ] Backend/unit/integration gates
+          - [ ] Frontend tests/build
+          - [ ] Wheel/package validation
+          - [ ] Docker/container smoke
+          - [ ] Live upstream/account smoke
+          - [ ] Live upstream/account smoke not required
 
           ## Install after publish
           \`\`\`bash
@@ -143,6 +170,7 @@ jobs:
           ## Promotion
           Merge the normal release-please PR to promote this beta-tested train to ${BASE_VERSION}.
           EOF
+          } > "${body_file}"
 
           existing_pr="$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
           if [ -n "${existing_pr}" ]; then

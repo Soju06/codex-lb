@@ -6,6 +6,8 @@ import json
 import pytest
 
 from app.core.auth import DEFAULT_EMAIL, generate_unique_account_id, parse_auth_json
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -98,6 +100,94 @@ async def test_pause_account(async_client):
     matched = next((account for account in data if account["accountId"] == expected_account_id), None)
     assert matched is not None
     assert matched["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_pause_reauth_required_account_returns_conflict(async_client):
+    email = "pause-reauth@example.com"
+    raw_account_id = "acc_pause_reauth"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, expected_account_id)
+        assert account is not None
+        account.status = AccountStatus.REAUTH_REQUIRED
+        account.deactivation_reason = "Authentication token invalidated - re-login required"
+        await session.commit()
+
+    pause = await async_client.post(f"/api/accounts/{expected_account_id}/pause")
+    assert pause.status_code == 409
+    assert pause.json()["error"]["code"] == "account_state_transition_invalid"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(
+        (account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id),
+        None,
+    )
+    assert matched is not None
+    assert matched["status"] == "reauth_required"
+
+
+@pytest.mark.asyncio
+async def test_reactivate_reauth_required_account_returns_conflict(async_client):
+    email = "reactivate-reauth@example.com"
+    raw_account_id = "acc_reactivate_reauth"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, expected_account_id)
+        assert account is not None
+        account.status = AccountStatus.REAUTH_REQUIRED
+        account.deactivation_reason = "Authentication token invalidated - re-login required"
+        await session.commit()
+
+    reactivate = await async_client.post(f"/api/accounts/{expected_account_id}/reactivate")
+    assert reactivate.status_code == 409
+    assert reactivate.json()["error"]["code"] == "account_state_transition_invalid"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(
+        (account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id),
+        None,
+    )
+    assert matched is not None
+    assert matched["status"] == "reauth_required"
 
 
 @pytest.mark.asyncio

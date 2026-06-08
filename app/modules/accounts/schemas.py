@@ -22,6 +22,7 @@ class AccountUsageTrend(DashboardModel):
 class AccountUsage(DashboardModel):
     primary_remaining_percent: float | None = None
     secondary_remaining_percent: float | None = None
+    monthly_remaining_percent: float | None = None
 
 
 class AccountRequestUsage(DashboardModel):
@@ -84,13 +85,17 @@ class AccountSummary(DashboardModel):
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
+    reset_at_monthly: datetime | None = None
     window_minutes_primary: int | None = None
     window_minutes_secondary: int | None = None
+    window_minutes_monthly: int | None = None
     last_refresh_at: datetime | None = None
     capacity_credits_primary: float | None = None
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None
     remaining_credits_secondary: float | None = None
+    capacity_credits_monthly: float | None = None
+    remaining_credits_monthly: float | None = None
     request_usage: AccountRequestUsage | None = None
     additional_quotas: list[AccountAdditionalQuota] = Field(default_factory=list)
     credits_has: bool | None = None

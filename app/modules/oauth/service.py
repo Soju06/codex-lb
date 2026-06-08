@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import logging
 import secrets
 import time
 from contextlib import AbstractAsyncContextManager
@@ -49,10 +51,14 @@ from app.modules.oauth.schemas import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 _async_sleep = asyncio.sleep
+logger = logging.getLogger(__name__)
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
+_ACCOUNT_IDENTITY_CONFLICT_MESSAGE = (
+    "Multiple accounts match the authenticated identity. Remove duplicate accounts and retry OAuth."
+)
 
 
 async def _oauth_route() -> ResolvedUpstreamRoute | None:
@@ -434,12 +440,12 @@ class OauthService:
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=exc.message)
-        except AccountIdentityConflictError as exc:
-            message = str(exc)
-            await self._set_error(message, flow_id=flow.flow_id)
-            return ManualCallbackResponse(status="error", error_message=message)
+        except AccountIdentityConflictError:
+            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+            return ManualCallbackResponse(status="error", error_message=_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
         except Exception as exc:
-            message = f"Unexpected error: {exc}"
+            logger.error("manual OAuth callback failed exception_type=%s", type(exc).__name__)
+            message = "An internal error occurred."
             await self._set_error(message, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=message)
 
@@ -508,9 +514,9 @@ class OauthService:
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow.flow_id)
             html = _error_html(exc.message)
-        except AccountIdentityConflictError as exc:
-            await self._set_error(str(exc), flow_id=flow.flow_id)
-            html = _error_html(str(exc))
+        except AccountIdentityConflictError:
+            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+            html = _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
 
         asyncio.create_task(self._stop_callback_server_if_idle())
         return self._html_response(html)
@@ -533,8 +539,8 @@ class OauthService:
             await self._set_error("Device code expired.", flow_id=flow_id)
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow_id)
-        except AccountIdentityConflictError as exc:
-            await self._set_error(str(exc), flow_id=flow_id)
+        except AccountIdentityConflictError:
+            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
         finally:
             async with self._store.lock:
                 flow = self._store.get_flow_locked(flow_id)
@@ -700,4 +706,5 @@ def _success_html() -> str:
 
 
 def _error_html(message: str) -> str:
-    return f"<html><body><h1>Login failed</h1><p>{message}</p></body></html>"
+    escaped_message = html.escape(message, quote=True)
+    return f"<html><body><h1>Login failed</h1><p>{escaped_message}</p></body></html>"

@@ -1,8 +1,11 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { createAccountSummary } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
@@ -137,6 +140,20 @@ describe("ApiKeyCreateDialog", () => {
   it("submits selected assigned accounts on create", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary(),
+            createAccountSummary({
+              accountId: "acc_secondary",
+              email: "secondary@example.com",
+              displayName: "secondary@example.com",
+            }),
+          ],
+        }),
+      ),
+    );
 
     renderWithProviders(
       <ApiKeyCreateDialog

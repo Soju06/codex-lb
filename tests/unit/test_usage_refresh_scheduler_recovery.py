@@ -17,6 +17,7 @@ def _make_account(
     account_id: str,
     *,
     status: AccountStatus,
+    plan_type: str = "plus",
     reset_at: int | None = None,
     blocked_at: int | None = None,
     deactivation_reason: str | None = None,
@@ -25,7 +26,7 @@ def _make_account(
         id=account_id,
         chatgpt_account_id=f"workspace-{account_id}",
         email=f"{account_id}@example.com",
-        plan_type="plus",
+        plan_type=plan_type,
         access_token_encrypted=b"access",
         refresh_token_encrypted=b"refresh",
         id_token_encrypted=b"id",
@@ -111,13 +112,17 @@ class StubUsageRepository:
         *,
         primary: dict[str, UsageHistory] | None = None,
         secondary: dict[str, UsageHistory] | None = None,
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
         self._primary = primary or {}
         self._secondary = secondary or {}
+        self._monthly = monthly or {}
 
     async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
         if window == "secondary":
             return self._secondary
+        if window == "monthly":
+            return self._monthly
         return self._primary
 
 
@@ -487,6 +492,60 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
                 reset_at=future_reset,
                 recorded_at=_epoch_to_naive_utc(now - 10),
                 window_minutes=10080,
+            )
+        },
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_from_fresh_monthly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    future_reset = int(now + 30 * 24 * 3600)
+    blocked_at = int(now - 130)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_quota_exceeded_monthly",
+        status=AccountStatus.QUOTA_EXCEEDED,
+        plan_type="free",
+        reset_at=future_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=5.0,
+                reset_at=int(now + 300),
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+        },
+        monthly={
+            account.id: _make_usage(
+                account.id,
+                window="monthly",
+                used_percent=10.0,
+                reset_at=future_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=43200,
             )
         },
     )

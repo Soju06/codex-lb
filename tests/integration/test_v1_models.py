@@ -549,6 +549,7 @@ async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_popu
     slugs = {item["slug"] for item in payload["models"]}
     assert slugs == BOOTSTRAP_MODEL_SLUGS
     assert "gpt-5.5-pro" not in slugs
+    assert all(not slug.startswith("gpt-image-") for slug in slugs)
 
 
 @pytest.mark.asyncio

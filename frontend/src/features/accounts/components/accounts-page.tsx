@@ -12,8 +12,13 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
-import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import {
+  DEFAULT_ACCOUNT_SORT_MODE,
+  sortAccountsForDisplay,
+  type AccountSortMode,
+} from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -26,18 +31,21 @@ const OauthDialog = lazy(() =>
 
 export function AccountsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [accountSortMode, setAccountSortMode] = useState<AccountSortMode>(DEFAULT_ACCOUNT_SORT_MODE);
   const {
     accountsQuery,
     importMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
+    probeMutation,
     limitWarmupMutation,
     updateMutation,
     deleteMutation,
     routingPolicyMutation,
     exportAuthMutation,
   } = useAccounts();
+  const { upstreamProxyQuery, accountBindingMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
 
   const importDialog = useDialogState();
@@ -52,8 +60,8 @@ export function AccountsPage() {
   );
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const sortedAccounts = useMemo(
-    () => sortAccountsForDisplay(accounts, quotaDisplay),
-    [accounts, quotaDisplay],
+    () => sortAccountsForDisplay(accounts, quotaDisplay, accountSortMode),
+    [accounts, quotaDisplay, accountSortMode],
   );
   const selectedAccountId = searchParams.get("selected");
 
@@ -94,22 +102,27 @@ export function AccountsPage() {
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
+    probeMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
-    updateMutation.isPending;
+    updateMutation.isPending ||
+    accountBindingMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
+    getErrorMessageOrNull(probeMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
-    getErrorMessageOrNull(updateMutation.error);
+    getErrorMessageOrNull(updateMutation.error) ||
+    getErrorMessageOrNull(upstreamProxyQuery.error) ||
+    getErrorMessageOrNull(accountBindingMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -134,6 +147,8 @@ export function AccountsPage() {
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}
               onSelect={handleSelectAccount}
+              sortMode={accountSortMode}
+              onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
             />
@@ -145,6 +160,9 @@ export function AccountsPage() {
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
+            onProbe={(accountId) =>
+              void probeMutation.mutateAsync({ accountId })
+            }
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })
             }
@@ -170,6 +188,10 @@ export function AccountsPage() {
                 accountId,
                 securityWorkAuthorized: enabled,
               })
+            }
+            upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
+            onProxyBindingSave={(accountId, payload) =>
+              accountBindingMutation.mutateAsync({ accountId, payload })
             }
           />
         </div>

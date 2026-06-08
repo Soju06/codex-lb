@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AccountAuthExportResponseSchema,
+  AccountProbeResponseSchema,
   AccountSummarySchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -20,11 +21,14 @@ describe("AccountSummarySchema", () => {
       usage: {
         primaryRemainingPercent: 85,
         secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 95,
       },
       resetAtPrimary: ISO,
       resetAtSecondary: null,
+      resetAtMonthly: ISO,
       windowMinutesPrimary: null,
       windowMinutesSecondary: 10080,
+      windowMinutesMonthly: 43200,
       requestUsage: {
         requestCount: 3,
         totalTokens: 1500,
@@ -48,7 +52,9 @@ describe("AccountSummarySchema", () => {
     expect(parsed.accountId).toBe("acc-1");
     expect(parsed.routingPolicy ?? "normal").toBe("normal");
     expect(parsed.usage?.primaryRemainingPercent).toBe(85);
+    expect(parsed.usage?.monthlyRemainingPercent).toBe(95);
     expect(parsed.windowMinutesSecondary).toBe(10080);
+    expect(parsed.windowMinutesMonthly).toBe(43200);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
   });
 
@@ -160,5 +166,24 @@ describe("ImportStateSchema", () => {
         message: "Imported 1 account",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("AccountProbeResponseSchema", () => {
+  it("parses probe response payloads", () => {
+    const parsed = AccountProbeResponseSchema.parse({
+      status: "probed",
+      accountId: "acc-1",
+      probeStatusCode: 200,
+      primaryUsedPercentBefore: 80,
+      primaryUsedPercentAfter: 79,
+      secondaryUsedPercentBefore: 50,
+      secondaryUsedPercentAfter: 49,
+      accountStatusBefore: "active",
+      accountStatusAfter: "active",
+    });
+
+    expect(parsed.probeStatusCode).toBe(200);
+    expect(parsed.accountId).toBe("acc-1");
   });
 });

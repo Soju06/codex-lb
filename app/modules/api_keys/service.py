@@ -349,7 +349,8 @@ def _compute_pooled_credits(
     account_map = {
         a.id: a
         for a in all_accounts
-        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        if a.id in requested_account_ids
+        and a.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     }
     account_ids = set(account_map)
 
@@ -1158,7 +1159,7 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
     parsed = json.loads(payload)
     if not isinstance(parsed, list):
         return None
-    models = [str(value).strip() for value in parsed if str(value).strip()]
+    models = [value.strip() for value in parsed if isinstance(value, str) and value.strip()]
     return models
 
 

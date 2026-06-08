@@ -12,7 +12,7 @@ from typing import Any, Protocol, TypeAlias
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token, should_refresh
-from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -212,8 +212,9 @@ class AuthManager:
                 ):
                     return latest
                 reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
-                await self._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
-                account.status = AccountStatus.DEACTIVATED
+                status = account_status_for_permanent_failure(exc.code)
+                await self._repo.update_status(account.id, status, reason)
+                account.status = status
                 account.deactivation_reason = reason
             raise
 

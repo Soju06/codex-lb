@@ -22,5 +22,5 @@ This change adds the per-account "force-probe" admin endpoint requested in upstr
 - Operators get a first-class manual recovery action for stuck-rate-limited accounts after OpenAI reset events. Closes the chicken-and-egg trap that #677 describes (LB excludes blocked accounts from selection, so blocked accounts can never wake the upstream limiter via organic traffic).
 - Single endpoint, single concern. No changes to selector decision logic, the proxy pipeline, the existing usage refresh cadence, or persistence beyond what `UsageUpdater.refresh_accounts` already writes.
 - The probe consumes a tiny amount of upstream quota (one `responses.create` with `max_output_tokens=1`) per invocation. The endpoint requires dashboard auth, so casual misuse is not a concern.
-- No frontend / dashboard button in this change. UI button is a follow-up so the API surface can land cleanly with a focused review.
+- Dashboard account actions expose a Force probe button for eligible accounts and keep it disabled for paused or deactivated accounts.
 - No change to public client surfaces (`/backend-api/codex/responses`, `/v1/responses`, etc.). The new endpoint lives under the existing dashboard `/api/accounts/*` namespace.

@@ -108,6 +108,7 @@ class DurableBridgeSessionCoordinator:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -123,6 +124,7 @@ class DurableBridgeSessionCoordinator:
                 latest_turn_state=latest_turn_state,
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
+                force_owner_epoch_advance=force_owner_epoch_advance,
             )
         return _to_lookup(snapshot)
 

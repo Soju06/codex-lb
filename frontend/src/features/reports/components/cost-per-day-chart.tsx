@@ -21,7 +21,7 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
 
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Custo por Dia</div>
+      <div className="text-sm font-semibold text-foreground">Cost by Day</div>
       <div className="mt-4 h-[200px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
@@ -51,8 +51,8 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
                 background: "hsl(var(--popover))",
               }}
               formatter={(value) => {
-                if (typeof value !== "number") return [String(value), "Custo"];
-                return [`$${value.toFixed(2)}`, "Custo"];
+                if (typeof value !== "number") return [String(value), "Cost"];
+                return [`$${value.toFixed(2)}`, "Cost"];
               }}
             />
             <Area

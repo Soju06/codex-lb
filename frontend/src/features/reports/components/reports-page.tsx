@@ -84,10 +84,10 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-6 px-4 py-8 sm:px-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          Relatório de Custo
+          Cost Report
         </h1>
         <p className="text-sm text-muted-foreground">
-          Histórico de utilização por período
+          Usage history by date range
         </p>
       </div>
 
@@ -116,7 +116,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
-          Carregando...
+          Loading...
         </div>
       ) : reportsQuery.data ? (
         <>

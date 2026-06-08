@@ -10,7 +10,7 @@ const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"
 export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Distribuição por Modelo</div>
+      <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
       <div className="mt-4 flex items-center gap-4">
         <div className="h-[140px] w-[140px] shrink-0">
           <ResponsiveContainer width="100%" height="100%">
@@ -36,8 +36,8 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                   background: "hsl(var(--popover))",
                 }}
                 formatter={(value) => {
-                  if (typeof value !== "number") return [String(value), "Custo"];
-                  return [`$${value.toFixed(2)}`, "Custo"];
+                  if (typeof value !== "number") return [String(value), "Cost"];
+                  return [`$${value.toFixed(2)}`, "Cost"];
                 }}
               />
             </PieChart>

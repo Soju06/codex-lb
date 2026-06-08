@@ -7,9 +7,9 @@ export type ReportsSummaryCardsProps = {
 export function ReportsSummaryCards({ summary }: ReportsSummaryCardsProps) {
   const cards = [
     {
-      label: "Custo Total",
+      label: "Total Cost",
       value: `$${summary.totalCostUsd.toFixed(2)}`,
-      sub: `média $${summary.avgCostPerDay.toFixed(2)}/dia`,
+      sub: `avg $${summary.avgCostPerDay.toFixed(2)}/day`,
     },
     {
       label: "Tokens",
@@ -17,9 +17,9 @@ export function ReportsSummaryCards({ summary }: ReportsSummaryCardsProps) {
       sub: `Input ${formatNumber(summary.totalInputTokens)} · Output ${formatNumber(summary.totalOutputTokens)}`,
     },
     {
-      label: "Requisições",
+      label: "Requests",
       value: formatNumber(summary.totalRequests),
-      sub: `média ${summary.avgRequestsPerDay.toFixed(0)}/dia · ${summary.activeAccounts} contas`,
+      sub: `avg ${summary.avgRequestsPerDay.toFixed(0)}/day · ${summary.activeAccounts} accounts`,
     },
   ];
 

@@ -17,7 +17,7 @@ export function DailyDetailTable({ data }: DailyDetailTableProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold text-foreground">Detalhamento por Dia</div>
+        <div className="text-sm font-semibold text-foreground">Daily Breakdown</div>
         <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={() => exportCSV(data)}>
           <Download className="h-3 w-3" />
           CSV
@@ -27,12 +27,12 @@ export function DailyDetailTable({ data }: DailyDetailTableProps) {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b text-left text-muted-foreground">
-              <th className="pb-2 pr-4 font-medium">Dia</th>
-              <th className="pb-2 pr-4 text-right font-medium">Req</th>
-              <th className="pb-2 pr-4 text-right font-medium">Tokens In</th>
-              <th className="pb-2 pr-4 text-right font-medium">Tokens Out</th>
-              <th className="pb-2 pr-4 text-right font-medium">Custo</th>
-              <th className="pb-2 text-right font-medium">Contas</th>
+              <th className="pb-2 pr-4 font-medium">Day</th>
+              <th className="pb-2 pr-4 text-right font-medium">Reqs</th>
+              <th className="pb-2 pr-4 text-right font-medium">Input Tokens</th>
+              <th className="pb-2 pr-4 text-right font-medium">Output Tokens</th>
+              <th className="pb-2 pr-4 text-right font-medium">Cost</th>
+              <th className="pb-2 text-right font-medium">Accounts</th>
             </tr>
           </thead>
           <tbody>

@@ -37,8 +37,12 @@ async def test_codex_style_responses_payload_is_accepted(async_client):
         lines = [line async for line in resp.aiter_lines() if line]
 
     # Public /v1/responses stream MUST start with `response.created` per the
-    # OpenAI Responses SSE contract; the proxy synthesizes one when the
-    # upstream stream skips it (e.g. when no accounts are available and
+    # OpenAI Responses SSE contract; do not inject a leading comment heartbeat
+    # before the first data event because OpenAI SDK stream parsers use the
+    # first event to establish the response object.
+    assert not lines[0].startswith(":"), lines[:3]
+    # The proxy synthesizes response.created when the upstream stream skips it
+    # (e.g. when no accounts are available and upstream emits only
     # upstream emits only `response.failed`). The original intent of this
     # test is to verify the Codex-style payload (input_text, tool_choice,
     # parallel_tool_calls, include) is accepted and a stream begins —

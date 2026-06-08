@@ -38,6 +38,18 @@ from app.modules.usage.depletion_service import (
 from app.modules.usage.mappers import usage_history_to_window_row
 
 
+def _parse_weekly_pace_working_days(value: str) -> set[int]:
+    try:
+        days = {int(part.strip()) for part in value.split(",") if part.strip()}
+    except ValueError:
+        return set()
+    if not days or any(day < 0 or day > 6 for day in days):
+        return set()
+    if days == set(range(7)):
+        return set()
+    return days
+
+
 class DashboardService:
     def __init__(self, repo: DashboardRepository) -> None:
         self._repo = repo
@@ -53,6 +65,7 @@ class DashboardService:
         account_ids = [account.id for account in accounts]
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        monthly_usage = await self._repo.latest_usage_by_account("monthly")
         limit_warmups_by_account = await self._repo.latest_limit_warmups_by_account(account_ids)
 
         account_summaries = sorted(
@@ -60,6 +73,7 @@ class DashboardService:
                 accounts=accounts,
                 primary_usage=primary_usage,
                 secondary_usage=secondary_usage,
+                monthly_usage=monthly_usage,
                 limit_warmups_by_account=limit_warmups_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
@@ -125,7 +139,7 @@ class DashboardService:
 
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
-            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, additional_ts),
+            last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, monthly_usage, additional_ts),
             timeframe=build_overview_timeframe(overview_timeframe),
             accounts=account_summaries,
             summary=summary,
@@ -138,10 +152,12 @@ class DashboardService:
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
+        monthly_usage = await self._repo.latest_usage_by_account("monthly")
         account_summaries = build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
+            monthly_usage=monthly_usage,
             encryptor=self._encryptor,
             include_auth=False,
         )
@@ -153,12 +169,14 @@ class DashboardService:
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
         settings = get_settings()
+        dashboard_settings = await self._repo.get_settings()
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
             usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
         )
         return DashboardProjectionsResponse(
             depletion_primary=pri_depletion,
@@ -331,11 +349,12 @@ def _should_use_weekly_primary_history(
 def _latest_recorded_at(
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    monthly_usage: dict[str, UsageHistory],
     additional_ts: datetime | None = None,
 ):
     timestamps = [
         entry.recorded_at
-        for entry in list(primary_usage.values()) + list(secondary_usage.values())
+        for entry in list(primary_usage.values()) + list(secondary_usage.values()) + list(monthly_usage.values())
         if entry.recorded_at is not None
     ]
     if additional_ts is not None:

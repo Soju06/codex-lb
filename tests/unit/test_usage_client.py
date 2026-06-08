@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
 
@@ -82,6 +83,36 @@ class StubRetryClient:
         return StubRequestContext(self._responses, self._state, headers or {}, retry_options)
 
 
+class StubCodexResponse:
+    def __init__(self, status_code: int = 200, payload: dict | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload or {
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 12.5,
+                    "reset_at": 1735689600,
+                    "limit_window_seconds": 60,
+                    "reset_after_seconds": 30,
+                }
+            },
+        }
+
+
+class StubCodexClient:
+    def __init__(self, responses: list[StubCodexResponse] | None = None) -> None:
+        self._responses = responses or [StubCodexResponse()]
+        self.calls: list[dict[str, object]] = []
+
+    async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: object) -> object:
+        self.calls.append({"method": method, "url": url, "route": route, **kwargs})
+        index = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[index]
+
+
 @pytest.fixture
 def usage_server() -> tuple[str, StubRetryClient, UsageClientState]:
     state = UsageClientState()
@@ -125,11 +156,72 @@ async def test_fetch_usage_retries_and_returns_payload(usage_server):
         max_retries=1,
         timeout_seconds=2.0,
         client=cast(Any, client),
+        allow_direct_egress=True,
     )
     assert data.plan_type == "plus"
     assert state.calls == 2
     assert state.auth == "Bearer access-token"
     assert state.account == "acc_test"
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_uses_resolved_codex_route() -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    client = StubCodexClient()
+
+    data = await fetch_usage(
+        access_token="access-token",
+        account_id="acc_test",
+        base_url="http://usage.test/backend-api",
+        timeout_seconds=2.0,
+        route=route,
+        codex_client=cast(Any, client),
+        allow_direct_egress=True,
+    )
+
+    assert data.plan_type == "plus"
+    assert client.calls[0]["route"] is route
+    assert client.calls[0]["method"] == "GET"
+    assert client.calls[0]["url"] == "http://usage.test/backend-api/wham/usage"
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_retries_resolved_codex_route_retryable_status(monkeypatch) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.core.clients.usage.asyncio.sleep", no_sleep)
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    client = StubCodexClient(
+        [
+            StubCodexResponse(503, {"error": {"message": "busy"}}),
+            StubCodexResponse(),
+        ]
+    )
+
+    data = await fetch_usage(
+        access_token="access-token",
+        account_id="acc_test",
+        base_url="http://usage.test/backend-api",
+        max_retries=1,
+        timeout_seconds=2.0,
+        route=route,
+        codex_client=cast(Any, client),
+        allow_direct_egress=True,
+    )
+
+    assert data.plan_type == "plus"
+    assert len(client.calls) == 2
+    assert client.calls[0]["route"] is route
+    assert client.calls[1]["route"] is route
 
 
 @pytest.mark.asyncio
@@ -143,6 +235,7 @@ async def test_fetch_usage_raises_after_retries(failing_usage_server):
             max_retries=0,
             timeout_seconds=1.0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
     exc = excinfo.value
     assert isinstance(exc, UsageFetchError)
@@ -174,6 +267,7 @@ async def test_fetch_usage_preserves_error_code():
             max_retries=0,
             timeout_seconds=1.0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     exc = excinfo.value

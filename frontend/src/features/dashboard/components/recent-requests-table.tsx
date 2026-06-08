@@ -60,6 +60,12 @@ const PLAN_CLASS_MAP: Record<string, string> = {
   pro: "bg-violet-500/15 text-violet-700 border-violet-500/20 hover:bg-violet-500/20 dark:text-violet-300",
 };
 
+const REQUEST_KIND_LABELS: Record<string, string> = {
+  normal: "Normal",
+  warmup: "Warmup",
+  limit_warmup: "Warmup",
+};
+
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -177,7 +183,7 @@ export function RecentRequestsTable({
           <TableBody>
             {requests.map((request) => {
               const time = formatTimeLong(request.requestedAt);
-              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "—";
+              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : "Unassigned";
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorPreview = request.errorMessage || request.errorCode || "-";
               const hasError = !!(request.errorCode || request.errorMessage);
@@ -222,6 +228,11 @@ export function RecentRequestsTable({
                       <span className="font-mono text-xs">
                         {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
                       </span>
+                      {request.requestKind === "warmup" || request.requestKind === "limit_warmup" ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {REQUEST_KIND_LABELS.warmup}
+                        </div>
+                      ) : null}
                       {showRequestedTier ? (
                         <div className="text-[11px] text-muted-foreground">
                           Requested {request.requestedServiceTier}
@@ -335,11 +346,21 @@ export function RecentRequestsTable({
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Status" value={selectedRequest ? (REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status) : "—"} />
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
+                <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
                 <RequestDetailField label="Time" value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt) : "—"} />
                 <RequestDetailField label="Error Code" value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              <RequestDetailField
+                label="User Agent"
+                value={selectedRequest?.useragent ?? "—"}
+                copyValue={selectedRequest?.useragent ?? undefined}
+                copyLabel="Copy"
+                compactCopy
+              />
             </div>
 
             <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />

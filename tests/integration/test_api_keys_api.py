@@ -1319,6 +1319,79 @@ async def test_chat_completions_stream_finalizes_token_limit(async_client, monke
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_cursor_context_limit_releases_reservation(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "chat-completions-cursor-context-limit",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_chat_cursor_context_limit", "chat-cursor-context-limit@example.com")
+
+    seen = {"calls": 0}
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        seen["calls"] += 1
+        yield 'data: {"type":"response.created","response":{"id":"resp_cursor_context_limit"}}\n\n'
+        yield 'data: {"type":"response.in_progress","response":{"id":"resp_cursor_context_limit"}}\n\n'
+        yield (
+            'data: {"type":"error","error":{"code":"context_length_exceeded",'
+            '"message":"This model maximum context length was exceeded.",'
+            '"type":"invalid_request_error"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}", "User-Agent": "Cursor/1.0"},
+        json={
+            "model": _TEST_MODELS[0],
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert seen["calls"] == 1
+    assert any('"total_tokens":1000000' in line for line in lines)
+
+    async with SessionLocal() as session:
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert [reservation.status for reservation in reservations] == ["released"]
+
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_stream_finalizes_cost_limit(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

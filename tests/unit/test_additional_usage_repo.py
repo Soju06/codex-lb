@@ -273,6 +273,96 @@ async def test_latest_by_account_reads_rows_under_legacy_quota_key_alias(
 
 
 @pytest.mark.asyncio
+async def test_latest_by_account_merges_alias_rows_conservatively(
+    async_session: AsyncSession,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    async_session.add_all(
+        [
+            AdditionalUsageHistory(
+                account_id="acc_alias_merge",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=92.0,
+                recorded_at=now,
+            ),
+            AdditionalUsageHistory(
+                account_id="acc_alias_merge",
+                quota_key="spark_enterprise",
+                limit_name="GPT-5.3-Codex-Spark",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=40.0,
+                recorded_at=now,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
+
+    assert list(result) == ["acc_alias_merge"]
+    assert result["acc_alias_merge"].quota_key == "codex_spark"
+    assert result["acc_alias_merge"].used_percent == 92.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_prefers_newer_alias_row_after_reset(
+    async_session: AsyncSession,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    repo = AdditionalUsageRepository(async_session)
+    now = datetime.now(tz=timezone.utc)
+
+    async_session.add_all(
+        [
+            AdditionalUsageHistory(
+                account_id="acc_alias_reset",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=96.0,
+                recorded_at=now - timedelta(seconds=10),
+            ),
+            AdditionalUsageHistory(
+                account_id="acc_alias_reset",
+                quota_key="spark_enterprise",
+                limit_name="GPT-5.3-Codex-Spark",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=12.0,
+                recorded_at=now,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
+
+    assert list(result) == ["acc_alias_reset"]
+    assert result["acc_alias_reset"].quota_key == "spark_enterprise"
+    assert result["acc_alias_reset"].used_percent == 12.0
+
+
+@pytest.mark.asyncio
 async def test_list_limit_names_returns_distinct_names(async_session: AsyncSession) -> None:
     """Test list_limit_names returns distinct limit names."""
     repo = AdditionalUsageRepository(async_session)

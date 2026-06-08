@@ -148,6 +148,104 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_account_change_advances_epoch_to_fence_stale_release(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-account-change",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    replaced = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-account-change",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_2",
+        latest_response_id="resp_2",
+        allow_takeover=False,
+    )
+
+    stale_release = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+
+    assert replaced.session_id == claimed.session_id
+    assert replaced.owner_instance_id == "instance-a"
+    assert replaced.owner_epoch == claimed.owner_epoch + 1
+    assert replaced.account_id == "acc-2"
+    assert stale_release is not None
+    assert stale_release.owner_instance_id == "instance-a"
+    assert stale_release.owner_epoch == replaced.owner_epoch
+    assert stale_release.state == "active"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_forced_generation_advance_fences_same_account_stale_release(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-forced-generation",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    replaced = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-forced-generation",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_2",
+        latest_response_id="resp_2",
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
+
+    stale_release = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+
+    assert replaced.session_id == claimed.session_id
+    assert replaced.owner_instance_id == "instance-a"
+    assert replaced.owner_epoch == claimed.owner_epoch + 1
+    assert stale_release is not None
+    assert stale_release.owner_instance_id == "instance-a"
+    assert stale_release.owner_epoch == replaced.owner_epoch
+    assert stale_release.state == "active"
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_takes_over_after_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

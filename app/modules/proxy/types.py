@@ -19,6 +19,7 @@ class RateLimitStatusDetailsData:
     limit_reached: bool
     primary_window: RateLimitWindowSnapshotData | None = None
     secondary_window: RateLimitWindowSnapshotData | None = None
+    monthly_window: RateLimitWindowSnapshotData | None = None
 
 
 @dataclass(frozen=True)

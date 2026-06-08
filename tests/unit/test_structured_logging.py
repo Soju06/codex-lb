@@ -8,10 +8,27 @@ import pytest
 from app.core.runtime_logging import (
     JsonFormatter,
     UtcDefaultFormatter,
+    _redact_log_value,
     build_log_config,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_redact_log_value_masks_keyed_secrets_and_bearer_tokens():
+    value = "password=secret-token Authorization: Bearer abc.def api_key=abc123"
+
+    redacted = _redact_log_value(value)
+
+    assert redacted == "password=[REDACTED] Authorization: Bearer [REDACTED] api_key=[REDACTED]"
+
+
+def test_redact_log_value_masks_basic_authorization_credentials():
+    value = "Authorization: Basic dXNlcjpwYXNz, status=failed"
+
+    redacted = _redact_log_value(value)
+
+    assert redacted == "Authorization: [REDACTED], status=failed"
 
 
 @pytest.fixture

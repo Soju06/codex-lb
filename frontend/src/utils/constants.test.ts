@@ -18,9 +18,11 @@ describe("STATUS_LABELS", () => {
       "exceeded",
       "limited",
       "paused",
+      "reauth",
     ]);
     expect(STATUS_LABELS.active).toBe("Active");
     expect(STATUS_LABELS.exceeded).toBe("Quota exceeded");
+    expect(STATUS_LABELS.reauth).toBe("Re-auth required");
   });
 });
 
@@ -40,6 +42,10 @@ describe("ROUTING_LABELS", () => {
     expect(ROUTING_LABELS.round_robin).toBe("round robin");
     expect(ROUTING_LABELS.capacity_weighted).toBe("capacity weighted");
     expect(ROUTING_LABELS.relative_availability).toBe("relative availability");
+    expect(ROUTING_LABELS.fill_first).toBe("fill first");
+    expect(ROUTING_LABELS.sequential_drain).toBe("sequential drain");
+    expect(ROUTING_LABELS.reset_drain).toBe("reset drain");
+    expect(ROUTING_LABELS.single_account).toBe("single account");
     expect(ROUTING_LABELS.sticky).toBe("sticky");
   });
 });

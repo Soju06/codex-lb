@@ -24,6 +24,98 @@ def test_chat_messages_to_responses_mapping():
     assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
+def test_chat_endpoint_accepts_responses_style_input_payload():
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "metadata": {"client": "cursor"},
+        "user": "cursor-user",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert responses.instructions == ""
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    assert "metadata" not in dumped
+    assert "user" not in dumped
+
+
+def test_chat_endpoint_preserves_responses_input_when_messages_is_empty():
+    input_items = [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [],
+        "input": input_items,
+        "instructions": "keep it short",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.instructions == "keep it short"
+    assert responses.input == input_items
+
+
+def test_chat_endpoint_preserves_responses_shaped_tools():
+    input_items = [{"role": "user", "content": [{"type": "input_text", "text": "Run tool."}]}]
+    tool = {
+        "type": "mcp",
+        "server_label": "filesystem",
+        "server_url": "https://example.com/mcp",
+        "require_approval": "never",
+    }
+    payload = {
+        "model": "gpt-5.2",
+        "input": input_items,
+        "tools": [tool],
+        "tool_choice": {"type": "mcp", "server_label": "filesystem"},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.input == input_items
+    assert responses.tools == [tool]
+    assert responses.tool_choice == {"type": "mcp", "server_label": "filesystem"}
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "file_search", "vector_store_ids": ["vs_dummy"]},
+        {"type": "image_generation", "output_format": "png"},
+    ],
+)
+def test_chat_endpoint_preserves_responses_shaped_builtin_tools(tool):
+    input_items = [{"role": "user", "content": [{"type": "input_text", "text": "Run tool."}]}]
+    payload = {
+        "model": "gpt-5.2",
+        "input": input_items,
+        "tools": [tool],
+        "tool_choice": {"type": tool["type"]},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.input == input_items
+    assert responses.tools == [tool]
+    assert responses.tool_choice == {"type": tool["type"]}
+
+
+def test_chat_messages_accept_responses_style_text_parts():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": [{"type": "input_text", "text": "sys"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.instructions == "sys"
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
 def test_chat_messages_require_objects():
     payload = {"model": "gpt-5.2", "messages": ["hi"]}
     with pytest.raises(ValidationError):

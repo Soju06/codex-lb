@@ -187,6 +187,7 @@ async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstr
     service._finalize_websocket_request_state = cast(Any, AsyncMock())
     upstream = _CancelThenRetryUpstreamWebSocket()
     session = _make_session(upstream)
+    service._http_bridge_sessions[session.key] = session
     session.upstream_reader = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
 
     first_request = _make_request_state("req-cancelled")

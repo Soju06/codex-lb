@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from app.core.auth import generate_unique_account_id, parse_auth_json
+from app.core.auth import DEFAULT_EMAIL, generate_unique_account_id, parse_auth_json
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -98,6 +100,94 @@ async def test_pause_account(async_client):
     matched = next((account for account in data if account["accountId"] == expected_account_id), None)
     assert matched is not None
     assert matched["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_pause_reauth_required_account_returns_conflict(async_client):
+    email = "pause-reauth@example.com"
+    raw_account_id = "acc_pause_reauth"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, expected_account_id)
+        assert account is not None
+        account.status = AccountStatus.REAUTH_REQUIRED
+        account.deactivation_reason = "Authentication token invalidated - re-login required"
+        await session.commit()
+
+    pause = await async_client.post(f"/api/accounts/{expected_account_id}/pause")
+    assert pause.status_code == 409
+    assert pause.json()["error"]["code"] == "account_state_transition_invalid"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(
+        (account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id),
+        None,
+    )
+    assert matched is not None
+    assert matched["status"] == "reauth_required"
+
+
+@pytest.mark.asyncio
+async def test_reactivate_reauth_required_account_returns_conflict(async_client):
+    email = "reactivate-reauth@example.com"
+    raw_account_id = "acc_reactivate_reauth"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, expected_account_id)
+        assert account is not None
+        account.status = AccountStatus.REAUTH_REQUIRED
+        account.deactivation_reason = "Authentication token invalidated - re-login required"
+        await session.commit()
+
+    reactivate = await async_client.post(f"/api/accounts/{expected_account_id}/reactivate")
+    assert reactivate.status_code == 409
+    assert reactivate.json()["error"]["code"] == "account_state_transition_invalid"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(
+        (account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id),
+        None,
+    )
+    assert matched is not None
+    assert matched["status"] == "reauth_required"
 
 
 @pytest.mark.asyncio
@@ -255,3 +345,64 @@ async def test_set_and_clear_account_alias(async_client):
     matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
     assert matched["alias"] is None
     assert matched["displayName"] == email
+
+
+@pytest.mark.asyncio
+async def test_list_accounts_flags_email_duplicates(async_client):
+    """Pin codex-lb #787 (B): after a token-invalidation cascade, the
+    re-add OAuth flow creates a second account row with the same email
+    but a fresh accountId for the same ChatGPT account identity and workspace
+    slot. /api/accounts surfaces that pair via isEmailDuplicate=true on both
+    rows so the dashboard can flag the operator's "stale + fresh" pair without
+    forcing them to group by email, ChatGPT identity, and workspace themselves.
+    """
+    from app.core.crypto import TokenEncryptor
+    from app.core.utils.time import utcnow
+    from app.db.models import Account, AccountStatus
+    from app.db.session import SessionLocal
+    from app.modules.accounts.repository import AccountsRepository
+
+    encryptor = TokenEncryptor()
+
+    def _account(account_id: str, email: str, chatgpt_id: str, workspace_id: str | None = None) -> Account:
+        return Account(
+            id=account_id,
+            chatgpt_account_id=chatgpt_id,
+            workspace_id=workspace_id,
+            email=email,
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("dup-stale", "dup@example.com", "chatgpt_same"), merge_by_email=False)
+        await repo.upsert(_account("dup-fresh", "dup@example.com", "chatgpt_same"), merge_by_email=False)
+        await repo.upsert(_account("workspace-a", "multi@example.com", "chatgpt_multi", "ws_a"), merge_by_email=False)
+        await repo.upsert(_account("workspace-b", "multi@example.com", "chatgpt_multi", "ws_b"), merge_by_email=False)
+        await repo.upsert(_account("workspace-other", "dup@example.com", "chatgpt_other"), merge_by_email=False)
+        await repo.upsert(_account("solo", "solo@example.com", "chatgpt_solo"), merge_by_email=False)
+        await repo.upsert(_account("placeholder-a", DEFAULT_EMAIL, "chatgpt_placeholder_a"), merge_by_email=False)
+        await repo.upsert(_account("placeholder-b", DEFAULT_EMAIL, "chatgpt_placeholder_b"), merge_by_email=False)
+        await repo.upsert(_account("blank-a", "   ", "chatgpt_blank"), merge_by_email=False)
+        await repo.upsert(_account("blank-b", "   ", "chatgpt_blank"), merge_by_email=False)
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts_by_id = {a["accountId"]: a for a in response.json()["accounts"]}
+
+    assert accounts_by_id["dup-stale"]["isEmailDuplicate"] is True
+    assert accounts_by_id["dup-fresh"]["isEmailDuplicate"] is True
+    assert accounts_by_id["workspace-a"]["isEmailDuplicate"] is False
+    assert accounts_by_id["workspace-b"]["isEmailDuplicate"] is False
+    assert accounts_by_id["workspace-other"]["isEmailDuplicate"] is False
+    assert accounts_by_id["solo"]["isEmailDuplicate"] is False
+    assert accounts_by_id["placeholder-a"]["isEmailDuplicate"] is False
+    assert accounts_by_id["placeholder-b"]["isEmailDuplicate"] is False
+    assert accounts_by_id["blank-a"]["isEmailDuplicate"] is False
+    assert accounts_by_id["blank-b"]["isEmailDuplicate"] is False

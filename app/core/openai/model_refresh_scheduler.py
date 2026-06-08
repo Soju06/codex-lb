@@ -13,6 +13,7 @@ from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_pla
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import UpstreamModel, get_model_registry
+from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
@@ -242,9 +243,15 @@ async def _fetch_models_with_transport_recovery(
 ) -> list[UpstreamModel]:
     access_token = encryptor.decrypt(account.access_token_encrypted)
     account_id = account.chatgpt_account_id
+    route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
 
     try:
-        return await fetch_models_for_plan(access_token, account_id)
+        return await fetch_models_for_plan(
+            access_token,
+            account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
     except ModelFetchError as exc:
         if not exc.transport_error or transport_recovery.attempted:
             raise
@@ -253,7 +260,23 @@ async def _fetch_models_with_transport_recovery(
         transport_recovery.attempted = True
         access_token = encryptor.decrypt(account.access_token_encrypted)
         account_id = account.chatgpt_account_id
-        return await fetch_models_for_plan(access_token, account_id)
+        route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
+        return await fetch_models_for_plan(
+            access_token,
+            account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+
+
+async def _resolve_upstream_route_for_account(account: Account, *, operation: str) -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        return await resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation=operation,
+            scope="account",
+        )
 
 
 async def _refresh_http_client_after_transport_error(account: Account, transport_exc: BaseException) -> None:

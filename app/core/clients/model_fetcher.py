@@ -6,11 +6,18 @@ from typing import cast
 
 import aiohttp
 
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedUpstreamRoute
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +104,20 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
 async def fetch_models_for_plan(
     access_token: str,
     account_id: str | None,
+    *,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> list[UpstreamModel]:
     settings = get_settings()
     upstream_base = settings.upstream_base_url.rstrip("/")
     client_version = await get_codex_version_cache().get_version()
     url = f"{upstream_base}/codex/models?client_version={client_version}"
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="model discovery",
+    )
 
     headers: dict[str, str] = {
         "Authorization": f"Bearer {access_token}",
@@ -110,27 +126,50 @@ async def fetch_models_for_plan(
     if account_id:
         headers["chatgpt-account-id"] = account_id
 
-    timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     try:
-        async with lease_http_session() as session:
-            async with session.get(url, headers=headers, timeout=timeout) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+        if route is not None:
+            owns_codex_client = codex_client is None
+            active_codex_client = codex_client or CodexClient(create_codex_session())
+            try:
+                resp = await active_codex_client.request(
+                    "GET",
+                    url,
+                    route=route,
+                    headers=headers,
+                    timeout=_FETCH_TIMEOUT_SECONDS,
+                )
+            finally:
+                if owns_codex_client:
+                    close = getattr(active_codex_client, "close", None)
+                    if callable(close):
+                        await close()
+            status = _codex_response_status(resp)
+            if status >= 400:
+                text = await _codex_response_text(resp)
+                raise ModelFetchError(status, f"HTTP {status}: {text[:200]}")
+            data = await _codex_response_json(resp)
+        else:
+            timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
+            async with lease_http_session() as session:
+                async with session.get(url, headers=headers, timeout=timeout) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
 
-                data = await resp.json(content_type=None)
+                    data = await resp.json(content_type=None)
     except ModelFetchError:
         raise
     except asyncio.TimeoutError as exc:
         raise ModelFetchError(504, "Upstream models API timed out", transport_error=True) from exc
-    except (aiohttp.ClientError, OSError) as exc:
+    except (aiohttp.ClientError, OSError, CodexTransportError) as exc:
         message = str(exc) or exc.__class__.__name__
         raise ModelFetchError(0, f"Transport error during model fetch: {message}", transport_error=True) from exc
 
     if not isinstance(data, dict):
         raise ModelFetchError(502, "Invalid response format from upstream models API")
 
-    models_raw = data.get("models")
+    data_object = cast(dict[str, object], data)
+    models_raw = data_object.get("models")
     if not isinstance(models_raw, list):
         raise ModelFetchError(502, "Missing 'models' key in upstream response")
 
@@ -138,13 +177,43 @@ async def fetch_models_for_plan(
     for entry in models_raw:
         if not isinstance(entry, dict):
             continue
-        slug = entry.get("slug")
+        entry_data = cast(dict[str, JsonValue], entry)
+        slug = entry_data.get("slug")
         if not isinstance(slug, str) or not slug:
             continue
         try:
-            result.append(_parse_upstream_model(entry))
+            result.append(_parse_upstream_model(entry_data))
         except Exception:
             logger.warning("Failed to parse upstream model entry slug=%s", slug, exc_info=True)
             continue
 
     return result
+
+
+def _codex_response_status(response: object) -> int:
+    value = getattr(response, "status_code", getattr(response, "status", None))
+    if value is None:
+        return 0
+    return int(value)
+
+
+async def _codex_response_text(response: object) -> str:
+    text_value = getattr(response, "text", None)
+    if isinstance(text_value, str):
+        return text_value
+    content = getattr(response, "content", None)
+    if isinstance(content, bytes):
+        return content.decode("utf-8", errors="replace")
+    if isinstance(content, str):
+        return content
+    return ""
+
+
+async def _codex_response_json(response: object) -> object:
+    json_method = getattr(response, "json", None)
+    if callable(json_method):
+        data = json_method()
+        if asyncio.iscoroutine(data):
+            return await data
+        return data
+    return {}

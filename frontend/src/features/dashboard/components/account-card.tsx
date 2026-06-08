@@ -70,10 +70,26 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
+  const monthlyRemaining = account.usage?.monthlyRemainingPercent ?? null;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const monthlyOnly =
+    account.windowMinutesMonthly != null &&
+    account.windowMinutesPrimary == null &&
+    account.windowMinutesSecondary == null;
+  const displayCredits = account.creditsBalance ?? (
+    monthlyOnly
+      ? account.remainingCreditsMonthly
+      : weeklyOnly
+        ? account.remainingCreditsSecondary
+        : (account.remainingCreditsSecondary ?? account.remainingCreditsPrimary)
+  );
+  const creditsLabel = account.creditsUnlimited ? "Unlimited" : (
+    displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2)
+  );
 
   const primaryReset = formatQuotaResetLabel(account.resetAtPrimary ?? null);
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
+  const monthlyReset = formatQuotaResetLabel(account.resetAtMonthly ?? null);
 
   const title = account.displayName || account.email;
   const compactId = formatCompactAccountId(account.accountId);
@@ -113,9 +129,15 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
       </div>
 
       {/* Quota bars */}
-      <div className={cn("mt-3.5 grid gap-3", weeklyOnly ? "grid-cols-1" : "grid-cols-2")}>
-        {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
-        <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
+      <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
+        {monthlyOnly ? (
+          <QuotaBar label="Monthly" percent={monthlyRemaining} resetLabel={monthlyReset} />
+        ) : (
+          <>
+            {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
+            <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
+          </>
+        )}
       </div>
 
       <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-2 text-xs">
@@ -139,6 +161,13 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
           <Zap className="h-3 w-3" aria-hidden="true" />
           {account.limitWarmupEnabled ? "On" : "Off"}
         </Button>
+      </div>
+
+      <div className="mt-3 text-xs text-muted-foreground">
+        Credits:{" "}
+        <span className="font-medium tabular-nums text-foreground">
+          {creditsLabel}
+        </span>
       </div>
 
       {/* Actions */}
@@ -165,7 +194,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             Resume
           </Button>
         )}
-        {status === "deactivated" && (
+        {(status === "reauth" || status === "deactivated") && (
           <Button
             type="button"
             size="sm"

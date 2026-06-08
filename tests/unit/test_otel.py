@@ -512,7 +512,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
             )
             service._http_bridge_inflight_sessions[inflight_key] = inflight_future
 
-            monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
+            monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
             monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
             monkeypatch.setattr(
                 proxy_module,

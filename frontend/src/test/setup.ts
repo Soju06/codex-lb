@@ -28,6 +28,34 @@ if (typeof document !== "undefined" && typeof document.elementFromPoint !== "fun
 
 ensureLocalStorageShim();
 
+if (typeof Element !== "undefined") {
+  const proto = Element.prototype as unknown as Record<string, unknown>;
+  if (typeof proto.hasPointerCapture !== "function") {
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: () => false,
+    });
+  }
+  if (typeof proto.setPointerCapture !== "function") {
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: () => {},
+    });
+  }
+  if (typeof proto.releasePointerCapture !== "function") {
+    Object.defineProperty(Element.prototype, "releasePointerCapture", {
+      configurable: true,
+      value: () => {},
+    });
+  }
+  if (typeof proto.scrollIntoView !== "function") {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => {},
+    });
+  }
+}
+
 if (typeof globalThis.ResizeObserver === "undefined") {
   class ResizeObserverMock {
     observe() {}

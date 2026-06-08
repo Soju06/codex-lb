@@ -143,9 +143,9 @@ def test_scale_up_minimal_key_remapping() -> None:
 def test_retry_under_mismatch() -> None:
     import inspect
 
-    from app.modules.proxy import service as proxy_module
+    from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 
-    source = inspect.getsource(proxy_module)
+    source = inspect.getsource(http_bridge_mixin_module)
 
     assert "owner_mismatch_retry" in source, "Expected 'owner_mismatch_retry' event — retry on mismatch not implemented"
 

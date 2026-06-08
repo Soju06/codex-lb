@@ -36,6 +36,14 @@ describe("useAccounts", () => {
 
     await result.current.pauseMutation.mutateAsync(firstAccountId as string);
     await result.current.resumeMutation.mutateAsync(firstAccountId as string);
+    await result.current.probeMutation.mutateAsync({
+      accountId: firstAccountId as string,
+    });
+    const routingPolicyResult = await result.current.routingPolicyMutation.mutateAsync({
+      accountId: firstAccountId as string,
+      routingPolicy: "preserve",
+    });
+    expect(routingPolicyResult.routingPolicy).toBe("preserve");
 
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),
@@ -44,69 +52,32 @@ describe("useAccounts", () => {
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ["accounts", "trends", firstAccountId],
+      });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     });
   });
 
-  it("downloads exported auth json without invalidating account queries", async () => {
+  it("exports auth for an account without invalidating account queries", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-    const createObjectURL = vi.fn((blob: Blob) => {
-      void blob;
-      return "blob:mock-export";
-    });
-    const revokeObjectURL = vi.fn((url: string) => {
-      void url;
-    });
-    const originalCreateObjectURL = URL.createObjectURL;
-    const originalRevokeObjectURL = URL.revokeObjectURL;
 
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      writable: true,
-      value: createObjectURL,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      writable: true,
-      value: revokeObjectURL,
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
     });
 
-    try {
-      const { result } = renderHook(() => useAccounts(), {
-        wrapper: createWrapper(queryClient),
-      });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    const firstAccountId = result.current.accountsQuery.data?.[0]?.accountId;
+    expect(firstAccountId).toBeTruthy();
 
-      await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
-      const firstAccountId = result.current.accountsQuery.data?.[0]?.accountId;
-      expect(firstAccountId).toBeTruthy();
+    await result.current.exportAuthMutation.mutateAsync(firstAccountId as string);
 
-      await result.current.exportMutation.mutateAsync(firstAccountId as string);
-
-      expect(createObjectURL).toHaveBeenCalledTimes(1);
-      expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
-      const blob = createObjectURL.mock.calls[0]?.[0];
-      expect(blob?.type).toBe("application/json");
-      expect(blob?.size).toBeGreaterThan(0);
-      expect(clickSpy).toHaveBeenCalledTimes(1);
-      expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-export");
-      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
-      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
-      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
-    } finally {
-      clickSpy.mockRestore();
-      Object.defineProperty(URL, "createObjectURL", {
-        configurable: true,
-        writable: true,
-        value: originalCreateObjectURL,
-      });
-      Object.defineProperty(URL, "revokeObjectURL", {
-        configurable: true,
-        writable: true,
-        value: originalRevokeObjectURL,
-      });
-    }
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
   });
 });

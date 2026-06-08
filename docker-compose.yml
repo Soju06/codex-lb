@@ -59,8 +59,32 @@ services:
           path: ./frontend/bun.lock
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     profiles: ["postgres"]
+    entrypoint:
+      - sh
+      - -ceu
+      - |
+        if [ -f /var/lib/postgresql/PG_VERSION ]; then
+          echo >&2 "Detected a pre-Postgres-18 data directory at /var/lib/postgresql."
+          echo >&2 "Run: docker compose --profile postgres-upgrade run --rm postgres-upgrade"
+          echo >&2 "Refusing to start postgres:18-alpine before the named volume is upgraded."
+          exit 1
+        fi
+        if [ -f /var/lib/postgresql/data/PG_VERSION ]; then
+          pg_major="$$(cat /var/lib/postgresql/data/PG_VERSION)"
+          if [ "$$pg_major" != "18" ]; then
+            echo >&2 "Detected a nested Postgres $$pg_major data directory at /var/lib/postgresql/data."
+            echo >&2 "Run pg_upgrade against that data directory before starting postgres:18-alpine."
+            echo >&2 "For the default Compose volume layout, run: docker compose --profile postgres-upgrade run --rm postgres-upgrade"
+            exit 1
+          fi
+        fi
+        if [ "$#" -eq 0 ]; then
+          set -- postgres
+        fi
+        exec docker-entrypoint.sh "$@"
+      - codex-lb-postgres-entrypoint-guard
     environment:
       POSTGRES_USER: codex_lb
       POSTGRES_PASSWORD: codex_lb
@@ -73,8 +97,20 @@ services:
       timeout: 5s
       retries: 5
     volumes:
-      - codex-lb-postgres-data:/var/lib/postgresql/data
+      - codex-lb-postgres-data:/var/lib/postgresql
     restart: unless-stopped
+
+  postgres-upgrade:
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:9fdd8f8da95a5c4ca041290bfe966cd22ccd66f9f3bece17a0d37bd3b7e0a260
+    profiles: ["postgres-upgrade"]
+    environment:
+      POSTGRES_USER: codex_lb
+      POSTGRES_PASSWORD: codex_lb
+      POSTGRES_DB: codex_lb
+      PGAUTO_ONESHOT: "yes"
+    volumes:
+      - codex-lb-postgres-data:/var/lib/postgresql
+    restart: "no"
 
 volumes:
   codex-lb-data:

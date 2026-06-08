@@ -140,6 +140,111 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_codex_usage_uses_monthly_only_rows_for_credits(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_monthly", "monthly@example.com", chatgpt_account_id="workspace_acc_monthly")
+        )
+
+        await usage_repo.add_entry(
+            "acc_monthly",
+            42.0,
+            window="monthly",
+            reset_at=1735862400,
+            window_minutes=43200,
+            credits_has=True,
+            credits_unlimited=False,
+            credits_balance=8.75,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_acc_monthly",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    monthly = payload["rate_limit"]["monthly_window"]
+    assert monthly["used_percent"] == 42
+    assert monthly["limit_window_seconds"] == 2592000
+    assert monthly["reset_at"] == 1735862400
+    assert payload["credits"] == {
+        "has_credits": True,
+        "unlimited": False,
+        "balance": "8.75",
+        "approx_local_messages": None,
+        "approx_cloud_messages": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_monthly_free_exhaustion_does_not_block_paid_capacity(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_free_monthly_full",
+                "free-full@example.com",
+                chatgpt_account_id="workspace_free_monthly_full",
+                plan_type="free",
+            )
+        )
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_paid_available",
+                "paid-available@example.com",
+                chatgpt_account_id="workspace_paid_available",
+                plan_type="plus",
+            )
+        )
+
+        await usage_repo.add_entry(
+            "acc_free_monthly_full",
+            100.0,
+            window="monthly",
+            reset_at=1735862400,
+            window_minutes=43200,
+        )
+        await usage_repo.add_entry(
+            "acc_paid_available",
+            10.0,
+            window="primary",
+            reset_at=1735689600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            "acc_paid_available",
+            20.0,
+            window="secondary",
+            reset_at=1735862400,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_paid_available",
+        },
+    )
+    assert response.status_code == 200
+    rate_limit = response.json()["rate_limit"]
+    assert rate_limit["allowed"] is True
+    assert rate_limit["limit_reached"] is False
+    assert rate_limit["primary_window"]["used_percent"] == 10
+    assert rate_limit["secondary_window"]["used_percent"] == 20
+    assert rate_limit["monthly_window"]["used_percent"] == 100
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_header_ignored(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -382,6 +487,47 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
         "approx_local_messages": None,
         "approx_cloud_messages": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_api_key_exposes_monthly_credit_window(async_client, db_setup):
+    key_id, plain_key = await _create_api_key(
+        name="codex-usage-api-key-monthly",
+        limits=[
+            LimitRuleInput(limit_type="credits", limit_window="monthly", max_value=1000),
+        ],
+    )
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        await repo.replace_limits(
+            key_id,
+            [
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.CREDITS,
+                    limit_window=LimitWindow.MONTHLY,
+                    max_value=1000,
+                    current_value=250,
+                    model_filter=None,
+                    reset_at=now + timedelta(days=30),
+                ),
+            ],
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["primary_window"] is None
+    assert payload["rate_limit"]["secondary_window"] is None
+    assert payload["rate_limit"]["monthly_window"]["used_percent"] == 25
+    assert payload["credits"]["balance"] == "750"
 
 
 @pytest.mark.asyncio

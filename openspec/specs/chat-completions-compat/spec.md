@@ -5,16 +5,24 @@
 Ensure `/v1/chat/completions` behavior matches OpenAI Chat Completions expectations by mapping to Responses semantics and preserving streaming and error envelopes.
 ## Requirements
 ### Requirement: Validate Chat Completions requests
-The service MUST accept POST requests to `/v1/chat/completions` with a JSON body and MUST validate required fields according to OpenAI Chat Completions expectations. The request MUST include `model` and a non-empty `messages` array of objects. Invalid payloads MUST return a 4xx response with an OpenAI error envelope.
+
+The service MUST accept POST requests to `/v1/chat/completions` with a JSON body and MUST validate required fields according to OpenAI
+Chat Completions expectations. The request MUST include `model` and either a non-empty `messages` array of objects or a Responses-shaped `input`
+payload. Invalid payloads MUST return a 4xx response with an OpenAI error envelope.
+
+#### Scenario: Responses-shaped chat payload accepted
+
+- **WHEN** the client sends `{ "model": "gpt-5.2", "input": [{"role":"user","content":[{"type":"input_text","text":"hi"}]}] }`
+- **THEN** the service accepts the request and forwards it as a Responses payload without requiring `messages`
+
+#### Scenario: Invalid messages payload
+
+- **WHEN** the client sends an empty `messages` array without `input`, or sends non-object message items
+- **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 #### Scenario: Minimal valid chat request
 - **WHEN** the client sends `{ "model": "gpt-4.1", "messages": [{"role":"user","content":"hi"}] }`
 - **THEN** the service accepts the request and begins a response (streaming or non-streaming based on `stream`)
-
-#### Scenario: Invalid messages payload
-- **WHEN** the client sends an empty `messages` array or non-object items
-- **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
-
 ### Requirement: Enforce message content type rules
 The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
 
@@ -27,6 +35,7 @@ The service MUST enforce role-specific message content rules: `system` and `deve
 - **THEN** the service accepts the request and forwards the content parts in order
 
 ### Requirement: Map chat requests to Responses wire format
+
 The service MUST map chat messages into the Responses request format by merging `system`/`developer` content into `instructions` and forwarding all other messages as `input`. When `response_format.type` is `json_object`, the service MUST instead preserve `system`/`developer` messages as Responses input role messages so JSON-mode instructions remain in the request context. Tool definitions MUST be normalized to the Responses tool schema, and `tool_choice`, `reasoning_effort`, and `response_format` MUST be mapped consistently. Unsupported fields MUST not be silently ignored if they change behavior.
 
 #### Scenario: System message normalization
@@ -51,16 +60,27 @@ When a Chat Completions request includes `service_tier`, the service MUST preser
 - **THEN** the mapped Responses payload forwarded upstream includes `service_tier: "priority"`
 
 ### Requirement: Allow web_search tools in Chat Completions
-The service MUST accept Chat Completions requests that include tools with type `web_search` or `web_search_preview`. The service MUST normalize `web_search_preview` to `web_search` when mapping to the Responses tool schema. The service MUST continue to reject other built-in tool types (file_search, code_interpreter, computer_use, computer_use_preview, image_generation) with an OpenAI invalid_request_error.
+
+The service MUST accept Chat Completions requests that include tools with type `web_search` or `web_search_preview`. The service MUST normalize
+`web_search_preview` to `web_search` when mapping to the Responses tool schema. For requests with a non-empty `messages` array, the service MUST
+continue to reject other built-in tool types (file_search, code_interpreter, computer_use, computer_use_preview, image_generation) with an OpenAI
+invalid_request_error. For Responses-shaped chat payloads using `input` with `messages` absent or empty, the service MUST preserve Responses tool
+definitions and `tool_choice`, including built-in Responses tools accepted by `/v1/responses`.
+
+#### Scenario: unsupported built-in tool rejected for chat messages
+
+- **WHEN** the client sends `tools=[{"type":"image_generation"}]`
+- **AND** the request includes a non-empty `messages` array
+- **THEN** the service returns a 4xx OpenAI invalid_request_error indicating the unsupported tool type
+
+#### Scenario: Responses-shaped built-in tool preserved
+
+- **WHEN** the client sends a `/v1/chat/completions` payload with `input`, `messages` absent or empty, `tools=[{"type":"image_generation"}]`, and `tool_choice={"type":"image_generation"}`
+- **THEN** the mapped Responses request preserves the `image_generation` tool and `tool_choice`
 
 #### Scenario: web_search_preview tool normalized in mapping
 - **WHEN** the client sends `tools=[{"type":"web_search_preview"}]`
 - **THEN** the mapped Responses request includes a tool with type `web_search`
-
-#### Scenario: unsupported built-in tool rejected
-- **WHEN** the client sends `tools=[{"type":"image_generation"}]`
-- **THEN** the service returns a 4xx OpenAI invalid_request_error indicating the unsupported tool type
-
 ### Requirement: Reject file_id in Chat Completions
 The service MUST reject chat `file` content parts that include `file_id` and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
 
@@ -168,6 +188,11 @@ For non-function tool types (`web_search`, etc.), the strict flag is not applica
 - **WHEN** a client sends a chat tool with `strict: true` but `parameters.additionalProperties` is missing or `true`
 - **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].function.parameters"`, without any upstream connection being opened
 
+#### Scenario: Responses-shaped chat payload with flat strict tool is rejected with 400
+
+- **WHEN** a client sends a Responses-shaped payload through `/v1/chat/completions` using `input` and a flat Responses function tool with `strict: true` but a violating `parameters` schema
+- **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].parameters"`, without any upstream connection being opened
+
 #### Scenario: Chat tool with strict=false or omitted is forwarded with strict preserved (or absent)
 
 - **WHEN** a client sends a chat tool without a `strict` key (or with `strict: false`)
@@ -195,3 +220,14 @@ When Chat Completions clients send provider-specific reasoning controls that are
 - **AND** no explicit `reasoning` or `reasoning_effort` override is present
 - **THEN** the mapped Responses payload includes `reasoning.effort: "medium"`
 - **AND** the forwarded upstream payload does not include `thinking`
+
+### Requirement: Preserve tool strictness semantics in Responses-shaped chat payloads
+
+When a Responses-shaped chat payload uses a flat Responses function tool, strict-mode validation MUST still run, and invalid strict schemas MUST be rejected before upstream is contacted. Rejection details MUST report the flat tool schema param path used by this path.
+
+#### Scenario: Responses-shaped chat payload with flat strict tool is rejected with 400
+
+- **WHEN** a client sends a Responses-shaped payload through `/v1/chat/completions` using `input` and a flat Responses function tool with
+  `strict: true` but a violating `parameters` schema
+- **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].parameters"`
+- **AND** no upstream connection is opened

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlparse
 
 import aiohttp
 import pytest
@@ -30,9 +31,9 @@ def _mock_session_per_url(responses: dict[str, MagicMock]) -> MagicMock:
     session = MagicMock()
 
     def _get(url, **_kwargs):
-        for key, resp in responses.items():
-            if key in url:
-                return resp
+        host = urlparse(url).hostname
+        if host in responses:
+            return responses[host]
         raise AssertionError(f"unexpected URL: {url}")
 
     session.get = MagicMock(side_effect=_get)
@@ -267,8 +268,9 @@ async def test_github_skipped_when_returning_valid_version():
     # GitHub wins; npm is not consulted.
     assert version == "0.130.0"
     urls = [call.args[0] for call in session.get.call_args_list]
-    assert any("api.github.com" in u for u in urls)
-    assert not any("registry.npmjs.org" in u for u in urls)
+    requested_hosts = [urlparse(url).hostname for url in urls]
+    assert requested_hosts.count("api.github.com") == 1
+    assert requested_hosts.count("registry.npmjs.org") == 0
 
 
 @pytest.mark.asyncio

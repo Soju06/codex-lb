@@ -39,8 +39,12 @@ describe("useSettings", () => {
     await result.current.updateSettingsMutation.mutateAsync({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
       openaiCacheAffinityMaxAgeSeconds: 180,
       dashboardSessionTtlSeconds: 31536000,
+      stickyReallocationBudgetThresholdPct: 95,
+      stickyReallocationPrimaryBudgetThresholdPct: 95,
+      stickyReallocationSecondaryBudgetThresholdPct: 100,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,

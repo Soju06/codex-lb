@@ -194,6 +194,7 @@ async def test_load_balancer_clears_stale_degraded_state_for_typed_selection_err
                 accounts=[],
                 latest_primary={},
                 latest_secondary={},
+                latest_monthly={},
                 error_message="No accounts with a plan supporting model 'gpt-5.3-codex-spark'",
                 error_code=load_balancer_module.NO_PLAN_SUPPORT_FOR_MODEL,
             )

@@ -104,6 +104,19 @@ async def test_v1_models_list(async_client):
         assert item["object"] == "model"
         assert item["owned_by"] == "codex-lb"
         assert "metadata" in item
+        assert item["api_types"] == ["chat_completions"]
+        assert item["capabilities"]["context_length"] == item["metadata"]["input_context_window"]
+        assert item["capabilities"]["supports_tool_use"] is True
+        assert item["capabilities"]["supports_streaming"] is True
+        assert item["capabilities"]["output_modalities"] == ["text"]
+        assert item["contextLength"] == item["metadata"]["input_context_window"]
+        assert item["context_length"] == item["metadata"]["input_context_window"]
+        assert item["supportsReasoning"] is True
+        assert item["supports_reasoning"] is True
+        assert item["supportsImages"] is True
+        assert item["supports_images"] is True
+        assert item["supportsVision"] is True
+        assert item["supports_vision"] is True
 
 
 @pytest.mark.asyncio
@@ -404,6 +417,62 @@ async def test_backend_codex_models_visibility_allowlist_respects_enforced_model
 
 
 @pytest.mark.asyncio
+async def test_model_catalogs_canonicalize_enforced_model_alias(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.2",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        _make_upstream_model(
+            "gpt-5.4-mini",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "hide",
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "catalog-enforced-alias",
+            "allowedModels": ["gpt-5.4-mini-high"],
+            "applyToCodexModel": True,
+            "enforcedModel": "gpt-5.4-mini-high",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    v1_resp = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert v1_resp.status_code == 200
+    assert [entry["id"] for entry in v1_resp.json()["data"]] == ["gpt-5.4-mini"]
+
+    codex_resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
+    assert codex_resp.status_code == 200
+    entries = {entry["slug"]: entry for entry in codex_resp.json()["models"]}
+    assert set(entries) == {"gpt-5.2", "gpt-5.4-mini"}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.4-mini"]["visibility"] == "list"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_preserves_original_flow_without_allowlist(async_client):
     registry = get_model_registry()
     models = [
@@ -480,6 +549,7 @@ async def test_backend_codex_models_uses_bootstrap_models_when_registry_not_popu
     slugs = {item["slug"] for item in payload["models"]}
     assert slugs == BOOTSTRAP_MODEL_SLUGS
     assert "gpt-5.5-pro" not in slugs
+    assert all(not slug.startswith("gpt-image-") for slug in slugs)
 
 
 @pytest.mark.asyncio
@@ -532,6 +602,9 @@ async def test_model_context_window_override(async_client, monkeypatch):
     metadata = v1_entry["metadata"]
     assert metadata["context_window"] == 515000
     assert metadata["input_context_window"] == 272000
+    assert v1_entry["capabilities"]["context_length"] == 272000
+    assert v1_entry["contextLength"] == 272000
+    assert v1_entry["context_length"] == 272000
 
 
 @pytest.mark.asyncio
@@ -575,6 +648,21 @@ async def test_v1_models_reports_backend_context_window(async_client):
         assert metadata["context_window"] == 272_000
         assert metadata["input_context_window"] == 272_000
         assert metadata["max_output_tokens"] == 128_000
+        entry = next(item for item in resp_v1.json()["data"] if item["id"] == slug)
+        assert entry["api_types"] == ["chat_completions"]
+        assert entry["capabilities"]["context_length"] == 272_000
+        assert entry["capabilities"]["max_output_tokens"] == 128_000
+        assert entry["capabilities"]["supports_reasoning"] is True
+        assert entry["capabilities"]["supportsImages"] is True
+        assert entry["capabilities"]["supports_images"] is True
+        assert entry["capabilities"]["supports_vision"] is True
+        assert entry["capabilities"]["supports_tool_use"] is True
+        assert entry["capabilities"]["supports_streaming"] is True
+        assert entry["capabilities"]["output_modalities"] == ["text"]
+        assert entry["contextLength"] == 272_000
+        assert entry["context_length"] == 272_000
+        assert entry["maxOutputTokens"] == 128_000
+        assert entry["max_output_tokens"] == 128_000
 
     resp_codex = await async_client.get("/backend-api/codex/models")
     assert resp_codex.status_code == 200

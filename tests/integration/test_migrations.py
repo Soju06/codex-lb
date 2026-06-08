@@ -505,6 +505,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
+            assert "single_account_id" in dashboard_columns
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
@@ -545,12 +546,25 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             ).scalar_one()
             assert gateway_safe_mode in (False, 0)
             assert "sticky_reallocation_budget_threshold_pct" in dashboard_columns
+            assert "sticky_reallocation_primary_budget_threshold_pct" in dashboard_columns
+            assert "sticky_reallocation_secondary_budget_threshold_pct" in dashboard_columns
             sticky_budget_threshold = (
                 await session.execute(
                     text("SELECT sticky_reallocation_budget_threshold_pct FROM dashboard_settings WHERE id=1")
                 )
             ).scalar_one()
             assert sticky_budget_threshold == 95.0
+            sticky_primary_threshold, sticky_secondary_threshold = (
+                await session.execute(
+                    text(
+                        "SELECT sticky_reallocation_primary_budget_threshold_pct, "
+                        "sticky_reallocation_secondary_budget_threshold_pct "
+                        "FROM dashboard_settings WHERE id=1"
+                    )
+                )
+            ).one()
+            assert sticky_primary_threshold == 95.0
+            assert sticky_secondary_threshold == 95.0
             sticky_columns_rows = (await session.execute(text("PRAGMA table_info(sticky_sessions)"))).fetchall()
             sticky_columns = {str(row[1]) for row in sticky_columns_rows if len(row) > 1}
             assert "kind" in sticky_columns
@@ -780,3 +794,79 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             assert row[1] in (True, 1)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_free_account_monthly_migration_renames_only_free_usage_windows(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'free-monthly-migration.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260604_000000_add_reauth_required_account_status",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, email, plan_type,
+                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                        last_refresh, status
+                    )
+                    VALUES
+                      ('acc_free_monthly_migration', 'free-monthly@example.com', 'free',
+                       x'01', x'02', x'03', '2026-01-01 00:00:00', 'active'),
+                      ('acc_paid_monthly_migration', 'paid-monthly@example.com', 'plus',
+                       x'04', x'05', x'06', '2026-01-01 00:00:00', 'active')
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO usage_history (account_id, recorded_at, window, used_percent)
+                    VALUES
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, 'primary', 10.0),
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, 'secondary', 20.0),
+                      ('acc_free_monthly_migration', CURRENT_TIMESTAMP, NULL, 25.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, 'primary', 30.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, 'secondary', 40.0),
+                      ('acc_paid_monthly_migration', CURRENT_TIMESTAMP, NULL, 45.0)
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            free_windows = [
+                row[0]
+                for row in (
+                    await session.execute(
+                        text("SELECT window FROM usage_history WHERE account_id = :account_id ORDER BY id"),
+                        {"account_id": "acc_free_monthly_migration"},
+                    )
+                ).all()
+            ]
+            paid_windows = [
+                row[0]
+                for row in (
+                    await session.execute(
+                        text("SELECT window FROM usage_history WHERE account_id = :account_id ORDER BY id"),
+                        {"account_id": "acc_paid_monthly_migration"},
+                    )
+                ).all()
+            ]
+    finally:
+        await engine.dispose()
+
+    assert free_windows == ["old-primary", "old-secondary", "old-primary"]
+    assert paid_windows == ["primary", "secondary", None]

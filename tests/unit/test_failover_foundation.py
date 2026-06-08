@@ -6,6 +6,7 @@ from app.core.balancer.logic import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    ROUTING_POLICY_BURN_FIRST,
     AccountState,
     evaluate_health_tier,
     failover_decision,
@@ -318,6 +319,21 @@ class TestSelectAccountHealthTier:
         result = select_account(states, routing_strategy="usage_weighted")
         assert result.account is not None
         assert result.account.account_id == "b"
+
+    def test_prefers_healthy_normal_over_draining_burn_first(self) -> None:
+        states = [
+            AccountState(
+                "drain",
+                AccountStatus.ACTIVE,
+                used_percent=10.0,
+                health_tier=HEALTH_TIER_DRAINING,
+                routing_policy=ROUTING_POLICY_BURN_FIRST,
+            ),
+            AccountState("healthy", AccountStatus.ACTIVE, used_percent=80.0, health_tier=HEALTH_TIER_HEALTHY),
+        ]
+        result = select_account(states, routing_strategy="fill_first")
+        assert result.account is not None
+        assert result.account.account_id == "healthy"
 
     def test_prefers_healthy_over_probing(self) -> None:
         states = [

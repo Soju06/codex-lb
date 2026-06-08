@@ -9,10 +9,12 @@ from pathlib import Path
 from scripts.release_versions import (
     assert_project_versions,
     discover_release_please_base_version,
+    format_beta_changelog,
     latest_beta_tag,
+    latest_stable_tag,
     next_beta_number,
     parse_version,
-    tag_targets_head,
+    releasable_commits_since,
     update_project_versions,
     write_github_outputs,
 )
@@ -32,6 +34,11 @@ def main() -> int:
         default=0,
         help="beta serial number (defaults to highest existing beta tag + 1)",
     )
+    parser.add_argument(
+        "--changelog-path",
+        default="",
+        help="optional path to write the beta PR changelog markdown",
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -41,17 +48,19 @@ def main() -> int:
         raise SystemExit(f"--base-version must be stable, got {base.version!r}")
 
     latest_beta = latest_beta_tag(root, base.version)
-    if args.beta_number == 0 and latest_beta is not None and tag_targets_head(root, latest_beta.tag):
+    previous_tag = latest_beta.tag if latest_beta is not None else latest_stable_tag(root)
+    if args.beta_number == 0 and latest_beta is not None and not releasable_commits_since(root, latest_beta.tag):
         assert_project_versions(root, latest_beta.version)
         outputs = {
             "should_create": False,
-            "reason": f"{latest_beta.tag} already covers HEAD",
+            "reason": f"{latest_beta.tag} already covers all releasable commits",
             "base_version": base.version,
             "beta_number": latest_beta.serial or 0,
             "version": latest_beta.version,
             "tag": latest_beta.tag,
             "pypi_version": latest_beta.pypi_version,
             "branch": f"release/beta-{latest_beta.version}",
+            "previous_tag": latest_beta.tag,
         }
         write_github_outputs(outputs)
         for key, value in outputs.items():
@@ -66,6 +75,16 @@ def main() -> int:
     release = parse_version(version)
     update_project_versions(root, release.version)
 
+    changelog_ref = previous_tag or "HEAD"
+    changelog = (
+        format_beta_changelog(root, changelog_ref)
+        if previous_tag is not None
+        else "Initial beta prerelease for this stable train."
+    )
+    changelog_path = args.changelog_path.strip()
+    if changelog_path:
+        Path(changelog_path).write_text(changelog + "\n", encoding="utf-8")
+
     outputs = {
         "base_version": base.version,
         "beta_number": beta_number,
@@ -73,6 +92,8 @@ def main() -> int:
         "tag": release.tag,
         "pypi_version": release.pypi_version,
         "branch": f"release/beta-{release.version}",
+        "previous_tag": previous_tag or "",
+        "changelog_path": changelog_path,
     }
     write_github_outputs(outputs)
     for key, value in outputs.items():

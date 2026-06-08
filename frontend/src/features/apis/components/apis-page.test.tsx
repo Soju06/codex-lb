@@ -158,4 +158,37 @@ describe("ApisPage", () => {
 		expect(screen.getByText("Pooled Weekly")).toBeInTheDocument();
 		expect(screen.getByText("API Limit")).toBeInTheDocument();
 	});
+
+	it("renders the overview section for the full API key list", () => {
+		renderApisPage({
+			apiKeys: [
+				createApiKey({
+					usageSummary: {
+						requestCount: 300,
+						totalTokens: 80_000,
+						cachedInputTokens: 12_000,
+						totalCostUsd: 2.5,
+					},
+				}),
+				createApiKey({
+					id: "key_2",
+					name: "Secondary key",
+					keyPrefix: "sk-secondary",
+					usageSummary: {
+						requestCount: 120,
+						totalTokens: 20_000,
+						cachedInputTokens: 2_000,
+						totalCostUsd: 1.0,
+					},
+				}),
+			],
+		});
+
+		expect(screen.getByText("Overview")).toBeInTheDocument();
+		expect(screen.getByText("Lifetime Cost by API Key")).toBeInTheDocument();
+		expect(screen.getByText("Lifetime Tokens by API Key")).toBeInTheDocument();
+		expect(
+			within(screen.getByTestId("api-keys-overview-cost-panel")).getByText("Secondary key"),
+		).toBeInTheDocument();
+	});
 });

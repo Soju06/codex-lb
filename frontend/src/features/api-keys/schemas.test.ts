@@ -40,6 +40,7 @@ describe("ApiKeySchema", () => {
     expect(parsed.applyToCodexModel).toBe(true);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
+    expect(parsed.trafficClass).toBe("foreground");
   });
 
   it("defaults limits to empty array when not provided", () => {
@@ -110,6 +111,24 @@ describe("ApiKeyCreateRequestSchema", () => {
 
     expect(parsed.assignedAccountIds).toEqual(["acc_primary"]);
   });
+
+  it("accepts opportunistic traffic class in create payload", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Opportunistic Key",
+      trafficClass: "opportunistic",
+    });
+
+    expect(parsed.trafficClass).toBe("opportunistic");
+  });
+
+  it("rejects invalid traffic class in create payload", () => {
+    const result = ApiKeyCreateRequestSchema.safeParse({
+      name: "Bad Key",
+      trafficClass: "bulk",
+    });
+
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("ApiKeyUpdateRequestSchema", () => {
@@ -153,6 +172,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
     });
 
     expect(parsed.resetUsage).toBe(true);
+  });
+
+  it("accepts opportunistic traffic class in update payload", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      trafficClass: "opportunistic",
+    });
+
+    expect(parsed.trafficClass).toBe("opportunistic");
   });
 });
 

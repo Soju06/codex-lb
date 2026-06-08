@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from math import ceil, isfinite
 from typing import Literal
 
@@ -49,6 +49,7 @@ def build_weekly_credit_pace(
     secondary_history: dict[str, list[UsageHistory]],
     now: datetime,
     usage_refresh_interval_seconds: int,
+    working_days: set[int] | None = None,
 ) -> WeeklyCreditPaceResponse | None:
     """Build server-side weekly quota pace from active, fresh weekly usage rows.
 
@@ -95,14 +96,23 @@ def build_weekly_credit_pace(
             continue
 
         full_credits, actual_remaining_credits, effective_reset_at_ms, window_ms = timing
-        time_left_ms = _clamp(effective_reset_at_ms - now_ms, 0.0, window_ms)
-        expected_remaining_credits = full_credits * (time_left_ms / window_ms)
+        used_schedule_fraction = _used_schedule_fraction(
+            reset_at_ms=effective_reset_at_ms,
+            window_ms=window_ms,
+            now_ms=now_ms,
+            working_days=working_days,
+        )
+        expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
         account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
 
         total_full_credits += full_credits
         total_actual_remaining_credits += actual_remaining_credits
         total_expected_remaining_credits += expected_remaining_credits
-        scheduled_burn_rate_credits_per_hour += (full_credits / window_ms) * 3_600_000.0
+        scheduled_burn_rate_credits_per_hour += full_credits * _working_schedule_share_per_hour(
+            reset_at_ms=effective_reset_at_ms,
+            window_ms=window_ms,
+            working_days=working_days,
+        )
         if account_rate is not None:
             rate_sample_count += 1
             forecast_burn_rate_credits_per_hour += account_rate
@@ -316,6 +326,67 @@ def _advance_reset_at(reset_at_ms: float, window_ms: float, now_ms: float) -> fl
         return reset_at_ms
     missed_windows = int((now_ms - reset_at_ms) // window_ms) + 1
     return reset_at_ms + (missed_windows * window_ms)
+
+
+def _used_schedule_fraction(
+    *,
+    reset_at_ms: float,
+    window_ms: float,
+    now_ms: float,
+    working_days: set[int] | None,
+) -> float:
+    window_start_ms = reset_at_ms - window_ms
+    elapsed_ms = _clamp(now_ms - window_start_ms, 0.0, window_ms)
+    if elapsed_ms <= 0:
+        return 0.0
+    if not working_days:
+        return elapsed_ms / window_ms
+
+    total_working_ms = _working_duration_ms(window_start_ms, reset_at_ms, working_days)
+    if total_working_ms <= 0:
+        return elapsed_ms / window_ms
+
+    used_working_ms = _working_duration_ms(window_start_ms, window_start_ms + elapsed_ms, working_days)
+    return _clamp(used_working_ms / total_working_ms, 0.0, 1.0)
+
+
+def _working_schedule_share_per_hour(
+    *,
+    reset_at_ms: float,
+    window_ms: float,
+    working_days: set[int] | None,
+) -> float:
+    if not working_days:
+        return 3_600_000.0 / window_ms
+
+    window_start_ms = reset_at_ms - window_ms
+    total_working_ms = _working_duration_ms(window_start_ms, reset_at_ms, working_days)
+    if total_working_ms <= 0:
+        return 3_600_000.0 / window_ms
+    return 3_600_000.0 / total_working_ms
+
+
+def _working_duration_ms(start_ms: float, end_ms: float, working_days: set[int]) -> float:
+    if end_ms <= start_ms:
+        return 0.0
+
+    cursor_ms = start_ms
+    total_ms = 0.0
+    while cursor_ms < end_ms:
+        next_day_ms = _day_start_ms(cursor_ms) + 86_400_000.0
+        segment_end_ms = min(end_ms, next_day_ms)
+        if _weekday(cursor_ms) in working_days:
+            total_ms += segment_end_ms - cursor_ms
+        cursor_ms = segment_end_ms
+    return total_ms
+
+
+def _day_start_ms(epoch_ms: float) -> float:
+    return float(int(epoch_ms // 86_400_000.0) * 86_400_000)
+
+
+def _weekday(epoch_ms: float) -> int:
+    return datetime.fromtimestamp(epoch_ms / 1000.0, UTC).weekday()
 
 
 def _weekly_pace_status(delta_percent: float, projected_shortfall_credits: float) -> WeeklyCreditPaceStatus:

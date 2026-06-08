@@ -47,6 +47,29 @@ describe("ApiKeyTable", () => {
     expect(within(secondRow).getByText("No Limit")).toBeInTheDocument();
   });
 
+  it("renders traffic class labels in the traffic column", () => {
+    const keys = [
+      createApiKey({ id: "foreground-key", trafficClass: "foreground" }),
+      createApiKey({
+        id: "opportunistic-key",
+        name: "Opportunistic key",
+        trafficClass: "opportunistic",
+      }),
+    ];
+    renderWithProviders(
+      <ApiKeyTable
+        keys={keys}
+        busy={false}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onRegenerate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Foreground")).toBeInTheDocument();
+    expect(screen.getByText("Opportunistic")).toBeInTheDocument();
+  });
+
   it("renders 'All' when allowedModels is missing and the configured list otherwise", () => {
     const restricted = createApiKey({
       id: "key_restricted",

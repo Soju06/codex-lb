@@ -111,6 +111,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
           <TableHead className="w-[20%] min-w-[12rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
           <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
           <TableHead className="w-[9%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
+          <TableHead className="w-[9%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Traffic</TableHead>
           <TableHead className="w-[26%] min-w-[17rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
           <TableHead className="w-[14%] min-w-[12rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Limit</TableHead>
           <TableHead className="w-[8%] min-w-[7rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
@@ -121,12 +122,14 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
       <TableBody>
         {keys.map((apiKey) => {
           const models = apiKey.allowedModels?.join(", ") || "All";
+          const trafficClass = apiKey.trafficClass === "opportunistic" ? "Opportunistic" : "Foreground";
 
           return (
             <TableRow key={apiKey.id}>
               <TableCell className="pl-4 font-medium truncate">{apiKey.name}</TableCell>
               <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
               <TableCell className="truncate">{models}</TableCell>
+              <TableCell className="truncate text-xs tabular-nums">{trafficClass}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getUsageValue(apiKey)}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getLimitValue(apiKey)}</TableCell>
               <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt)}</TableCell>

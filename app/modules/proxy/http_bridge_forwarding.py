@@ -95,6 +95,9 @@ class HTTPBridgeOwnerClient:
                     raise ProxyResponseError(
                         response.status,
                         _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
+                        failure_phase="owner_forward_status",
+                        failure_detail="owner_forward_non_200",
+                        upstream_status_code=response.status,
                     )
                 yielded_event = False
                 try:

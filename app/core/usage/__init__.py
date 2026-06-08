@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 from app.core.plan_types import normalize_account_plan_type
+from app.core.usage.models import UsageWindow
 from app.core.usage.types import (
     UsageCostSummary,
     UsageHistoryPayload,
@@ -37,8 +39,20 @@ PLAN_CAPACITY_CREDITS_SECONDARY = {
     "enterprise": 50400.0,
 }
 
+PLAN_CAPACITY_CREDITS_MONTHLY = {
+    "free": 1134.0,
+}
+
 DEFAULT_WINDOW_MINUTES_PRIMARY = 300
 DEFAULT_WINDOW_MINUTES_SECONDARY = 10080
+DEFAULT_WINDOW_MINUTES_MONTHLY = 43200
+
+
+@dataclass(frozen=True)
+class NormalizedRateLimitWindows:
+    primary: UsageWindow | None
+    secondary: UsageWindow | None
+    monthly: UsageWindow | None
 
 
 def _normalize_window_key(window: str | None) -> str:
@@ -47,7 +61,22 @@ def _normalize_window_key(window: str | None) -> str:
         return "primary"
     if normalized in {"secondary", "7d"}:
         return "secondary"
+    if normalized in {"monthly", "30d"}:
+        return "monthly"
     return normalized
+
+
+def normalize_rate_limit_windows(
+    primary_window: UsageWindow | None,
+    secondary_window: UsageWindow | None,
+) -> NormalizedRateLimitWindows:
+    if (
+        primary_window is not None
+        and primary_window.limit_window_seconds == DEFAULT_WINDOW_MINUTES_MONTHLY * 60
+        and secondary_window is None
+    ):
+        return NormalizedRateLimitWindows(primary=None, secondary=None, monthly=primary_window)
+    return NormalizedRateLimitWindows(primary=primary_window, secondary=secondary_window, monthly=None)
 
 
 def _empty_cost() -> UsageCostSummary:
@@ -152,6 +181,8 @@ def capacity_for_plan(plan_type: str | None, window: str) -> float | None:
         return PLAN_CAPACITY_CREDITS_PRIMARY.get(normalized)
     if window_key == "secondary":
         return PLAN_CAPACITY_CREDITS_SECONDARY.get(normalized)
+    if window_key == "monthly":
+        return PLAN_CAPACITY_CREDITS_MONTHLY.get(normalized)
     return None
 
 
@@ -161,6 +192,8 @@ def default_window_minutes(window: str) -> int | None:
         return DEFAULT_WINDOW_MINUTES_PRIMARY
     if window_key == "secondary":
         return DEFAULT_WINDOW_MINUTES_SECONDARY
+    if window_key == "monthly":
+        return DEFAULT_WINDOW_MINUTES_MONTHLY
     return None
 
 
@@ -176,6 +209,24 @@ def is_weekly_window_minutes(window_minutes: int | None) -> bool:
     if secondary_default is None:
         return False
     return window_minutes == secondary_default
+
+
+def is_monthly_window_minutes(window_minutes: int | None) -> bool:
+    if window_minutes is None:
+        return False
+    monthly_default = default_window_minutes("monthly")
+    if monthly_default is None:
+        return False
+    return window_minutes == monthly_default
+
+
+def is_primary_window_minutes(window_minutes: int | None) -> bool:
+    if window_minutes is None:
+        return False
+    primary_default = default_window_minutes("primary")
+    if primary_default is None:
+        return False
+    return window_minutes == primary_default
 
 
 def should_use_weekly_primary(
@@ -257,6 +308,7 @@ def _resolve_window_minutes(window: str, values: set[int]) -> int | None:
 def parse_usage_summary(
     primary_window: UsageWindowSummary,
     secondary_window: UsageWindowSummary | None,
+    monthly_window: UsageWindowSummary | None,
     cost: UsageCostSummary,
     metrics: UsageMetricsSummary | None = None,
 ) -> UsageSummaryPayload:
@@ -264,9 +316,13 @@ def parse_usage_summary(
     secondary = None
     if secondary_window is not None:
         secondary = normalize_usage_window(secondary_window)
+    monthly = None
+    if monthly_window is not None:
+        monthly = normalize_usage_window(monthly_window)
     return UsageSummaryPayload(
         primary_window=primary,
         secondary_window=secondary,
+        monthly_window=monthly,
         cost=cost,
         metrics=metrics,
     )
@@ -276,6 +332,7 @@ async def usage_summary() -> UsageSummaryPayload:
     return UsageSummaryPayload(
         primary_window=_empty_window(window_minutes=None),
         secondary_window=None,
+        monthly_window=None,
         cost=_empty_cost(),
         metrics=None,
     )

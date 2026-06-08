@@ -231,6 +231,36 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_exposes_monthly_only_free_account(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_free_monthly", "free-monthly@example.com", plan_type="free"))
+        await usage_repo.add_entry(
+            "acc_free_monthly",
+            20.0,
+            window="monthly",
+            window_minutes=43200,
+            recorded_at=now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+    account = accounts["acc_free_monthly"]
+    assert payload["lastSyncAt"] == (now - timedelta(minutes=1)).isoformat() + "Z"
+    assert account["usage"]["monthlyRemainingPercent"] == pytest.approx(80.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
+    assert account["windowMinutesMonthly"] == 43200
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 
@@ -425,6 +455,45 @@ async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slo
     assert pace["paceMultiplier"] == pytest.approx(0.0)
     assert pace["pauseForBreakEvenHours"] is None
     assert pace["status"] == "ahead"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_projections_weekly_credit_pace_uses_configured_working_days(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 5, 24, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    reset_at = int(naive_utc_to_epoch(datetime(2026, 5, 25, 0, 0, 0)))
+
+    settings_response = await async_client.put("/api/settings", json={"weeklyPaceWorkingDays": "0,1,2,3,4"})
+    assert settings_response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_weekdays", "weekdays@example.com", plan_type="pro"))
+        await usage_repo.add_entry(
+            "acc_weekdays",
+            80.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/projections")
+    assert response.status_code == 200
+    payload = response.json()
+
+    pace = payload["weeklyCreditPace"]
+    assert pace["accountCount"] == 1
+    assert pace["actualUsedPercent"] == pytest.approx(80.0)
+    assert pace["scheduledUsedPercent"] == pytest.approx(100.0)
+    assert pace["scheduleGapCredits"] == 0
+    assert pace["status"] == "behind"
 
 
 @pytest.mark.asyncio

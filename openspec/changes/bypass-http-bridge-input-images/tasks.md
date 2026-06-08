@@ -1,0 +1,5 @@
+- [x] Add regression coverage that bridge-enabled `/v1/responses` requests with nested `input_image` parts bypass the HTTP responses bridge
+- [x] Route image-bearing Responses requests over raw HTTP while leaving text-only bridge routing intact
+- [x] Preserve existing unsupported `input_image.file_id` / `sediment://` rejection tests
+- [x] Validate OpenSpec and targeted proxy tests
+- [x] Rebuild candidate image and repeat live image smoke with short client timeout

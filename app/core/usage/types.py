@@ -78,6 +78,7 @@ class UsageMetricsSummary:
 class UsageSummaryPayload:
     primary_window: UsageWindowSnapshot
     secondary_window: UsageWindowSnapshot | None
+    monthly_window: UsageWindowSnapshot | None
     cost: UsageCostSummary
     metrics: UsageMetricsSummary | None = None
 

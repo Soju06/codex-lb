@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
@@ -16,6 +18,8 @@ from app.modules.oauth.schemas import (
     OauthStartResponse,
     OauthStatusResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/oauth",
@@ -72,8 +76,14 @@ async def manual_callback(
 ) -> ManualCallbackResponse | JSONResponse:
     try:
         return await context.service.manual_callback(request.callback_url, flow_id=request.flow_id)
-    except Exception as exc:
+    except OAuthError as exc:
+        return JSONResponse(
+            status_code=502,
+            content=dashboard_error(exc.code, exc.message),
+        )
+    except Exception:
+        logger.exception("manual_callback failed")
         return JSONResponse(
             status_code=500,
-            content=dashboard_error("manual_callback_failed", str(exc)),
+            content=dashboard_error("manual_callback_failed", "An internal error occurred."),
         )

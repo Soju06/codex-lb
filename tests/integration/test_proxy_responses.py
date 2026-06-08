@@ -74,7 +74,10 @@ def _extract_first_raw_event(lines: list[str]) -> dict:
 def _iter_sse_events(lines: list[str]):
     for line in lines:
         if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-            yield json.loads(line[6:])
+            event = json.loads(line[6:])
+            if event.get("type") == "codex.keepalive":
+                continue
+            yield event
 
 
 class _FakeUpstreamWebSocket:

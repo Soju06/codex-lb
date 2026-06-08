@@ -31,6 +31,7 @@ class UsageMetrics(DashboardModel):
 class UsageSummaryResponse(DashboardModel):
     primary_window: UsageWindow
     secondary_window: UsageWindow | None = None
+    monthly_window: UsageWindow | None = None
     cost: UsageCost
     metrics: UsageMetrics | None = None
 

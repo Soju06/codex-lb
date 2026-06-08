@@ -90,6 +90,16 @@
       ]
     },
     {
+      "login": "diogenesc",
+      "name": "Diógenes Castro",
+      "avatar_url": "https://avatars.githubusercontent.com/u/22321454?v=4",
+      "profile": "https://github.com/diogenesc",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "azkore",
       "name": "Eugene Korekin",
       "avatar_url": "https://avatars.githubusercontent.com/u/7746783?v=4",
@@ -544,6 +554,56 @@
       ]
     },
     {
+      "login": "Pablosinyores",
+      "name": "Nikhil",
+      "avatar_url": "https://avatars.githubusercontent.com/u/150948502?v=4",
+      "profile": "https://github.com/Pablosinyores",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "kramarb",
+      "name": "Miha Orazem",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9120027?v=4",
+      "profile": "https://github.com/kramarb",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "minh-dng",
+      "name": "Steven (Minh) Dang",
+      "avatar_url": "https://avatars.githubusercontent.com/u/73318601?v=4",
+      "profile": "https://github.com/minh-dng",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "onlysdesign-ui",
+      "name": "onlysdesign-ui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/251030415?v=4",
+      "profile": "https://github.com/onlysdesign-ui",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mahirozdin",
+      "name": "Mahir Taha Özdin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9491185?v=4",
+      "profile": "https://www.linkedin.com/in/mahir-ozdin/",
+      "contributions": [
+        "ideas",
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "datfooldive",
       "name": "hikki",
       "avatar_url": "https://avatars.githubusercontent.com/u/110718021?v=4",
@@ -551,6 +611,82 @@
       "contributions": [
         "code",
         "design"
+      ]
+    },
+    {
+      "login": "1llu5ion",
+      "name": "Nataprom",
+      "avatar_url": "https://avatars.githubusercontent.com/u/23450032?v=4",
+      "profile": "https://github.com/1llu5ion",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "Iweisc",
+      "name": "Iweisc",
+      "avatar_url": "https://avatars.githubusercontent.com/u/179300695?v=4",
+      "profile": "https://github.com/Iweisc",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "ramhaidar",
+      "name": "ram/haidar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49301219?v=4",
+      "profile": "https://github.com/ramhaidar",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Rtx09x",
+      "name": "Rudra Tiwari",
+      "avatar_url": "https://avatars.githubusercontent.com/u/187954595?v=4",
+      "profile": "https://rtx09x.github.io/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "wuchao05",
+      "name": "Wu Chao",
+      "avatar_url": "https://avatars.githubusercontent.com/u/97175999?v=4",
+      "profile": "https://github.com/wuchao05",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "zwd0313",
+      "name": "zwd0313",
+      "avatar_url": "https://avatars.githubusercontent.com/u/159164983?v=4",
+      "profile": "https://github.com/zwd0313",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "jhordanjw123",
+      "name": "jhordanjw123",
+      "avatar_url": "https://avatars.githubusercontent.com/u/123907587?v=4",
+      "profile": "https://github.com/jhordanjw123",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mastertyko",
+      "name": "mastertyko",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11311479?v=4",
+      "profile": "https://github.com/mastertyko",
+      "contributions": [
+        "code",
+        "test"
       ]
     }
   ],

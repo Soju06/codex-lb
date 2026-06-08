@@ -47,7 +47,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
-from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
+from app.core.exceptions import ProxyAuthError, ProxyRateLimitError, ProxyUpstreamError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
@@ -87,7 +87,23 @@ from app.core.utils.sse import (
 )
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
-from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
+from app.dependencies import (
+    AgentProviderRuntimeContext,
+    ProxyContext,
+    get_agent_provider_runtime_context,
+    get_proxy_context,
+    get_proxy_websocket_context,
+)
+from app.modules.agent_provider_runtime.model_catalog import AgentProviderModel, list_agent_provider_models
+from app.modules.agent_provider_runtime.service import (
+    AntigravityRuntimeRequestContext,
+    AntigravityRuntimeValidationError,
+    GeminiRuntimeRequestContext,
+    GeminiRuntimeValidationError,
+)
+from app.modules.agent_provider_runtime.service import (
+    invalid_request_error as agent_provider_invalid_request_error,
+)
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -1741,10 +1757,6 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
 
-    if not models:
-        await _release_reservation(reservation)
-        return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
-
     items: list[ModelListItem] = []
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
@@ -1771,6 +1783,10 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
                 }
             )
         )
+    for model in list_agent_provider_models():
+        if allowed_models is not None and model.model_id not in allowed_models:
+            continue
+        items.append(_to_agent_provider_model_list_item(model, created=created))
     await _release_reservation(reservation)
     return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
 
@@ -1889,6 +1905,55 @@ def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
     }
 
 
+def _to_agent_provider_model_list_item(model: AgentProviderModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": model.model_id,
+            "created": created,
+            "owned_by": "agent-lb",
+            "provider": model.provider_id,
+            "protocol": model.protocol,
+            "lifecycle": model.lifecycle,
+            "metadata": {
+                "display_name": model.display_name,
+                "description": model.description,
+                "context_window": model.input_token_limit,
+                "input_context_window": model.input_token_limit,
+                "max_output_tokens": model.output_token_limit,
+                "input_modalities": list(model.input_modalities),
+                "supported_reasoning_levels": [],
+                "supports_reasoning_summaries": model.supports_reasoning,
+                "supports_parallel_tool_calls": False,
+                "supported_in_api": True,
+                "priority": 100,
+            },
+            "api_types": ["chat_completions"],
+            "capabilities": {
+                "context_length": model.input_token_limit,
+                "max_output_tokens": model.output_token_limit,
+                "supports_reasoning": model.supports_reasoning,
+                "supports_images": model.supports_vision,
+                "supportsImages": model.supports_vision,
+                "supports_vision": model.supports_vision,
+                "supports_tool_use": model.supports_tool_use,
+                "supports_streaming": model.supports_streaming,
+                "input_modalities": list(model.input_modalities),
+                "output_modalities": list(model.output_modalities),
+            },
+            "context_length": model.input_token_limit,
+            "contextLength": model.input_token_limit,
+            "max_output_tokens": model.output_token_limit,
+            "maxOutputTokens": model.output_token_limit,
+            "supports_reasoning": model.supports_reasoning,
+            "supportsReasoning": model.supports_reasoning,
+            "supports_images": model.supports_vision,
+            "supportsImages": model.supports_vision,
+            "supports_vision": model.supports_vision,
+            "supportsVision": model.supports_vision,
+        }
+    )
+
+
 def _v1_supports_reasoning(model: UpstreamModel) -> bool:
     return bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries
 
@@ -1943,10 +2008,15 @@ async def v1_chat_completions(
     request: Request,
     payload: ChatCompletionsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
+    agent_provider_context: AgentProviderRuntimeContext = Depends(get_agent_provider_runtime_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     cursor_compat_client = _is_cursor_compat_client(request, api_key)
     effective_model = _effective_model_for_api_key(api_key, payload.model)
+    if _is_gemini_model(effective_model):
+        return await _v1_gemini_chat_completions(request, payload, agent_provider_context, api_key)
+    if _is_antigravity_model(effective_model):
+        return await _v1_antigravity_chat_completions(payload, agent_provider_context, api_key)
     validate_model_access(api_key, effective_model)
 
     rate_limit_headers = await context.service.rate_limit_headers()
@@ -2061,6 +2131,65 @@ async def v1_chat_completions(
         status_code=200,
         headers=rate_limit_headers,
     )
+
+
+async def _v1_gemini_chat_completions(
+    request: Request,
+    payload: ChatCompletionsRequest,
+    context: AgentProviderRuntimeContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    request_payload = payload.model_dump(mode="json", exclude_none=True)
+    runtime_context = GeminiRuntimeRequestContext(api_key=api_key)
+    try:
+        if payload.stream:
+            body = await context.gemini_service.stream_chat(request_payload, runtime_context)
+            body, startup_error = await _probe_chat_stream_startup_error(body)
+            if startup_error is not None:
+                return _stream_startup_error_response(request, startup_error, headers={})
+            return StreamingResponse(
+                body,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        response = await context.gemini_service.complete_chat(request_payload, runtime_context)
+    except GeminiRuntimeValidationError as exc:
+        return JSONResponse(status_code=400, content=agent_provider_invalid_request_error(str(exc)))
+    except ProxyRateLimitError as exc:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after is not None else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error(exc.code, exc.message, error_type=exc.error_type),
+            headers=headers,
+        )
+    except ProxyUpstreamError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error(exc.code, exc.message, error_type=exc.error_type),
+        )
+    return JSONResponse(content=response)
+
+
+def _is_gemini_model(model: str) -> bool:
+    return model.startswith("gemini-")
+
+
+async def _v1_antigravity_chat_completions(
+    payload: ChatCompletionsRequest,
+    context: AgentProviderRuntimeContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    request_payload = payload.model_dump(mode="json", exclude_none=True)
+    runtime_context = AntigravityRuntimeRequestContext(api_key=api_key)
+    try:
+        response = await context.antigravity_managed_service.complete_chat(request_payload, runtime_context)
+    except AntigravityRuntimeValidationError as exc:
+        return JSONResponse(status_code=400, content=agent_provider_invalid_request_error(str(exc)))
+    return JSONResponse(content=response)
+
+
+def _is_antigravity_model(model: str) -> bool:
+    return model.startswith("antigravity-")
 
 
 async def _stream_responses(

@@ -19,6 +19,7 @@ describe("DashboardSettingsSchema", () => {
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
       singleAccountId: "acc-1",
+      manualAccountPriorityIds: ["acc-2", "acc-1"],
       weeklyPaceWorkingDays: "0,1,2,3,4",
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
@@ -47,6 +48,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.relativeAvailabilityPower).toBe(2);
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.singleAccountId).toBe("acc-1");
+    expect(parsed.manualAccountPriorityIds).toEqual(["acc-2", "acc-1"]);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
@@ -75,6 +77,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.singleAccountId).toBeNull();
+    expect(parsed.manualAccountPriorityIds).toEqual([]);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
@@ -139,6 +142,7 @@ describe("SettingsUpdateRequestSchema", () => {
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 7,
       singleAccountId: "acc-1",
+      manualAccountPriorityIds: ["acc-2", "acc-1"],
       weeklyPaceWorkingDays: "0,1,2,3,4",
       openaiCacheAffinityMaxAgeSeconds: 120,
       dashboardSessionTtlSeconds: 7200,
@@ -171,6 +175,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.relativeAvailabilityPower).toBe(1.5);
     expect(parsed.relativeAvailabilityTopK).toBe(7);
     expect(parsed.singleAccountId).toBe("acc-1");
+    expect(parsed.manualAccountPriorityIds).toEqual(["acc-2", "acc-1"]);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
@@ -226,6 +231,18 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(parsed.routingStrategy).toBe("fill_first");
+  });
+
+  it("accepts ordered_fallback as a valid routing strategy", () => {
+    const parsed = SettingsUpdateRequestSchema.parse({
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      routingStrategy: "ordered_fallback",
+      manualAccountPriorityIds: ["acc-2", "acc-1"],
+    });
+
+    expect(parsed.routingStrategy).toBe("ordered_fallback");
+    expect(parsed.manualAccountPriorityIds).toEqual(["acc-2", "acc-1"]);
   });
 
   it("rejects unknown routing strategies", () => {

@@ -30,6 +30,7 @@ class SettingsRepository:
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             single_account_id=None,
+            manual_account_priority_ids_json="[]",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=43200,
             warmup_model=get_settings().warmup_model,
@@ -77,6 +78,7 @@ class SettingsRepository:
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         single_account_id: str | None = None,
+        manual_account_priority_ids_json: str | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
@@ -117,6 +119,8 @@ class SettingsRepository:
             settings.relative_availability_top_k = relative_availability_top_k
         if single_account_id is not None or routing_strategy == "single_account":
             settings.single_account_id = single_account_id
+        if manual_account_priority_ids_json is not None:
+            settings.manual_account_priority_ids_json = manual_account_priority_ids_json
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if dashboard_session_ttl_seconds is not None:

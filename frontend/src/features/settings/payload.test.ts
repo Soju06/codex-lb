@@ -120,4 +120,24 @@ describe("buildSettingsUpdateRequest", () => {
     expect(payload.stickyReallocationPrimaryBudgetThresholdPct).toBe(80);
     expect(payload.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
   });
+
+  it("preserves nonempty manual account priority when saving unrelated settings", () => {
+    const settings = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "ordered_fallback",
+      manualAccountPriorityIds: ["acc-two", "acc-one"],
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    const payload = buildSettingsUpdateRequest(settings, { dashboardSessionTtlSeconds: 7200 });
+
+    expect(payload.manualAccountPriorityIds).toEqual(["acc-two", "acc-one"]);
+  });
 });

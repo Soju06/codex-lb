@@ -319,6 +319,99 @@ class AccountProxyBinding(Base):
     __table_args__ = (UniqueConstraint("account_id", name="uq_account_proxy_bindings_account"),)
 
 
+class AgentProviderAccount(Base):
+    __tablename__ = "agent_provider_accounts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider_id: Mapped[str] = mapped_column(String, nullable=False)
+    external_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="active", server_default=text("'active'"), nullable=False)
+    auth_mode: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    credential_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    quota_windows: Mapped[list["AgentProviderQuotaWindow"]] = relationship(
+        "AgentProviderQuotaWindow",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider_id", "external_account_id", name="uq_agent_provider_accounts_external"),
+        UniqueConstraint("provider_id", "credential_fingerprint", name="uq_agent_provider_accounts_credential"),
+        Index("idx_agent_provider_accounts_provider_status", "provider_id", "status", "display_name"),
+    )
+
+
+class AgentProviderRoutingSettings(Base):
+    __tablename__ = "agent_provider_routing_settings"
+
+    provider_id: Mapped[str] = mapped_column(String, primary_key=True)
+    strategy: Mapped[str] = mapped_column(
+        String,
+        default="capacity_weighted",
+        server_default=text("'capacity_weighted'"),
+        nullable=False,
+    )
+    single_account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("agent_provider_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    ordered_account_ids_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        server_default=text("'[]'"),
+        nullable=False,
+    )
+    quota_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=100.0,
+        server_default=text("100.0"),
+        nullable=False,
+    )
+    round_robin_cursor: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class AgentProviderQuotaWindow(Base):
+    __tablename__ = "agent_provider_quota_windows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("agent_provider_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    dimension: Mapped[str] = mapped_column(String, nullable=False)
+    used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    account: Mapped[AgentProviderAccount] = relationship("AgentProviderAccount", back_populates="quota_windows")
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "dimension", name="uq_agent_provider_quota_windows_account_dimension"),
+        Index("idx_agent_provider_quota_windows_account_dimension", "account_id", "dimension"),
+    )
+
+
 class AccountLimitWarmup(Base):
     __tablename__ = "account_limit_warmups"
 
@@ -440,6 +533,12 @@ class DashboardSettings(Base):
         nullable=False,
     )
     single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    manual_account_priority_ids_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        server_default=text("'[]'"),
+        nullable=False,
+    )
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,

@@ -54,6 +54,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
     assert payload["singleAccountId"] is None
+    assert payload["manualAccountPriorityIds"] == []
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 43200
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
@@ -87,6 +88,7 @@ async def test_settings_api_get_and_update(async_client):
             "relativeAvailabilityTopK": 7,
             "preferEarlierResetWindow": "secondary",
             "singleAccountId": None,
+            "manualAccountPriorityIds": [],
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "dashboardSessionTtlSeconds": 31536000,
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800,
@@ -119,6 +121,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["relativeAvailabilityTopK"] == 7
     assert updated["preferEarlierResetWindow"] == "secondary"
     assert updated["singleAccountId"] is None
+    assert updated["manualAccountPriorityIds"] == []
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["dashboardSessionTtlSeconds"] == 31536000
     assert updated["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
@@ -152,6 +155,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityTopK"] == 7
     assert payload["preferEarlierResetWindow"] == "secondary"
     assert payload["singleAccountId"] is None
+    assert payload["manualAccountPriorityIds"] == []
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 1800
@@ -189,6 +193,60 @@ async def test_settings_api_accepts_fill_first_routing_strategy(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     assert response.json()["routingStrategy"] == "fill_first"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_persists_ordered_fallback_manual_priority(async_client):
+    first_id = await _import_account(async_client, "chatgpt-priority-1", "priority1@example.com")
+    second_id = await _import_account(async_client, "chatgpt-priority-2", "priority2@example.com")
+
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "ordered_fallback",
+            "manualAccountPriorityIds": [second_id, first_id, second_id],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["routingStrategy"] == "ordered_fallback"
+    assert payload["manualAccountPriorityIds"] == [second_id, first_id]
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["manualAccountPriorityIds"] == [second_id, first_id]
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_ordered_fallback_without_known_priority(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "ordered_fallback",
+            "manualAccountPriorityIds": [],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "manual_account_priority_required"
+
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": True,
+            "preferEarlierResetAccounts": True,
+            "routingStrategy": "ordered_fallback",
+            "manualAccountPriorityIds": ["missing-account"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "manual_account_priority_unknown_account"
 
 
 @pytest.mark.asyncio

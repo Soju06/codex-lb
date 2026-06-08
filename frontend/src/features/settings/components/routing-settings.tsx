@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Route, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus, Route, Trash2, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -61,6 +61,30 @@ function accountLabel(account: AccountSummary): string {
   const name = account.alias?.trim() || account.displayName?.trim() || account.email?.trim() || account.accountId;
   const compactId = formatCompactAccountId(account.accountId, 6, 4);
   return `${name} (${compactId})`;
+}
+
+function normalizeAccountOrder(accountIds: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const rawAccountId of accountIds) {
+    const accountId = rawAccountId.trim();
+    if (!accountId || seen.has(accountId)) {
+      continue;
+    }
+    seen.add(accountId);
+    ordered.push(accountId);
+  }
+  return ordered;
+}
+
+function moveOrderedAccount(accountIds: readonly string[], index: number, direction: -1 | 1): string[] {
+  const next = [...accountIds];
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= next.length) {
+    return next;
+  }
+  [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+  return next;
 }
 
 export function RoutingSettings({
@@ -157,6 +181,11 @@ export function RoutingSettings({
   const blockedSelectedAccount =
     selectedAccount !== undefined && !isSingleAccountRoutingSelectable(selectedAccount.status) ? selectedAccount : null;
   const firstAccountId = selectableAccounts[0]?.accountId;
+  const manualPriorityIds = normalizeAccountOrder(settings.manualAccountPriorityIds ?? []);
+  const manualPriorityIdSet = new Set(manualPriorityIds);
+  const nextManualPriorityAccountId = selectableAccounts.find(
+    (account) => !manualPriorityIdSet.has(account.accountId),
+  )?.accountId;
   const additionalQuotaOverrides = settings.additionalQuotaRoutingPolicies ?? {};
   const knownAdditionalQuotaKeys = new Set((settings.additionalQuotaPolicies ?? []).map((policy) => policy.quotaKey));
   const additionalQuotaRows = [
@@ -294,6 +323,17 @@ export function RoutingSettings({
                   });
                   return;
                 }
+                if (routingStrategy === "ordered_fallback") {
+                  const orderedIds = manualPriorityIds.length > 0 ? manualPriorityIds : firstAccountId ? [firstAccountId] : [];
+                  if (orderedIds.length === 0) {
+                    return;
+                  }
+                  save({
+                    routingStrategy,
+                    manualAccountPriorityIds: orderedIds,
+                  });
+                  return;
+                }
                 save({
                   routingStrategy,
                 });
@@ -310,6 +350,9 @@ export function RoutingSettings({
                 <SelectItem value="reset_drain">Reset drain</SelectItem>
                 <SelectItem value="single_account" disabled={!settings.singleAccountId && !firstAccountId}>
                   Single account
+                </SelectItem>
+                <SelectItem value="ordered_fallback" disabled={manualPriorityIds.length === 0 && !firstAccountId}>
+                  Ordered fallback
                 </SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
@@ -516,6 +559,117 @@ export function RoutingSettings({
               </Select>
               {!accountsLoading && selectableAccounts.length === 0 ? (
                 <p className="text-xs text-muted-foreground">Import an account before enabling single-account routing.</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {settings.routingStrategy === "ordered_fallback" ? (
+            <div className="space-y-3 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Account priority</p>
+                  <p className="text-xs text-muted-foreground">Try accounts in this order before denying the request.</p>
+                </div>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className="h-8 w-8"
+                  disabled={busy || accountsLoading || !nextManualPriorityAccountId}
+                  aria-label="Add account priority"
+                  onClick={() =>
+                    nextManualPriorityAccountId
+                      ? save({
+                          manualAccountPriorityIds: [...manualPriorityIds, nextManualPriorityAccountId],
+                        })
+                      : undefined
+                  }
+                >
+                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                </Button>
+              </div>
+              <div className="space-y-2">
+                {manualPriorityIds.map((accountId, index) => {
+                  const account = accounts.find((item) => item.accountId === accountId);
+                  const availableAccounts = selectableAccounts.filter(
+                    (item) => item.accountId === accountId || !manualPriorityIdSet.has(item.accountId),
+                  );
+                  return (
+                    <div key={`${accountId}-${index}`} className="flex items-center gap-2">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-muted/20 text-xs text-muted-foreground">
+                        {index + 1}
+                      </div>
+                      <Select
+                        value={accountId}
+                        onValueChange={(value) => {
+                          const next = [...manualPriorityIds];
+                          next[index] = value;
+                          save({ manualAccountPriorityIds: normalizeAccountOrder(next) });
+                        }}
+                      >
+                        <SelectTrigger
+                          aria-label={`Priority account ${index + 1}`}
+                          className="h-8 min-w-0 flex-1 text-xs"
+                          disabled={busy || accountsLoading}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent align="end">
+                          {account && !isSingleAccountRoutingSelectable(account.status) ? (
+                            <SelectItem value={account.accountId} disabled>
+                              {accountLabel(account)}
+                            </SelectItem>
+                          ) : null}
+                          {availableAccounts.map((item) => (
+                            <SelectItem key={item.accountId} value={item.accountId}>
+                              {accountLabel(item)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8"
+                        disabled={busy || index === 0}
+                        aria-label={`Move ${account?.alias ?? account?.displayName ?? accountId} up`}
+                        onClick={() => save({ manualAccountPriorityIds: moveOrderedAccount(manualPriorityIds, index, -1) })}
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8"
+                        disabled={busy || index === manualPriorityIds.length - 1}
+                        aria-label={`Move ${account?.alias ?? account?.displayName ?? accountId} down`}
+                        onClick={() => save({ manualAccountPriorityIds: moveOrderedAccount(manualPriorityIds, index, 1) })}
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8"
+                        disabled={busy || manualPriorityIds.length <= 1}
+                        aria-label={`Remove ${account?.alias ?? account?.displayName ?? accountId}`}
+                        onClick={() =>
+                          save({
+                            manualAccountPriorityIds: manualPriorityIds.filter((_, itemIndex) => itemIndex !== index),
+                          })
+                        }
+                      >
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+              {!accountsLoading && selectableAccounts.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Import an account before enabling ordered fallback.</p>
               ) : null}
             </div>
           ) : null}

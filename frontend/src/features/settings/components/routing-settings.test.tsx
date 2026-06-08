@@ -39,6 +39,7 @@ const BASE_SETTINGS: DashboardSettings = {
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
   singleAccountId: null,
+  manualAccountPriorityIds: [],
   weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
@@ -447,6 +448,29 @@ describe("RoutingSettings", () => {
       apiKeyAuthEnabled: true,
       ...LIMIT_WARMUP_DEFAULTS,
     });
+  });
+
+  it("seeds account priority when ordered fallback routing is selected", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, routingStrategy: "capacity_weighted" }}
+        accounts={[createAccountSummary({ accountId: "acc-one", email: "one@example.com", displayName: "one@example.com" })]}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("combobox")[1]);
+    await user.click(await screen.findByRole("option", { name: "Ordered fallback" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        routingStrategy: "ordered_fallback",
+        manualAccountPriorityIds: ["acc-one"],
+      }),
+    );
   });
 
   it("names limit warm-up controls for assistive technology", () => {

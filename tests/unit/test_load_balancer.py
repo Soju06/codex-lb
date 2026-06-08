@@ -3943,6 +3943,56 @@ def test_select_account_fill_first_treats_none_used_percent_as_zero():
     assert result.account.account_id == "a"
 
 
+def test_select_account_ordered_fallback_uses_manual_priority_order():
+    states = [
+        AccountState("low-usage", AccountStatus.ACTIVE, used_percent=1.0),
+        AccountState("preferred", AccountStatus.ACTIVE, used_percent=80.0),
+        AccountState("backup", AccountStatus.ACTIVE, used_percent=20.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="ordered_fallback",
+        ordered_account_ids=("preferred", "backup", "low-usage"),
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "preferred"
+
+
+def test_select_account_ordered_fallback_skips_exhausted_and_unlisted_accounts():
+    states = [
+        AccountState("exhausted", AccountStatus.ACTIVE, used_percent=100.0),
+        AccountState("backup", AccountStatus.ACTIVE, used_percent=20.0),
+        AccountState("unlisted", AccountStatus.ACTIVE, used_percent=1.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="ordered_fallback",
+        ordered_account_ids=("exhausted", "backup"),
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "backup"
+
+
+def test_select_account_ordered_fallback_denies_when_no_ordered_account_available():
+    states = [
+        AccountState("exhausted", AccountStatus.ACTIVE, used_percent=100.0),
+        AccountState("unlisted", AccountStatus.ACTIVE, used_percent=1.0),
+    ]
+
+    result = select_account(
+        states,
+        routing_strategy="ordered_fallback",
+        ordered_account_ids=("exhausted", "missing"),
+    )
+
+    assert result.account is None
+    assert result.error_message == "No ordered fallback accounts are available"
+
+
 def test_select_account_fill_first_is_deterministic_across_calls():
     now = 1_700_000_000.0
     states = [

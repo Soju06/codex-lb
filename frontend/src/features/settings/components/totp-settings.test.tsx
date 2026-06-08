@@ -41,6 +41,7 @@ const baseSettings = {
   relativeAvailabilityPower: 2,
   relativeAvailabilityTopK: 5,
   singleAccountId: null,
+  manualAccountPriorityIds: [],
   weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
@@ -141,6 +142,7 @@ describe("TotpSettings", () => {
     delete saveSettings.totpConfigured;
     delete saveSettings.upstreamProxyRoutingEnabled;
     delete saveSettings.upstreamProxyDefaultPoolId;
+    delete saveSettings.manualAccountPriorityIds;
 
     renderWithClient(<TotpSettings settings={baseSettings} onSave={onSave} />);
 

@@ -37,11 +37,12 @@ class DashboardSettingsResponse(DashboardModel):
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     routing_strategy: str = Field(
-        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$"
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account|ordered_fallback)$"
     )
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
     single_account_id: str | None = None
+    manual_account_priority_ids: list[str] = Field(default_factory=list)
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
@@ -77,11 +78,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(
         default=None,
-        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$",
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account|ordered_fallback)$",
     )
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
     single_account_id: str | None = Field(default=None, max_length=255)
+    manual_account_priority_ids: list[str] | None = None
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
@@ -116,6 +118,23 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     @classmethod
     def _normalize_weekly_pace_days(cls, value: str | None) -> str | None:
         return _normalize_weekly_pace_working_days(value)
+
+    @field_validator("manual_account_priority_ids")
+    @classmethod
+    def _normalize_manual_account_priority_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for raw_account_id in value:
+            account_id = raw_account_id.strip()
+            if not account_id:
+                continue
+            if account_id in seen:
+                continue
+            seen.add(account_id)
+            ordered.append(account_id)
+        return ordered
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

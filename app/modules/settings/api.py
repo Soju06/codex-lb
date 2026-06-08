@@ -111,6 +111,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
         single_account_id=settings.single_account_id,
+        manual_account_priority_ids=list(settings.manual_account_priority_ids),
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
@@ -328,6 +329,22 @@ async def _validate_account_id(context: SettingsContext, account_id: str) -> Non
         raise DashboardBadRequestError("Account not found", code="account_not_found")
 
 
+async def _validate_manual_account_priority_ids(context: SettingsContext, account_ids: tuple[str, ...]) -> None:
+    if not account_ids:
+        raise DashboardBadRequestError(
+            "manualAccountPriorityIds is required for ordered fallback routing",
+            code="manual_account_priority_required",
+        )
+    result = await context.session.execute(select(Account.id).where(Account.id.in_(account_ids)))
+    known_ids = {str(account_id) for account_id in result.scalars().all()}
+    missing_ids = [account_id for account_id in account_ids if account_id not in known_ids]
+    if missing_ids:
+        raise DashboardBadRequestError(
+            f"manualAccountPriorityIds contains unknown accounts: {', '.join(missing_ids)}",
+            code="manual_account_priority_unknown_account",
+        )
+
+
 def _is_missing_proxy_endpoint_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "foreign key" in message or "fk constraint" in message or "violates foreign key constraint" in message
@@ -439,6 +456,14 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
+        manual_account_priority_ids = (
+            tuple(payload.manual_account_priority_ids)
+            if payload.manual_account_priority_ids is not None
+            else current.manual_account_priority_ids
+        )
+        routing_strategy = payload.routing_strategy or current.routing_strategy
+        if routing_strategy == "ordered_fallback":
+            await _validate_manual_account_priority_ids(context, manual_account_priority_ids)
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=(
@@ -463,7 +488,7 @@ async def update_settings(
                     else current.prefer_earlier_reset_accounts
                 ),
                 prefer_earlier_reset_window=payload.prefer_earlier_reset_window or current.prefer_earlier_reset_window,
-                routing_strategy=payload.routing_strategy or current.routing_strategy,
+                routing_strategy=routing_strategy,
                 relative_availability_power=(
                     payload.relative_availability_power
                     if payload.relative_availability_power is not None
@@ -475,6 +500,7 @@ async def update_settings(
                     else current.relative_availability_top_k
                 ),
                 single_account_id=single_account_id,
+                manual_account_priority_ids=manual_account_priority_ids,
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None

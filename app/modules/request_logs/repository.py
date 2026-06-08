@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -22,6 +22,17 @@ from app.db.session import sqlite_writer_section
 class _RequestLogFilters:
     conditions: list
     needs_related_search_joins: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestLogAggregate:
+    provider_id: str
+    request_count: int
+    success_count: int
+    error_count: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
 
 
 class RequestLogsRepository:
@@ -158,6 +169,43 @@ class RequestLogsRepository:
             cost_usd=float(row.cost_usd or 0.0),
         )
 
+    async def aggregate_by_provider_since(self, since: datetime) -> list[ProviderRequestLogAggregate]:
+        provider_expr = case(
+            (RequestLog.source == "gemini", "gemini"),
+            (RequestLog.source == "antigravity", "antigravity"),
+            else_="codex",
+        ).label("provider_id")
+        stmt = (
+            select(
+                provider_expr,
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(cast(RequestLog.status == "success", Integer)), 0).label("success_count"),
+                func.coalesce(func.sum(cast(RequestLog.status != "success", Integer)), 0).label("error_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            )
+            .where(
+                RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
+                RequestLog.deleted_at.is_(None),
+            )
+            .group_by(provider_expr)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            ProviderRequestLogAggregate(
+                provider_id=str(row.provider_id),
+                request_count=int(row.request_count),
+                success_count=int(row.success_count),
+                error_count=int(row.error_count),
+                input_tokens=int(row.input_tokens),
+                output_tokens=int(row.output_tokens),
+                cached_input_tokens=int(row.cached_input_tokens),
+            )
+            for row in result.all()
+        ]
+
     async def top_error_since(self, since: datetime) -> str | None:
         stmt = (
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
@@ -230,6 +278,7 @@ class RequestLogsRepository:
                 request_id=resolved_request_id,
                 model=model,
                 plan_type=resolved_plan_type,
+                source=source,
                 transport=transport,
                 request_kind=request_kind,
                 useragent=resolved_useragent,

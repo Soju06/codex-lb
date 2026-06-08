@@ -35,6 +35,16 @@ class ProxyRateLimitError(AppError):
     code = "rate_limit_exceeded"
     error_type = "rate_limit_error"
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        retry_after: str | int | None = None,
+        code: str | None = None,
+    ) -> None:
+        self.retry_after = str(retry_after) if retry_after is not None else None
+        super().__init__(message, code=code)
+
 
 class ProxyUpstreamError(AppError):
     status_code = 503
@@ -77,3 +87,8 @@ class DashboardRateLimitError(AppError):
     def __init__(self, message: str, *, retry_after: int, code: str | None = None) -> None:
         self.retry_after = retry_after
         super().__init__(message, code=code)
+
+
+class DashboardUpstreamError(AppError):
+    status_code = 502
+    code = "upstream_error"

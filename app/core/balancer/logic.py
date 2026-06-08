@@ -62,6 +62,7 @@ RoutingStrategy = Literal[
     "sequential_drain",
     "reset_drain",
     "single_account",
+    "ordered_fallback",
 ]
 TrafficClass = Literal["foreground", "opportunistic"]
 UsageWeightedOrder = Literal["secondary_first", "primary_first"]
@@ -370,6 +371,7 @@ def select_account(
     bypass_quota_exceeded_account_ids: Collection[str] | None = None,
     primary_first_usage_weighted: bool = False,
     routing_costs: RoutingCostsByAccount | None = None,
+    ordered_account_ids: Collection[str] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -586,6 +588,12 @@ def select_account(
         selected = min(candidate_pool, key=lambda state: state.account_id)
         return SelectionResult(selected, None)
 
+    if routing_strategy == "ordered_fallback":
+        ordered_pool = _ordered_fallback_pool(available, ordered_account_ids)
+        if not ordered_pool:
+            return SelectionResult(None, "No ordered fallback accounts are available")
+        return SelectionResult(ordered_pool[0], None)
+
     if routing_strategy == "sequential_drain":
         candidate_pool = [state for state in available if not _usage_exhausted(state)]
         if not candidate_pool:
@@ -658,6 +666,31 @@ def select_account(
                 key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key_with_cost,
             )
     return SelectionResult(selected, None)
+
+
+def _ordered_fallback_pool(
+    available: Iterable[AccountState],
+    ordered_account_ids: Collection[str] | None,
+) -> list[AccountState]:
+    order = _normalized_ordered_account_ids(ordered_account_ids)
+    if not order:
+        return []
+    available_by_id = {
+        state.account_id: state for state in available if state.account_id in order and not _usage_exhausted(state)
+    }
+    return [available_by_id[account_id] for account_id in order if account_id in available_by_id]
+
+
+def _normalized_ordered_account_ids(ordered_account_ids: Collection[str] | None) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_account_id in ordered_account_ids or ():
+        account_id = raw_account_id.strip()
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        ordered.append(account_id)
+    return tuple(ordered)
 
 
 def _remaining_secondary_credits(state: AccountState) -> float:

@@ -8,6 +8,7 @@ import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { ApisPage } from "@/features/apis/components/apis-page";
+import { ProvidersPage } from "@/features/agent-providers/components/providers-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { ReportsPage } from "@/features/reports/components/reports-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
@@ -44,6 +45,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/providers" element={<ProvidersPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />

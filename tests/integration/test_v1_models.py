@@ -100,8 +100,39 @@ async def test_v1_models_list(async_client):
     ids = {item["id"] for item in data}
     assert "gpt-5.2" in ids
     assert "gpt-5.3-codex" in ids
+    assert "gemini-3.5-flash" in ids
+    gemini = next(item for item in data if item["id"] == "gemini-3.5-flash")
+    assert gemini["owned_by"] == "agent-lb"
+    assert gemini["provider"] == "gemini"
+    assert gemini["protocol"] == "gemini_api"
+    assert gemini["context_length"] == 1_048_576
+    assert gemini["max_output_tokens"] == 65_536
+    assert gemini["capabilities"]["supports_streaming"] is True
+    assert gemini["capabilities"]["input_modalities"] == ["text"]
+    assert gemini["capabilities"]["output_modalities"] == ["text"]
+    assert gemini["capabilities"]["supportsImages"] is False
+    assert gemini["capabilities"]["supports_images"] is False
+    assert gemini["capabilities"]["supports_vision"] is False
+    assert gemini["supportsImages"] is False
+    assert gemini["supports_images"] is False
+    assert gemini["supportsVision"] is False
+    assert gemini["supports_vision"] is False
+    antigravity = next(item for item in data if item["id"] == "antigravity-preview-05-2026")
+    assert antigravity["provider"] == "antigravity"
+    assert antigravity["capabilities"]["input_modalities"] == ["text"]
+    assert antigravity["capabilities"]["supports_tool_use"] is False
+    assert antigravity["capabilities"]["supportsImages"] is False
+    assert antigravity["capabilities"]["supports_images"] is False
+    assert antigravity["capabilities"]["supports_vision"] is False
+    assert antigravity["supportsImages"] is False
+    assert antigravity["supports_images"] is False
+    assert antigravity["supportsVision"] is False
+    assert antigravity["supports_vision"] is False
     for item in data:
         assert item["object"] == "model"
+        if item.get("provider") in {"gemini", "antigravity"}:
+            assert item["owned_by"] == "agent-lb"
+            continue
         assert item["owned_by"] == "codex-lb"
         assert "metadata" in item
         assert item["api_types"] == ["chat_completions"]
@@ -128,7 +159,8 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
     payload = resp.json()
     assert payload["object"] == "list"
     ids = {item["id"] for item in payload["data"]}
-    assert ids == BOOTSTRAP_MODEL_SLUGS
+    assert BOOTSTRAP_MODEL_SLUGS.issubset(ids)
+    assert "gemini-3.5-flash" in ids
     assert "gpt-5.5-pro" not in ids
 
 
@@ -473,6 +505,40 @@ async def test_model_catalogs_canonicalize_enforced_model_alias(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_filters_to_allowed_gemini_model(async_client):
+    await _populate_test_registry()
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "gemini-model-catalog",
+            "allowedModels": ["gemini-3.5-flash"],
+            "enforcedModel": "gemini-3.5-flash",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    resp = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert [entry["id"] for entry in data] == ["gemini-3.5-flash"]
+    assert data[0]["provider"] == "gemini"
+    assert data[0]["metadata"]["max_output_tokens"] == 65_536
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_preserves_original_flow_without_allowlist(async_client):
     registry = get_model_registry()
     models = [
@@ -573,7 +639,12 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     dashboard_ids = {item["id"] for item in dashboard.json()["models"]}
     v1_ids = {item["id"] for item in v1.json()["data"]}
     codex_slugs = {item["slug"] for item in codex.json()["models"]}
-    assert dashboard_ids == v1_ids == codex_slugs
+    assert codex_slugs.issubset(dashboard_ids)
+    assert codex_slugs.issubset(v1_ids)
+    assert dashboard_ids == v1_ids
+    assert "gemini-3.5-flash" in dashboard_ids
+    gemini = next(item for item in dashboard.json()["models"] if item["id"] == "gemini-3.5-flash")
+    assert gemini["provider"] == "gemini"
 
 
 @pytest.mark.asyncio

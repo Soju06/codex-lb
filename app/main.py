@@ -43,6 +43,10 @@ from app.core.resilience.memory_monitor import configure as configure_memory_mon
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.db.session import SessionLocal, close_db, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.agent_provider_accounts import api as agent_provider_accounts_api
+from app.modules.agent_provider_routing import api as agent_provider_routing_api
+from app.modules.agent_provider_runtime import api as agent_provider_runtime_api
+from app.modules.agent_providers import api as agent_providers_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
@@ -394,6 +398,12 @@ def create_app() -> FastAPI:
     app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)
     app.include_router(runtime_api.router)
+    app.include_router(agent_providers_api.router)
+    app.include_router(agent_provider_accounts_api.router)
+    app.include_router(agent_provider_routing_api.router)
+    app.include_router(agent_provider_runtime_api.router)
+    app.include_router(agent_provider_runtime_api.antigravity_router)
+    app.include_router(agent_provider_runtime_api.dashboard_router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)

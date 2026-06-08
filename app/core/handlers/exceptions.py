@@ -19,6 +19,7 @@ from app.core.exceptions import (
     DashboardConflictError,
     DashboardNotFoundError,
     DashboardRateLimitError,
+    DashboardUpstreamError,
     DashboardValidationError,
     ProxyAuthError,
     ProxyModelNotAllowed,
@@ -43,6 +44,7 @@ _DASHBOARD_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     DashboardBadRequestError,
     DashboardValidationError,
     DashboardRateLimitError,
+    DashboardUpstreamError,
 )
 
 
@@ -67,6 +69,10 @@ def add_exception_handlers(app: FastAPI) -> None:
         @app.exception_handler(exc_cls)
         async def _openai_domain_handler(request: Request, exc: AppError) -> JSONResponse:
             error_type = getattr(exc, "error_type", "server_error")
+            headers: dict[str, str] | None = None
+            retry_after = getattr(exc, "retry_after", None)
+            if isinstance(retry_after, str) and retry_after:
+                headers = {"Retry-After": retry_after}
             log_error_response(
                 logger,
                 request,
@@ -78,6 +84,7 @@ def add_exception_handlers(app: FastAPI) -> None:
             return JSONResponse(
                 status_code=exc.status_code,
                 content=openai_error(exc.code, exc.message, error_type=error_type),
+                headers=headers,
             )
 
     # --- Domain exceptions: Dashboard envelope ---

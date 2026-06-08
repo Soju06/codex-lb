@@ -16,6 +16,7 @@ export function buildSettingsUpdateRequest(
     relativeAvailabilityPower: settings.relativeAvailabilityPower,
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     singleAccountId: settings.singleAccountId,
+    manualAccountPriorityIds: settings.manualAccountPriorityIds,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
     warmupModel: settings.warmupModel,
@@ -62,6 +63,12 @@ export function buildSettingsUpdateRequest(
     settings.__stickyReallocationBudgetThresholdPctProvided !== false
   ) {
     payload.stickyReallocationBudgetThresholdPct = patch.stickyReallocationPrimaryBudgetThresholdPct;
+  }
+  if (
+    !("manualAccountPriorityIds" in patch) &&
+    settings.manualAccountPriorityIds.length === 0
+  ) {
+    delete payload.manualAccountPriorityIds;
   }
   return payload;
 }

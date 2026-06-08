@@ -12,6 +12,18 @@ from app.db.session import get_background_session, get_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
+from app.modules.agent_provider_accounts.repository import AgentProviderAccountsRepository
+from app.modules.agent_provider_accounts.service import AgentProviderAccountsService
+from app.modules.agent_provider_routing.repository import AgentProviderRoutingRepository
+from app.modules.agent_provider_routing.service import AgentProviderRoutingService
+from app.modules.agent_provider_runtime.service import (
+    AntigravityHarnessService,
+    AntigravityManagedAgentService,
+    ApiKeyUsagePort,
+    GeminiRuntimeService,
+    RequestLogWriterPort,
+)
+from app.modules.agent_providers.service import AgentProviderOverviewService
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.audit.repository import AuditRepository
@@ -48,6 +60,38 @@ class AccountsContext:
     session: AsyncSession
     repository: AccountsRepository
     service: AccountsService
+
+
+@dataclass(slots=True)
+class AgentProviderAccountsContext:
+    session: AsyncSession
+    repository: AgentProviderAccountsRepository
+    service: AgentProviderAccountsService
+
+
+@dataclass(slots=True)
+class AgentProviderRoutingContext:
+    session: AsyncSession
+    repository: AgentProviderRoutingRepository
+    service: AgentProviderRoutingService
+
+
+@dataclass(slots=True)
+class AgentProviderRuntimeContext:
+    session: AsyncSession
+    routing_repository: AgentProviderRoutingRepository
+    routing_service: AgentProviderRoutingService
+    api_keys_repository: ApiKeysRepository
+    request_logs_repository: RequestLogsRepository
+    gemini_service: GeminiRuntimeService
+    antigravity_service: AntigravityHarnessService
+    antigravity_managed_service: AntigravityManagedAgentService
+
+
+@dataclass(slots=True)
+class AgentProvidersContext:
+    session: AsyncSession
+    service: AgentProviderOverviewService
 
 
 @dataclass(slots=True)
@@ -156,6 +200,67 @@ def get_accounts_context(
         repository=repository,
         service=service,
     )
+
+
+def get_agent_provider_accounts_context(
+    session: AsyncSession = Depends(get_session),
+) -> AgentProviderAccountsContext:
+    repository = AgentProviderAccountsRepository(session)
+    service = AgentProviderAccountsService(repository)
+    return AgentProviderAccountsContext(session=session, repository=repository, service=service)
+
+
+def get_agent_provider_routing_context(
+    session: AsyncSession = Depends(get_session),
+) -> AgentProviderRoutingContext:
+    repository = AgentProviderRoutingRepository(session)
+    service = AgentProviderRoutingService(repository)
+    return AgentProviderRoutingContext(session=session, repository=repository, service=service)
+
+
+def get_agent_provider_runtime_context(
+    session: AsyncSession = Depends(get_session),
+) -> AgentProviderRuntimeContext:
+    routing_repository = AgentProviderRoutingRepository(session)
+    routing_service = AgentProviderRoutingService(routing_repository)
+    api_keys_repository = ApiKeysRepository(session)
+    request_logs_repository = RequestLogsRepository(session)
+    gemini_service = GeminiRuntimeService(
+        routing_service,
+        api_key_service=cast(ApiKeyUsagePort, ApiKeysService(api_keys_repository)),
+        request_logs=cast(RequestLogWriterPort, request_logs_repository),
+    )
+    antigravity_service = AntigravityHarnessService(
+        routing_service,
+        request_logs=cast(RequestLogWriterPort, request_logs_repository),
+    )
+    antigravity_managed_service = AntigravityManagedAgentService(
+        routing_service,
+        api_key_service=cast(ApiKeyUsagePort, ApiKeysService(api_keys_repository)),
+        request_logs=cast(RequestLogWriterPort, request_logs_repository),
+    )
+    return AgentProviderRuntimeContext(
+        session=session,
+        routing_repository=routing_repository,
+        routing_service=routing_service,
+        api_keys_repository=api_keys_repository,
+        request_logs_repository=request_logs_repository,
+        gemini_service=gemini_service,
+        antigravity_service=antigravity_service,
+        antigravity_managed_service=antigravity_managed_service,
+    )
+
+
+def get_agent_providers_context(
+    session: AsyncSession = Depends(get_session),
+) -> AgentProvidersContext:
+    service = AgentProviderOverviewService(
+        codex_accounts=AccountsRepository(session),
+        provider_accounts=AgentProviderAccountsRepository(session),
+        provider_routing=AgentProviderRoutingRepository(session),
+        request_logs=RequestLogsRepository(session),
+    )
+    return AgentProvidersContext(session=session, service=service)
 
 
 def get_audit_context(

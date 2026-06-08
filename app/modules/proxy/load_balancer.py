@@ -307,6 +307,7 @@ class LoadBalancer:
         lease_kind: AccountLeaseKind | None = None,
         estimated_lease_tokens: float = 0.0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        ordered_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -448,6 +449,7 @@ class LoadBalancer:
                             traffic_class=traffic_class,
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
+                            ordered_account_ids=ordered_account_ids,
                         )
 
                     selected_account_map = account_map
@@ -977,6 +979,7 @@ class LoadBalancer:
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
+        ordered_account_ids: Collection[str] | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
@@ -1025,6 +1028,7 @@ class LoadBalancer:
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=False,
+            ordered_account_ids=ordered_account_ids,
         )
         if result.account is None:
             return AccountSelection(
@@ -2385,6 +2389,7 @@ def _select_account_preferring_budget_safe(
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    ordered_account_ids: Collection[str] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     state_budget_threshold = (
@@ -2398,7 +2403,7 @@ def _select_account_preferring_budget_safe(
         if apply_secondary_budget_threshold
         else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
     )
-    if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+    if routing_strategy in ("sequential_drain", "reset_drain", "single_account", "ordered_fallback"):
         budget_safe_states = [
             state
             for state in state_list
@@ -2416,6 +2421,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            ordered_account_ids=ordered_account_ids,
         )
 
     best_health_states = _best_health_tier_states(state_list)
@@ -2433,6 +2439,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            ordered_account_ids=ordered_account_ids,
         )
         if burn_first.account is not None:
             return burn_first
@@ -2456,6 +2463,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            ordered_account_ids=ordered_account_ids,
         )
         if preferred.account is not None:
             return preferred
@@ -2473,6 +2481,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            ordered_account_ids=ordered_account_ids,
         )
     return select_account(
         state_list,
@@ -2486,6 +2495,7 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+        ordered_account_ids=ordered_account_ids,
     )
 
 

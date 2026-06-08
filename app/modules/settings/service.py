@@ -22,6 +22,7 @@ class DashboardSettingsData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    manual_account_priority_ids: tuple[str, ...]
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -56,6 +57,7 @@ class DashboardSettingsUpdateData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    manual_account_priority_ids: tuple[str, ...]
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -94,6 +96,7 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             single_account_id=row.single_account_id,
+            manual_account_priority_ids=_parse_manual_account_priority_ids(row.manual_account_priority_ids_json),
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -135,6 +138,7 @@ class SettingsService:
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             single_account_id=payload.single_account_id,
+            manual_account_priority_ids_json=_dump_manual_account_priority_ids(payload.manual_account_priority_ids),
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -170,6 +174,7 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             single_account_id=row.single_account_id,
+            manual_account_priority_ids=_parse_manual_account_priority_ids(row.manual_account_priority_ids_json),
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -239,3 +244,29 @@ def _dump_additional_quota_routing_policies(policies: dict[str, str]) -> str:
         if normalized_quota_key is not None and normalized_policy in _ROUTING_POLICIES:
             normalized[normalized_quota_key] = normalized_policy
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_manual_account_priority_ids(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_account_id in parsed:
+        if not isinstance(raw_account_id, str):
+            continue
+        account_id = raw_account_id.strip()
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        ordered.append(account_id)
+    return tuple(ordered)
+
+
+def _dump_manual_account_priority_ids(account_ids: tuple[str, ...]) -> str:
+    return json.dumps(list(account_ids), separators=(",", ":"))

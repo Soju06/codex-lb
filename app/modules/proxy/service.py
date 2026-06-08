@@ -1356,6 +1356,7 @@ class ProxyService(
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=_routing_strategy(settings),
+            ordered_account_ids=_manual_account_priority_ids(settings),
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
@@ -1722,6 +1723,7 @@ class ProxyService(
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
+                        ordered_account_ids=_manual_account_priority_ids(settings),
                         relative_availability_power=_relative_availability_power(settings),
                         relative_availability_top_k=_relative_availability_top_k(settings),
                         model=model,
@@ -1763,6 +1765,7 @@ class ProxyService(
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
+                    ordered_account_ids=_manual_account_priority_ids(settings),
                     relative_availability_power=_relative_availability_power(settings),
                     relative_availability_top_k=_relative_availability_top_k(settings),
                     model=model,
@@ -1873,6 +1876,7 @@ class ProxyService(
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
             routing_strategy=_routing_strategy(settings),
+            ordered_account_ids=_manual_account_priority_ids(settings),
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
@@ -2141,6 +2145,8 @@ def _partial_output_proxy_error_event_block(
 
 def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
     value = getattr(settings, "routing_strategy", None) or "capacity_weighted"
+    if value == "ordered_fallback":
+        return "ordered_fallback"
     if value == "single_account":
         return "single_account"
     if value == "sequential_drain":
@@ -2156,6 +2162,29 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
     if value == "fill_first":
         return "fill_first"
     return "capacity_weighted"
+
+
+def _manual_account_priority_ids(settings: DashboardSettings) -> tuple[str, ...]:
+    raw_ids = getattr(settings, "manual_account_priority_ids_json", None)
+    if isinstance(raw_ids, str):
+        import json
+
+        try:
+            parsed = json.loads(raw_ids)
+        except json.JSONDecodeError:
+            parsed = []
+        raw_ids = parsed if isinstance(parsed, list) else []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_account_id in raw_ids or ():
+        if not isinstance(raw_account_id, str):
+            continue
+        account_id = raw_account_id.strip()
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        ordered.append(account_id)
+    return tuple(ordered)
 
 
 async def _call_with_supported_optional_kwargs(

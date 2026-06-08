@@ -17,6 +17,7 @@ type RoutingStrategy =
   | "relative_availability"
   | "fill_first"
   | "single_account"
+  | "ordered_fallback"
   | "sequential_drain"
   | "reset_drain";
 
@@ -47,6 +48,9 @@ function getRoutingLabel(
   }
   if (strategy === "single_account") {
     return "Single account";
+  }
+  if (strategy === "ordered_fallback") {
+    return sticky ? "Ordered fallback + Sticky threads" : "Ordered fallback";
   }
   if (strategy === "sequential_drain") {
     return sticky ? "Sequential drain + Sticky threads" : "Sequential drain";

@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { DailyReportRow } from "../schemas";
+import { ChartTooltip } from "./chart-tooltip";
 
 export type CostPerDayChartProps = {
   data: DailyReportRow[];
@@ -45,15 +46,7 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
               tickFormatter={(v: number) => `$${v}`}
             />
             <Tooltip
-              contentStyle={{
-                borderRadius: "8px",
-                border: "1px solid hsl(var(--border))",
-                background: "hsl(var(--popover))",
-              }}
-              formatter={(value) => {
-                if (typeof value !== "number") return [String(value), "Cost"];
-                return [`$${value.toFixed(2)}`, "Cost"];
-              }}
+              content={<ChartTooltip names={{ cost: "Cost" }} formatValue={(v) => `$${v.toFixed(2)}`} />}
             />
             <Area
               type="monotone"

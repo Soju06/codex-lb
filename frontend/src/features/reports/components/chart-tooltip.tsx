@@ -1,6 +1,6 @@
-import type { TooltipProps } from "recharts";
+import type { TooltipContentProps } from "recharts";
 
-export type ChartTooltipProps = TooltipProps<number, string> & {
+export type ChartTooltipProps = TooltipContentProps<number, string> & {
   formatValue?: (value: number, dataKey: string) => string;
   names?: Record<string, string>;
 };

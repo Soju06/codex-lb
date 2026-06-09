@@ -41,12 +41,14 @@ export function StatsGrid({ stats }: StatsGridProps) {
               </div>
             </div>
             <div className="mt-1">
-              <p className="text-[1.625rem] font-semibold tracking-[-0.02em]">{stat.value}</p>
-              {stat.comparison ? (
-                <p className={cn("mt-1 text-xs font-medium", COMPARISON_STYLES[stat.comparison.tone])}>
-                  {stat.comparison.text}
-                </p>
-              ) : null}
+              <div data-testid="stat-value-row" className="flex items-baseline gap-2">
+                <p className="text-[1.625rem] font-semibold tracking-[-0.02em]">{stat.value}</p>
+                {stat.comparison ? (
+                  <p className={cn("text-xs font-medium", COMPARISON_STYLES[stat.comparison.tone])}>
+                    {stat.comparison.text}
+                  </p>
+                ) : null}
+              </div>
               {stat.meta ? (
                 <p className="mt-1 text-xs text-muted-foreground">{stat.meta}</p>
               ) : null}

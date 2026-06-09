@@ -36,6 +36,20 @@ describe("StatsGrid", () => {
     expect(screen.getByText("Top: rate_limit_exceeded")).toBeInTheDocument();
   });
 
+  it("renders the comparison indicator inline with the metric value", () => {
+    render(
+      <StatsGrid
+        stats={[
+          { label: "Requests (30d)", value: "228", comparison: { text: "▲ 50%", tone: "positive" }, icon: Activity, trend: SAMPLE_TREND, trendColor: "#3b82f6" },
+        ]}
+      />,
+    );
+
+    const valueRow = screen.getByTestId("stat-value-row");
+    expect(valueRow).toContainElement(screen.getByText("228"));
+    expect(valueRow).toContainElement(screen.getByText("▲ 50%"));
+  });
+
   it("does not render a comparison line when a stat has no comparison", () => {
     render(
       <StatsGrid

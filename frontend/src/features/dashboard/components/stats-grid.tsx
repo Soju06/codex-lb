@@ -10,6 +10,12 @@ const ACCENT_STYLES = [
   "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
 ];
 
+const COMPARISON_STYLES = {
+  positive: "text-emerald-600 dark:text-emerald-400",
+  negative: "text-red-600 dark:text-red-400",
+  neutral: "text-muted-foreground",
+} as const;
+
 export type StatsGridProps = {
   stats: DashboardStat[];
 };
@@ -36,6 +42,11 @@ export function StatsGrid({ stats }: StatsGridProps) {
             </div>
             <div className="mt-1">
               <p className="text-[1.625rem] font-semibold tracking-[-0.02em]">{stat.value}</p>
+              {stat.comparison ? (
+                <p className={cn("mt-1 text-xs font-medium", COMPARISON_STYLES[stat.comparison.tone])}>
+                  {stat.comparison.text}
+                </p>
+              ) : null}
               {stat.meta ? (
                 <p className="mt-1 text-xs text-muted-foreground">{stat.meta}</p>
               ) : null}

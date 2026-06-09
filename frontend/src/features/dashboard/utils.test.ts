@@ -975,4 +975,94 @@ describe("buildDashboardView", () => {
     expect(burn.value).toBe("0.0 / 1.0");
     expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
   });
+
+  it("adds previous-window comparison indicators to requests tokens and cost cards", () => {
+    const overview = createDashboardOverview();
+
+    const view = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          metrics: {
+            requests: 1500,
+            tokens: 450,
+            cachedInputTokens: 0,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 15,
+          },
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 1000,
+              tokens: 900,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(view.stats[0]?.comparison).toEqual({ text: "▲ 50%", tone: "positive" });
+    expect(view.stats[1]?.comparison).toEqual({ text: "▼ 50%", tone: "negative" });
+    expect(view.stats[2]?.comparison).toEqual({ text: "▲ 50%", tone: "positive" });
+    expect(view.stats[view.stats.length - 1]?.comparison).toBeUndefined();
+  });
+
+  it("hides previous-window comparison indicators when comparison is unavailable or previous totals are zero", () => {
+    const overview = createDashboardOverview();
+
+    const unavailableView = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          comparison: {
+            canCompare: false,
+            previous: {
+              requests: 1000,
+              tokens: 1000,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(unavailableView.stats[0]?.comparison).toBeUndefined();
+    expect(unavailableView.stats[1]?.comparison).toBeUndefined();
+    expect(unavailableView.stats[2]?.comparison).toBeUndefined();
+
+    const zeroPreviousView = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 0,
+              tokens: 0,
+              costUsd: 0,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(zeroPreviousView.stats[0]?.comparison).toBeUndefined();
+    expect(zeroPreviousView.stats[1]?.comparison).toBeUndefined();
+    expect(zeroPreviousView.stats[2]?.comparison).toBeUndefined();
+  });
 });

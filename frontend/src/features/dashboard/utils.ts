@@ -35,9 +35,15 @@ export type DashboardStat = {
   label: string;
   value: string;
   meta?: string;
+  comparison?: DashboardStatComparison;
   icon: LucideIcon;
   trend: { value: number }[];
   trendColor: string;
+};
+
+export type DashboardStatComparison = {
+  text: string;
+  tone: "positive" | "negative" | "neutral";
 };
 
 export interface SafeLineView {
@@ -227,6 +233,26 @@ function isFiniteNumber(value: number | null | undefined): value is number {
 
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
+}
+
+function buildStatComparison(
+  current: number | null | undefined,
+  previous: number,
+  canCompare: boolean,
+): DashboardStatComparison | undefined {
+  if (!canCompare || !isFiniteNumber(current) || previous <= 0) {
+    return undefined;
+  }
+
+  const deltaPercent = ((current - previous) / previous) * 100;
+  const roundedPercent = Math.round(Math.abs(deltaPercent));
+  if (deltaPercent > 0) {
+    return { text: `▲ ${roundedPercent}%`, tone: "positive" };
+  }
+  if (deltaPercent < 0) {
+    return { text: `▼ ${roundedPercent}%`, tone: "negative" };
+  }
+  return { text: "0%", tone: "neutral" };
 }
 
 function windowUsedAccountEquivalents(
@@ -742,12 +768,15 @@ export function buildDashboardView(
     (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0) > 0
       ? (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0)
       : null;
+  const comparison = overview.summary.comparison;
+  const canCompare = comparison?.canCompare ?? false;
 
   const stats: DashboardStat[] = [
     {
       label: `Requests (${timeframeLabel})`,
       value: formatCompactNumber(metrics?.requests ?? 0),
       meta: requestMeta,
+      comparison: buildStatComparison(metrics?.requests, comparison?.previous.requests ?? 0, canCompare),
       icon: Activity,
       trend: trendPointsToValues(trends.requests),
       trendColor: TREND_COLORS[0],
@@ -756,6 +785,7 @@ export function buildDashboardView(
       label: `Tokens (${timeframeLabel})`,
       value: formatCompactNumber(metrics?.tokens ?? 0),
       meta: formatCachedTokensMeta(metrics?.tokens, metrics?.cachedInputTokens),
+      comparison: buildStatComparison(metrics?.tokens, comparison?.previous.tokens ?? 0, canCompare),
       icon: Coins,
       trend: trendPointsToValues(trends.tokens),
       trendColor: TREND_COLORS[1],
@@ -764,6 +794,7 @@ export function buildDashboardView(
       label: `Est. API Cost (${timeframeLabel})`,
       value: formatCurrency(cost),
       meta: costMeta,
+      comparison: buildStatComparison(cost, comparison?.previous.costUsd ?? 0, canCompare),
       icon: DollarSign,
       trend: trendPointsToValues(trends.cost),
       trendColor: TREND_COLORS[2],

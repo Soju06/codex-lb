@@ -6,6 +6,7 @@ import { RefreshCw } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
+import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
@@ -219,6 +220,7 @@ export function DashboardPage() {
           <section className="space-y-4">
             <div className="flex items-center gap-3">
               <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
+              <AccountSummaryLine accounts={overview?.accounts ?? []} />
               <div className="h-px flex-1 bg-border" />
             </div>
             <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />

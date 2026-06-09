@@ -976,6 +976,87 @@ describe("buildDashboardView", () => {
     expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
   });
 
+  it("shows only the averaged cost text on the estimated cost card", () => {
+    const weeklyView = buildDashboardView(
+      createDashboardOverview({
+        summary: {
+          primaryWindow: {
+            remainingPercent: 63.5,
+            capacityCredits: 225,
+            remainingCredits: 142.875,
+            resetAt: null,
+            windowMinutes: 300,
+          },
+          secondaryWindow: {
+            remainingPercent: 55.2,
+            capacityCredits: 7560,
+            remainingCredits: 4173.12,
+            resetAt: null,
+            windowMinutes: 10080,
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 56,
+          },
+          metrics: {
+            requests: 228,
+            tokens: 45000,
+            cachedInputTokens: 8200,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+        },
+      }),
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    const dailyView = buildDashboardView(
+      createDashboardOverview({
+        timeframe: {
+          key: "1d",
+          windowMinutes: 1440,
+          bucketSeconds: 3600,
+          bucketCount: 24,
+        },
+        summary: {
+          primaryWindow: {
+            remainingPercent: 63.5,
+            capacityCredits: 225,
+            remainingCredits: 142.875,
+            resetAt: null,
+            windowMinutes: 300,
+          },
+          secondaryWindow: {
+            remainingPercent: 55.2,
+            capacityCredits: 7560,
+            remainingCredits: 4173.12,
+            resetAt: null,
+            windowMinutes: 10080,
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 24,
+          },
+          metrics: {
+            requests: 228,
+            tokens: 45000,
+            cachedInputTokens: 8200,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+        },
+      }),
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(weeklyView.stats[2]?.meta).toBe("Avg/day $8.00");
+    expect(dailyView.stats[2]?.meta).toBe("Avg/hr $1.00");
+  });
+
   it("adds previous-window comparison indicators to requests tokens and cost cards", () => {
     const overview = createDashboardOverview();
 

@@ -758,10 +758,7 @@ export function buildDashboardView(
     timeframeHours <= 24
       ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
       : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
-  const costMeta =
-    metrics?.cachedInputTokens && metrics.cachedInputTokens > 0
-      ? `${costAverage} · API estimate, ${formatCompactNumber(metrics.cachedInputTokens)} cached`
-      : `${costAverage} · API estimate`;
+  const costMeta = costAverage;
   const trends = overview.trends;
   const primaryBurnLabel = formatBurnWindowLabel("primary", overview.summary.primaryWindow.windowMinutes);
   const secondaryBurnLabel = formatBurnWindowLabel("secondary", overview.summary.secondaryWindow?.windowMinutes);

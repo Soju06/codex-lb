@@ -246,13 +246,16 @@ function buildStatComparison(
 
   const deltaPercent = ((current - previous) / previous) * 100;
   const roundedPercent = Math.round(Math.abs(deltaPercent));
+  if (roundedPercent === 0) {
+    return undefined;
+  }
   if (deltaPercent > 0) {
     return { text: `▲ ${roundedPercent}%`, tone: "positive" };
   }
   if (deltaPercent < 0) {
     return { text: `▼ ${roundedPercent}%`, tone: "negative" };
   }
-  return { text: "0%", tone: "neutral" };
+  return undefined;
 }
 
 function windowUsedAccountEquivalents(

@@ -1016,6 +1016,45 @@ describe("buildDashboardView", () => {
     expect(view.stats[view.stats.length - 1]?.comparison).toBeUndefined();
   });
 
+  it("hides comparison indicators for sub-percent deltas that would round to 0%", () => {
+    const overview = createDashboardOverview();
+
+    const view = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          metrics: {
+            requests: 1001,
+            tokens: 999,
+            cachedInputTokens: 0,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 10.04,
+          },
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 1000,
+              tokens: 1000,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(view.stats[0]?.comparison).toBeUndefined();
+    expect(view.stats[1]?.comparison).toBeUndefined();
+    expect(view.stats[2]?.comparison).toBeUndefined();
+  });
+
   it("hides previous-window comparison indicators when comparison is unavailable or previous totals are zero", () => {
     const overview = createDashboardOverview();
 

@@ -271,6 +271,14 @@ from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
 )
 from app.modules.proxy._service.streaming.helpers import (
+    _mark_downstream_stream_cancelled,
+    _mark_upstream_stream_incomplete,
+    _raw_stream_error_code_or_upstream,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _raw_stream_error_fields as _raw_error_fields,
+)
+from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
 )
 from app.modules.proxy._service.streaming.helpers import (
@@ -372,11 +380,6 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_continuity_error_fields,  # noqa: F401
     _websocket_continuity_response_ids,  # noqa: F401
     _websocket_downstream_response_id,  # noqa: F401
-    _websocket_event_error_code,  # noqa: F401
-    _websocket_event_error_message,  # noqa: F401
-    _websocket_event_error_param,  # noqa: F401
-    _websocket_event_error_payload,  # noqa: F401
-    _websocket_event_error_type,  # noqa: F401
     _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401
     _websocket_input_item_type,  # noqa: F401
     _websocket_owner_pinned_quota_error_code,  # noqa: F401
@@ -646,33 +649,40 @@ class _StreamingMixin(_StreamingRetryMixin):
                     if event.type == "response.failed" and event.response and event.response.id
                     else request_id
                 )
-                code = _normalize_error_code(
-                    error.code if error else None,
-                    error.type if error else None,
-                )
-                if (
-                    event_type == "error"
-                    and code == "error"
-                    and _websocket_event_error_code(event_type, first_payload) is None
-                ):
-                    code = "upstream_error"
+                if preserve_raw_sse_line and error is None:
+                    raw_error_type, raw_error_message, raw_error_param, code = _raw_error_fields(
+                        event_type,
+                        first_payload,
+                    )
+                    settlement.error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
+                else:
+                    raw_error_type = error.type if error else None
+                    raw_error_message = error.message if error else None
+                    raw_error_param = error.param if error else None
+                    code = _normalize_error_code(
+                        error.code if error else None,
+                        raw_error_type,
+                    )
+                code = _raw_stream_error_code_or_upstream(event_type, first_payload, code)
                 rewritten_error = _facade()._rewrite_previous_response_stream_error(
                     previous_response_id=payload.previous_response_id,
                     preferred_account_id=preferred_account_id,
                     error_code=code,
-                    error_type=error.type if error else None,
-                    error_message=error.message if error else None,
-                    error_param=error.param if error else None,
+                    error_type=raw_error_type,
+                    error_message=raw_error_message,
+                    error_param=raw_error_param,
                 )
                 status = "error"
-                settlement.error = _upstream_error_from_openai(error)
+                if not (preserve_raw_sse_line and error is None):
+                    settlement.error = _upstream_error_from_openai(error)
+                upstream_error: UpstreamError = settlement.error or cast(UpstreamError, {"message": "Upstream error"})
                 settlement.record_success = False
                 if rewritten_error is not None:
                     rewritten_code, rewritten_message, upstream_error_code = rewritten_error
                     if upstream_error_code is not None:
                         await proxy._handle_stream_error(
                             account,
-                            settlement.error,
+                            upstream_error,
                             upstream_error_code,
                         )
                     first, event, first_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
@@ -682,10 +692,15 @@ class _StreamingMixin(_StreamingRetryMixin):
                     )
                     error_code = rewritten_code
                     error_message = rewritten_message
+                    upstream_error = cast(
+                        UpstreamError,
+                        {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code},
+                    )
+                    settlement.error = upstream_error
                     settlement.account_health_error = False
                 else:
                     error_code = code
-                    error_message = error.message if error else None
+                    error_message = raw_error_message
                     if error_code == "stream_incomplete":
                         failure_metadata = _RequestLogFailureMetadata(
                             failure_phase="upstream",
@@ -693,20 +708,20 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     settlement.account_health_error = _facade()._should_penalize_stream_error(code)
                     if allow_retry and code == "stream_idle_timeout":
-                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
+                        raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     if allow_retry and _facade()._is_security_work_authorization_required_error(code, error_message):
                         error_code = _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
                         raise _RetryableStreamError(
                             _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
-                            settlement.error,
+                            upstream_error,
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
-                        raise _RetryableStreamError(code, settlement.error, exclude_account=True)
+                        raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     if allow_transient_retry and _facade()._should_retry_transient_stream_error(code, error_message):
-                        raise _TransientStreamError(code, settlement.error)
+                        raise _TransientStreamError(code, upstream_error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
-                    settlement.error,
+                    upstream_error,
                 )
                 if allow_retry:
                     _facade().logger.info(
@@ -716,11 +731,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         error_code or code,
                     )
             elif preserve_raw_sse_line:
-                code = _normalize_error_code(
-                    _websocket_event_error_code(event_type, first_payload),
-                    _websocket_event_error_type(event_type, first_payload),
-                )
-                error_message = _websocket_event_error_message(event_type, first_payload)
+                _, error_message, _, code = _raw_error_fields(event_type, first_payload)
                 status = "error"
                 error_code = code
                 settlement.error = {"message": error_message or "Upstream error"}
@@ -820,11 +831,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         else:
                             error = event.error
                         if preserve_raw_sse_line and error is None:
-                            raw_error_code = _normalize_error_code(
-                                _websocket_event_error_code(event_type, event_payload),
-                                _websocket_event_error_type(event_type, event_payload),
-                            )
-                            raw_error_message = _websocket_event_error_message(event_type, event_payload)
+                            _, raw_error_message, _, raw_error_code = _raw_error_fields(event_type, event_payload)
                             upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
                             raw_error_code = _normalize_error_code(
@@ -833,12 +840,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                             )
                             raw_error_message = error.message if error else None
                             upstream_error = _upstream_error_from_openai(error)
-                        if (
-                            event_type == "error"
-                            and raw_error_code == "error"
-                            and _websocket_event_error_code(event_type, event_payload) is None
-                        ):
-                            raw_error_code = "upstream_error"
+                        raw_error_code = _raw_stream_error_code_or_upstream(
+                            event_type,
+                            event_payload,
+                            raw_error_code,
+                        )
                         rewritten_error = _facade()._rewrite_previous_response_stream_error(
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
@@ -892,11 +898,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                                     _facade()._should_penalize_stream_error(error_code) and not saw_text_delta
                                 )
                 elif preserve_raw_sse_line:
-                    raw_error_code = _normalize_error_code(
-                        _websocket_event_error_code(event_type, event_payload),
-                        _websocket_event_error_type(event_type, event_payload),
+                    _, raw_error_message, _, raw_error_code = _raw_error_fields(
+                        event_type,
+                        event_payload,
                     )
-                    raw_error_message = _websocket_event_error_message(event_type, event_payload)
                     status = "error"
                     error_code = raw_error_code
                     error_message = raw_error_message
@@ -944,16 +949,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.downstream_text_visible = True
                 yield line
             if not terminal_event_seen:
-                status = "error"
-                error_code = "stream_incomplete"
-                error_message = "Upstream stream ended before response.completed"
-                failure_metadata = _RequestLogFailureMetadata(
-                    failure_phase="upstream",
-                    failure_detail="upstream_eof_before_terminal_event",
-                )
-                settlement.record_success = False
-                settlement.account_health_error = False
-                settlement.error = {"message": error_message}
+                status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
         except ProxyResponseError as exc:
             response_create_lease.release()
             failure_metadata = _facade()._request_log_failure_metadata(exc)
@@ -1015,18 +1011,13 @@ class _StreamingMixin(_StreamingRetryMixin):
             return
         except _TerminalStreamError:
             raise
+        except (asyncio.CancelledError, GeneratorExit):
+            if settlement.downstream_visible:
+                status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
+            raise
         except Exception:
             if settlement.downstream_visible:
-                status = "error"
-                error_code = "stream_incomplete"
-                error_message = "Upstream stream ended before response.completed"
-                failure_metadata = _RequestLogFailureMetadata(
-                    failure_phase="upstream",
-                    failure_detail="upstream_eof_before_terminal_event",
-                )
-                settlement.record_success = False
-                settlement.account_health_error = False
-                settlement.error = {"message": error_message}
+                status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
             raise
         finally:
             api_key_reservation_heartbeat_stop.set()

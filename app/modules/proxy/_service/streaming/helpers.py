@@ -276,6 +276,8 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
+    _RequestLogFailureMetadata,
+    _StreamSettlement,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -512,6 +514,84 @@ def _rewrite_previous_response_stream_error(
             normalized_code,
         )
     return None
+
+
+def _raw_stream_error_fields(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+) -> tuple[str | None, str | None, str | None, str]:
+    raw_error_type = _websocket_event_error_type(event_type, event_payload)
+    raw_error_message = _websocket_event_error_message(event_type, event_payload)
+    raw_error_param = _websocket_event_error_param(event_type, event_payload)
+    return (
+        raw_error_type,
+        raw_error_message,
+        raw_error_param,
+        _normalize_error_code(_websocket_event_error_code(event_type, event_payload), raw_error_type),
+    )
+
+
+def _raw_stream_error_code_or_upstream(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    error_code: str,
+) -> str:
+    if (
+        event_type == "error"
+        and error_code == "error"
+        and _websocket_event_error_code(event_type, event_payload) is None
+    ):
+        return "upstream_error"
+    return error_code
+
+
+def _mark_stream_settlement_interrupted(
+    settlement: _StreamSettlement,
+    *,
+    status: str,
+    error_code: str,
+    error_message: str,
+    failure_phase: Literal["upstream", "downstream"],
+    failure_detail: str,
+    account_health_error: bool,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    settlement.record_success = False
+    settlement.account_health_error = account_health_error
+    settlement.error = {"message": error_message}
+    return (
+        status,
+        error_code,
+        error_message,
+        _RequestLogFailureMetadata(failure_phase=failure_phase, failure_detail=failure_detail),
+    )
+
+
+def _mark_upstream_stream_incomplete(
+    settlement: _StreamSettlement,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    return _mark_stream_settlement_interrupted(
+        settlement,
+        status="error",
+        error_code="stream_incomplete",
+        error_message="Upstream stream ended before response.completed",
+        failure_phase="upstream",
+        failure_detail="upstream_eof_before_terminal_event",
+        account_health_error=True,
+    )
+
+
+def _mark_downstream_stream_cancelled(
+    settlement: _StreamSettlement,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    return _mark_stream_settlement_interrupted(
+        settlement,
+        status="cancelled",
+        error_code="client_disconnected",
+        error_message="Downstream client disconnected before response.completed",
+        failure_phase="downstream",
+        failure_detail="client_disconnected_before_terminal_event",
+        account_health_error=False,
+    )
 
 
 def _build_rewritten_stream_response_failed_event(

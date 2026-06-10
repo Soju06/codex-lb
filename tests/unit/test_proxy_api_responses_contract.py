@@ -6,6 +6,8 @@ from typing import Any, cast
 import pytest
 
 import app.modules.proxy.api as proxy_api_module
+from app.core.openai.models import CompactResponsePayload
+from app.core.types import JsonValue
 
 pytestmark = pytest.mark.unit
 
@@ -13,6 +15,58 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+def test_compact_response_output_item_accepts_modeled_output_field() -> None:
+    class ModeledCompactPayload(CompactResponsePayload):
+        output: list[dict[str, JsonValue]] | None = None
+
+    payload = ModeledCompactPayload.model_validate(
+        {
+            "object": "response.compaction",
+            "output": [
+                {
+                    "type": "compaction",
+                    "encrypted_content": "MODELED_CONTEXT",
+                }
+            ],
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "type": "compaction",
+        "encrypted_content": "MODELED_CONTEXT",
+    }
+
+
+def test_compact_response_id_generates_unique_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proxy_api_module, "get_request_id", lambda: None)
+    payload = CompactResponsePayload.model_validate({"object": "response.compaction"})
+
+    first = proxy_api_module._compact_response_id(payload)
+    second = proxy_api_module._compact_response_id(payload)
+
+    assert first.startswith("resp_")
+    assert second.startswith("resp_")
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._synthetic_compaction_response_stream(
+            {"type": "compaction", "encrypted_content": "SUMMARY"},
+            response_id="resp_mapping_usage",
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+    ]
+
+    completed = proxy_api_module._parse_sse_payload(blocks[1])
+    assert completed is not None
+    response = completed["response"]
+    assert isinstance(response, dict)
+    assert response["usage"] == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
 
 
 @pytest.mark.asyncio

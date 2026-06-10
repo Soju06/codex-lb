@@ -40,7 +40,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
-        libc-bin libc6 libcap2 libsystemd0 libudev1 sed \
+        libc-bin libc6 libcap2 libssl3t64 libsystemd0 libudev1 openssl openssl-provider-legacy sed \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip uninstall -y pip setuptools wheel || true \

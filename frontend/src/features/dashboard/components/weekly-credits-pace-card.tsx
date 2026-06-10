@@ -31,6 +31,9 @@ function formatProAccountEquivalent(value: number): string {
 
 function statusLabel(pace: WeeklyCreditPace): string {
   if (pace.status === "on_track") return "On pace";
+  if (pace.status === "danger" && pace.projectedShortfallCredits > 0 && pace.deltaPercent <= 0) {
+    return "Recent burn shortfall";
+  }
   const direction = pace.deltaPercent > 0 ? "over planned usage" : "below planned usage";
   return `${formatSignedPercent(pace.deltaPercent)} ${direction}`;
 }

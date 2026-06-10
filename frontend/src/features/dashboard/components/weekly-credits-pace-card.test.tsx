@@ -131,6 +131,25 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("No weekly shortfall projected at recent pace")).toBeInTheDocument();
   });
 
+  it("keeps a danger label when recent burn projects a shortfall below schedule", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...BASE_PACE,
+          deltaPercent: -5,
+          scheduleGapCredits: 0,
+          overPlanCredits: 0,
+          projectedShortfallCredits: 42_000,
+          status: "danger",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Recent burn shortfall")).toBeInTheDocument();
+    expect(screen.queryByText("5% below planned usage")).not.toBeInTheDocument();
+    expect(screen.getByText("42K credits projected short before reset")).toBeInTheDocument();
+  });
+
   it("does not render fake pace when data is unavailable", () => {
     const { container } = render(<WeeklyCreditsPaceCard pace={null} />);
 

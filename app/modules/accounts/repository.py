@@ -659,7 +659,20 @@ class AccountsRepository:
         return matches[0]
 
     async def _account_by_slot_identity(self, account: Account) -> Account | None:
-        if account.chatgpt_account_id and account.email:
+        workspace_slot = _workspace_slot_identity(account)
+        if account.chatgpt_account_id and account.email and workspace_slot:
+            column, value = workspace_slot
+            result = await self._session.execute(
+                select(Account)
+                .where(Account.chatgpt_account_id == account.chatgpt_account_id)
+                .where(Account.email == account.email)
+                .where(column == value)
+                .order_by(Account.created_at.asc(), Account.id.asc())
+                .limit(1)
+            )
+            if matched := result.scalar_one_or_none():
+                return matched
+        if account.chatgpt_account_id and account.email and not workspace_slot:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
@@ -669,11 +682,12 @@ class AccountsRepository:
             )
             if matched := result.scalar_one_or_none():
                 return matched
-        if account.workspace_id and account.email:
+        if workspace_slot and account.email:
+            column, value = workspace_slot
             result = await self._session.execute(
                 select(Account)
                 .where(Account.email == account.email)
-                .where(Account.workspace_id == account.workspace_id)
+                .where(column == value)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
             )
@@ -739,10 +753,14 @@ def _slot_lock_key(account: Account, *, preserve_unknown_workspace_duplicates: b
 
 def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: bool = True) -> tuple[str, ...]:
     keys: list[str] = []
-    if account.chatgpt_account_id and account.email:
-        keys.append(f"slot:{account.chatgpt_account_id}:{account.email}")
-    if account.email and account.workspace_id:
-        keys.append(f"slot-email:{account.email}:{account.workspace_id}")
+    workspace_key = _workspace_slot_key(account)
+    if account.chatgpt_account_id:
+        if workspace_key:
+            keys.append(f"slot:{account.chatgpt_account_id}:{workspace_key}")
+        elif account.email:
+            keys.append(f"slot:{account.chatgpt_account_id}:{account.email}")
+    if account.email and workspace_key:
+        keys.append(f"slot-email:{account.email}:{workspace_key}")
         if not preserve_unknown_workspace_duplicates:
             keys.append(f"slot-email-unknown:{account.email}")
     if keys:
@@ -754,11 +772,27 @@ def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: 
 
 def _same_unknown_workspace_identity(existing: Account, incoming: Account) -> bool:
     return (
-        not existing.workspace_id
-        and not incoming.workspace_id
+        _workspace_slot_key(existing) is None
+        and _workspace_slot_key(incoming) is None
         and existing.chatgpt_account_id == incoming.chatgpt_account_id
         and existing.email == incoming.email
     )
+
+
+def _workspace_slot_identity(account: Account) -> tuple[Any, str] | None:
+    if account.workspace_id:
+        return Account.workspace_id, account.workspace_id
+    if account.workspace_label:
+        return Account.workspace_label, account.workspace_label
+    return None
+
+
+def _workspace_slot_key(account: Account) -> str | None:
+    if account.workspace_id:
+        return account.workspace_id
+    if account.workspace_label:
+        return account.workspace_label
+    return None
 
 
 def _is_workspace_less_reauth_for_known_slot(

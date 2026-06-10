@@ -573,7 +573,7 @@ class OauthService:
         workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
         workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
         seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
-        account_id = generate_unique_account_id(raw_account_id, email, workspace_id)
+        account_id = generate_unique_account_id(raw_account_id, email, workspace_id, workspace_label)
         plan_type = coerce_account_plan_type(
             auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type,
             DEFAULT_PLAN,

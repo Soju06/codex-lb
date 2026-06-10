@@ -171,8 +171,9 @@ def generate_unique_account_id(
     account_id: str | None,
     email: str | None,
     workspace_id: str | None = None,
+    workspace_label: str | None = None,
 ) -> str:
-    workspace_key = clean_account_identity_part(workspace_id)
+    workspace_key = clean_account_identity_part(workspace_id) or clean_account_identity_part(workspace_label)
     if account_id and workspace_key:
         workspace_hash = hashlib.sha256(workspace_key.encode()).hexdigest()[:8]
         return f"{account_id}_{workspace_hash}"

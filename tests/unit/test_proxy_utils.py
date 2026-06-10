@@ -14087,6 +14087,73 @@ async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(
 
 
 @pytest.mark.asyncio
+async def test_stream_api_key_settlement_returns_completed_result_when_cancel_races(monkeypatch):
+    finalized: list[str] = []
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield repo
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            assert api_keys_repository is repo.api_keys
+
+        async def finalize_usage_reservation(self, reservation_id: str, **kwargs: object) -> None:
+            del kwargs
+            finalized.append(reservation_id)
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            raise AssertionError(f"unexpected release for {reservation_id}")
+
+    real_shield = asyncio.shield
+
+    async def cancel_after_task_completes(task: asyncio.Task[bool]) -> bool:
+        await real_shield(task)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+    monkeypatch.setattr(proxy_service.asyncio, "shield", cancel_after_task_completes)
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_stream_cancel_done",
+        name="stream cancel done",
+        key_prefix="sk-done",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_stream_cancel_done",
+        key_id=api_key.id,
+        model="gpt-5.5",
+    )
+    settlement = proxy_service._StreamSettlement(
+        status="success",
+        model="gpt-5.5",
+        input_tokens=1,
+        output_tokens=2,
+    )
+
+    settled = await service._settle_stream_api_key_usage(
+        api_key,
+        reservation,
+        settlement,
+        request_id="req_stream_cancel_done",
+    )
+
+    assert settled is True
+    assert settlement.usage_settlement_transferred is False
+    assert finalized == ["resv_stream_cancel_done"]
+
+
+@pytest.mark.asyncio
 async def test_stream_api_key_background_settlement_failure_falls_back_to_release(monkeypatch):
     started = asyncio.Event()
     release_finalize = asyncio.Event()

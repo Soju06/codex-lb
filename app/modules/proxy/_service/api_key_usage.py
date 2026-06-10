@@ -346,6 +346,8 @@ class _ApiKeyUsageMixin:
             with anyio.CancelScope(shield=True):
                 return await asyncio.shield(task)
         except asyncio.CancelledError:
+            if task.done():
+                return task.result()
             if not task.done():
                 settlement.usage_settlement_transferred = True
                 self._track_stream_usage_settlement_task(

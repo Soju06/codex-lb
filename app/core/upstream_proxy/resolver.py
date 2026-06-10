@@ -81,6 +81,7 @@ def _is_missing_upstream_proxy_schema(exc: OperationalError) -> bool:
     return (
         "no such table: account_proxy_bindings" in message
         or "no such column: dashboard_settings.upstream_proxy" in message
+        or "column dashboard_settings.upstream_proxy" in message and "does not exist" in message
         or 'relation "account_proxy_bindings" does not exist' in message
         or 'relation "dashboard_settings" does not exist' in message
         or ('column "dashboard_settings"' in message and "does not exist" in message)

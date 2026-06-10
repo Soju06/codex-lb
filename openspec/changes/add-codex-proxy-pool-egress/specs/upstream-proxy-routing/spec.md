@@ -10,6 +10,12 @@ When an account has an explicit upstream proxy pool binding, every ChatGPT/OpenA
 - **THEN** the operation MUST fail before opening an upstream network connection
 - **AND** it MUST NOT use the default pool, environment proxy, or direct egress.
 
+#### Scenario: Warmup and compact operations obey account-bound routing
+- **GIVEN** an account has an explicit upstream proxy pool binding
+- **WHEN** the system performs warmup or compact Responses operations with that account's credentials
+- **THEN** the operation MUST resolve and use a route from the bound pool before opening the upstream connection
+- **AND** it MUST fail closed instead of falling back to direct egress when no bound route is available.
+
 ### Requirement: Codex upstream Codex client must require a resolved route and built-in TLS fingerprint
 Affected Codex upstream HTTP and websocket calls MUST use the Codex upstream client with an explicit resolved route and the built-in Codex CLI TLS fingerprint.
 

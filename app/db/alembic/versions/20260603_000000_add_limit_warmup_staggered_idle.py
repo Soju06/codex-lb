@@ -1,7 +1,7 @@
 """add staggered idle limit warm-up setting
 
 Revision ID: 20260603_000000_add_limit_warmup_staggered_idle
-Revises: 20260604_000000_add_reauth_required_account_status
+Revises: 20260607_000000_merge_weekly_monthly_useragent_heads
 Create Date: 2026-06-03 00:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260603_000000_add_limit_warmup_staggered_idle"
-down_revision = "20260604_000000_add_reauth_required_account_status"
+down_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
 branch_labels = None
 depends_on = None
 

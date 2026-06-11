@@ -65,7 +65,6 @@ def _default_put_body() -> dict[str, Any]:
         ("importWithoutOverwrite", False, "import_without_overwrite"),
         ("apiKeyAuthEnabled", True, "api_key_auth_enabled"),
         ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
-        ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
         ("limitWarmupStaggeredIdleEnabled", True, "limit_warmup_staggered_idle_enabled"),
     ],
 )

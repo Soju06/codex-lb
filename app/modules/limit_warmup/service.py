@@ -345,16 +345,21 @@ class LimitWarmupService:
             ):
                 continue
 
-            for window in selected_windows:
-                candidate = _build_candidate(
-                    account=account,
-                    window=window,
-                    before_primary=before_primary,
-                    before_secondary=before_secondary,
-                    after_primary=after_primary,
-                    after_secondary=after_secondary,
-                    min_available_percent=settings.limit_warmup_min_available_percent,
-                )
+            windows_to_evaluate = list(selected_windows)
+            if settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
+                windows_to_evaluate.append("primary")
+            for window in windows_to_evaluate:
+                candidate = None
+                if window in selected_windows:
+                    candidate = _build_candidate(
+                        account=account,
+                        window=window,
+                        before_primary=before_primary,
+                        before_secondary=before_secondary,
+                        after_primary=after_primary,
+                        after_secondary=after_secondary,
+                        min_available_percent=settings.limit_warmup_min_available_percent,
+                    )
                 if candidate is None and settings.limit_warmup_staggered_idle_enabled and window == "primary":
                     candidate = _build_staggered_idle_candidate(
                         account=account,

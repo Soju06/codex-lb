@@ -949,6 +949,36 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_staggered_idle_enabled=True,
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary_idle"
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkeypatch) -> None:
     monkeypatch.setattr(
         limit_warmup_service,

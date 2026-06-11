@@ -363,7 +363,6 @@ class LimitWarmupService:
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
-                        min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if candidate is None:
                     continue
@@ -683,7 +682,6 @@ def _build_staggered_idle_candidate(
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
     usage_refresh_interval_seconds: int,
-    min_available_percent: float,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
     if after is None:
@@ -692,10 +690,7 @@ def _build_staggered_idle_candidate(
         return None
     if usage_core.is_weekly_window_minutes(after.window_minutes):
         return None
-    available_percent = 100.0 - after.used_percent
-    if min_available_percent < 100.0 and available_percent < min_available_percent:
-        return None
-    if min_available_percent >= 100.0 and after.used_percent > 0.0:
+    if after.used_percent > 0.0:
         return None
 
     due = _staggered_idle_due(

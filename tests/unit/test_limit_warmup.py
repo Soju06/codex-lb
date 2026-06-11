@@ -949,6 +949,35 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(
+            limit_warmup_min_available_percent=80.0,
+            limit_warmup_staggered_idle_enabled=True,
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=10, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=10, reset_at=1000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypatch) -> None:
     now = datetime.fromtimestamp(6065, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)

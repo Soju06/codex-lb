@@ -702,6 +702,7 @@ def _build_staggered_idle_candidate(
         account.id,
         [candidate.id for candidate in accounts],
         now=now,
+        interval_started_at=refresh_started_at,
         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
     )
     if due is None:
@@ -720,6 +721,7 @@ def _staggered_idle_due(
     account_ids: list[str],
     *,
     now: datetime,
+    interval_started_at: datetime | None = None,
     usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
 ) -> _StaggeredIdleDue | None:
     if not account_ids:
@@ -735,7 +737,12 @@ def _staggered_idle_due(
     elapsed = now_epoch - cycle_start
     slot_offset = int(account_index * _ROLLING_WINDOW_SECONDS / len(ordered_account_ids))
     grace_seconds = max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
-    if not slot_offset <= elapsed < slot_offset + grace_seconds:
+    interval_start_epoch = naive_utc_to_epoch(interval_started_at) if interval_started_at is not None else now_epoch
+    interval_start_epoch = min(interval_start_epoch, now_epoch)
+    interval_start_elapsed = max(0, interval_start_epoch - cycle_start)
+    if not slot_offset <= elapsed:
+        return None
+    if slot_offset + grace_seconds <= interval_start_elapsed:
         return None
     return _StaggeredIdleDue(
         cycle_end=cycle_start + _ROLLING_WINDOW_SECONDS,

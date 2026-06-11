@@ -975,6 +975,32 @@ async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_catches_slot_during_long_refresh(monkeypatch) -> None:
+    now = datetime.fromtimestamp(6070, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000, recorded_at=now)},
+        after_secondary={},
+        refresh_started_at=datetime.fromtimestamp(5995, tz=timezone.utc).replace(tzinfo=None),
+        usage_refresh_interval_seconds=60,
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary_idle"
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch) -> None:
     now = datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)

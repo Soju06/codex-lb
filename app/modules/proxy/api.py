@@ -2141,6 +2141,8 @@ async def _stream_responses(
         compact_payload_data["input"] = compact_trigger_input
         if payload.previous_response_id is not None:
             compact_payload_data["previous_response_id"] = payload.previous_response_id
+        if payload.conversation is not None:
+            compact_payload_data["conversation"] = payload.conversation
         compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
         try:
             try:

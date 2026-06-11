@@ -4656,17 +4656,14 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
 async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_sdk_contract_disabled():
     raw_payload = {"type": "error", "code": "rate_limit_exceeded", "message": "OpenCode stream failed"}
 
-    class _CodexWebSocket:
-        def __init__(self) -> None:
-            self.recv_calls = 0
-
-        async def recv(self):
-            self.recv_calls += 1
-            if self.recv_calls == 1:
-                return json.dumps(raw_payload, separators=(",", ":")).encode(), int(proxy_module.CurlWsFlag.TEXT)
-            return b"", int(proxy_module.CurlWsFlag.CLOSE)
-
-    websocket = _CodexWebSocket()
+    websocket = _WsResponse(
+        [
+            _WsMessage(
+                proxy_module.aiohttp.WSMsgType.TEXT,
+                json.dumps(raw_payload, separators=(",", ":")),
+            )
+        ]
+    )
 
     events = [
         event
@@ -4681,7 +4678,7 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
 
     assert len(events) == 1
     assert parse_sse_data_json(events[0]) == raw_payload
-    assert websocket.recv_calls == 1
+    assert websocket._index == 1
 
 
 @pytest.mark.asyncio

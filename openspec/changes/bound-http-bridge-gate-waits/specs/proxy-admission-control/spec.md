@@ -17,4 +17,3 @@ limits.
 - **THEN** the request waits for the gate until the configured `proxy_admission_wait_timeout_seconds` elapses
 - **AND** if the timeout elapses first, the request is rejected with `response_create_gate_timeout`
 - **AND** `bridge_queue_full` remains the bounded local-overload reason when the bridge queue itself is saturated
-

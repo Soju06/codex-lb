@@ -13,4 +13,3 @@ overload path so the queue slot and account lease are not held forever.
 - Preserve `response_create_gate_timeout` as the stable local-overload reason
   when the gate does not open in time.
 - Ensure interrupted queued submissions release admission state and queue slots.
-

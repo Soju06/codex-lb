@@ -7,4 +7,3 @@
   cancelled or fail before being enqueued upstream.
 - [x] Add/adjust regression coverage for gate timeout logging and cancellation
   cleanup.
-

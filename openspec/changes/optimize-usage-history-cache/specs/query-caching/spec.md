@@ -40,7 +40,7 @@
 
 ### Requirement: Additional usage latest reads avoid SQLite window scans
 
-Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` window-function scans over the full `additional_usage_history` table. They MUST select matching accounts, then use indexed latest-row lookups ordered by `recorded_at DESC, id DESC` while preserving canonical quota-key and alias matching semantics. Non-SQLite dialects MAY keep the set-based window-function query.
+Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` window-function scans over the full `additional_usage_history` table. They MUST select matching accounts, then use indexed latest-row lookups ordered by `recorded_at DESC, used_percent DESC, id DESC` while preserving canonical quota-key and alias matching semantics. Non-SQLite dialects MAY keep the set-based window-function query.
 
 #### Scenario: SQLite additional usage latest lookup uses indexed account probes
 - **WHEN** additional usage latest rows are requested for a quota key, window, and optional account set on SQLite

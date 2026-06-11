@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import cast
 
@@ -266,6 +267,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
 
     async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del headers, access_token, kwargs
+        seen_payload["payload"] = payload.model_dump(mode="json", exclude_none=True)
         seen_payload["input"] = payload.input
         seen_payload["model"] = payload.model
         seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
@@ -292,6 +294,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             {"type": "compaction_trigger"},
         ],
         "previous_response_id": "resp_compact_anchor",
+        "include": [],
         "stream": True,
     }
     async with async_client.stream(
@@ -310,6 +313,9 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
+    compact_payload = cast(Mapping[str, object], seen_payload["payload"])
+    assert "include" not in compact_payload
+    assert "stream" not in compact_payload
     assert events[0]["item"] == {
         "type": "compaction",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",

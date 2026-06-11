@@ -2126,8 +2126,21 @@ async def _stream_responses(
         else {}
     )
     if compact_trigger_input is not None:
-        compact_payload_data = payload.model_dump(mode="json", exclude_none=True)
+        compact_payload_data = payload.model_dump(
+            mode="json",
+            include={
+                "model",
+                "instructions",
+                "reasoning",
+                "store",
+                "service_tier",
+                "prompt_cache_key",
+            },
+            exclude_none=True,
+        )
         compact_payload_data["input"] = compact_trigger_input
+        if payload.previous_response_id is not None:
+            compact_payload_data["previous_response_id"] = payload.previous_response_id
         compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
         try:
             try:

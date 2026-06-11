@@ -444,7 +444,9 @@ class _CompactMixin:
                 selection_inputs = await proxy._load_balancer._load_selection_inputs(
                     model=payload.model,
                     additional_limit_name=None,
-                    account_ids=None,
+                    account_ids=api_key.assigned_account_ids
+                    if api_key is not None and api_key.account_assignment_scope_enabled
+                    else None,
                 )
                 if len(selection_inputs.accounts) != 1:
                     message = "Previous response owner account is unavailable; retry later."

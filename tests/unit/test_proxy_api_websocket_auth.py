@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from types import SimpleNamespace
@@ -530,6 +531,68 @@ async def test_probe_stream_startup_error_closes_consumed_bridge_error_stream():
 
     assert startup_error is not None
     assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_probe_stream_startup_timeout_preserves_late_proxy_error_without_shield(monkeypatch):
+    def fail_if_shielded(_task):
+        raise AssertionError("startup probes must not use shielded futures after timeout")
+
+    async def stream():
+        await asyncio.sleep(0.01)
+        raise ProxyResponseError(
+            409,
+            openai_error(
+                "bridge_instance_mismatch",
+                "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+                error_type="server_error",
+            ),
+        )
+        yield "data: never\n\n"
+
+    monkeypatch.setattr(proxy_api_module.asyncio, "shield", fail_if_shielded)
+
+    probed, startup_error = await proxy_api_module._probe_stream_startup_error(
+        stream(),
+        timeout_seconds=0,
+    )
+
+    assert startup_error is None
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _line in probed:
+            pass
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_probe_chat_stream_startup_timeout_preserves_late_proxy_error_without_shield(monkeypatch):
+    def fail_if_shielded(_task):
+        raise AssertionError("chat startup probes must not use shielded futures after timeout")
+
+    async def stream():
+        await asyncio.sleep(0.01)
+        raise ProxyResponseError(
+            409,
+            openai_error(
+                "bridge_instance_mismatch",
+                "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+                error_type="server_error",
+            ),
+        )
+        yield "data: never\n\n"
+
+    monkeypatch.setattr(proxy_api_module.asyncio, "shield", fail_if_shielded)
+
+    probed, startup_error = await proxy_api_module._probe_chat_stream_startup_error(
+        stream(),
+        timeout_seconds=0,
+    )
+
+    assert startup_error is None
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _line in probed:
+            pass
+    assert exc_info.value.status_code == 409
 
 
 def test_stream_startup_error_response_masks_proxy_previous_response_error():

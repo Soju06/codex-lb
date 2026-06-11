@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import text
@@ -412,6 +413,125 @@ async def test_upstream_proxy_admin_controls(async_client):
     assert admin_payload["defaultPoolId"] == pool_payload["id"]
     assert admin_payload["endpoints"][0]["id"] == endpoint_payload["id"]
     assert admin_payload["pools"][0]["endpointIds"] == [endpoint_payload["id"]]
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 204
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            captured["url"] = url
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy A",
+            "scheme": "http",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["statusCode"] == 204
+    assert payload["error"] is None
+    client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
+    assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
+    assert client_kwargs["proxy"] == "http://user:secret@proxy.internal:8080"
+    assert "secret" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_client, monkeypatch):
+    class _Response:
+        status_code = 407
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy Auth",
+            "scheme": "http",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "wrong",
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["statusCode"] == 407
+    assert payload["error"] == "proxy_auth_failed"
+    assert "wrong" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_reports_unsupported_socks_probe(async_client):
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy A",
+            "scheme": "socks5",
+            "host": "proxy.internal",
+            "port": 1080,
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"] == "unsupported_proxy_scheme_for_test"
 
 
 @pytest.mark.asyncio

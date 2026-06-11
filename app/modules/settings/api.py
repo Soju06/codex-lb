@@ -3,7 +3,9 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import time
 
+import httpx
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +19,7 @@ from app.core.auth.dependencies import (
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
+from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import (
@@ -29,6 +32,7 @@ from app.modules.settings.schemas import (
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
     UpstreamProxyEndpointResponse,
+    UpstreamProxyEndpointTestResponse,
     UpstreamProxyPoolCreateRequest,
     UpstreamProxyPoolMemberRequest,
     UpstreamProxyPoolResponse,
@@ -40,6 +44,9 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+UPSTREAM_PROXY_TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
+UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS = 8.0
+HTTP_PROXY_AUTHENTICATION_REQUIRED = 407
 
 
 def _is_non_loopback_ipv4(value: str | None) -> bool:
@@ -212,6 +219,54 @@ async def create_upstream_proxy_endpoint(
     await context.session.commit()
     await context.session.refresh(row)
     return _proxy_endpoint_response(row)
+
+
+@router.post("/upstream-proxy/endpoints/{endpoint_id}/test", response_model=UpstreamProxyEndpointTestResponse)
+async def test_upstream_proxy_endpoint(
+    endpoint_id: str,
+    context: SettingsContext = Depends(get_settings_context),
+) -> UpstreamProxyEndpointTestResponse:
+    row = await context.session.get(ProxyEndpoint, endpoint_id)
+    if row is None:
+        raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+    endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    if endpoint.scheme not in {"http", "https"}:
+        return UpstreamProxyEndpointTestResponse(
+            endpoint_id=endpoint.id,
+            ok=False,
+            error="unsupported_proxy_scheme_for_test",
+        )
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(
+            proxy=endpoint.proxy_url,
+            timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
+            follow_redirects=False,
+        ) as client:
+            response = await client.get(UPSTREAM_PROXY_TEST_URL)
+    except Exception as exc:
+        return UpstreamProxyEndpointTestResponse(
+            endpoint_id=endpoint.id,
+            ok=False,
+            elapsed_ms=_elapsed_ms(started),
+            error=type(exc).__name__,
+        )
+    if response.status_code == HTTP_PROXY_AUTHENTICATION_REQUIRED:
+        return UpstreamProxyEndpointTestResponse(
+            endpoint_id=endpoint.id,
+            ok=False,
+            status_code=response.status_code,
+            elapsed_ms=_elapsed_ms(started),
+            error="proxy_auth_failed",
+        )
+    ok = response.status_code < 500
+    return UpstreamProxyEndpointTestResponse(
+        endpoint_id=endpoint.id,
+        ok=ok,
+        status_code=response.status_code,
+        elapsed_ms=_elapsed_ms(started),
+        error=None if ok else "upstream_probe_failed",
+    )
 
 
 @router.post("/upstream-proxy/pools", response_model=UpstreamProxyPoolResponse)
@@ -397,6 +452,10 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         username=row.username,
         is_active=row.is_active,
     )
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.monotonic() - started) * 1000))
 
 
 @router.put("", response_model=DashboardSettingsResponse)

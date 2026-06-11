@@ -145,6 +145,14 @@ class UpstreamProxyEndpointResponse(DashboardModel):
     is_active: bool
 
 
+class UpstreamProxyEndpointTestResponse(DashboardModel):
+    endpoint_id: str
+    ok: bool
+    status_code: int | None = None
+    elapsed_ms: int | None = None
+    error: str | None = None
+
+
 class UpstreamProxyPoolCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     endpoint_ids: list[str] = Field(default_factory=list)

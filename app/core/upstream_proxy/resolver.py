@@ -151,3 +151,9 @@ def _resolve_endpoint(endpoint: ProxyEndpoint, *, encryptor: TokenEncryptor | No
         username=endpoint.username,
         password=password,
     )
+
+
+def resolve_proxy_endpoint(
+    endpoint: ProxyEndpoint, *, encryptor: TokenEncryptor | None = None
+) -> ResolvedProxyEndpoint:
+    return _resolve_endpoint(endpoint, encryptor=encryptor)

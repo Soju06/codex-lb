@@ -11,6 +11,7 @@ function renderSettings(overrides: Partial<Parameters<typeof UpstreamProxySettin
     busy: false,
     onSaveSettings: vi.fn().mockResolvedValue(undefined),
     onCreateEndpoint: vi.fn().mockResolvedValue(undefined),
+    onTestEndpoint: vi.fn().mockResolvedValue({ endpointId: "ep_primary", ok: true }),
     onCreatePool: vi.fn().mockResolvedValue(undefined),
     onAddPoolMember: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -117,5 +118,24 @@ describe("UpstreamProxySettings", () => {
     expect(within(memberDialog).getByText(/Endpoint is already in Primary pool/)).toBeInTheDocument();
     expect(within(memberDialog).getByRole("button", { name: "Add member" })).toBeDisabled();
     expect(onAddPoolMember).not.toHaveBeenCalled();
+  });
+
+  it("tests a configured proxy endpoint", async () => {
+    const user = userEvent.setup();
+    const onTestEndpoint = vi.fn().mockResolvedValue({
+      endpointId: "ep_primary",
+      ok: true,
+      statusCode: 200,
+      elapsedMs: 42,
+      error: null,
+    });
+
+    renderSettings({ onTestEndpoint });
+
+    await user.click(screen.getByRole("button", { name: "Test" }));
+
+    expect(onTestEndpoint).toHaveBeenCalledWith("ep_primary");
+    expect(await screen.findByText(/Connection ok/)).toBeInTheDocument();
+    expect(screen.getByText(/HTTP 200/)).toBeInTheDocument();
   });
 });

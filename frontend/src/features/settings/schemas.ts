@@ -195,6 +195,14 @@ export const UpstreamProxyEndpointCreateRequestSchema = z.object({
   isActive: z.boolean().optional().default(true),
 });
 
+export const UpstreamProxyEndpointTestResponseSchema = z.object({
+  endpointId: z.string(),
+  ok: z.boolean(),
+  statusCode: z.number().int().nullable().optional(),
+  elapsedMs: z.number().int().nullable().optional(),
+  error: z.string().nullable().optional(),
+});
+
 export const UpstreamProxyPoolSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -236,6 +244,7 @@ export const UpstreamProxyAdminSchema = z.object({
 
 export type UpstreamProxyEndpoint = z.infer<typeof UpstreamProxyEndpointSchema>;
 export type UpstreamProxyEndpointCreateRequest = z.infer<typeof UpstreamProxyEndpointCreateRequestSchema>;
+export type UpstreamProxyEndpointTestResponse = z.infer<typeof UpstreamProxyEndpointTestResponseSchema>;
 export type UpstreamProxyPool = z.infer<typeof UpstreamProxyPoolSchema>;
 export type UpstreamProxyPoolCreateRequest = z.infer<typeof UpstreamProxyPoolCreateRequestSchema>;
 export type UpstreamProxyPoolMemberRequest = z.infer<typeof UpstreamProxyPoolMemberRequestSchema>;

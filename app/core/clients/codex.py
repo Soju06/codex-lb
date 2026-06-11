@@ -9,7 +9,7 @@ from aiohttp_socks import ProxyConnector
 
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 
-_RESERVED = frozenset({"proxy", "proxies"})
+_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
 
 
 class CodexTransportError(RuntimeError):

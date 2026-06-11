@@ -174,7 +174,7 @@ async def test_request_converts_legacy_files_payload_to_form_data(route: Resolve
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", ["proxy", "proxies"])
+@pytest.mark.parametrize("override", ["akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"])
 async def test_runtime_route_and_fingerprint_overrides_are_rejected(
     route: ResolvedUpstreamRoute,
     override: str,

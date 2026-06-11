@@ -283,7 +283,10 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     changed = False
     for item in input_value:
         item_mapping = _json_mapping_or_none(item)
-        role = item_mapping.get("role") if item_mapping is not None else None
+        if item_mapping is None:
+            input_items.append(item)
+            continue
+        role = item_mapping.get("role")
         if role not in ("system", "developer"):
             input_items.append(item)
             continue

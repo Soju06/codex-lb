@@ -548,8 +548,41 @@ def test_responses_input_system_message_moves_to_instructions():
     request = ResponsesRequest.model_validate(payload)
 
     assert request.instructions == "primary\nsys\ndev"
+    assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+def test_responses_input_system_message_keeps_user_text_parts():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "primary",
+        "input": [
+            {
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": "sys"}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "hello"},
+                    {"type": "input_file", "file_id": "file_123"},
+                ],
+            },
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.instructions == "primary\nsys"
     assert request.input == [
-        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "hello"},
+                {"type": "input_file", "file_id": "file_123"},
+            ],
+        }
     ]
 
 

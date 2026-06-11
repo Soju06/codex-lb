@@ -720,6 +720,13 @@ class AutomationsRepository:
         stmt = (
             select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
             .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+            .outerjoin(
+                AutomationRunCycleAccount,
+                and_(
+                    AutomationRunCycleAccount.cycle_key == AutomationRun.cycle_key,
+                    AutomationRunCycleAccount.account_id == AutomationRun.account_id,
+                ),
+            )
             .where(AutomationRun.trigger == "manual")
             .where(AutomationRun.status == "running")
             .where(AutomationRun.finished_at.is_(None))
@@ -730,7 +737,12 @@ class AutomationsRepository:
                     AutomationRun.started_at < stale_started_before,
                 )
             )
-            .order_by(AutomationRun.scheduled_for.asc(), AutomationRun.started_at.asc(), AutomationRun.id.asc())
+            .order_by(
+                AutomationRun.scheduled_for.asc(),
+                func.coalesce(AutomationRunCycleAccount.position, 2147483647).asc(),
+                AutomationRun.started_at.asc(),
+                AutomationRun.id.asc(),
+            )
             .limit(limit)
         )
         if cycle_key is not None:

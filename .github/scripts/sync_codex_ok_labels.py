@@ -777,17 +777,11 @@ def unresolved_codex_finding_thread_urls(
                 body = comment.get("body")
                 original_commit = comment.get("originalCommit")
                 original_oid = original_commit.get("oid") if isinstance(original_commit, dict) else None
-                commit = comment.get("commit")
-                commit_oid = commit.get("oid") if isinstance(commit, dict) else None
                 body_mentions_current_head = body_mentions_head(body, head_sha)
                 if body_mentions_current_head:
                     pass
-                elif isinstance(original_oid, str):
-                    if original_oid != head_sha:
-                        continue
-                elif isinstance(commit_oid, str):
-                    if commit_oid != head_sha:
-                        continue
+                elif original_oid == head_sha:
+                    pass
                 else:
                     continue
                 url = comment.get("url")

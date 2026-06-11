@@ -429,8 +429,8 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
                                         "nodes": [
                                             {
                                                 "author": {"login": "openai-codex"},
-                                                "body": "**[P1]** old finding",
-                                                "url": "https://example.invalid/stale",
+                                                "body": "**[P1]** rebased stale finding",
+                                                "url": "https://example.invalid/reanchored-stale",
                                                 "commit": {"oid": head_sha},
                                                 "originalCommit": {"oid": old_sha},
                                             }
@@ -461,7 +461,22 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
                                                 "author": {"login": "openai-codex"},
                                                 "body": f"**[P2]** stale fallback for {head_sha[:12]}",
                                                 "url": "https://example.invalid/fallback",
-                                                "commit": {"oid": head_sha},
+                                                "commit": {"oid": old_sha},
+                                                "originalCommit": {"oid": old_sha},
+                                            }
+                                        ]
+                                    },
+                                },
+                                {
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "author": {"login": "openai-codex"},
+                                                "body": "**[P2]** stale old commit finding",
+                                                "url": "https://example.invalid/stale",
+                                                "commit": {"oid": old_sha},
                                                 "originalCommit": {"oid": old_sha},
                                             }
                                         ]
@@ -499,4 +514,7 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
         allowed_authors={"openai-codex"},
     )
 
-    assert urls == ("https://example.invalid/current", "https://example.invalid/fallback")
+    assert urls == (
+        "https://example.invalid/current",
+        "https://example.invalid/fallback",
+    )

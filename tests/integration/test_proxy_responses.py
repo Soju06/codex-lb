@@ -295,6 +295,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             {"type": "compaction_trigger"},
         ],
         "previous_response_id": "resp_compact_anchor",
+        "promptCacheKey": "compact-cache-affinity",
         "include": [],
         "stream": True,
     }
@@ -315,6 +316,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])
+    assert compact_payload["prompt_cache_key"] == "compact-cache-affinity"
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
     assert events[0]["item"] == {

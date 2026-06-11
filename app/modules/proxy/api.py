@@ -2138,6 +2138,10 @@ async def _stream_responses(
             },
             exclude_none=True,
         )
+        if isinstance(payload.model_extra, dict):
+            prompt_cache_key_alias = payload.model_extra.get("promptCacheKey")
+            if isinstance(prompt_cache_key_alias, str) and "prompt_cache_key" not in compact_payload_data:
+                compact_payload_data["prompt_cache_key"] = prompt_cache_key_alias
         compact_payload_data["input"] = compact_trigger_input
         if payload.previous_response_id is not None:
             compact_payload_data["previous_response_id"] = payload.previous_response_id

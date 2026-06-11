@@ -3559,7 +3559,9 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
-        if not enforce_openai_sdk_contract and event_type == "error":
+        if not enforce_openai_sdk_contract and (
+            event_type == "error" or is_json_mapping(normalized_payload.get("error"))
+        ):
             terminal_seen = True
             yield event_block
             continue

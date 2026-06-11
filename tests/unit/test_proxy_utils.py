@@ -7039,7 +7039,10 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_after_c
         )
     ]
 
-    assert chunks[1] == raw_error_line
+    assert chunks == [
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_typeless_raw_error"}}\n\n',
+        raw_error_line,
+    ]
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "rate_limit_exceeded"
     assert request_logs.calls[0]["error_message"] == "OpenCode stream failed"

@@ -250,6 +250,7 @@ class AccountsRepository:
         account: Account,
         *,
         preserve_unknown_workspace_duplicates: bool | None = None,
+        preserve_identity_slots: bool = False,
     ) -> Account:
         if preserve_unknown_workspace_duplicates is None:
             preserve_unknown_workspace_duplicates = not await self._merge_by_email_enabled()
@@ -283,7 +284,7 @@ class AccountsRepository:
         elif not preserve_unknown_workspace_duplicates:
             if _workspace_slot_key(account):
                 existing_by_email = await self._single_unknown_workspace_account_by_email(account.email)
-            elif account.chatgpt_account_id:
+            elif preserve_identity_slots and account.chatgpt_account_id:
                 existing_by_email = None
             else:
                 existing_by_email = await self._single_account_by_email(account.email)

@@ -489,7 +489,10 @@ async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_me
 
     repo.upsert.assert_not_awaited()
     repo.upsert_account_slot.assert_awaited_once()
-    assert repo.upsert_account_slot.await_args.kwargs == {"preserve_unknown_workspace_duplicates": False}
+    assert repo.upsert_account_slot.await_args.kwargs == {
+        "preserve_unknown_workspace_duplicates": False,
+        "preserve_identity_slots": True,
+    }
     assert account_cache.invalidated is True
     assert api_key_cache.cleared is True
     assert poller.bumped == ["api_key"]
@@ -529,7 +532,10 @@ async def test_oauth_persist_tokens_uses_slot_upsert_for_label_only_workspace(mo
     repo.upsert_account_slot.assert_awaited_once()
     saved_account = repo.upsert_account_slot.await_args.args[0]
     assert saved_account.workspace_label == "Label Only Workspace"
-    assert repo.upsert_account_slot.await_args.kwargs == {"preserve_unknown_workspace_duplicates": False}
+    assert repo.upsert_account_slot.await_args.kwargs == {
+        "preserve_unknown_workspace_duplicates": False,
+        "preserve_identity_slots": True,
+    }
 
 
 @pytest.mark.asyncio

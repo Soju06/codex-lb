@@ -599,11 +599,13 @@ class OauthService:
                 await repo.upsert_account_slot(
                     account,
                     preserve_unknown_workspace_duplicates=False,
+                    preserve_identity_slots=True,
                 )
         else:
             await self._accounts_repo.upsert_account_slot(
                 account,
                 preserve_unknown_workspace_duplicates=False,
+                preserve_identity_slots=True,
             )
 
         await self._invalidate_account_routing_caches()

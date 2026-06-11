@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let registeredUnauthorizedHandler: (() => void) | null = null;
+const getAuthSession = vi.fn();
 
 vi.mock("@/features/auth/api", () => ({
-  getAuthSession: vi.fn(),
+  getAuthSession,
+  loginGuest: vi.fn(),
   loginPassword: vi.fn(),
   logout: vi.fn(),
   verifyTotp: vi.fn(),
@@ -18,22 +20,41 @@ vi.mock("@/lib/api-client", () => ({
 describe("useAuthStore unauthorized handler", () => {
   beforeEach(() => {
     vi.resetModules();
+    getAuthSession.mockReset();
     registeredUnauthorizedHandler = null;
   });
 
-  it("preserves bootstrap state on 401 handling", async () => {
+  it("refreshes server auth state on 401 handling", async () => {
     const { useAuthStore } = await import("@/features/auth/hooks/use-auth");
+    getAuthSession.mockResolvedValue({
+      passwordRequired: false,
+      authenticated: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      bootstrapRequired: true,
+      bootstrapTokenConfigured: true,
+      authMode: "standard",
+      passwordManagementEnabled: true,
+      passwordSessionActive: false,
+      role: "guest",
+      permissions: ["read"],
+      guestAccessEnabled: true,
+      guestPasswordRequired: true,
+    });
 
     useAuthStore.setState({
       authenticated: true,
       initialized: true,
-      bootstrapRequired: true,
-      bootstrapTokenConfigured: true,
+      bootstrapRequired: false,
+      bootstrapTokenConfigured: false,
+      guestAccessEnabled: true,
+      guestPasswordRequired: false,
       error: "boom",
     });
 
     expect(registeredUnauthorizedHandler).not.toBeNull();
     registeredUnauthorizedHandler?.();
+    await vi.waitFor(() => expect(getAuthSession).toHaveBeenCalledTimes(1));
 
     const next = useAuthStore.getState();
     expect(next.authenticated).toBe(false);
@@ -41,6 +62,7 @@ describe("useAuthStore unauthorized handler", () => {
     expect(next.error).toBeNull();
     expect(next.bootstrapRequired).toBe(true);
     expect(next.bootstrapTokenConfigured).toBe(true);
+    expect(next.guestPasswordRequired).toBe(true);
   });
 
   it("clears write permissions for guest deployments on 401 handling", async () => {

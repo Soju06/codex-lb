@@ -181,4 +181,5 @@ setUnauthorizedHandler(() => {
     initialized: true,
     error: null,
   }));
+  void useAuthStore.getState().refreshSession().catch(() => undefined);
 });

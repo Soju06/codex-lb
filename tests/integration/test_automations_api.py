@@ -3342,6 +3342,129 @@ async def test_automations_manual_cycle_reclaims_timed_out_claimed_run(async_cli
 
 
 @pytest.mark.asyncio
+async def test_automations_scheduled_cycle_reclaims_timed_out_claimed_run(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-scheduled-stale-active-a")
+    now = utcnow().replace(second=0, microsecond=0)
+    scheduled_for = now - timedelta(hours=3)
+    claimed_started_at = now - timedelta(hours=2)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Scheduled stale claimed reclaim",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=1,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id],
+        )
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(accounts[0].id, scheduled_for)],
+        )
+        run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=scheduled_for,
+            started_at=claimed_started_at,
+            account_id=accounts[0].id,
+        )
+        assert run is not None
+
+        executed = await service.run_due_jobs(now_utc=now)
+        stored_run = await automations_repository.get_run(run.id)
+
+    assert executed == 1
+    assert called_chatgpt_account_ids == [accounts[0].chatgpt_account_id]
+    assert stored_run is not None
+    assert stored_run.status == "success"
+    assert stored_run.account_id == accounts[0].id
+    assert stored_run.started_at > claimed_started_at
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduled_cycle_execution_uses_upstream_route(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-scheduled-route-a")
+    now = utcnow().replace(second=0, microsecond=0)
+    compact_calls: list[dict[str, object]] = []
+    resolved_accounts: list[str] = []
+    route = SimpleNamespace(mode="account", pool_id="pool", endpoint_id="endpoint")
+
+    async def _fake_compact(*_args, **kwargs):
+        compact_calls.append(kwargs)
+        return SimpleNamespace()
+
+    async def _fake_resolve_route(
+        _account: Account,
+        *,
+        encryptor: object,
+    ) -> object:
+        resolved_accounts.append(_account.id)
+        return route
+
+    monkeypatch.setattr("app.modules.automations.service._resolve_upstream_route_for_account", _fake_resolve_route)
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Scheduled route ping",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id],
+        )
+        _ = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(accounts[0].id, now)],
+        )
+
+        executed = await service.run_due_jobs(now_utc=now)
+
+    assert executed == 1
+    assert len(compact_calls) == 1
+    assert resolved_accounts == [accounts[0].id]
+    assert compact_calls[0]["route"] is route
+    assert compact_calls[0]["allow_direct_egress"] is False
+
+@pytest.mark.asyncio
 async def test_automations_manual_cycle_all_skipped_placeholders_are_not_reported_success(
     async_client,
     monkeypatch,

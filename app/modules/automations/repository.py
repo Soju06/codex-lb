@@ -784,6 +784,37 @@ class AutomationsRepository:
             return None
         return self._run_from_model(run)
 
+    async def claim_scheduled_cycle_run_execution(
+        self,
+        run_id: str,
+        *,
+        observed_started_at: datetime,
+        claimed_started_at: datetime,
+        stale_started_before: datetime,
+    ) -> AutomationRunRecord | None:
+        result = await self._session.execute(
+            update(AutomationRun)
+            .where(AutomationRun.id == run_id)
+            .where(AutomationRun.trigger == "scheduled")
+            .where(AutomationRun.status == "running")
+            .where(AutomationRun.finished_at.is_(None))
+            .where(AutomationRun.account_id.is_not(None))
+            .where(AutomationRun.started_at == observed_started_at)
+            .where(
+                or_(
+                    AutomationRun.started_at <= AutomationRun.scheduled_for,
+                    AutomationRun.started_at < stale_started_before,
+                )
+            )
+            .values(started_at=claimed_started_at)
+            .returning(AutomationRun)
+        )
+        run = result.scalar_one_or_none()
+        await self._session.commit()
+        if run is None:
+            return None
+        return self._run_from_model(run)
+
     async def skip_unclaimed_manual_run_placeholder(
         self,
         run_id: str,

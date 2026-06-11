@@ -18,8 +18,10 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
+from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
+from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.automations.repository import (
@@ -72,6 +74,21 @@ _AUTOMATION_ALWAYS_SKIPPED_ACCOUNT_STATUSES = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_upstream_route_for_account(
+    account: Account,
+    *,
+    encryptor: TokenEncryptor,
+) -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        return await resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation="automation",
+            scope="account",
+            encryptor=encryptor,
+        )
 
 
 class AutomationValidationError(ValueError):
@@ -799,11 +816,11 @@ class AutomationsService:
             ): cycle_account.account_id
             for cycle_account in cycle.accounts
         }
-        existing_cycle_account_ids: set[str] = set()
+        existing_cycle_runs_by_account: dict[str, AutomationRunRecord] = {}
         for cycle_run in existing_cycle_runs:
             account_id = cycle_run.account_id or cycle_account_id_by_slot_key.get(cycle_run.slot_key)
             if account_id is not None:
-                existing_cycle_account_ids.add(account_id)
+                existing_cycle_runs_by_account[account_id] = cycle_run
         eligible_cycle_account_ids = await self._resolve_eligible_account_ids(
             [cycle_account.account_id for cycle_account in cycle.accounts],
             include_paused_accounts=job.include_paused_accounts,
@@ -811,9 +828,8 @@ class AutomationsService:
         )
         executed = 0
         cycle_expected_accounts = cycle.cycle_expected_accounts
+        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
         for cycle_account in cycle.accounts:
-            if cycle_account.account_id in existing_cycle_account_ids:
-                continue
             if cycle_account.scheduled_for > now_utc:
                 continue
             if cycle_account.account_id not in eligible_cycle_account_ids:
@@ -823,28 +839,43 @@ class AutomationsService:
                 )
                 cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
                 continue
-            slot_key = _scheduled_slot_key(
-                job.id,
-                account_id=cycle_account.account_id,
-                due_slot=due_slot,
-            )
-            claim_result = await self._repository.claim_scheduled_cycle_account_run(
-                job_id=job.id,
-                trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
-                slot_key=slot_key,
-                cycle_key=cycle_key,
-                cycle_expected_accounts=cycle_expected_accounts,
-                cycle_window_end=cycle.cycle_window_end,
-                scheduled_for=cycle_account.scheduled_for,
-                started_at=now_utc,
-                account_id=cycle_account.account_id,
-            )
-            claim = claim_result.run
-            if claim is None:
-                if not claim_result.snapshot_account_exists:
-                    cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
-                continue
-            existing_cycle_account_ids.add(cycle_account.account_id)
+            existing_cycle_run = existing_cycle_runs_by_account.get(cycle_account.account_id)
+            if existing_cycle_run is not None:
+                existing_run_is_stale = (
+                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
+                    or existing_cycle_run.started_at < stale_started_before
+                )
+                if not existing_run_is_stale:
+                    continue
+                claim = await self._repository.claim_scheduled_cycle_run_execution(
+                    run_id=existing_cycle_run.id,
+                    observed_started_at=existing_cycle_run.started_at,
+                    claimed_started_at=now_utc,
+                    stale_started_before=stale_started_before,
+                )
+                if claim is None:
+                    continue
+            else:
+                claim_result = await self._repository.claim_scheduled_cycle_account_run(
+                    job_id=job.id,
+                    trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
+                    slot_key=_scheduled_slot_key(
+                        job.id,
+                        account_id=cycle_account.account_id,
+                        due_slot=due_slot,
+                    ),
+                    cycle_key=cycle_key,
+                    cycle_expected_accounts=cycle_expected_accounts,
+                    cycle_window_end=cycle.cycle_window_end,
+                    scheduled_for=cycle_account.scheduled_for,
+                    started_at=now_utc,
+                    account_id=cycle_account.account_id,
+                )
+                if claim_result.run is None:
+                    if not claim_result.snapshot_account_exists:
+                        cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
+                    continue
+                claim = claim_result.run
             await self._execute_claimed_run(job, claim, forced_account_id=cycle_account.account_id)
             executed += 1
         return executed
@@ -998,6 +1029,10 @@ class AutomationsService:
                 last_attempted_account_id = account_id
                 account = await self._auth_manager.ensure_fresh(account)
                 access_token = self._encryptor.decrypt(account.access_token_encrypted)
+                route = await _resolve_upstream_route_for_account(
+                    account,
+                    encryptor=self._encryptor,
+                )
                 ping_request = ResponsesCompactRequest(
                     model=job.model,
                     input=job.prompt,
@@ -1010,6 +1045,8 @@ class AutomationsService:
                     headers={},
                     access_token=access_token,
                     account_id=account.chatgpt_account_id,
+                    route=route,
+                    allow_direct_egress=route is None,
                 )
                 latency_ms = _elapsed_ms(request_started_at)
                 request_id = _automation_request_id(getattr(compact_response, "id", None), run.id, attempt_count)

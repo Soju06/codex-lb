@@ -121,6 +121,31 @@ def changed_release_files(root: Path, base_ref: str) -> list[str]:
     return sorted(set(changed))
 
 
+def changed_release_version_files(root: Path, base_ref: str) -> list[str]:
+    """Return release-managed files whose version value changed from *base_ref*."""
+
+    current_versions = read_project_versions(root)
+    changed: list[str] = []
+    for name, current_version in current_versions.items():
+        path = name.split(" ", 1)[0]
+        proc = run_git(root, "show", f"{base_ref}:{path}", check=False)
+        if proc.returncode != 0:
+            changed.append(name)
+            continue
+
+        original = root / path
+        original_text = original.read_text(encoding="utf-8")
+        try:
+            original.write_text(proc.stdout, encoding="utf-8")
+            base_version = read_project_versions(root)[name]
+        finally:
+            original.write_text(original_text, encoding="utf-8")
+
+        if base_version != current_version:
+            changed.append(name)
+    return changed
+
+
 def read_consistent_release_version(root: Path) -> ReleaseVersion:
     versions = read_project_versions(root)
     unique_versions = set(versions.values())
@@ -178,7 +203,7 @@ def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_re
         expected_sha = run_git(root, "rev-parse", "HEAD").stdout.strip()
         body = os.environ.get("BETA_RELEASE_PR_BODY", "")
 
-    changed = changed_release_files(root, base_ref)
+    changed = changed_release_version_files(root, base_ref)
     if not changed:
         print("No release-managed version files changed; beta release PR guard passed.")
         return

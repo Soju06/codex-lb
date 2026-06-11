@@ -678,6 +678,24 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "neoclaw",
+      "name": "NeoClaw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/261536598?v=4",
+      "profile": "https://github.com/NeoClaw",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "abarsegov",
+      "name": "abarsegov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/181010154?v=4",
+      "profile": "https://github.com/abarsegov",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

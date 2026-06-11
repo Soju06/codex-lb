@@ -428,12 +428,14 @@ class _CompactMixin:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        previous_response_id = getattr(payload, "previous_response_id", None)
         previous_response_preferred_account_id: str | None = None
         previous_response_lookup_session_id: str | None = None
-        if payload.previous_response_id is not None:
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            previous_response_id = previous_response_id.strip()
             previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
             previous_response_preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
-                previous_response_id=payload.previous_response_id,
+                previous_response_id=previous_response_id,
                 api_key=api_key,
                 session_id=previous_response_lookup_session_id,
                 surface="compact",
@@ -449,7 +451,7 @@ class _CompactMixin:
                     _record_continuity_fail_closed(
                         surface="compact",
                         reason="owner_account_unavailable",
-                        previous_response_id=payload.previous_response_id,
+                        previous_response_id=previous_response_id,
                         session_id=previous_response_lookup_session_id,
                         upstream_error_code="owner_lookup_miss",
                     )

@@ -121,4 +121,34 @@ describe("AccountActions", () => {
       expect(onProbe).not.toHaveBeenCalled();
     },
   );
+
+  it("disables force probe in read-only mode", async () => {
+    const user = userEvent.setup();
+    const account = createAccountSummary();
+    const onProbe = vi.fn();
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        readOnly
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={onProbe}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Force probe" });
+    expect(button).toBeDisabled();
+
+    await user.click(button);
+
+    expect(onProbe).not.toHaveBeenCalled();
+  });
 });

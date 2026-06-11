@@ -59,7 +59,7 @@ export function AccountActions({
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
   const probeDisabled =
-    busy || account.status === "paused" || showOperatorRecoveryAction;
+    busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
 
   return (
     <div className="space-y-3 border-t pt-4">

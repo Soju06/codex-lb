@@ -152,6 +152,7 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         buffer_response = bool(kwargs.pop("buffer_response", True))
+        _normalize_aiohttp_request_kwargs(kwargs)
         _reject_reserved(kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
         allow_fallback = _is_idempotent_method(method)
@@ -285,6 +286,39 @@ async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> t
     except Exception:
         await session.close()
         raise
+
+
+def _normalize_aiohttp_request_kwargs(kwargs: dict[str, Any]) -> None:
+    files = kwargs.pop("files", None)
+    if files is None:
+        return
+    form = aiohttp.FormData()
+    data = kwargs.pop("data", None)
+    if isinstance(data, Mapping):
+        for name, value in data.items():
+            form.add_field(str(name), value)
+    elif data is not None:
+        form.add_field("data", data)
+
+    file_items = files.items() if isinstance(files, Mapping) else files
+    for name, value in file_items:
+        _add_form_file(form, str(name), value)
+    kwargs["data"] = form
+
+
+def _add_form_file(form: aiohttp.FormData, name: str, value: Any) -> None:
+    if isinstance(value, tuple):
+        filename = value[0] if len(value) >= 1 else None
+        file_value = value[1] if len(value) >= 2 else b""
+        content_type = value[2] if len(value) >= 3 else None
+        form.add_field(
+            name,
+            file_value,
+            filename=str(filename) if filename else None,
+            content_type=str(content_type) if content_type else None,
+        )
+        return
+    form.add_field(name, value)
 
 
 async def _buffer_response(response: Any) -> Any:

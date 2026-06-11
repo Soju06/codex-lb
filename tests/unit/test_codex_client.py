@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+import aiohttp
 import pytest
 
 from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
@@ -152,6 +153,24 @@ async def test_streaming_request_can_opt_out_of_response_buffering(route: Resolv
     assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
     assert "buffer_response" not in session.calls[0]
     assert isinstance(result.response, _Response)
+
+
+@pytest.mark.asyncio
+async def test_request_converts_legacy_files_payload_to_form_data(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test/transcribe",
+        route=route,
+        files={"file": ("audio.wav", b"abc", "audio/wav")},
+        data={"prompt": "summarize"},
+    )
+
+    assert "files" not in session.calls[0]
+    assert isinstance(session.calls[0]["data"], aiohttp.FormData)
+    assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
 
 
 @pytest.mark.asyncio

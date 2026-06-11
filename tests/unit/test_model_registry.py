@@ -159,7 +159,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert spark.context_window == 128_000
     assert spark.input_modalities == ("text",)
     assert spark.default_reasoning_level == "high"
-    assert spark.supported_in_api is False
+    assert spark.supported_in_api is True
     assert spark.minimal_client_version == "0.100.0"
 
     auto_review = models["codex-auto-review"]

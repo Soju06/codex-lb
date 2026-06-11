@@ -178,7 +178,6 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         context_window=128_000,
         input_modalities=("text",),
         default_reasoning_level="high",
-        supported_in_api=False,
         minimal_client_version="0.100.0",
     ),
     _bootstrap_model(

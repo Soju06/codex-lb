@@ -234,6 +234,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
         del headers, access_token, account_id, kwargs
         seen_payload["input"] = payload.input
         seen_payload["model"] = payload.model
+        seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
         return CompactResponsePayload.model_validate(
             {
                 "object": "response.compaction",
@@ -254,6 +255,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             {"role": "user", "content": "hello"},
             {"type": "compaction_trigger"},
         ],
+        "previous_response_id": "resp_compact_anchor",
         "stream": True,
     }
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
@@ -264,6 +266,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
     assert seen_payload["model"] == "gpt-5.1"
     assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
+    assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert events[0]["item"] == {
         "type": "compaction",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",

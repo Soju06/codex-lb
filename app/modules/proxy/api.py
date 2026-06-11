@@ -2126,15 +2126,9 @@ async def _stream_responses(
         else {}
     )
     if compact_trigger_input is not None:
-        compact_payload = ResponsesCompactRequest(
-            model=payload.model,
-            instructions=payload.instructions,
-            input=compact_trigger_input,
-            reasoning=payload.reasoning,
-            store=payload.store,
-            service_tier=payload.service_tier,
-            prompt_cache_key=payload.prompt_cache_key,
-        )
+        compact_payload_data = payload.model_dump(mode="json", exclude_none=True)
+        compact_payload_data["input"] = compact_trigger_input
+        compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
         try:
             try:
                 compact_result = await context.service.compact_responses(

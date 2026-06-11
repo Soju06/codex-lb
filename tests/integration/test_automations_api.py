@@ -3464,6 +3464,7 @@ async def test_automations_scheduled_cycle_execution_uses_upstream_route(async_c
     assert compact_calls[0]["route"] is route
     assert compact_calls[0]["allow_direct_egress"] is False
 
+
 @pytest.mark.asyncio
 async def test_automations_manual_cycle_all_skipped_placeholders_are_not_reported_success(
     async_client,

@@ -228,13 +228,48 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
+    other_email = "compact-trigger-other@example.com"
+    other_raw_account_id = "acc_compact_trigger_other"
+    other_auth_json = _make_auth_json(other_raw_account_id, other_email)
+    other_files = {"auth_json": ("auth.json", json.dumps(other_auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=other_files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts = {
+            account.chatgpt_account_id: account
+            for account in (await session.execute(select(Account))).scalars().all()
+            if account.chatgpt_account_id in {raw_account_id, other_raw_account_id}
+        }
+        owner_account = accounts[raw_account_id]
+        session.add(
+            RequestLog(
+                account_id=owner_account.id,
+                session_id="sid_compact_trigger",
+                request_id="resp_compact_anchor",
+                request_kind="response_create",
+                model="gpt-5.1",
+                status="success",
+            )
+        )
+        await session.commit()
+
     seen_payload: dict[str, object] = {}
+    selection_preferred_ids: list[str | None] = []
+
+    async def fake_select_account(self, deadline: float, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        selection_preferred_ids.append(preferred_account_id)
+        assert preferred_account_id == owner_account.id
+        return proxy_module.AccountSelection(account=owner_account, error_message=None, error_code=None)
 
     async def fake_compact(payload, headers, access_token, account_id, **kwargs):
-        del headers, access_token, account_id, kwargs
+        del headers, access_token, kwargs
         seen_payload["input"] = payload.input
         seen_payload["model"] = payload.model
         seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
+        seen_payload["account_id"] = account_id
         return CompactResponsePayload.model_validate(
             {
                 "object": "response.compaction",
@@ -246,6 +281,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             }
         )
 
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
     payload = {
@@ -258,15 +294,22 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
         "previous_response_id": "resp_compact_anchor",
         "stream": True,
     }
-    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"session_id": "sid_compact_trigger"},
+    ) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = list(_iter_sse_events(lines))
     assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
+    assert selection_preferred_ids == [owner_account.id]
     assert seen_payload["model"] == "gpt-5.1"
     assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
+    assert seen_payload["account_id"] == raw_account_id
     assert events[0]["item"] == {
         "type": "compaction",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",

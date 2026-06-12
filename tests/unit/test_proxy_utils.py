@@ -17732,6 +17732,63 @@ async def test_compact_responses_preserves_codex_compaction_timeout_failure(monk
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_timeout_uses_latest_encrypted_reasoning_fallback(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_timeout_local_fallback")
+    handle_stream_error = AsyncMock(return_value={"failure_class": "retryable_transient"})
+    record_errors = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    async def failing_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "old_state", "summary": []},
+                {"role": "user", "content": "hello"},
+                {"type": "reasoning", "encrypted_content": "latest_state", "summary": []},
+            ],
+        }
+    )
+
+    response = await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+    assert response.object == "response.compaction"
+    assert response.model_extra is not None
+    assert response.model_extra["output"][-1] == {
+        "type": "compaction_summary",
+        "encrypted_content": "latest_state",
+    }
+    handle_stream_error.assert_awaited_once()
+    record_errors.assert_awaited_once_with(account, 1)
+    record_success.assert_awaited_once_with(account)
+    assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_forwards_codex_compaction_to_upstream(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

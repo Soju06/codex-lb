@@ -707,15 +707,65 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "user",
 }
 
+_POISONED_LOCAL_COMPACT_FALLBACK_TEXT = (
+    "Local compact fallback preserved the latest encrypted reasoning state."
+)
+
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
+    _strip_poisoned_local_compact_fallback_items(payload)
     _canonicalize_tools(payload)
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
+
+
+def _strip_poisoned_local_compact_fallback_items(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+
+    input_items = input_value
+    kept: list[JsonValue] = []
+    skip_next_poison_compaction = False
+    changed = False
+    for item in input_items:
+        if skip_next_poison_compaction and is_json_mapping(item) and item.get("type") == "compaction":
+            encrypted_content = item.get("encrypted_content")
+            if isinstance(encrypted_content, str) and encrypted_content:
+                skip_next_poison_compaction = False
+                changed = True
+                continue
+        skip_next_poison_compaction = False
+
+        if _is_poisoned_local_compact_fallback_message(item):
+            skip_next_poison_compaction = True
+            changed = True
+            continue
+
+        kept.append(item)
+
+    if changed:
+        payload["input"] = kept
+
+
+def _is_poisoned_local_compact_fallback_message(item: JsonValue) -> bool:
+    if not is_json_mapping(item):
+        return False
+    if item.get("type") != "message" or item.get("role") != "assistant":
+        return False
+    content = item.get("content")
+    if not is_json_list(content):
+        return False
+    for part in content:
+        if not is_json_mapping(part):
+            continue
+        if part.get("text") == _POISONED_LOCAL_COMPACT_FALLBACK_TEXT:
+            return True
+    return False
 
 
 def _canonicalize_tools(payload: MutableJsonObject) -> None:

@@ -119,7 +119,7 @@ export function AccountList({
         </Select>
       </div>
 
-      <div>
+      <div className="flex items-center justify-between gap-3">
         <Button
           type="button"
           variant="link"
@@ -130,11 +130,20 @@ export function AccountList({
           Need help?
           {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          className="gap-1.5"
+          onClick={() => setChooserOpen(true)}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add account
+        </Button>
       </div>
 
       {helpOpen ? <WindowsOauthHelp /> : null}
 
-      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1">
+      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1" data-testid="account-list-scroll-region">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
             <p className="text-sm font-medium text-muted-foreground">No matching accounts</p>
@@ -151,14 +160,6 @@ export function AccountList({
             />
           ))
         )}
-        <button
-          type="button"
-          onClick={() => setChooserOpen(true)}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed p-3 text-xs font-medium text-muted-foreground transition-colors outline-none hover:bg-muted/40 hover:text-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add account
-        </button>
       </div>
 
       <AddAccountDialog

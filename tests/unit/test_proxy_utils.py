@@ -17817,6 +17817,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     seen_excluded_account_ids: list[set[str]] = []
     upstream_accounts: list[str | None] = []
     handle_stream_error = AsyncMock(return_value={"failure_class": "retryable_transient"})
+    record_errors = AsyncMock()
 
     async def silent_upstream(payload, headers, access_token, account_id):
         del payload, headers, access_token
@@ -17828,6 +17829,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
     monkeypatch.setattr(proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining: 0.01)
     monkeypatch.setattr(proxy_service, "core_compact_responses", silent_upstream)
     _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
@@ -17843,6 +17845,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     assert seen_excluded_account_ids == [set()]
     assert upstream_accounts == [account_a.chatgpt_account_id]
     handle_stream_error.assert_awaited_once()
+    record_errors.assert_awaited_once_with(account_a, 1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"

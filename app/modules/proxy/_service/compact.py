@@ -944,6 +944,7 @@ class _CompactMixin:
                                 code,
                                 http_status=exc.status_code,
                             )
+                            await proxy._load_balancer.record_errors(account, 1)
                             logger.info(
                                 "Failover decision request_id=%s transport=compact account_id=%s "
                                 "attempt=%d failure_class=%s action=surface",

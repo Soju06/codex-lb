@@ -203,7 +203,7 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
 def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
-    return min(30.0, remaining_budget)
+    return min(12.0, remaining_budget)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -929,6 +929,28 @@ class _CompactMixin:
                             transient_exhausted = True
                             break
                         if _is_account_neutral_error_code(code):
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise
+                        if code == "upstream_request_timeout":
+                            classified = await proxy._handle_stream_error(
+                                account,
+                                _upstream_error_from_openai(error),
+                                code,
+                                http_status=exc.status_code,
+                            )
+                            logger.info(
+                                "Failover decision request_id=%s transport=compact account_id=%s "
+                                "attempt=%d failure_class=%s action=surface",
+                                request_id,
+                                account.id,
+                                _account_attempt + 1,
+                                classified["failure_class"],
+                            )
                             await proxy._settle_compact_api_key_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

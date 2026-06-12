@@ -61,6 +61,7 @@ _CompactResponses = Callable[
 class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
+    _repo_factory: Any
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 

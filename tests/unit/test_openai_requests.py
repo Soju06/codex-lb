@@ -799,6 +799,24 @@ def test_compact_strips_poisoned_local_compact_fallback_items():
     assert request.to_payload()["input"] == [{"role": "user", "content": "continue"}]
 
 
+def test_compact_trims_oversized_input_tail_for_upstream():
+    input_items = [{"role": "user", "content": f"item {idx}"} for idx in range(356)]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert len(dumped_input) == 180
+    assert dumped_input[0] == {"role": "user", "content": "item 176"}
+    assert dumped_input[-1] == {"role": "user", "content": "item 355"}
+
+
 def test_v1_compact_strips_tool_fields():
     payload = {
         "model": "gpt-5.1",

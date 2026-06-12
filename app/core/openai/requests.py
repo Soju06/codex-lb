@@ -710,6 +710,7 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
 _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = (
     "Local compact fallback preserved the latest encrypted reasoning state."
 )
+_MAX_COMPACT_UPSTREAM_INPUT_ITEMS = 180
 
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
@@ -805,6 +806,7 @@ def _sort_keys_recursive(value: JsonValue) -> JsonValue:
 
 def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     payload = _strip_unsupported_fields(payload)
+    _trim_compact_input_for_upstream(payload)
     payload.pop("store", None)
     payload.pop("text", None)
     payload.pop("tools", None)
@@ -812,6 +814,13 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("parallel_tool_calls", None)
     payload.pop("client_metadata", None)
     return payload
+
+
+def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value) or len(input_value) <= _MAX_COMPACT_UPSTREAM_INPUT_ITEMS:
+        return
+    payload["input"] = input_value[-_MAX_COMPACT_UPSTREAM_INPUT_ITEMS:]
 
 
 def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:

@@ -731,6 +731,62 @@ def test_compact_strips_tool_fields():
     assert "text" not in dumped
 
 
+def test_responses_strips_poisoned_local_compact_fallback_items():
+    poisoned_message = {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "Local compact fallback preserved the latest encrypted reasoning state.",
+            }
+        ],
+    }
+    poisoned_compaction = {"type": "compaction", "encrypted_content": "bad-local-summary"}
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {"role": "user", "content": "before"},
+            poisoned_message,
+            poisoned_compaction,
+            {"role": "user", "content": "after"},
+        ],
+    }
+
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.to_payload()["input"] == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+
+
+def test_compact_strips_poisoned_local_compact_fallback_items():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Local compact fallback preserved the latest encrypted reasoning state.",
+                    }
+                ],
+            },
+            {"type": "compaction", "encrypted_content": "bad-local-summary"},
+            {"role": "user", "content": "continue"},
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.to_payload()["input"] == [{"role": "user", "content": "continue"}]
+
+
 def test_v1_compact_strips_tool_fields():
     payload = {
         "model": "gpt-5.1",

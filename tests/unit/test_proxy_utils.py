@@ -17808,6 +17808,47 @@ async def test_compact_responses_bounds_silent_upstream_compaction(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_surfaces_upstream_timeout_without_account_failover(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_silent_upstream_a")
+    account_b = _make_account("acc_compact_silent_upstream_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_accounts: list[str | None] = []
+    handle_stream_error = AsyncMock(return_value={"failure_class": "retryable_transient"})
+
+    async def silent_upstream(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_accounts.append(account_id)
+        await asyncio.sleep(60)
+        raise AssertionError("upstream compact timeout did not interrupt")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining: 0.01)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", silent_upstream)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert seen_excluded_account_ids == [set()]
+    assert upstream_accounts == [account_a.chatgpt_account_id]
+    handle_stream_error.assert_awaited_once()
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_a.id
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_with_timeout_bounds_whole_singleflight_wait(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_refresh_wait_bound")

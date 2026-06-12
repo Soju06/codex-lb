@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.modules.reports.repository import DailyReportLogRow, ReportsRepository
+from app.modules.reports.repository import ReportsRepository
 from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
@@ -52,8 +51,26 @@ class ReportsService:
             model,
         )
         earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model)
-        daily_logs = await self._repository.list_daily_report_logs(start_at, end_at, account_ids, model)
-        daily = _bucket_daily_rows(daily_logs, timezone_info)
+        daily_rows = await self._repository.aggregate_daily_rows(
+            start_date,
+            end_date,
+            timezone_info,
+            account_ids,
+            model,
+        )
+        daily = [
+            DailyReportRow(
+                date=row.date,
+                requests=row.requests,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cached_input_tokens=row.cached_input_tokens,
+                cost_usd=round(row.cost_usd, 4),
+                active_accounts=row.active_accounts,
+                error_count=row.error_count,
+            )
+            for row in daily_rows
+        ]
         by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model)
         by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model)
 
@@ -114,43 +131,3 @@ def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
 
 def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:
     return to_utc_naive(datetime.combine(value, datetime.min.time(), tzinfo=timezone_info))
-
-
-def _bucket_daily_rows(
-    daily_logs: list[DailyReportLogRow],
-    timezone_info: ZoneInfo | timezone,
-) -> list[DailyReportRow]:
-    buckets: OrderedDict[str, DailyReportRow] = OrderedDict()
-    bucket_accounts: dict[str, set[str]] = {}
-
-    for log in daily_logs:
-        local_date = log.requested_at.replace(tzinfo=timezone.utc).astimezone(timezone_info).date().isoformat()
-        row = buckets.get(local_date)
-        if row is None:
-            row = DailyReportRow(
-                date=local_date,
-                requests=0,
-                input_tokens=0,
-                output_tokens=0,
-                cached_input_tokens=0,
-                cost_usd=0.0,
-                active_accounts=0,
-                error_count=0,
-            )
-            buckets[local_date] = row
-            bucket_accounts[local_date] = set()
-
-        row.requests += 1
-        row.input_tokens += log.input_tokens
-        row.output_tokens += log.output_tokens
-        row.cached_input_tokens += log.cached_input_tokens
-        row.cost_usd += log.cost_usd
-        row.error_count += int(log.is_error)
-        if log.account_id is not None:
-            bucket_accounts[local_date].add(log.account_id)
-            row.active_accounts = len(bucket_accounts[local_date])
-
-    for row in buckets.values():
-        row.cost_usd = round(row.cost_usd, 4)
-
-    return list(buckets.values())

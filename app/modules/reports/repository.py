@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, RequestLog
@@ -13,14 +14,15 @@ _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 
 
 @dataclass(frozen=True)
-class DailyReportLogRow:
-    requested_at: datetime
-    account_id: str | None
-    is_error: bool
+class DailyReportAggregateRow:
+    date: str
+    requests: int
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
     cost_usd: float
+    active_accounts: int
+    error_count: int
 
 
 @dataclass(frozen=True)
@@ -52,38 +54,68 @@ class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_daily_report_logs(
+    async def aggregate_daily_rows(
         self,
-        start_date: datetime,
-        end_date: datetime,
+        start_date: date,
+        end_date: date,
+        timezone_info: ZoneInfo | timezone,
         account_ids: list[str] | None = None,
         model: str | None = None,
-    ) -> list[DailyReportLogRow]:
-        conditions = _report_conditions(start_date, end_date, account_ids, model)
+    ) -> list[DailyReportAggregateRow]:
+        day_ranges = list(_daily_bucket_ranges(start_date, end_date, timezone_info))
+        if not day_ranges:
+            return []
 
+        day_range_rows = [
+            select(
+                literal(report_date).label("report_date"),
+                literal(day_start).label("day_start"),
+                literal(day_end).label("day_end"),
+            )
+            for report_date, day_start, day_end in day_ranges
+        ]
+        day_ranges_query = day_range_rows[0] if len(day_range_rows) == 1 else union_all(*day_range_rows)
+        day_ranges_cte = day_ranges_query.cte("report_days")
         stmt = (
             select(
-                RequestLog.requested_at,
-                RequestLog.account_id,
-                RequestLog.status,
-                RequestLog.input_tokens,
-                RequestLog.output_tokens,
-                RequestLog.cached_input_tokens,
-                RequestLog.cost_usd,
+                day_ranges_cte.c.report_date,
+                func.count(RequestLog.id).label("requests"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+                func.coalesce(
+                    func.sum(case((RequestLog.status != "success", 1), else_=0)),
+                    0,
+                ).label("error_count"),
             )
-            .where(and_(*conditions))
-            .order_by(RequestLog.requested_at, RequestLog.request_id)
+            .select_from(
+                day_ranges_cte.join(
+                    RequestLog,
+                    and_(
+                        RequestLog.requested_at >= day_ranges_cte.c.day_start,
+                        RequestLog.requested_at < day_ranges_cte.c.day_end,
+                    _normal_traffic_clause(),
+                    *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+                    *([RequestLog.model == model] if model else []),
+                    ),
+                )
+            )
+            .group_by(day_ranges_cte.c.report_date)
+            .order_by(day_ranges_cte.c.report_date)
         )
         result = await self._session.execute(stmt)
         return [
-            DailyReportLogRow(
-                requested_at=row.requested_at,
-                account_id=row.account_id,
-                is_error=row.status != "success",
+            DailyReportAggregateRow(
+                date=row.report_date,
+                requests=int(row.requests or 0),
                 input_tokens=int(row.input_tokens or 0),
                 output_tokens=int(row.output_tokens or 0),
                 cached_input_tokens=int(row.cached_input_tokens or 0),
                 cost_usd=float(row.cost_usd or 0.0),
+                active_accounts=int(row.active_accounts or 0),
+                error_count=int(row.error_count or 0),
             )
             for row in result.all()
         ]
@@ -251,3 +283,24 @@ def _normal_traffic_clause():
             RequestLog.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
         ),
     )
+
+
+def _daily_bucket_ranges(
+    start_date: date,
+    end_date: date,
+    timezone_info: ZoneInfo | timezone,
+) -> list[tuple[str, datetime, datetime]]:
+    ranges: list[tuple[str, datetime, datetime]] = []
+    current_date = start_date
+    while current_date <= end_date:
+        day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=timezone_info)
+        next_day_start = datetime.combine(current_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone_info)
+        ranges.append(
+            (
+                current_date.isoformat(),
+                day_start.astimezone(timezone.utc).replace(tzinfo=None),
+                next_day_start.astimezone(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        current_date += timedelta(days=1)
+    return ranges

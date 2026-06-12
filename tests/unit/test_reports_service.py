@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.modules.reports.repository import DailyReportRangeTooLargeError
-from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
 from app.modules.reports.service import ReportsService
 
 pytestmark = pytest.mark.unit

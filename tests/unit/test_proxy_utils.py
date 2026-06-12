@@ -10205,7 +10205,7 @@ async def test_prepare_websocket_response_create_request_does_not_infer_previous
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_response_create_request_trims_codex_session_full_replay(monkeypatch):
+async def test_prepare_websocket_response_create_request_keeps_codex_session_full_replay(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reserve_usage = AsyncMock(return_value=None)
@@ -10264,10 +10264,10 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
     )
 
     upstream_payload = json.loads(prepared.text_data)
-    assert upstream_payload["previous_response_id"] == "resp_completed_anchor"
-    assert upstream_payload["input"] == [new_input]
-    assert prepared.request_state.previous_response_id == "resp_completed_anchor"
-    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert "previous_response_id" not in upstream_payload
+    assert upstream_payload["input"] == [*historical_input, new_input]
+    assert prepared.request_state.previous_response_id is None
+    assert prepared.request_state.proxy_injected_previous_response_id is False
     assert prepared.request_state.input_item_count == 3
     assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
         [*historical_input, new_input]

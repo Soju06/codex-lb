@@ -370,30 +370,8 @@ def _websocket_continuity_anchor_for_payload(
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
 ) -> _WebSocketContinuityAnchor | None:
-    if not codex_session_affinity or continuity_state is None:
-        return None
-    if responses_payload.previous_response_id is not None:
-        return None
-    previous_response_id = continuity_state.last_completed_response_id
-    stored_count = continuity_state.last_completed_input_count
-    stored_fingerprint = continuity_state.last_completed_input_prefix_fingerprint
-    incoming_input = responses_payload.input
-    if (
-        previous_response_id is None
-        or stored_count <= 0
-        or stored_fingerprint is None
-        or not isinstance(incoming_input, list)
-        or len(incoming_input) <= stored_count
-    ):
-        return None
-    incoming_input_list = cast(list[JsonValue], incoming_input)
-    incoming_prefix_fingerprint = _facade()._fingerprint_input_items(incoming_input_list[:stored_count])
-    if incoming_prefix_fingerprint != stored_fingerprint:
-        return None
-    return _WebSocketContinuityAnchor(
-        previous_response_id=previous_response_id,
-        stored_input_item_count=stored_count,
-    )
+    del continuity_state, responses_payload, codex_session_affinity
+    return None
 
 
 def _websocket_client_previous_response_full_resend_is_retry_safe(

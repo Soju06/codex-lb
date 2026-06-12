@@ -945,6 +945,24 @@ class _CompactMixin:
                                 http_status=exc.status_code,
                             )
                             await proxy._load_balancer.record_errors(account, 1)
+                            if affinity.key is not None and affinity.kind is not None:
+                                try:
+                                    async with proxy._repo_factory() as repos:
+                                        await repos.sticky_sessions.delete(affinity.key, kind=affinity.kind)
+                                    logger.info(
+                                        "Compact sticky mapping cleared after upstream timeout request_id=%s "
+                                        "sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to clear compact sticky mapping after upstream timeout "
+                                        "request_id=%s sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                        exc_info=True,
+                                    )
                             logger.info(
                                 "Failover decision request_id=%s transport=compact account_id=%s "
                                 "attempt=%d failure_class=%s action=surface",

@@ -17811,7 +17811,23 @@ async def test_compact_responses_bounds_silent_upstream_compaction(monkeypatch):
 async def test_compact_responses_surfaces_upstream_timeout_without_account_failover(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    sticky_sessions = AsyncMock()
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
     account_a = _make_account("acc_compact_silent_upstream_a")
     account_b = _make_account("acc_compact_silent_upstream_b")
     seen_excluded_account_ids: list[set[str]] = []
@@ -17837,7 +17853,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service.compact_responses(payload, {"session_id": "sid-compact"})
+        await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
@@ -17846,6 +17862,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     assert upstream_accounts == [account_a.chatgpt_account_id]
     handle_stream_error.assert_awaited_once()
     record_errors.assert_awaited_once_with(account_a, 1)
+    sticky_sessions.delete.assert_awaited_once_with("sid-compact", kind=proxy_service.StickySessionKind.CODEX_SESSION)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"

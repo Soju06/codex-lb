@@ -13,7 +13,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
     <div className="rounded-xl border bg-card p-5">
       <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
       <div className="mt-4 flex items-center gap-4">
-        <div className="h-[140px] w-[140px] shrink-0">
+        <div className="relative h-[140px] w-[140px] shrink-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie

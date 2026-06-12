@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -21,14 +21,14 @@ async def get_reports(
     context: ReportsContext = Depends(get_reports_context),
     start_date: Annotated[date | None, Query()] = None,
     end_date: Annotated[date | None, Query()] = None,
+    report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
     account_id: Annotated[list[str] | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
 ) -> ReportsResponse:
-    start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc) if start_date else None
-    end = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) if end_date else None
     return await context.service.get_reports(
-        start_date=start,
-        end_date=end,
+        start_date=start_date,
+        end_date=end_date,
+        report_timezone=report_timezone,
         account_ids=account_id,
         model=model,
     )

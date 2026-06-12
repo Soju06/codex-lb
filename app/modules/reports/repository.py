@@ -13,6 +13,11 @@ from app.db.models import Account, RequestLog
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
+MAX_DAILY_REPORT_DAYS = 730
+
+
+class DailyReportRangeTooLargeError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,11 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
     ) -> list[DailyReportAggregateRow]:
+        window_days = (end_date - start_date).days + 1
+        if window_days > MAX_DAILY_REPORT_DAYS:
+            raise DailyReportRangeTooLargeError(
+                f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less"
+            )
         day_ranges = list(_daily_bucket_ranges(start_date, end_date, timezone_info))
         if not day_ranges:
             return []

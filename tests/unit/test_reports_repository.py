@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, Base, RequestLog
-from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
 
 pytestmark = pytest.mark.unit
 
@@ -148,3 +148,17 @@ async def test_aggregate_daily_rows_supports_ranges_longer_than_sqlite_compound_
     assert rows[0].cost_usd == 0.25
     assert rows[1].requests == 1
     assert rows[1].cost_usd == 0.1
+
+
+@pytest.mark.asyncio
+async def test_aggregate_daily_rows_rejects_ranges_over_supported_window(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+
+    with pytest.raises(DailyReportRangeTooLargeError, match="730 days or less"):
+        await repo.aggregate_daily_rows(
+            date(2024, 1, 1),
+            date(2026, 1, 1),
+            timezone.utc,
+        )

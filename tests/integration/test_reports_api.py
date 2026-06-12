@@ -100,6 +100,18 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
     ]
 
 
+async def test_reports_api_rejects_oversized_date_ranges(async_client, db_setup):
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2024-01-01",
+            "end_date": "2026-01-01",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "report date range must be 730 days or less"
+
+
 async def test_reports_api_includes_preserved_deleted_account_history(async_client, db_setup):
     start_at = _naive_utc(datetime(2026, 6, 1, 11, 0, 0, tzinfo=timezone.utc))
     deleted_at = _naive_utc(datetime(2026, 6, 2, 9, 0, 0, tzinfo=timezone.utc))

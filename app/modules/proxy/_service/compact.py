@@ -204,7 +204,7 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
 def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
-    return min(12.0, remaining_budget)
+    return min(60.0, remaining_budget)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:

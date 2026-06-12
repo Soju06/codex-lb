@@ -10533,7 +10533,7 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_full_replay_retry_text_disables_oversized_unslimmable_retry(monkeypatch):
+async def test_prepare_websocket_full_replay_rejects_oversized_unslimmable_payload(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reserve_usage = AsyncMock(return_value=None)
@@ -10573,26 +10573,27 @@ async def test_prepare_websocket_full_replay_retry_text_disables_oversized_unsli
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
-    prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "input": [*historical_input, new_input],
-            },
-        ),
-        headers={"session_id": "turn_ws_trim_too_large"},
-        codex_session_affinity=True,
-        openai_cache_affinity=True,
-        sticky_threads_enabled=False,
-        openai_cache_affinity_max_age_seconds=300,
-        api_key=api_key,
-        continuity_state=continuity_state,
-    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._prepare_websocket_response_create_request(
+            cast(
+                dict[str, JsonValue],
+                {
+                    "type": "response.create",
+                    "model": "gpt-5.1",
+                    "input": [*historical_input, new_input],
+                },
+            ),
+            headers={"session_id": "turn_ws_trim_too_large"},
+            codex_session_affinity=True,
+            openai_cache_affinity=True,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=api_key,
+            continuity_state=continuity_state,
+        )
 
-    assert prepared.request_state.fresh_upstream_request_text is None
-    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.payload["error"]["code"] == "payload_too_large"
 
 
 def test_websocket_continuity_state_reuses_codex_session_scope():

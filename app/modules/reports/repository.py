@@ -96,9 +96,9 @@ class ReportsRepository:
                     and_(
                         RequestLog.requested_at >= day_ranges_cte.c.day_start,
                         RequestLog.requested_at < day_ranges_cte.c.day_end,
-                    _normal_traffic_clause(),
-                    *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
-                    *([RequestLog.model == model] if model else []),
+                        _normal_traffic_clause(),
+                        *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+                        *([RequestLog.model == model] if model else []),
                     ),
                 )
             )

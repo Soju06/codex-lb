@@ -1398,7 +1398,10 @@ class ProxyService(
                     acquire_refresh_admission=self._get_work_admission().acquire_token_refresh,
                     refresh_repo_factory=self._accounts_refresh_scope,
                 )
-                return await auth_manager.ensure_fresh(account, force=force)
+                refresh = auth_manager.ensure_fresh(account, force=force)
+                if timeout_seconds is None:
+                    return await refresh
+                return await asyncio.wait_for(refresh, timeout=max(0.001, timeout_seconds))
         finally:
             pop_token_refresh_timeout_override(token)
 

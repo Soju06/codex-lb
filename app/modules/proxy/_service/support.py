@@ -335,6 +335,7 @@ class _WebSocketRequestState:
     error_http_status_override: int | None = None
     response_event_count: int = 0
     previous_response_not_found_rewritten: bool = False
+    request_kind: str = "normal"
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None

@@ -202,6 +202,27 @@ def _enforce_http_bridge_response_create_text_size(
         request_state.request_text = original_request_text
 
 
+def _request_kind_from_client_metadata(client_metadata: Mapping[str, JsonValue] | None) -> str:
+    if not client_metadata:
+        return "normal"
+    raw_turn_metadata = client_metadata.get("x-codex-turn-metadata")
+    if not isinstance(raw_turn_metadata, str):
+        return "normal"
+    try:
+        turn_metadata = json.loads(raw_turn_metadata)
+    except json.JSONDecodeError:
+        return "normal"
+    if not isinstance(turn_metadata, dict):
+        return "normal"
+    raw_request_kind = turn_metadata.get("request_kind")
+    if not isinstance(raw_request_kind, str):
+        return "normal"
+    request_kind = raw_request_kind.strip()
+    if not request_kind:
+        return "normal"
+    return request_kind[:64]
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -288,6 +309,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            request_kind=_request_kind_from_client_metadata(client_metadata),
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count

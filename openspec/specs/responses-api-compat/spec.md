@@ -527,7 +527,7 @@ When multiple `file_id`s are referenced and several are pinned, the most-recentl
 - **THEN** the proxy MUST follow the prompt-cache affinity for routing and MUST NOT use the file_id pin
 
 ### Requirement: Codex backend session_id preserves account affinity
-When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `x-codex-session-id`, and `x-codex-conversation-id`, in that priority order.
+When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, and `thread-id`, in that priority order.
 
 #### Scenario: Backend Codex request derives prompt_cache_key before codex-session routing
 - **WHEN** `/backend-api/codex/responses` is called with `session_id` and without `prompt_cache_key`

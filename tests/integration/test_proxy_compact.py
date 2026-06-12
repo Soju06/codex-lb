@@ -127,6 +127,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
         "tools": [{"type": "image_generation"}],
         "tool_choice": {"type": "image_generation"},
         "parallel_tool_calls": True,
+        "text": {"verbosity": "low"},
     }
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 
@@ -138,6 +139,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
     assert "tools" not in seen_payloads[0]
     assert "tool_choice" not in seen_payloads[0]
     assert "parallel_tool_calls" not in seen_payloads[0]
+    assert "text" not in seen_payloads[0]
 
 
 @pytest.mark.asyncio

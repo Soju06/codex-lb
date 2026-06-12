@@ -756,6 +756,7 @@ def _sort_keys_recursive(value: JsonValue) -> JsonValue:
 def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     payload = _strip_unsupported_fields(payload)
     payload.pop("store", None)
+    payload.pop("text", None)
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
     payload.pop("parallel_tool_calls", None)

@@ -732,6 +732,7 @@ def test_compact_strips_tool_fields():
         "tools": [{"type": "image_generation"}],
         "tool_choice": {"type": "image_generation"},
         "parallel_tool_calls": True,
+        "text": {"verbosity": "low"},
     }
     request = ResponsesCompactRequest.model_validate(payload)
 
@@ -739,6 +740,7 @@ def test_compact_strips_tool_fields():
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
     assert "parallel_tool_calls" not in dumped
+    assert "text" not in dumped
 
 
 def test_v1_compact_strips_tool_fields():

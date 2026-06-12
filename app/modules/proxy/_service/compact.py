@@ -25,7 +25,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
-from app.core.types import JsonObject, JsonValue
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
@@ -205,44 +205,6 @@ def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
     return min(8.0, remaining_budget)
-
-
-def _local_compaction_from_latest_reasoning(payload: ResponsesCompactRequest) -> CompactResponsePayload | None:
-    input_items = payload.input
-    if not isinstance(input_items, list):
-        return None
-    for raw_item in reversed(input_items):
-        if not isinstance(raw_item, dict):
-            continue
-        item = cast(JsonObject, raw_item)
-        if item.get("type") != "reasoning":
-            continue
-        encrypted_content = item.get("encrypted_content")
-        if not isinstance(encrypted_content, str) or not encrypted_content:
-            continue
-        return CompactResponsePayload.model_validate(
-            {
-                "object": "response.compaction",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": "Local compact fallback preserved the latest encrypted reasoning state.",
-                            }
-                        ],
-                    },
-                    {
-                        "type": "compaction_summary",
-                        "encrypted_content": encrypted_content,
-                    },
-                ],
-            }
-        )
-    return None
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -1010,23 +972,6 @@ class _CompactMixin:
                                 _account_attempt + 1,
                                 classified["failure_class"],
                             )
-                            local_compaction = _local_compaction_from_latest_reasoning(payload)
-                            if local_compaction is not None:
-                                logger.warning(
-                                    "Compact upstream timeout using local encrypted-state fallback "
-                                    "request_id=%s account_id=%s",
-                                    request_id,
-                                    account.id,
-                                )
-                                await proxy._load_balancer.record_success(account)
-                                await proxy._settle_compact_api_key_usage(
-                                    api_key=api_key,
-                                    api_key_reservation=api_key_reservation,
-                                    response=local_compaction,
-                                    request_service_tier=request_service_tier,
-                                )
-                                log_status = "success"
-                                return local_compaction
                             await proxy._settle_compact_api_key_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

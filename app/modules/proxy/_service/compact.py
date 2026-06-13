@@ -23,7 +23,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
-from app.core.openai.requests import ResponsesCompactRequest
+from app.core.openai.requests import ResponsesCompactRequest, build_local_compact_fallback_output
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -217,6 +217,35 @@ def _record_compact_failure_cooldown(
     if cooldown_key is None or cooldown_seconds <= 0:
         return
     _COMPACT_FAILURE_COOLDOWNS[cooldown_key] = now + cooldown_seconds
+
+
+def _local_compact_fallback_response(
+    payload: ResponsesCompactRequest,
+    *,
+    reason: str,
+    max_estimated_tokens: int,
+) -> CompactResponsePayload:
+    return CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "output": build_local_compact_fallback_output(
+                payload.input,
+                reason=reason,
+                max_estimated_tokens=max_estimated_tokens,
+            ),
+        }
+    )
+
+
+def _local_compact_fallback_enabled(settings: object) -> bool:
+    return bool(getattr(settings, "local_compact_fallback_enabled", True))
+
+
+def _local_compact_fallback_token_limit(settings: object) -> int:
+    raw_limit = getattr(settings, "local_compact_fallback_max_estimated_tokens", 20_000)
+    if isinstance(raw_limit, int) and raw_limit > 0:
+        return raw_limit
+    return 20_000
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -473,6 +502,17 @@ class _CompactMixin:
                 affinity.kind.value if affinity.kind is not None else None,
                 cooldown_remaining,
             )
+            if _local_compact_fallback_enabled(settings):
+                logger.warning(
+                    "Returning local compact fallback during upstream cooldown request_id=%s sticky_kind=%s",
+                    request_id,
+                    affinity.kind.value if affinity.kind is not None else None,
+                )
+                return _local_compact_fallback_response(
+                    payload,
+                    reason="compact upstream cooldown active after repeated upstream timeouts",
+                    max_estimated_tokens=_local_compact_fallback_token_limit(settings),
+                )
             raise ProxyResponseError(
                 503,
                 openai_error(
@@ -969,6 +1009,28 @@ class _CompactMixin:
                                 now=_service_time().monotonic(),
                                 cooldown_seconds=getattr(base_settings, "compact_failure_cooldown_seconds", 60.0),
                             )
+                            if _local_compact_fallback_enabled(settings):
+                                response = _local_compact_fallback_response(
+                                    payload,
+                                    reason="all compact upstream account attempts timed out",
+                                    max_estimated_tokens=_local_compact_fallback_token_limit(settings),
+                                )
+                                logger.warning(
+                                    "Returning local compact fallback after upstream timeouts "
+                                    "request_id=%s account_id=%s",
+                                    request_id,
+                                    account.id,
+                                )
+                                await proxy._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=response,
+                                    request_service_tier=request_service_tier,
+                                )
+                                log_status = "success"
+                                log_error_code = None
+                                log_error_message = None
+                                return response
                             await proxy._settle_compact_api_key_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,
@@ -1013,6 +1075,41 @@ class _CompactMixin:
                         raise
                 if transient_exhausted:
                     continue  # outer loop: try different account
+            if last_exc is not None:
+                if _proxy_response_error_code(
+                    last_exc
+                ) == "upstream_request_timeout" and _local_compact_fallback_enabled(settings):
+                    _record_compact_failure_cooldown(
+                        cooldown_key,
+                        now=_service_time().monotonic(),
+                        cooldown_seconds=getattr(base_settings, "compact_failure_cooldown_seconds", 60.0),
+                    )
+                    response = _local_compact_fallback_response(
+                        payload,
+                        reason="compact upstream attempts exhausted before a healthy account completed",
+                        max_estimated_tokens=_local_compact_fallback_token_limit(settings),
+                    )
+                    logger.warning(
+                        "Returning local compact fallback after compact attempts exhausted request_id=%s",
+                        request_id,
+                    )
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=response,
+                        request_service_tier=request_service_tier,
+                    )
+                    log_status = "success"
+                    log_error_code = None
+                    log_error_message = None
+                    return response
+                await proxy._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                    request_service_tier=request_service_tier,
+                )
+                raise last_exc
             # All account attempts exhausted — raise last error
             await proxy._settle_compact_api_key_usage(
                 api_key=api_key,
@@ -1020,8 +1117,6 @@ class _CompactMixin:
                 response=None,
                 request_service_tier=request_service_tier,
             )
-            if last_exc is not None:
-                raise last_exc
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", "All account attempts exhausted"),

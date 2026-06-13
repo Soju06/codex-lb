@@ -10,6 +10,7 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
     _input_image_file_reference,
+    build_local_compact_fallback_output,
     extract_input_file_ids,
     extract_input_image_file_references,
 )
@@ -789,6 +790,57 @@ def test_v1_compact_store_true_is_coerced_to_false():
     request = V1ResponsesCompactRequest.model_validate(payload)
     compact = request.to_compact_request()
     assert compact.store is False
+
+
+def test_local_compact_fallback_preserves_state_anchors_tool_pairs_and_tail():
+    input_items: JsonValue = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old request"}]},
+        {
+            "type": "function_call",
+            "name": "update_plan",
+            "call_id": "call_plan",
+            "arguments": '{"plan":[]}',
+        },
+        {"type": "function_call_output", "call_id": "call_plan", "output": "plan updated"},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x" * 2000}]},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        '<codex_internal_context source="goal">keep fixing restart recovery</codex_internal_context>'
+                    ),
+                }
+            ],
+        },
+        {"type": "function_call_output", "call_id": "call_orphan", "output": "must be dropped without its call"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "latest retry"}]},
+    ]
+
+    output = build_local_compact_fallback_output(
+        input_items,
+        reason="test outage",
+        max_estimated_tokens=120,
+    )
+
+    marker = cast(Mapping[str, object], output[0])
+    assert marker["type"] == "message"
+    marker_content = cast(list[Mapping[str, str]], marker["content"])
+    assert marker_content[0]["text"].startswith("[local compact fallback]")
+    assert "Remote compaction was unavailable" in marker_content[0]["text"]
+    assert "test outage" in marker_content[0]["text"]
+    assert "codex-lb" not in marker_content[0]["text"]
+    assert input_items[1] in output
+    assert input_items[2] in output
+    assert input_items[4] in output
+    assert input_items[-1] in output
+    assert input_items[5] not in output
+    assert any(
+        isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
+        for item in output
+    )
 
 
 def test_responses_normalizes_assistant_input_text_to_output_text():

@@ -162,6 +162,8 @@ class Settings(BaseSettings):
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
     compact_failure_cooldown_seconds: float = Field(default=60.0, ge=0)
+    local_compact_fallback_enabled: bool = True
+    local_compact_fallback_max_estimated_tokens: int = Field(default=20_000, gt=0)
     stream_idle_timeout_seconds: float = 600.0
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)

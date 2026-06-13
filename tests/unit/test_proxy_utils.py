@@ -2189,6 +2189,8 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         compact_failure_cooldown_seconds=60.0,
+        local_compact_fallback_enabled=True,
+        local_compact_fallback_max_estimated_tokens=20_000,
         http_responses_session_bridge_gateway_safe_mode=False,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
@@ -17013,6 +17015,100 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_returns_local_fallback_after_codex_compaction_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_timeout_fallback")
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_handle_stream_error",
+        AsyncMock(return_value={"failure_class": "retryable_transient"}),
+    )
+
+    async def failing_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    headers = {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}
+
+    response = await service.compact_responses(payload, headers)
+
+    assert response.object == "response.compaction"
+    output = (response.model_extra or {})["output"]
+    assert isinstance(output, list)
+    assert output
+    marker = output[0]
+    assert isinstance(marker, dict)
+    assert marker["type"] == "message"
+    assert "local compact fallback" in str(marker["content"])
+    record_success.assert_not_awaited()
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_can_disable_local_fallback_after_compaction_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.local_compact_fallback_enabled = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_timeout_fallback_disabled")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_handle_stream_error",
+        AsyncMock(return_value={"failure_class": "retryable_transient"}),
+    )
+
+    async def failing_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", failing_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    headers = {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, headers)
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_fails_over_after_upstream_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -17137,21 +17233,22 @@ async def test_compact_responses_cools_down_after_all_upstream_timeouts(monkeypa
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
 
     try:
-        with pytest.raises(proxy_module.ProxyResponseError) as first_exc_info:
-            await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+        first_response = await service.compact_responses(
+            payload, {"session_id": "sid-compact"}, codex_session_affinity=True
+        )
 
-        first_exc = _assert_proxy_response_error(first_exc_info.value)
-        assert first_exc.status_code == 502
-        assert _proxy_error_code(first_exc) == "upstream_request_timeout"
+        assert first_response.object == "response.compaction"
         assert seen_excluded_account_ids == [set(), {account_a.id}]
         assert upstream_accounts == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
 
-        with pytest.raises(proxy_module.ProxyResponseError) as second_exc_info:
-            await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+        second_response = await service.compact_responses(
+            payload, {"session_id": "sid-compact"}, codex_session_affinity=True
+        )
 
-        second_exc = _assert_proxy_response_error(second_exc_info.value)
-        assert second_exc.status_code == 503
-        assert _proxy_error_code(second_exc) == "compact_upstream_unavailable"
+        assert second_response.object == "response.compaction"
+        second_output = (second_response.model_extra or {})["output"]
+        assert isinstance(second_output, list)
+        assert "local compact fallback" in str(second_output[0])
         assert seen_excluded_account_ids == [set(), {account_a.id}]
         assert upstream_accounts == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
     finally:

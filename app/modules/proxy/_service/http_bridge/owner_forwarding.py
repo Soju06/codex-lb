@@ -60,6 +60,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner,
+    _http_bridge_endpoint_matches_current_instance,
     _http_bridge_previous_response_alias_key,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_retiring_with_visible_requests,
@@ -264,7 +265,9 @@ class _HTTPBridgeOwnerForwardingMixin:
         except Exception:
             logger.debug("Failed to resolve HTTP bridge owner endpoint during anchor injection decision", exc_info=True)
             return False
-        return owner_endpoint is not None
+        if owner_endpoint is None:
+            return False
+        return not _http_bridge_endpoint_matches_current_instance(owner_endpoint, _service_get_settings())
 
     async def _forward_http_bridge_request_to_owner(
         self: Any,

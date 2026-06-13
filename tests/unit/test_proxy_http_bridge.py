@@ -3528,6 +3528,44 @@ async def test_stream_via_http_bridge_clears_injected_anchor_after_owner_unavail
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_forwardable_owner_excludes_current_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: Settings(
+            http_responses_session_bridge_instance_id="instance-a",
+            http_responses_session_bridge_advertise_base_url="http://127.0.0.1:2455",
+        ),
+    )
+    service._ring_membership = cast(
+        Any,
+        SimpleNamespace(resolve_endpoint=AsyncMock(return_value="http://127.0.0.1:2455/")),
+    )
+
+    forwardable = await service._http_bridge_can_forward_to_active_owner(
+        proxy_service.DurableBridgeLookup(
+            session_id="durable-1",
+            canonical_kind="session_header",
+            canonical_key="sid-restart",
+            api_key_scope="__anonymous__",
+            account_id="acc-1",
+            owner_instance_id="instance-old",
+            owner_epoch=2,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state="http_turn_old",
+            latest_response_id="resp_old",
+        )
+    )
+
+    assert forwardable is False
+    service._ring_membership.resolve_endpoint.assert_awaited_once_with("instance-old")
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_derived_prompt_cache_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -181,9 +181,9 @@ def _request_kind_from_headers(headers: Mapping[str, str]) -> str:
     if not isinstance(raw_request_kind, str):
         return "normal"
     request_kind = raw_request_kind.strip()
-    if not request_kind:
-        return "normal"
-    return request_kind[:64]
+    if request_kind == "compaction":
+        return request_kind
+    return "normal"
 
 
 def _remaining_budget_seconds(deadline: float) -> float:
@@ -201,10 +201,17 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
+def _compact_upstream_budget_seconds(
+    remaining_budget: float,
+    configured_timeout_seconds: float | None = None,
+) -> float:
     if remaining_budget <= 0:
         return 0.0
-    return min(8.0, remaining_budget)
+    reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
+    available = max(0.0, remaining_budget - reserve)
+    if configured_timeout_seconds is not None:
+        return min(configured_timeout_seconds, available)
+    return available
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -530,19 +537,8 @@ class _CompactMixin:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
-                if upstream_budget <= 0:
-                    logger.warning(
-                        "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
-                        request_id,
-                        target.id,
-                    )
-                    _raise_proxy_budget_exhausted()
-                timeout_tokens = _service_push_compact_timeout_overrides(
-                    connect_timeout_seconds=upstream_budget,
-                    total_timeout_seconds=upstream_budget,
-                )
                 create_lease: AdmissionLease | None = None
+                timeout_tokens: Any | None = None
                 try:
                     if account_response_create_lease is None:
                         account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
@@ -552,11 +548,35 @@ class _CompactMixin:
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "Compact request budget exhausted after admission waits request_id=%s account_id=%s",
+                            request_id,
+                            target.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    upstream_budget = _compact_upstream_budget_seconds(
+                        remaining_budget,
+                        getattr(settings, "upstream_compact_timeout_seconds", None),
+                    )
+                    if upstream_budget <= 0:
+                        logger.warning(
+                            "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
+                            request_id,
+                            target.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    timeout_tokens = _service_push_compact_timeout_overrides(
+                        connect_timeout_seconds=upstream_budget,
+                        total_timeout_seconds=upstream_budget,
+                    )
                     if route is not None:
                         route_mode = route.mode
                         route_pool_id = route.pool_id
                         route_endpoint_id = route.endpoint_id
                     route_trace = UpstreamProxyRouteTrace()
+                    upstream_started_at = time.monotonic()
                     try:
                         logger.info(
                             "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
@@ -566,7 +586,7 @@ class _CompactMixin:
                             upstream_budget,
                             remaining_budget,
                         )
-                        return await asyncio.wait_for(
+                        response = await asyncio.wait_for(
                             _call_with_supported_optional_kwargs(
                                 _service_core_compact_responses(),
                                 payload,
@@ -582,11 +602,22 @@ class _CompactMixin:
                             ),
                             timeout=upstream_budget,
                         )
-                    except asyncio.TimeoutError as exc:
-                        logger.warning(
-                            "Compact upstream call timed out request_id=%s account_id=%s timeout_seconds=%.2f",
+                        logger.info(
+                            "Compact upstream call complete request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
                             request_id,
                             target.id,
+                            time.monotonic() - upstream_started_at,
+                            upstream_budget,
+                        )
+                        return response
+                    except asyncio.TimeoutError as exc:
+                        logger.warning(
+                            "Compact upstream call timed out request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
+                            request_id,
+                            target.id,
+                            time.monotonic() - upstream_started_at,
                             upstream_budget,
                         )
                         raise ProxyResponseError(
@@ -603,7 +634,8 @@ class _CompactMixin:
                     if create_lease is not None:
                         create_lease.release()
                     await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                    _service_pop_compact_timeout_overrides(timeout_tokens)
+                    if timeout_tokens is not None:
+                        _service_pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
@@ -939,13 +971,18 @@ class _CompactMixin:
                             )
                             raise
                         if code == "upstream_request_timeout":
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
                             classified = await proxy._handle_stream_error(
                                 account,
                                 _upstream_error_from_openai(error),
                                 code,
                                 http_status=exc.status_code,
                             )
-                            await proxy._load_balancer.record_errors(account, 1)
                             if affinity.key is not None and affinity.kind is not None:
                                 try:
                                     async with proxy._repo_factory() as repos:
@@ -971,12 +1008,6 @@ class _CompactMixin:
                                 account.id,
                                 _account_attempt + 1,
                                 classified["failure_class"],
-                            )
-                            await proxy._settle_compact_api_key_usage(
-                                api_key=api_key,
-                                api_key_reservation=api_key_reservation,
-                                response=None,
-                                request_service_tier=request_service_tier,
                             )
                             raise
                         classified = await proxy._handle_stream_error(

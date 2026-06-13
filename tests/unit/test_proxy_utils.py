@@ -5735,7 +5735,7 @@ def test_sticky_key_for_responses_request_derives_when_payload_key_is_whitespace
 
 
 @pytest.mark.asyncio
-async def test_service_compact_budget_does_not_override_unbounded_read_timeout(monkeypatch):
+async def test_service_compact_budget_bounds_timeout_per_remaining_account_attempt(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -5767,8 +5767,8 @@ async def test_service_compact_budget_does_not_override_unbounded_read_timeout(m
 
     result = await service.compact_responses(payload, {"session_id": "sid-compact"})
 
-    assert captured["connect_timeout"] == pytest.approx(3.0)
-    assert captured["total_timeout"] is None
+    assert captured["connect_timeout"] == pytest.approx(1.5)
+    assert captured["total_timeout"] == pytest.approx(1.5)
     assert result.model_extra == {"output": []}
 
 

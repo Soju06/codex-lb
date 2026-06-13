@@ -45,6 +45,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -60,6 +61,7 @@ _CompactResponses = Callable[
 class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
+    _repo_factory: ProxyRepoFactory
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 

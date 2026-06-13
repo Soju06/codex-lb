@@ -44,6 +44,7 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -58,6 +59,19 @@ def test_relative_availability_settings_default_when_stored_values_are_null():
 
     assert proxy_service._relative_availability_power(settings) == 2.0
     assert proxy_service._relative_availability_top_k(settings) == 5
+
+
+def test_compact_attempt_timeout_splits_remaining_budget_across_account_attempts():
+    assert proxy_compact_service._compact_attempt_timeout_seconds(600.0) == pytest.approx(600.0)
+    assert proxy_compact_service._compact_attempt_timeout_seconds(600.0, account_attempts_remaining=2) == pytest.approx(
+        300.0
+    )
+    assert proxy_compact_service._compact_attempt_timeout_seconds(180.0, account_attempts_remaining=2) == pytest.approx(
+        90.0
+    )
+    assert proxy_compact_service._compact_attempt_timeout_seconds(
+        600.0, 120.0, account_attempts_remaining=2
+    ) == pytest.approx(120.0)
 
 
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
@@ -16989,6 +17003,80 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
     assert _proxy_error_code(exc) == "upstream_unavailable"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_fails_over_after_upstream_timeout(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+    account_a = _make_account("acc_compact_silent_upstream_a")
+    account_b = _make_account("acc_compact_silent_upstream_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_accounts: list[str | None] = []
+    call_order: list[str] = []
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "retryable_transient"}
+
+    async def settle_compact_api_key_usage(**kwargs):
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    record_errors = AsyncMock()
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_accounts.append(account_id)
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    handle_stream_error_mock = AsyncMock(side_effect=handle_stream_error)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error_mock)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    response = await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+    assert response.model_extra == {"output": []}
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert upstream_accounts == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
+    handle_stream_error_mock.assert_awaited_once()
+    assert call_order[:2] == ["handle_stream_error", "settle_compact_api_key_usage"]
+    record_errors.assert_not_awaited()
+    sticky_sessions.delete.assert_awaited_once_with("sid-compact", kind=proxy_service.StickySessionKind.CODEX_SESSION)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["error_code"] is None
 
 
 @pytest.mark.asyncio

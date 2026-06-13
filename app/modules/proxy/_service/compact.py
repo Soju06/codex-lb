@@ -169,6 +169,21 @@ def _remaining_budget_seconds(deadline: float) -> float:
     return cast(Callable[[float], float], _service_global("_remaining_budget_seconds"))(deadline)
 
 
+def _compact_attempt_timeout_seconds(
+    remaining_budget: float,
+    configured_timeout_seconds: float | None = None,
+    *,
+    account_attempts_remaining: int = 1,
+) -> float:
+    if remaining_budget <= 0:
+        return 0.0
+    if account_attempts_remaining > 1:
+        remaining_budget = remaining_budget / account_attempts_remaining
+    if configured_timeout_seconds is not None:
+        return min(configured_timeout_seconds, remaining_budget)
+    return remaining_budget
+
+
 def _raise_proxy_budget_exhausted() -> NoReturn:
     cast(Callable[[], NoReturn], _service_global("_raise_proxy_budget_exhausted"))()
 
@@ -479,6 +494,8 @@ class _CompactMixin:
             async def _call_compact(
                 target: Account,
                 account_response_create_lease: AccountLease | None = None,
+                *,
+                account_attempts_remaining: int = 1,
             ) -> CompactResponsePayload:
                 nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
@@ -491,15 +508,15 @@ class _CompactMixin:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                if base_settings.upstream_compact_timeout_seconds is None:
-                    timeout_tokens = _service_push_compact_timeout_overrides(
-                        connect_timeout_seconds=remaining_budget,
-                    )
-                else:
-                    timeout_tokens = _service_push_compact_timeout_overrides(
-                        connect_timeout_seconds=remaining_budget,
-                        total_timeout_seconds=remaining_budget,
-                    )
+                attempt_timeout = _compact_attempt_timeout_seconds(
+                    remaining_budget,
+                    getattr(base_settings, "upstream_compact_timeout_seconds", None),
+                    account_attempts_remaining=account_attempts_remaining,
+                )
+                timeout_tokens = _service_push_compact_timeout_overrides(
+                    connect_timeout_seconds=attempt_timeout,
+                    total_timeout_seconds=attempt_timeout,
+                )
                 create_lease: AdmissionLease | None = None
                 try:
                     if account_response_create_lease is None:
@@ -663,7 +680,11 @@ class _CompactMixin:
                     try:
                         account_response_create_lease = selected_account_response_create_lease
                         selected_account_response_create_lease = None
-                        response = await _call_compact(account, account_response_create_lease)
+                        response = await _call_compact(
+                            account,
+                            account_response_create_lease,
+                            account_attempts_remaining=_compact_max_account_attempts() - _account_attempt,
+                        )
                         actual_service_tier = _service_tier_from_response(response)
                         await proxy._load_balancer.record_success(account)
                         await proxy._settle_compact_api_key_usage(
@@ -834,6 +855,63 @@ class _CompactMixin:
                             transient_exhausted = True
                             break
                         if _is_account_neutral_error_code(code):
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise
+                        if code == "upstream_request_timeout":
+                            classified = await proxy._handle_stream_error(
+                                account,
+                                _upstream_error_from_openai(error),
+                                code,
+                                http_status=exc.status_code,
+                            )
+                            if affinity.key is not None and affinity.kind is not None:
+                                try:
+                                    async with proxy._repo_factory() as repos:
+                                        await repos.sticky_sessions.delete(affinity.key, kind=affinity.kind)
+                                    logger.info(
+                                        "Compact sticky mapping cleared after upstream timeout request_id=%s "
+                                        "sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to clear compact sticky mapping after upstream timeout "
+                                        "request_id=%s sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                        exc_info=True,
+                                    )
+                            if (
+                                getattr(base_settings, "deterministic_failover_enabled", True)
+                                and file_preferred_account_id is None
+                            ):
+                                action = failover_decision(
+                                    failure_class=classified["failure_class"],
+                                    downstream_visible=False,
+                                    candidates_remaining=_compact_max_account_attempts() - _account_attempt - 1,
+                                )
+                            else:
+                                action = "surface"
+                            logger.info(
+                                "Failover decision request_id=%s transport=compact account_id=%s "
+                                "attempt=%d failure_class=%s action=%s",
+                                request_id,
+                                account.id,
+                                _account_attempt + 1,
+                                classified["failure_class"],
+                                action,
+                            )
+                            if action == "failover_next":
+                                last_exc = exc
+                                excluded_account_ids.add(account.id)
+                                transient_exhausted = True
+                                break
                             await proxy._settle_compact_api_key_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

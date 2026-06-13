@@ -809,6 +809,34 @@ compact client before exhausting eligible accounts.
 - **THEN** the service-level auth refresh/failover path handles it
 - **AND** the low-level compact transport does not mark it as a generic same-contract transport retry
 
+### Requirement: Compact upstream timeouts fail over before surfacing
+
+The proxy MUST treat a compact upstream timeout before any valid compact result
+as a pre-visible retryable transient account failure. The proxy MUST clear the
+stale compact affinity mapping for that request, exclude the timed-out account,
+and try another eligible account within the same compact request when one is
+available. Per-account compact upstream timeouts MUST share the remaining
+request budget across remaining eligible account attempts so the first timed-out
+account cannot consume the full retry window. The proxy MUST preserve
+account-pinned compact routing, such as file-scoped routing, and fail closed
+instead of crossing account boundaries when the request requires a specific
+account.
+
+#### Scenario: compact upstream timeout uses another account
+
+- **GIVEN** at least two accounts are eligible for a compact request
+- **AND** the selected account times out before returning a valid compact result
+- **WHEN** another eligible account can complete the compact request
+- **THEN** the downstream compact response succeeds from the second account
+- **AND** the compact affinity mapping for the timed-out account is cleared
+- **AND** the selected account is excluded from further attempts for that compact request
+
+#### Scenario: compact upstream timeout keeps retry budget for later accounts
+
+- **GIVEN** a compact request has multiple eligible account attempts remaining
+- **WHEN** calculating the upstream timeout for the current account attempt
+- **THEN** the proxy divides the remaining compact budget across the remaining account attempts
+
 ### Requirement: Pre-visible proxy auth failures fail over after forced refresh
 
 The proxy MUST treat repeated account-local authentication failures as

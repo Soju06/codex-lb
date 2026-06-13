@@ -74,6 +74,12 @@ def test_compact_attempt_timeout_splits_remaining_budget_across_account_attempts
     ) == pytest.approx(120.0)
 
 
+def test_runtime_settings_default_caps_compact_upstream_timeout():
+    settings = Settings()
+
+    assert settings.upstream_compact_timeout_seconds == pytest.approx(30.0)
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_missing_tool_precreated",
@@ -2182,6 +2188,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
+        compact_failure_cooldown_seconds=60.0,
         http_responses_session_bridge_gateway_safe_mode=False,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
@@ -17077,6 +17084,78 @@ async def test_compact_responses_fails_over_after_upstream_timeout(monkeypatch):
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
     assert request_logs.calls[0]["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_cools_down_after_all_upstream_timeouts(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.compact_failure_cooldown_seconds = 30.0
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+    account_a = _make_account("acc_compact_timeout_cooldown_a")
+    account_b = _make_account("acc_compact_timeout_cooldown_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    upstream_accounts: list[str | None] = []
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        return {"failure_class": "retryable_transient"}
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_accounts.append(account_id)
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+        )
+
+    proxy_compact_service._COMPACT_FAILURE_COOLDOWNS.clear()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as first_exc_info:
+            await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+        first_exc = _assert_proxy_response_error(first_exc_info.value)
+        assert first_exc.status_code == 502
+        assert _proxy_error_code(first_exc) == "upstream_request_timeout"
+        assert seen_excluded_account_ids == [set(), {account_a.id}]
+        assert upstream_accounts == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
+
+        with pytest.raises(proxy_module.ProxyResponseError) as second_exc_info:
+            await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+        second_exc = _assert_proxy_response_error(second_exc_info.value)
+        assert second_exc.status_code == 503
+        assert _proxy_error_code(second_exc) == "compact_upstream_unavailable"
+        assert seen_excluded_account_ids == [set(), {account_a.id}]
+        assert upstream_accounts == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
+    finally:
+        proxy_compact_service._COMPACT_FAILURE_COOLDOWNS.clear()
 
 
 @pytest.mark.asyncio

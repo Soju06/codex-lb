@@ -52,6 +52,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
 _REQUEST_TRANSPORT_HTTP = "http"
+_COMPACT_FAILURE_COOLDOWNS: dict[str, float] = {}
 _CompactResponses = Callable[
     [ResponsesCompactRequest, Mapping[str, str], str, str | None],
     Awaitable[CompactResponsePayload],
@@ -184,6 +185,36 @@ def _compact_attempt_timeout_seconds(
     if configured_timeout_seconds is not None:
         return min(configured_timeout_seconds, remaining_budget)
     return remaining_budget
+
+
+def _compact_cooldown_key(affinity: _AffinityPolicy) -> str | None:
+    if affinity.key is None or affinity.kind is None:
+        return None
+    return f"{affinity.kind.value}:{affinity.key}"
+
+
+def _compact_cooldown_remaining_seconds(cooldown_key: str | None, *, now: float) -> float:
+    if cooldown_key is None:
+        return 0.0
+    expires_at = _COMPACT_FAILURE_COOLDOWNS.get(cooldown_key)
+    if expires_at is None:
+        return 0.0
+    remaining = expires_at - now
+    if remaining <= 0:
+        _COMPACT_FAILURE_COOLDOWNS.pop(cooldown_key, None)
+        return 0.0
+    return remaining
+
+
+def _record_compact_failure_cooldown(
+    cooldown_key: str | None,
+    *,
+    now: float,
+    cooldown_seconds: float,
+) -> None:
+    if cooldown_key is None or cooldown_seconds <= 0:
+        return
+    _COMPACT_FAILURE_COOLDOWNS[cooldown_key] = now + cooldown_seconds
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -431,6 +462,23 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        cooldown_key = _compact_cooldown_key(affinity)
+        cooldown_remaining = _compact_cooldown_remaining_seconds(cooldown_key, now=start)
+        if cooldown_remaining > 0:
+            logger.warning(
+                "Compact upstream cooldown active request_id=%s sticky_kind=%s cooldown_remaining_seconds=%.2f",
+                request_id,
+                affinity.kind.value if affinity.kind is not None else None,
+                cooldown_remaining,
+            )
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    "compact_upstream_unavailable",
+                    "Compact upstream is cooling down after repeated timeouts; retry shortly.",
+                    error_type="server_error",
+                ),
+            )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = "session_header"
@@ -914,6 +962,11 @@ class _CompactMixin:
                                 excluded_account_ids.add(account.id)
                                 transient_exhausted = True
                                 break
+                            _record_compact_failure_cooldown(
+                                cooldown_key,
+                                now=_service_time().monotonic(),
+                                cooldown_seconds=getattr(base_settings, "compact_failure_cooldown_seconds", 60.0),
+                            )
                             await proxy._settle_compact_api_key_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

@@ -31,6 +31,16 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 pytestmark = pytest.mark.unit
 
 
+def _without_installation_metadata(text: str) -> dict[str, Any]:
+    payload = json.loads(text)
+    client_metadata = payload.get("client_metadata")
+    if isinstance(client_metadata, dict):
+        client_metadata.pop("x-codex-installation-id", None)
+        if not client_metadata:
+            payload.pop("client_metadata", None)
+    return payload
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 
@@ -9810,7 +9820,13 @@ async def test_retry_http_bridge_request_on_fresh_upstream_replays_retry_safe_in
     # executes as a fresh turn using the captured unanchored payload.
     assert request_state.previous_response_id is None
     assert request_state.proxy_injected_previous_response_id is False
-    send_text.assert_awaited_once_with('{"type":"response.create","input":"full-history-fallback"}')
+    send_text.assert_awaited_once()
+    send_text_await = send_text.await_args
+    assert send_text_await is not None
+    assert _without_installation_metadata(send_text_await.args[0]) == {
+        "type": "response.create",
+        "input": "full-history-fallback",
+    }
 
 
 @pytest.mark.asyncio

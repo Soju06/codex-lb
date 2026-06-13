@@ -804,6 +804,13 @@ def test_local_compact_fallback_preserves_state_anchors_tool_pairs_and_tail():
         {"type": "function_call_output", "call_id": "call_plan", "output": "plan updated"},
         {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x" * 2000}]},
         {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "status": "completed",
+            "execution": "server",
+            "arguments": {"query": "codex-lb"},
+        },
+        {
             "type": "message",
             "role": "user",
             "content": [
@@ -816,13 +823,27 @@ def test_local_compact_fallback_preserves_state_anchors_tool_pairs_and_tail():
             ],
         },
         {"type": "function_call_output", "call_id": "call_orphan", "output": "must be dropped without its call"},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_orphan_search",
+            "status": "completed",
+            "execution": "server",
+            "arguments": {"query": "must be dropped without output"},
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "status": "completed",
+            "execution": "server",
+            "tools": [],
+        },
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "latest retry"}]},
     ]
 
     output = build_local_compact_fallback_output(
         input_items,
         reason="test outage",
-        max_estimated_tokens=120,
+        max_estimated_tokens=240,
     )
 
     marker = cast(Mapping[str, object], output[0])
@@ -835,8 +856,11 @@ def test_local_compact_fallback_preserves_state_anchors_tool_pairs_and_tail():
     assert input_items[1] in output
     assert input_items[2] in output
     assert input_items[4] in output
+    assert input_items[5] in output
     assert input_items[-1] in output
-    assert input_items[5] not in output
+    assert input_items[6] not in output
+    assert input_items[7] not in output
+    assert input_items[8] in output
     assert any(
         isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
         for item in output

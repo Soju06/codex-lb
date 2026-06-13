@@ -39,9 +39,9 @@ _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content",
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
-_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
+_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call", "tool_search_call"})
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
-    {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+    {"function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output"}
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"

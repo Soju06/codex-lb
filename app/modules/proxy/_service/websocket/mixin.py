@@ -2885,7 +2885,16 @@ class _WebSocketMixin:
             if retry_error_code is not None:
                 return downstream_text
 
-        if event_type == "response.completed" and continuity_state is not None:
+        completed_usage = (
+            event.response.usage if event_type == "response.completed" and event and event.response else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+        if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
             _record_websocket_continuity_completion(
                 continuity_state,
                 request_state=request_state,
@@ -3197,14 +3206,15 @@ class _WebSocketMixin:
             error_message=error_message,
             error=error_payload,
         )
-        if event_type in {"response.failed", "response.incomplete", "error"}:
-            settlement.record_success = False
-        if (
+        completed_empty_prewarm = (
             event_type == "response.completed"
             and request_state.request_kind == "prewarm"
             and usage is not None
             and usage.output_tokens == 0
-        ):
+        )
+        if event_type in {"response.failed", "response.incomplete", "error"}:
+            settlement.record_success = False
+        if completed_empty_prewarm:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(

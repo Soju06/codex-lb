@@ -61,6 +61,28 @@ def test_relative_availability_settings_default_when_stored_values_are_null():
     assert proxy_service._relative_availability_top_k(settings) == 5
 
 
+def test_compact_upstream_budget_uses_remaining_budget_with_cap_and_reserve():
+    assert proxy_compact_service._compact_upstream_budget_seconds(180.0) == pytest.approx(75.0)
+    assert proxy_compact_service._compact_upstream_budget_seconds(20.0) == pytest.approx(16.0)
+    assert proxy_compact_service._compact_upstream_budget_seconds(0.0) == pytest.approx(0.0)
+
+
+def test_compact_upstream_budget_honors_configured_timeout_with_reserve():
+    assert proxy_compact_service._compact_upstream_budget_seconds(650.0, 600.0) == pytest.approx(600.0)
+    assert proxy_compact_service._compact_upstream_budget_seconds(180.0, 600.0) == pytest.approx(150.0)
+    assert proxy_compact_service._compact_upstream_budget_seconds(20.0, 600.0) == pytest.approx(16.0)
+    assert proxy_compact_service._compact_upstream_budget_seconds(180.0, 30.0) == pytest.approx(30.0)
+
+
+def test_compact_upstream_budget_treats_missing_runtime_timeout_as_default():
+    class RuntimeSettings:
+        pass
+
+    configured = getattr(RuntimeSettings(), "upstream_compact_timeout_seconds", None)
+
+    assert proxy_compact_service._compact_upstream_budget_seconds(180.0, configured) == pytest.approx(75.0)
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_missing_tool_precreated",
@@ -5760,8 +5782,8 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
 
     result = await service.compact_responses(payload, {"session_id": "sid-compact"})
 
-    assert captured["connect_timeout"] == pytest.approx(3.0)
-    assert captured["total_timeout"] == pytest.approx(3.0)
+    assert captured["connect_timeout"] == pytest.approx(2.0)
+    assert captured["total_timeout"] == pytest.approx(2.0)
     assert result.model_extra == {"output": []}
     assert request_logs.calls[-1]["request_kind"] == "normal"
 
@@ -9571,7 +9593,7 @@ async def test_prepare_websocket_response_create_request_does_not_infer_previous
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_response_create_request_keeps_codex_session_full_replay(monkeypatch):
+async def test_prepare_websocket_response_create_request_injects_anchor_for_codex_session_full_replay(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reserve_usage = AsyncMock(return_value=None)
@@ -9630,10 +9652,10 @@ async def test_prepare_websocket_response_create_request_keeps_codex_session_ful
     )
 
     upstream_payload = json.loads(prepared.text_data)
-    assert "previous_response_id" not in upstream_payload
-    assert upstream_payload["input"] == [*historical_input, new_input]
-    assert prepared.request_state.previous_response_id is None
-    assert prepared.request_state.proxy_injected_previous_response_id is False
+    assert upstream_payload["previous_response_id"] == "resp_completed_anchor"
+    assert upstream_payload["input"] == [new_input]
+    assert prepared.request_state.previous_response_id == "resp_completed_anchor"
+    assert prepared.request_state.proxy_injected_previous_response_id is True
     assert prepared.request_state.input_item_count == 3
     assert prepared.request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(
         [*historical_input, new_input]
@@ -9860,7 +9882,9 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_input_count=len(historical_input),
         last_completed_response_id="resp_completed_anchor",
-        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(
+            [{"role": "user", "content": [{"type": "input_text", "text": "different stored question"}]}]
+        ),
     )
 
     monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048)
@@ -9931,7 +9955,9 @@ async def test_prepare_websocket_full_replay_rejects_oversized_unslimmable_paylo
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_input_count=len(historical_input),
         last_completed_response_id="resp_completed_anchor",
-        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(
+            [{"role": "user", "content": [{"type": "input_text", "text": "different stored question"}]}]
+        ),
     )
 
     monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048)
@@ -10985,6 +11011,57 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     handle_stream_error.assert_not_awaited()
     assert incomplete_upstream_control.reconnect_requested is False
     assert request_logs.calls[-1]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_prewarm_continuity")
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock())
+
+    payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_prewarm_empty",
+            "usage": {"input_tokens": 9, "output_tokens": 0, "total_tokens": 9},
+        },
+    }
+    event = parse_sse_event(f"data: {json.dumps(payload)}\n\n")
+    assert event is not None
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=2,
+        last_completed_response_id="resp_existing",
+        last_completed_input_prefix_fingerprint="existing-fingerprint",
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prewarm_empty",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        input_item_count=1,
+        input_full_fingerprint="prewarm-fingerprint",
+    )
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        continuity_state=continuity_state,
+    )
+
+    assert continuity_state.last_completed_response_id == "resp_existing"
+    assert continuity_state.last_completed_input_count == 2
+    assert continuity_state.last_completed_input_prefix_fingerprint == "existing-fingerprint"
 
 
 @pytest.mark.asyncio
@@ -17153,7 +17230,9 @@ async def test_compact_responses_bounds_silent_upstream_compaction(monkeypatch):
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
-    monkeypatch.setattr(proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining: 0.01)
+    monkeypatch.setattr(
+        proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining, _configured=None: 0.01
+    )
     monkeypatch.setattr(proxy_service, "core_compact_responses", silent_upstream)
 
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
@@ -17208,7 +17287,9 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
-    monkeypatch.setattr(proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining: 0.01)
+    monkeypatch.setattr(
+        proxy_compact_service, "_compact_upstream_budget_seconds", lambda _remaining, _configured=None: 0.01
+    )
     monkeypatch.setattr(proxy_service, "core_compact_responses", silent_upstream)
     _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
 
@@ -17223,7 +17304,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     assert seen_excluded_account_ids == [set()]
     assert upstream_accounts == [account_a.chatgpt_account_id]
     handle_stream_error.assert_awaited_once()
-    record_errors.assert_awaited_once_with(account_a, 1)
+    record_errors.assert_not_awaited()
     sticky_sessions.delete.assert_awaited_once_with("sid-compact", kind=proxy_service.StickySessionKind.CODEX_SESSION)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id

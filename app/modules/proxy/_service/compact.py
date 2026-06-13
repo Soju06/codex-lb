@@ -52,6 +52,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
 _REQUEST_TRANSPORT_HTTP = "http"
+_COMPACT_UPSTREAM_DEFAULT_MAX_SECONDS = 75.0
 _CompactResponses = Callable[
     [ResponsesCompactRequest, Mapping[str, str], str, str | None],
     Awaitable[CompactResponsePayload],
@@ -201,10 +202,17 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
+def _compact_upstream_budget_seconds(
+    remaining_budget: float,
+    configured_timeout_seconds: float | None = None,
+) -> float:
     if remaining_budget <= 0:
         return 0.0
-    return min(8.0, remaining_budget)
+    reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
+    available = max(0.0, remaining_budget - reserve)
+    if configured_timeout_seconds is not None:
+        return min(configured_timeout_seconds, available)
+    return min(_COMPACT_UPSTREAM_DEFAULT_MAX_SECONDS, available)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -530,7 +538,10 @@ class _CompactMixin:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
+                upstream_budget = _compact_upstream_budget_seconds(
+                    remaining_budget,
+                    getattr(settings, "upstream_compact_timeout_seconds", None),
+                )
                 if upstream_budget <= 0:
                     logger.warning(
                         "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
@@ -557,6 +568,7 @@ class _CompactMixin:
                         route_pool_id = route.pool_id
                         route_endpoint_id = route.endpoint_id
                     route_trace = UpstreamProxyRouteTrace()
+                    upstream_started_at = time.monotonic()
                     try:
                         logger.info(
                             "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
@@ -566,7 +578,7 @@ class _CompactMixin:
                             upstream_budget,
                             remaining_budget,
                         )
-                        return await asyncio.wait_for(
+                        response = await asyncio.wait_for(
                             _call_with_supported_optional_kwargs(
                                 _service_core_compact_responses(),
                                 payload,
@@ -581,11 +593,22 @@ class _CompactMixin:
                             ),
                             timeout=upstream_budget,
                         )
-                    except asyncio.TimeoutError as exc:
-                        logger.warning(
-                            "Compact upstream call timed out request_id=%s account_id=%s timeout_seconds=%.2f",
+                        logger.info(
+                            "Compact upstream call complete request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
                             request_id,
                             target.id,
+                            time.monotonic() - upstream_started_at,
+                            upstream_budget,
+                        )
+                        return response
+                    except asyncio.TimeoutError as exc:
+                        logger.warning(
+                            "Compact upstream call timed out request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
+                            request_id,
+                            target.id,
+                            time.monotonic() - upstream_started_at,
                             upstream_budget,
                         )
                         raise ProxyResponseError(
@@ -944,7 +967,6 @@ class _CompactMixin:
                                 code,
                                 http_status=exc.status_code,
                             )
-                            await proxy._load_balancer.record_errors(account, 1)
                             if affinity.key is not None and affinity.kind is not None:
                                 try:
                                     async with proxy._repo_factory() as repos:

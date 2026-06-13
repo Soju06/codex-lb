@@ -70,6 +70,7 @@ class Account(Base):
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
     seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_installation_id: Mapped[str] = mapped_column(String, default=lambda: str(uuid.uuid4()), nullable=False)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
     routing_policy: Mapped[str] = mapped_column(
         String,

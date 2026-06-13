@@ -76,6 +76,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _prewarm_response_timeout_seconds,
     _release_websocket_response_create_gate,
     _response_create_client_metadata,
+    _response_create_text_with_account_installation_id,
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
@@ -473,6 +474,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
             )
+        text_data = _response_create_text_with_account_installation_id(text_data, account=session.account)
+        request_state.request_text = text_data
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
@@ -502,6 +505,8 @@ class _HTTPBridgeRequestSubmitMixin:
             session.queued_request_count += 1
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
+            text_data = _response_create_text_with_account_installation_id(text_data, account=session.account)
+            request_state.request_text = text_data
             self._start_request_state_api_key_reservation_heartbeat(
                 request_state,
                 api_key=request_state.api_key,
@@ -952,6 +957,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
+                retry_text_data = _response_create_text_with_account_installation_id(
+                    retry_text_data,
+                    account=session.account,
+                )
+                request_state.request_text = retry_text_data
                 await session.upstream.send_text(retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
@@ -1141,6 +1151,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
+            retry_text = _response_create_text_with_account_installation_id(retry_text, account=session.account)
+            request_state.request_text = retry_text
             await session.upstream.send_text(retry_text)
             session.last_used_at = _service_time().monotonic()
             return True

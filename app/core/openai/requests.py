@@ -44,7 +44,6 @@ _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output"}
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
-_PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
 
 def _json_mapping_or_none(value: JsonValue) -> Mapping[str, JsonValue] | None:
@@ -844,7 +843,8 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
-        _compact_trim_suffix_indices(
+        _compact_semantic_tail_indices(
+            input_value,
             token_counts,
             selected_indices=selected_indices,
             start_index=head_count,
@@ -1016,8 +1016,6 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         stripped = text.lstrip()
         if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
             return True
-        if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
-            return True
     return False
 
 
@@ -1057,7 +1055,7 @@ def _compact_latest_semantic_tail_index(
     )
     for index in range(len(input_items) - 1, -1, -1):
         item = input_items[index]
-        if _compact_item_is_trim_marker(item):
+        if _compact_item_is_low_value_tail_context(item):
             continue
         if token_counts[index] > item_budget:
             continue
@@ -1075,7 +1073,7 @@ def _compact_local_fallback_tail_indices(
     used = 0
     indices: set[int] = set()
     for index in range(len(input_items) - 1, -1, -1):
-        if index in selected_indices or _compact_item_is_trim_marker(input_items[index]):
+        if index in selected_indices or _compact_item_is_low_value_tail_context(input_items[index]):
             continue
         token_count = token_counts[index]
         if used + token_count > token_budget:
@@ -1091,6 +1089,29 @@ def _compact_item_is_trim_marker(item: JsonValue) -> bool:
     for text in _compact_item_texts(item):
         if text.lstrip().startswith("[compact trim]"):
             return True
+    return False
+
+
+def _compact_item_is_low_value_tail_context(item: JsonValue) -> bool:
+    if _compact_item_is_trim_marker(item):
+        return True
+    if not is_json_mapping(item):
+        return False
+
+    role = item.get("role")
+    texts = [text.lstrip() for text in _compact_item_texts(item)]
+    if role == "developer":
+        return any(
+            text.startswith("<permissions instructions>")
+            or text.startswith("<collaboration_mode>")
+            or text.startswith("<skills_instructions>")
+            or text.startswith("<personality_spec>")
+            for text in texts
+        )
+    if role == "user":
+        has_agents = any(text.startswith("# AGENTS.md instructions for ") for text in texts)
+        has_environment = any(text.startswith("<environment_context>") for text in texts)
+        return has_agents and has_environment
     return False
 
 
@@ -1139,6 +1160,27 @@ def _compact_trim_suffix_indices(
             break
         if not indices and token_count > token_budget:
             break
+        used += token_count
+        indices.add(index)
+    return indices
+
+
+def _compact_semantic_tail_indices(
+    input_items: list[JsonValue],
+    token_counts: list[int],
+    *,
+    selected_indices: set[int],
+    start_index: int,
+    token_budget: int,
+) -> set[int]:
+    used = 0
+    indices: set[int] = set()
+    for index in range(len(token_counts) - 1, start_index - 1, -1):
+        if index in selected_indices or _compact_item_is_low_value_tail_context(input_items[index]):
+            continue
+        token_count = token_counts[index]
+        if used + token_count > token_budget:
+            continue
         used += token_count
         indices.add(index)
     return indices

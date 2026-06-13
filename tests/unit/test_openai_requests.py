@@ -908,6 +908,62 @@ def test_local_compact_fallback_scans_past_large_tail_blockers_and_trim_markers(
     )
 
 
+def test_compact_trim_prefers_semantic_tail_over_current_turn_bootstrap():
+    task_item: JsonValue = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "actual task: plan cherry picks and create zh PR"}],
+    }
+    progress_item: JsonValue = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "I found the PR destinations and am checking comments."}],
+    }
+    developer_bootstrap: JsonValue = {
+        "type": "message",
+        "role": "developer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "<permissions instructions>\nnever ask approval\n</permissions instructions>",
+            },
+            {"type": "input_text", "text": "<collaboration_mode># Plan Mode\n" + "plan mode rules\n" * 2000},
+            {"type": "input_text", "text": "<skills_instructions>\n" + "skill docs\n" * 4000},
+        ],
+    }
+    workspace_bootstrap: JsonValue = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "# AGENTS.md instructions for /workspace\n" + "workspace rules\n" * 4000},
+            {"type": "input_text", "text": "<environment_context>\n  <cwd>/workspace</cwd>\n</environment_context>"},
+        ],
+    }
+    payload = {
+        "model": "gpt-5.5",
+        "input": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "old " * 200_000}]},
+            task_item,
+            progress_item,
+            developer_bootstrap,
+            workspace_bootstrap,
+        ],
+    }
+
+    dumped = ResponsesCompactRequest.model_validate(payload).to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert task_item in dumped_input
+    assert progress_item in dumped_input
+    assert developer_bootstrap not in dumped_input
+    assert workspace_bootstrap not in dumped_input
+    assert any(
+        isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
+        for item in dumped_input
+    )
+
+
 def test_responses_normalizes_assistant_input_text_to_output_text():
     payload = {
         "model": "gpt-5.1",

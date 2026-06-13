@@ -718,6 +718,7 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _LOCAL_COMPACT_FALLBACK_DEFAULT_MAX_ESTIMATED_TOKENS = 20_000
+_LOCAL_COMPACT_FALLBACK_MAX_SINGLE_TAIL_ITEM_ESTIMATED_TOKENS = 8_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
 
 
@@ -874,15 +875,20 @@ def build_local_compact_fallback_output(
     token_counts = [_estimated_json_tokens(item) for item in input_items]
     marker_tokens = _estimated_json_tokens(marker)
     selected_indices = _compact_state_anchor_indices(input_items)
-    if input_items:
-        selected_indices.add(len(input_items) - 1)
+    latest_semantic_index = _compact_latest_semantic_tail_index(
+        input_items,
+        token_counts,
+        max_estimated_tokens=max_estimated_tokens,
+    )
+    if latest_semantic_index is not None:
+        selected_indices.add(latest_semantic_index)
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     suffix_budget = max(0, max_estimated_tokens - marker_tokens - selected_tokens)
     selected_indices.update(
-        _compact_trim_suffix_indices(
+        _compact_local_fallback_tail_indices(
+            input_items,
             token_counts,
             selected_indices=selected_indices,
-            start_index=0,
             token_budget=suffix_budget,
         )
     )
@@ -1037,6 +1043,55 @@ def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:
         if isinstance(text, str):
             texts.append(text)
     return texts
+
+
+def _compact_latest_semantic_tail_index(
+    input_items: list[JsonValue],
+    token_counts: list[int],
+    *,
+    max_estimated_tokens: int,
+) -> int | None:
+    item_budget = max(
+        1,
+        min(_LOCAL_COMPACT_FALLBACK_MAX_SINGLE_TAIL_ITEM_ESTIMATED_TOKENS, max_estimated_tokens),
+    )
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if _compact_item_is_trim_marker(item):
+            continue
+        if token_counts[index] > item_budget:
+            continue
+        return index
+    return None
+
+
+def _compact_local_fallback_tail_indices(
+    input_items: list[JsonValue],
+    token_counts: list[int],
+    *,
+    selected_indices: set[int],
+    token_budget: int,
+) -> set[int]:
+    used = 0
+    indices: set[int] = set()
+    for index in range(len(input_items) - 1, -1, -1):
+        if index in selected_indices or _compact_item_is_trim_marker(input_items[index]):
+            continue
+        token_count = token_counts[index]
+        if used + token_count > token_budget:
+            continue
+        used += token_count
+        indices.add(index)
+    return indices
+
+
+def _compact_item_is_trim_marker(item: JsonValue) -> bool:
+    if not is_json_mapping(item):
+        return False
+    for text in _compact_item_texts(item):
+        if text.lstrip().startswith("[compact trim]"):
+            return True
+    return False
 
 
 def _compact_trimmed_input_with_markers(

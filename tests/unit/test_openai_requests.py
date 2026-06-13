@@ -867,6 +867,47 @@ def test_local_compact_fallback_preserves_state_anchors_tool_pairs_and_tail():
     )
 
 
+def test_local_compact_fallback_scans_past_large_tail_blockers_and_trim_markers():
+    task_item: JsonValue = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "actual task: create the Chinese translation PR"}],
+    }
+    giant_technical_item: JsonValue = {
+        "type": "function_call_output",
+        "call_id": "call_big",
+        "output": "bootstrap/log noise " * 20_000,
+    }
+    trim_marker: JsonValue = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "[compact trim] Omitted 2 input items (~14552 estimated tokens) before forwarding this "
+                    "oversized compact request upstream."
+                ),
+            }
+        ],
+    }
+    input_items: JsonValue = [task_item, giant_technical_item, trim_marker]
+
+    output = build_local_compact_fallback_output(
+        input_items,
+        reason="upstream timeout",
+        max_estimated_tokens=80,
+    )
+
+    assert task_item in output
+    assert giant_technical_item not in output
+    assert trim_marker not in output
+    assert any(
+        isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
+        for item in output
+    )
+
+
 def test_responses_normalizes_assistant_input_text_to_output_text():
     payload = {
         "model": "gpt-5.1",

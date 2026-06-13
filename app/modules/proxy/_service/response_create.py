@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 from app.core.clients.proxy import (
     ImageFetchSession,
@@ -191,6 +192,36 @@ def _response_create_text_with_size_guard(
             )
             return None
     return text_data
+
+
+def _response_create_text_with_account_installation_id(
+    text_data: str,
+    *,
+    account: Any,
+) -> str:
+    installation_id = getattr(account, "codex_installation_id", None)
+    if not isinstance(installation_id, str) or not installation_id.strip():
+        installation_id = str(uuid4())
+        try:
+            setattr(account, "codex_installation_id", installation_id)
+        except Exception:
+            pass
+
+    try:
+        raw_payload = json.loads(text_data)
+    except json.JSONDecodeError:
+        return text_data
+    if not isinstance(raw_payload, dict) or raw_payload.get("type") != "response.create":
+        return text_data
+    upstream_payload = cast(dict[str, JsonValue], raw_payload)
+
+    raw_metadata = upstream_payload.get("client_metadata")
+    client_metadata: dict[str, JsonValue] = {}
+    if is_json_mapping(raw_metadata):
+        client_metadata.update({key: value for key, value in raw_metadata.items() if isinstance(key, str)})
+    client_metadata["x-codex-installation-id"] = installation_id
+    upstream_payload["client_metadata"] = client_metadata
+    return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
 
 def _slim_response_create_payload_for_upstream(
@@ -727,6 +758,8 @@ def _response_create_client_metadata(
     if is_json_mapping(raw_value):
         for key, value in raw_value.items():
             if isinstance(key, str):
+                if key == "x-codex-installation-id":
+                    continue
                 client_metadata[key] = value
 
     normalized_headers = {key.lower(): value for key, value in headers.items()}

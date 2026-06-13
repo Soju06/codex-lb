@@ -31,6 +31,16 @@ Request logs for migrated upstream calls MUST record route mode, proxy pool id, 
 - **WHEN** the request log is written
 - **THEN** the log MUST include the fail-closed reason without proxy credentials.
 
+### Requirement: Codex installation metadata must be account-owned
+Codex `response.create` requests sent through account-scoped bridge or websocket transports MUST use the selected local account's stored `x-codex-installation-id` value in `client_metadata`.
+
+#### Scenario: Client-supplied installation id is replaced
+- **GIVEN** a client sends `client_metadata.x-codex-installation-id`
+- **AND** codex-lb selects account `A`
+- **WHEN** codex-lb sends the upstream `response.create` request
+- **THEN** the upstream `client_metadata.x-codex-installation-id` MUST equal account `A`'s stored installation id
+- **AND** it MUST NOT equal the client-supplied value.
+
 ### Requirement: Upstream proxy pool membership must reject duplicates
 Dashboard upstream proxy pool member mutations MUST reject attempts to add an endpoint that is already a member of the target pool with a validation error instead of surfacing a database integrity failure.
 

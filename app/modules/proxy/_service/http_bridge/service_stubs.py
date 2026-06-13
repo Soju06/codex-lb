@@ -302,6 +302,10 @@ def _response_create_client_metadata(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_response_create_client_metadata")(*args, **kwargs)
 
 
+def _response_create_text_with_account_installation_id(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_response_create_text_with_account_installation_id")(*args, **kwargs)
+
+
 def _count_external_image_urls(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_count_external_image_urls")(*args, **kwargs)
 

@@ -988,6 +988,17 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if text_data is not None:
+                        if (
+                            request_state is not None
+                            and payload is not None
+                            and account is not None
+                            and _is_websocket_response_create(payload)
+                        ):
+                            text_data = _facade()._response_create_text_with_account_installation_id(
+                                text_data,
+                                account=account,
+                            )
+                            request_state.request_text = text_data
                         await upstream.send_text(text_data)
                     elif bytes_data is not None:
                         await upstream.send_bytes(bytes_data)

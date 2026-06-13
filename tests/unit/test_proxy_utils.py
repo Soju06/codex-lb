@@ -62,12 +62,12 @@ def test_relative_availability_settings_default_when_stored_values_are_null():
 
 
 def test_compact_attempt_timeout_splits_remaining_budget_across_account_attempts():
-    assert proxy_compact_service._compact_attempt_timeout_seconds(600.0) == pytest.approx(600.0)
+    assert proxy_compact_service._compact_attempt_timeout_seconds(600.0) == pytest.approx(30.0)
     assert proxy_compact_service._compact_attempt_timeout_seconds(600.0, account_attempts_remaining=2) == pytest.approx(
-        300.0
+        30.0
     )
     assert proxy_compact_service._compact_attempt_timeout_seconds(180.0, account_attempts_remaining=2) == pytest.approx(
-        90.0
+        30.0
     )
     assert proxy_compact_service._compact_attempt_timeout_seconds(
         600.0, 120.0, account_attempts_remaining=2

@@ -52,6 +52,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
 _REQUEST_TRANSPORT_HTTP = "http"
+_DEFAULT_COMPACT_UPSTREAM_TIMEOUT_SECONDS = 30.0
 _COMPACT_FAILURE_COOLDOWNS: dict[str, float] = {}
 _CompactResponses = Callable[
     [ResponsesCompactRequest, Mapping[str, str], str, str | None],
@@ -182,9 +183,10 @@ def _compact_attempt_timeout_seconds(
         return 0.0
     if account_attempts_remaining > 1:
         remaining_budget = remaining_budget / account_attempts_remaining
-    if configured_timeout_seconds is not None:
-        return min(configured_timeout_seconds, remaining_budget)
-    return remaining_budget
+    timeout = configured_timeout_seconds
+    if timeout is None:
+        timeout = _DEFAULT_COMPACT_UPSTREAM_TIMEOUT_SECONDS
+    return min(timeout, remaining_budget)
 
 
 def _compact_cooldown_key(affinity: _AffinityPolicy) -> str | None:

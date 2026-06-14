@@ -440,11 +440,7 @@ async def put_account_proxy_binding(
     else:
         row.pool_id = payload.pool_id
         row.is_active = payload.is_active
-    if (
-        payload.is_active
-        and account.status == AccountStatus.PAUSED
-        and account.deactivation_reason == IMPORT_PROXY_REQUIRED_PAUSE_REASON
-    ):
+    if payload.is_active and _account_proxy_binding_should_reactivate(account):
         account.status = AccountStatus.ACTIVE
         account.deactivation_reason = None
         account.reset_at = None
@@ -463,6 +459,16 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         port=row.port,
         username=row.username,
         is_active=row.is_active,
+    )
+
+
+def _account_proxy_binding_should_reactivate(account: Account) -> bool:
+    reason = account.deactivation_reason or ""
+    return (
+        account.status == AccountStatus.PAUSED
+        and reason == IMPORT_PROXY_REQUIRED_PAUSE_REASON
+        or account.status == AccountStatus.DEACTIVATED
+        and (reason == "proxy_unreachable" or reason.startswith("proxy_unreachable:"))
     )
 
 

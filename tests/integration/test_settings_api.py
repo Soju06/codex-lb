@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from app.core.auth import generate_unique_account_id
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -613,3 +614,69 @@ async def test_account_proxy_binding_rejects_missing_targets(async_client):
     )
     assert missing_pool.status_code == 400
     assert missing_pool.json()["error"]["code"] == "proxy_pool_not_found"
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async_client):
+    account_id = await _import_account(async_client, "acc-settings-proxy-repair", "settings-proxy-repair@example.com")
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "proxy_unreachable: ProxyConnectionError - connection refused"
+        await session.commit()
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "repair proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "repair pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.ACTIVE
+        assert account.deactivation_reason is None
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_does_not_reactivate_session_deactivated_account(async_client):
+    account_id = await _import_account(async_client, "acc-settings-proxy-reauth", "settings-proxy-reauth@example.com")
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "ChatGPT session ended - re-login required"
+        await session.commit()
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "reauth proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "reauth pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.DEACTIVATED
+        assert account.deactivation_reason == "ChatGPT session ended - re-login required"

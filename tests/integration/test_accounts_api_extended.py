@@ -177,6 +177,11 @@ async def test_import_pauses_until_proxy_binding_when_proxy_routing_enabled(
         assert account is not None
         assert account.status == AccountStatus.ACTIVE
         assert account.deactivation_reason is None
+    reset_settings = await async_client.put(
+        "/api/settings",
+        json={"upstreamProxyRoutingEnabled": False, "upstreamProxyDefaultPoolId": None},
+    )
+    assert reset_settings.status_code == 200
 
 
 @pytest.mark.asyncio

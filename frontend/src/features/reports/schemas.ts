@@ -36,8 +36,20 @@ export const ReportSummarySchema = z.object({
   avgRequestsPerDay: z.number(),
 });
 
+export const ReportComparisonPreviousSchema = z.object({
+  totalCostUsd: z.number(),
+  totalTokens: z.number(),
+  totalRequests: z.number(),
+});
+
+export const ReportComparisonSchema = z.object({
+  canCompare: z.boolean(),
+  previous: ReportComparisonPreviousSchema,
+});
+
 export const ReportsResponseSchema = z.object({
   summary: ReportSummarySchema,
+  comparison: ReportComparisonSchema,
   daily: z.array(DailyReportRowSchema),
   byModel: z.array(ModelCostEntrySchema),
   byAccount: z.array(AccountCostEntrySchema),
@@ -47,4 +59,5 @@ export type DailyReportRow = z.infer<typeof DailyReportRowSchema>;
 export type ModelCostEntry = z.infer<typeof ModelCostEntrySchema>;
 export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;
 export type ReportSummary = z.infer<typeof ReportSummarySchema>;
+export type ReportComparison = z.infer<typeof ReportComparisonSchema>;
 export type ReportsResponse = z.infer<typeof ReportsResponseSchema>;

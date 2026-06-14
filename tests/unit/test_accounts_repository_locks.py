@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import app.modules.accounts.repository as repository_module
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -80,6 +82,80 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
     monkeypatch.setattr(repo, "_next_available_account_id", fake_next_available_account_id)
 
     return repo, recorded
+
+
+def _make_result(value: str | None = "acc") -> MagicMock:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
+
+
+@pytest.mark.asyncio
+async def test_account_update_status_uses_sqlite_writer_section(monkeypatch):
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=_make_result("acc"))
+    session.commit = AsyncMock()
+    repo = AccountsRepository(session)
+    order: list[str] = []
+
+    @asynccontextmanager
+    async def fake_writer_section():
+        order.append("lock-enter")
+        yield
+        order.append("lock-exit")
+
+    async def execute_with_order(*args, **kwargs):
+        del args, kwargs
+        order.append("execute")
+        return _make_result("acc")
+
+    async def commit_with_order():
+        order.append("commit")
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", fake_writer_section)
+    session.execute.side_effect = execute_with_order
+    session.commit.side_effect = commit_with_order
+
+    assert await repo.update_status("acc", AccountStatus.RATE_LIMITED) is True
+
+    assert order == ["lock-enter", "execute", "commit", "lock-exit"]
+
+
+@pytest.mark.asyncio
+async def test_account_update_tokens_uses_sqlite_writer_section(monkeypatch):
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=_make_result("acc"))
+    session.commit = AsyncMock()
+    repo = AccountsRepository(session)
+    order: list[str] = []
+
+    @asynccontextmanager
+    async def fake_writer_section():
+        order.append("lock-enter")
+        yield
+        order.append("lock-exit")
+
+    async def execute_with_order(*args, **kwargs):
+        del args, kwargs
+        order.append("execute")
+        return _make_result("acc")
+
+    async def commit_with_order():
+        order.append("commit")
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", fake_writer_section)
+    session.execute.side_effect = execute_with_order
+    session.commit.side_effect = commit_with_order
+
+    assert await repo.update_tokens(
+        "acc",
+        b"access",
+        b"refresh",
+        b"id",
+        utcnow(),
+    )
+
+    assert order == ["lock-enter", "execute", "commit", "lock-exit"]
 
 
 @pytest.mark.asyncio

@@ -1,26 +1,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
+from itertools import batched
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, and_, cast, func, literal_column, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, RequestLog
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
+_SQLITE_COMPOUND_SELECT_LIMIT = 500
+MAX_DAILY_REPORT_DAYS = 730
+
+
+class DailyReportRangeTooLargeError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
-class DailyAggregateRow:
+class DailyReportAggregateRow:
     date: str
-    request_count: int
-    error_count: int
+    requests: int
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
     cost_usd: float
+    active_accounts: int
+    error_count: int
+
+
+@dataclass(frozen=True)
+class SummaryAggregateRow:
+    total_cost_usd: float
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cached_tokens: int
+    total_requests: int
+    total_errors: int
     active_accounts: int
 
 
@@ -42,63 +61,75 @@ class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def aggregate_daily(
+    async def aggregate_daily_rows(
+        self,
+        start_date: date,
+        end_date: date,
+        timezone_info: ZoneInfo | timezone,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+    ) -> list[DailyReportAggregateRow]:
+        window_days = (end_date - start_date).days + 1
+        if window_days > MAX_DAILY_REPORT_DAYS:
+            raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
+        day_ranges = list(_daily_bucket_ranges(start_date, end_date, timezone_info))
+        if not day_ranges:
+            return []
+
+        rows: list[DailyReportAggregateRow] = []
+        # SQLite caps compound SELECTs at 500 terms, so long report ranges are
+        # executed in chunks instead of building a single oversized UNION ALL.
+        for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
+            stmt = _daily_rows_stmt(list(day_ranges_batch), account_ids, model)
+            result = await self._session.execute(stmt)
+            rows.extend(
+                DailyReportAggregateRow(
+                    date=row.report_date,
+                    requests=int(row.requests or 0),
+                    input_tokens=int(row.input_tokens or 0),
+                    output_tokens=int(row.output_tokens or 0),
+                    cached_input_tokens=int(row.cached_input_tokens or 0),
+                    cost_usd=float(row.cost_usd or 0.0),
+                    active_accounts=int(row.active_accounts or 0),
+                    error_count=int(row.error_count or 0),
+                )
+                for row in result.all()
+            )
+        return rows
+
+    async def aggregate_summary(
         self,
         start_date: datetime,
         end_date: datetime,
         account_ids: list[str] | None = None,
         model: str | None = None,
-    ) -> list[DailyAggregateRow]:
-        bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            date_expr = func.date(RequestLog.requested_at)
-        else:
-            date_expr = func.strftime("%Y-%m-%d", RequestLog.requested_at)
-        date_col = date_expr.label("date")
+    ) -> SummaryAggregateRow:
+        conditions = _report_conditions(start_date, end_date, account_ids, model)
 
-        conditions = [
-            RequestLog.requested_at >= start_date,
-            RequestLog.requested_at < end_date,
-            _normal_traffic_clause(),
-        ]
-        if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
-        if model:
-            conditions.append(RequestLog.model == model)
-
-        stmt = (
+        result = await self._session.execute(
             select(
-                date_col,
-                func.count().label("request_count"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("total_cached_tokens"),
+                func.count().label("total_requests"),
                 func.coalesce(
-                    func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)),
+                    func.sum(case((RequestLog.status != "success", 1), else_=0)),
                     0,
-                ).label("error_count"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                ).label("total_errors"),
                 func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
-            )
-            .where(and_(*conditions))
-            .group_by(date_col)
-            .order_by(date_col)
+            ).where(and_(*conditions))
         )
-        result = await self._session.execute(stmt)
-        return [
-            DailyAggregateRow(
-                date=str(row.date),
-                request_count=int(row.request_count),
-                error_count=int(row.error_count),
-                input_tokens=int(row.input_tokens),
-                output_tokens=int(row.output_tokens),
-                cached_input_tokens=int(row.cached_input_tokens),
-                cost_usd=float(row.cost_usd),
-                active_accounts=int(row.active_accounts),
-            )
-            for row in result.all()
-        ]
+        row = result.one()
+        return SummaryAggregateRow(
+            total_cost_usd=float(row.total_cost_usd),
+            total_input_tokens=int(row.total_input_tokens),
+            total_output_tokens=int(row.total_output_tokens),
+            total_cached_tokens=int(row.total_cached_tokens),
+            total_requests=int(row.total_requests),
+            total_errors=int(row.total_errors),
+            active_accounts=int(row.active_accounts),
+        )
 
     async def aggregate_by_model(
         self,
@@ -108,15 +139,9 @@ class ReportsRepository:
         model: str | None = None,
     ) -> list[ModelAggregateRow]:
         conditions = [
-            RequestLog.requested_at >= start_date,
-            RequestLog.requested_at < end_date,
-            _normal_traffic_clause(),
+            *_report_conditions(start_date, end_date, account_ids, model),
             RequestLog.model.is_not(None),
         ]
-        if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
-        if model:
-            conditions.append(RequestLog.model == model)
 
         stmt = (
             select(
@@ -143,15 +168,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
     ) -> list[AccountAggregateRow]:
-        conditions = [
-            RequestLog.requested_at >= start_date,
-            RequestLog.requested_at < end_date,
-            _normal_traffic_clause(),
-        ]
-        if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
-        if model:
-            conditions.append(RequestLog.model == model)
+        conditions = _report_conditions(start_date, end_date, account_ids, model)
 
         stmt = (
             select(
@@ -192,20 +209,47 @@ class ReportsRepository:
         model: str | None = None,
     ) -> int:
         conditions = [
-            RequestLog.requested_at >= start_date,
-            RequestLog.requested_at < end_date,
-            _normal_traffic_clause(),
+            *_report_conditions(start_date, end_date, account_ids, model),
             RequestLog.account_id.is_not(None),
         ]
-        if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
-        if model:
-            conditions.append(RequestLog.model == model)
 
         result = await self._session.execute(
             select(func.count(func.distinct(RequestLog.account_id))).where(and_(*conditions))
         )
         return int(result.scalar_one() or 0)
+
+    async def earliest_report_activity_at(
+        self,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+    ) -> datetime | None:
+        conditions = [_normal_traffic_clause()]
+        if account_ids:
+            conditions.append(RequestLog.account_id.in_(account_ids))
+        if model:
+            conditions.append(RequestLog.model == model)
+
+        result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
+        value = result.scalar_one_or_none()
+        return value if isinstance(value, datetime) else None
+
+
+def _report_conditions(
+    start_date: datetime,
+    end_date: datetime,
+    account_ids: list[str] | None,
+    model: str | None,
+) -> list:
+    conditions = [
+        RequestLog.requested_at >= start_date,
+        RequestLog.requested_at < end_date,
+        _normal_traffic_clause(),
+    ]
+    if account_ids:
+        conditions.append(RequestLog.account_id.in_(account_ids))
+    if model:
+        conditions.append(RequestLog.model == model)
+    return conditions
 
 
 def _normal_traffic_clause():
@@ -216,3 +260,70 @@ def _normal_traffic_clause():
             RequestLog.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
         ),
     )
+
+
+def _daily_rows_stmt(
+    day_ranges: list[tuple[str, datetime, datetime]],
+    account_ids: list[str] | None,
+    model: str | None,
+):
+    day_range_rows = [
+        select(
+            literal(report_date).label("report_date"),
+            literal(day_start).label("day_start"),
+            literal(day_end).label("day_end"),
+        )
+        for report_date, day_start, day_end in day_ranges
+    ]
+    day_ranges_query = day_range_rows[0] if len(day_range_rows) == 1 else union_all(*day_range_rows)
+    day_ranges_cte = day_ranges_query.cte("report_days")
+    return (
+        select(
+            day_ranges_cte.c.report_date,
+            func.count(RequestLog.id).label("requests"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+            func.coalesce(
+                func.sum(case((RequestLog.status != "success", 1), else_=0)),
+                0,
+            ).label("error_count"),
+        )
+        .select_from(
+            day_ranges_cte.join(
+                RequestLog,
+                and_(
+                    RequestLog.requested_at >= day_ranges_cte.c.day_start,
+                    RequestLog.requested_at < day_ranges_cte.c.day_end,
+                    _normal_traffic_clause(),
+                    *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+                    *([RequestLog.model == model] if model else []),
+                ),
+            )
+        )
+        .group_by(day_ranges_cte.c.report_date)
+        .order_by(day_ranges_cte.c.report_date)
+    )
+
+
+def _daily_bucket_ranges(
+    start_date: date,
+    end_date: date,
+    timezone_info: ZoneInfo | timezone,
+) -> list[tuple[str, datetime, datetime]]:
+    ranges: list[tuple[str, datetime, datetime]] = []
+    current_date = start_date
+    while current_date <= end_date:
+        day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=timezone_info)
+        next_day_start = datetime.combine(current_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone_info)
+        ranges.append(
+            (
+                current_date.isoformat(),
+                day_start.astimezone(timezone.utc).replace(tzinfo=None),
+                next_day_start.astimezone(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        current_date += timedelta(days=1)
+    return ranges

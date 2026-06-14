@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -882,7 +883,9 @@ def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, 
 
 def test_create_sqlite_pre_migration_backup_rotates_old_files(tmp_path: Path) -> None:
     db_path = tmp_path / "store.db"
-    db_path.write_bytes(b"sqlite-bytes")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        conn.execute("INSERT INTO items (name) VALUES ('alpha')")
 
     created: list[Path] = []
     base_time = datetime(2026, 2, 13, 12, 0, 0, tzinfo=timezone.utc)
@@ -898,8 +901,47 @@ def test_create_sqlite_pre_migration_backup_rotates_old_files(tmp_path: Path) ->
     backups = list_sqlite_pre_migration_backups(db_path)
     assert len(backups) == 2
     assert backups == created[-2:]
-    assert backups[0].read_bytes() == b"sqlite-bytes"
-    assert backups[1].read_bytes() == b"sqlite-bytes"
+    for backup in backups:
+        with sqlite3.connect(backup) as conn:
+            assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert conn.execute("SELECT name FROM items").fetchall() == [("alpha",)]
+        assert not Path(f"{backup}-wal").exists()
+
+
+def test_create_sqlite_pre_migration_backup_consolidates_wal_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        conn.execute("INSERT INTO items (name) VALUES ('from-wal')")
+        conn.commit()
+        assert Path(f"{db_path}-wal").exists()
+
+        backup = create_sqlite_pre_migration_backup(
+            db_path,
+            max_files=2,
+            now=datetime(2026, 2, 13, 12, 0, 0, tzinfo=timezone.utc),
+        )
+
+    with sqlite3.connect(backup) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT name FROM items").fetchall() == [("from-wal",)]
+    assert not Path(f"{backup}-wal").exists()
+
+
+def test_create_sqlite_pre_migration_backup_preserves_source_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    db_path.chmod(0o600)
+
+    backup = create_sqlite_pre_migration_backup(
+        db_path,
+        max_files=2,
+        now=datetime(2026, 2, 13, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert backup.stat().st_mode & 0o777 == 0o600
 
 
 class _FakeStringType:

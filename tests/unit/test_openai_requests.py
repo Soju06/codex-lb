@@ -1038,6 +1038,40 @@ def test_compact_trimming_keeps_selected_tool_calls_with_matching_outputs():
     assert tool_output in dumped_input
 
 
+def test_compact_trimming_drops_head_tool_call_when_output_exceeds_budget():
+    tool_call = {
+        "type": "function_call",
+        "name": "lookup",
+        "call_id": "call_head_large_output",
+        "arguments": "{}",
+    }
+    tool_output = {
+        "type": "function_call_output",
+        "call_id": "call_head_large_output",
+        "output": "huge historical tool output " + "z" * 500_000,
+    }
+    input_items = [
+        tool_call,
+        {"role": "assistant", "content": "x" * 500_000},
+        tool_output,
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert tool_call not in dumped_input
+    assert tool_output not in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+
+
 def test_compact_trimming_drops_selected_tool_outputs_without_matching_calls():
     orphan_output = {
         "type": "function_call_output",

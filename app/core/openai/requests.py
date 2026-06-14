@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -850,7 +850,12 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             token_budget=tail_budget,
         )
     )
-    selected_indices = _compact_reconciled_tool_call_indices(input_value, selected_indices)
+    selected_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        selected_indices,
+        token_counts=token_counts,
+        token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
+    )
     if len(selected_indices) == len(input_value):
         return
     payload["input"] = _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
@@ -883,7 +888,13 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
     return preserved_indices
 
 
-def _compact_reconciled_tool_call_indices(input_value: list[JsonValue], selected_indices: set[int]) -> set[int]:
+def _compact_reconciled_tool_call_indices(
+    input_value: list[JsonValue],
+    selected_indices: set[int],
+    *,
+    token_counts: list[int],
+    token_budget: int,
+) -> set[int]:
     call_indices_by_id: dict[str, int] = {}
     output_indices_by_id: dict[str, list[int]] = {}
     for index, item in enumerate(input_value):
@@ -899,23 +910,43 @@ def _compact_reconciled_tool_call_indices(input_value: list[JsonValue], selected
             output_indices_by_id.setdefault(call_id, []).append(index)
 
     reconciled = set(selected_indices)
+    selected_tokens = sum(token_counts[index] for index in reconciled)
+
+    def add_indices(indices: Iterable[int]) -> bool:
+        nonlocal selected_tokens
+        missing_indices = [index for index in indices if index not in reconciled]
+        missing_tokens = sum(token_counts[index] for index in missing_indices)
+        if selected_tokens + missing_tokens > token_budget:
+            return False
+        reconciled.update(missing_indices)
+        selected_tokens += missing_tokens
+        return True
+
+    def remove_indices(indices: Iterable[int]) -> None:
+        nonlocal selected_tokens
+        for index in indices:
+            if index in reconciled:
+                reconciled.remove(index)
+                selected_tokens -= token_counts[index]
+
     for call_id, output_indices in output_indices_by_id.items():
         selected_outputs = [index for index in output_indices if index in reconciled]
         if not selected_outputs:
             continue
         call_index = call_indices_by_id.get(call_id)
         if call_index is None:
-            reconciled.difference_update(selected_outputs)
-        else:
-            reconciled.add(call_index)
+            remove_indices(selected_outputs)
+        elif not add_indices([call_index]):
+            remove_indices(selected_outputs)
     for call_id, call_index in call_indices_by_id.items():
         if call_index not in reconciled:
             continue
         output_indices = output_indices_by_id.get(call_id)
-        if output_indices:
-            reconciled.update(output_indices)
-        else:
-            reconciled.remove(call_index)
+        if not output_indices:
+            remove_indices([call_index])
+            continue
+        if not add_indices(output_indices):
+            remove_indices([call_index, *output_indices])
     return reconciled
 
 

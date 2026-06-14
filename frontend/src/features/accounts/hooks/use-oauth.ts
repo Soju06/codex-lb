@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   completeOauth,
@@ -6,6 +7,7 @@ import {
   startOauth,
   submitManualOauthCallback,
 } from "@/features/accounts/api";
+import { invalidateAccountRelatedQueries } from "@/features/accounts/hooks/use-accounts";
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
@@ -23,6 +25,7 @@ const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
 });
 
 export function useOauth() {
+  const queryClient = useQueryClient();
   const [state, setState] = useState<OAuthState>(INITIAL_OAUTH_STATE);
   const pollTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
@@ -134,6 +137,7 @@ export function useOauth() {
           status: "success",
         }),
       );
+      invalidateAccountRelatedQueries(queryClient);
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({
@@ -144,7 +148,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.deviceAuthId, state.flowId, state.userCode]);
+  }, [queryClient, state.deviceAuthId, state.flowId, state.userCode]);
 
   const manualCallback = useCallback(async (callbackUrl: string) => {
     try {
@@ -159,6 +163,9 @@ export function useOauth() {
           errorMessage: response.errorMessage,
         }),
       );
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
       return response;
     } catch (error) {
       setState((prev) =>
@@ -170,7 +177,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.flowId]);
+  }, [queryClient, state.flowId]);
 
   useEffect(() => {
     if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {

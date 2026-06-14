@@ -513,7 +513,28 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
 
 
 @pytest.mark.asyncio
-async def test_upstream_proxy_endpoint_test_reports_unsupported_socks_probe(async_client):
+async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 204
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            captured["url"] = url
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+
     endpoint = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={
@@ -531,8 +552,12 @@ async def test_upstream_proxy_endpoint_test_reports_unsupported_socks_probe(asyn
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is False
-    assert payload["error"] == "unsupported_proxy_scheme_for_test"
+    assert payload["ok"] is True
+    assert payload["statusCode"] == 204
+    assert payload["error"] is None
+    client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
+    assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
+    assert client_kwargs["proxy"] == "socks5h://proxy.internal:1080"
 
 
 @pytest.mark.asyncio
@@ -618,6 +643,9 @@ async def test_account_proxy_binding_rejects_missing_targets(async_client):
 
 @pytest.mark.asyncio
 async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async_client):
+    from app.modules.proxy.account_cache import get_account_selection_cache
+
+    cache_generation = get_account_selection_cache().generation
     account_id = await _import_account(async_client, "acc-settings-proxy-repair", "settings-proxy-repair@example.com")
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
@@ -647,6 +675,7 @@ async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async
         assert account is not None
         assert account.status == AccountStatus.ACTIVE
         assert account.deactivation_reason is None
+    assert get_account_selection_cache().generation > cache_generation
 
 
 @pytest.mark.asyncio

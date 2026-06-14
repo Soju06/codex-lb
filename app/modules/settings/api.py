@@ -22,6 +22,7 @@ from app.core.exceptions import DashboardBadRequestError
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_settings_context
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
@@ -231,12 +232,6 @@ async def test_upstream_proxy_endpoint(
     if row is None:
         raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
     endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
-    if endpoint.scheme not in {"http", "https"}:
-        return UpstreamProxyEndpointTestResponse(
-            endpoint_id=endpoint.id,
-            ok=False,
-            error="unsupported_proxy_scheme_for_test",
-        )
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(
@@ -445,6 +440,7 @@ async def put_account_proxy_binding(
         account.deactivation_reason = None
         account.reset_at = None
         account.blocked_at = None
+        get_account_selection_cache().invalidate()
     await context.session.commit()
     await context.session.refresh(row)
     return AccountProxyBindingResponse(account_id=row.account_id, pool_id=row.pool_id, is_active=row.is_active)

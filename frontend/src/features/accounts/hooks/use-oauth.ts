@@ -65,6 +65,9 @@ export function useOauth() {
           errorMessage: status.errorMessage,
         }),
       );
+      if (status.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({
@@ -74,7 +77,7 @@ export function useOauth() {
         }),
       );
     }
-  }, [state.flowId]);
+  }, [queryClient, state.flowId]);
 
   const start = useCallback(async (forceMethod?: "browser" | "device") => {
     clearPollTimer();

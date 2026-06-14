@@ -8,12 +8,13 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 const startOauthMock = vi.fn();
 const completeOauthMock = vi.fn();
 const submitManualOauthCallbackMock = vi.fn();
+const getOauthStatusMock = vi.fn();
 
 vi.mock("@/features/accounts/api", () => ({
   startOauth: (...args: unknown[]) => startOauthMock(...args),
   completeOauth: (...args: unknown[]) => completeOauthMock(...args),
   submitManualOauthCallback: (...args: unknown[]) => submitManualOauthCallbackMock(...args),
-  getOauthStatus: vi.fn().mockResolvedValue({ status: "pending", errorMessage: null }),
+  getOauthStatus: (...args: unknown[]) => getOauthStatusMock(...args),
 }));
 
 function createTestQueryClient(): QueryClient {
@@ -45,6 +46,7 @@ function renderUseOauth(queryClient = createTestQueryClient()) {
 describe("useOauth", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getOauthStatusMock.mockResolvedValue({ status: "pending", errorMessage: null });
   });
 
   it("starts device polling immediately after device OAuth start", async () => {
@@ -106,6 +108,43 @@ describe("useOauth", () => {
       await result.current.complete();
     });
 
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+  });
+
+  it("invalidates account and dashboard queries after device OAuth polling succeeds", async () => {
+    startOauthMock.mockResolvedValue({
+      flowId: "flow-device",
+      method: "device",
+      authorizationUrl: null,
+      callbackUrl: null,
+      verificationUrl: "https://auth.example.com/device",
+      userCode: "ABCD-1234",
+      deviceAuthId: "device-auth-id",
+      intervalSeconds: 5,
+      expiresInSeconds: 600,
+    });
+    completeOauthMock.mockResolvedValue({ status: "pending" });
+    getOauthStatusMock.mockResolvedValue({
+      status: "success",
+      errorMessage: null,
+    });
+
+    const { queryClient, result } = renderUseOauth();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await act(async () => {
+      await result.current.start("device");
+    });
+
+    await act(async () => {
+      await result.current.poll();
+    });
+
+    expect(getOauthStatusMock).toHaveBeenCalledWith("flow-device");
+    expect(result.current.state.status).toBe("success");
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from types import TracebackType
 import aiohttp
 import certifi
 from aiohttp_retry import RetryClient
+from aiohttp_socks import ProxyConnector
 
 from app.core.config.settings import get_settings
 
@@ -37,6 +39,17 @@ _http_client: _ManagedHttpClient | None = None
 _http_client_lock = asyncio.Lock()
 _retired_http_clients: list[_ManagedHttpClient] = []
 _closing_http_clients: list[_ManagedHttpClient] = []
+
+
+def _socks_proxy_url() -> str | None:
+    for var in (
+        "SOCKS_PROXY", "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
+        "socks_proxy", "all_proxy", "https_proxy", "http_proxy",
+    ):
+        val = os.environ.get(var, "").strip()
+        if val.lower().startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
+            return val
+    return None
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -71,23 +84,39 @@ class HttpClientLease:
 
 async def _build_http_client() -> HttpClient:
     settings = get_settings()
-    connector = aiohttp.TCPConnector(
-        limit=settings.http_connector_limit,
-        limit_per_host=settings.http_connector_limit_per_host,
-        ssl=_build_ssl_context(),
-    )
+    socks_url = _socks_proxy_url()
+    if socks_url:
+        connector = ProxyConnector.from_url(
+            socks_url,
+            limit=settings.http_connector_limit,
+            limit_per_host=settings.http_connector_limit_per_host,
+            ssl=_build_ssl_context(),
+        )
+    else:
+        connector = aiohttp.TCPConnector(
+            limit=settings.http_connector_limit,
+            limit_per_host=settings.http_connector_limit_per_host,
+            ssl=_build_ssl_context(),
+        )
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
         trust_env=True,
     )
     try:
-        # Match direct Codex transport unless operators explicitly override or
-        # standard outbound proxy env vars are present.
+        if socks_url:
+            ws_connector: aiohttp.TCPConnector | ProxyConnector = ProxyConnector.from_url(
+                socks_url,
+                ssl=_build_ssl_context(),
+            )
+            ws_trust_env = False
+        else:
+            ws_connector = aiohttp.TCPConnector(ssl=_build_ssl_context())
+            ws_trust_env = settings.upstream_websocket_trust_env
         websocket_session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=_build_ssl_context()),
+            connector=ws_connector,
             timeout=aiohttp.ClientTimeout(total=None),
-            trust_env=settings.upstream_websocket_trust_env,
+            trust_env=ws_trust_env,
         )
     except Exception:
         await session.close()

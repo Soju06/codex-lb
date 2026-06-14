@@ -96,6 +96,60 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     await http_module.close_http_client()
 
 
+def test_socks_proxy_url_detects_lowercase_socks_proxy() -> None:
+    with patch.dict("os.environ", {"socks_proxy": "socks5://proxy.example.com:1080"}, clear=False):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_strips_whitespace_from_env_value() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "  socks5://proxy.example.com:1080  "}, clear=False):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+@pytest.mark.asyncio
+async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
+    await http_module.close_http_client()
+
+    http_session = MagicMock()
+    websocket_session = MagicMock()
+    websocket_session.close = AsyncMock()
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+    proxy_connector = MagicMock()
+    ssl_context = MagicMock()
+    socks_settings = SimpleNamespace(
+        http_connector_limit=100,
+        http_connector_limit_per_host=50,
+        upstream_websocket_trust_env=True,
+    )
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=socks_settings),
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context),
+        patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session],
+        ) as client_session_cls,
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+        patch.dict("os.environ", {"socks_proxy": "socks5://proxy.example.com:1080"}, clear=False),
+    ):
+        proxy_connector_cls.from_url.return_value = proxy_connector
+        client = await http_module.init_http_client()
+
+    assert client.session is http_session
+    assert client.websocket_session is websocket_session
+    assert proxy_connector_cls.from_url.call_count == 2
+    assert client_session_cls.call_args_list[0].kwargs["connector"] is proxy_connector
+    assert client_session_cls.call_args_list[1].kwargs["connector"] is proxy_connector
+    # trust_env must be False for websocket session when SOCKS proxy is active (avoids double-proxying)
+    assert client_session_cls.call_args_list[1].kwargs["trust_env"] is False
+
+    await http_module.close_http_client()
+
+
 def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> None:
     with (
         patch("app.core.clients.http.certifi.where", return_value="/tmp/cacert.pem") as certifi_where,

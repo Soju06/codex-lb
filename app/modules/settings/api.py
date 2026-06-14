@@ -25,7 +25,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
-from app.dependencies import SettingsContext, get_settings_context
+from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
@@ -414,6 +414,7 @@ def _duplicate_proxy_pool_member_error() -> DashboardBadRequestError:
 async def put_account_proxy_binding(
     account_id: str,
     payload: AccountProxyBindingRequest,
+    request: Request,
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> AccountProxyBindingResponse:
@@ -442,6 +443,8 @@ async def put_account_proxy_binding(
         clear_account_routing_unavailable(account_id)
         get_account_selection_cache().invalidate()
     await context.session.commit()
+    if payload.is_active:
+        await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
     await context.session.refresh(row)
     return AccountProxyBindingResponse(account_id=row.account_id, pool_id=row.pool_id, is_active=row.is_active)
 

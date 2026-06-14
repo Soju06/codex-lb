@@ -14,6 +14,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -149,6 +150,7 @@ async def test_import_pauses_until_proxy_binding_when_proxy_routing_enabled(
     assert payload["accountId"] == account_id
     assert payload["status"] == AccountStatus.PAUSED.value
     assert fetch_calls == 0
+    assert is_account_routing_unavailable(account_id) is True
 
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
@@ -182,6 +184,7 @@ async def test_import_pauses_until_proxy_binding_when_proxy_routing_enabled(
         json={"upstreamProxyRoutingEnabled": False, "upstreamProxyDefaultPoolId": None},
     )
     assert reset_settings.status_code == 200
+    clear_account_routing_unavailable(account_id)
 
 
 @pytest.mark.asyncio

@@ -766,6 +766,35 @@ async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_ac
     await _wait_for_close_await(close_session, stale_session)
 
 
+@pytest.mark.asyncio
+async def test_close_http_bridge_sessions_for_account_detaches_matching_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    matching = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-matching", None),
+        key_value="bridge-matching",
+    )
+    matching.account.id = "acc-close"
+    other = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-other", None),
+        key_value="bridge-other",
+    )
+    other.account.id = "acc-other"
+    service._http_bridge_sessions[matching.key] = matching
+    service._http_bridge_sessions[other.key] = other
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_session)
+
+    closed = await service.close_http_bridge_sessions_for_account("acc-close")
+
+    assert closed == 1
+    assert matching.key not in service._http_bridge_sessions
+    assert service._http_bridge_sessions[other.key] is other
+    assert matching.closed is True
+    close_session.assert_awaited_once_with(matching, reason="account_binding_changed")
+
+
 def test_http_bridge_request_text_replaces_client_installation_id() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session()

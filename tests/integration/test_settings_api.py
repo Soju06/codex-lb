@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
@@ -693,6 +694,34 @@ async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async
         assert account.deactivation_reason is None
     assert get_account_selection_cache().generation > cache_generation
     assert is_account_routing_unavailable(account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_closes_existing_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+    account_id = await _import_account(async_client, "acc-settings-proxy-close", "settings-proxy-close@example.com")
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "close proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "close pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
 
 
 @pytest.mark.asyncio

@@ -319,6 +319,7 @@ class AccountsService:
                 None,
                 blocked_at=None,
             )
+            mark_account_routing_unavailable(saved.id)
             saved = await self._repo.get_by_id(saved.id) or saved
         if import_usage_refresh_allowed and self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")

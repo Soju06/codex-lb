@@ -362,6 +362,29 @@ class _HTTPBridgeMixin(
                 request_id=_hash_identifier(session.key.affinity_key),
             )
 
+    async def close_http_bridge_sessions_for_account(self, account_id: str) -> int:
+        sessions_to_close: list[_HTTPBridgeSession] = []
+        async with self._http_bridge_lock:
+            for key, session in tuple(self._http_bridge_sessions.items()):
+                if session.account.id != account_id:
+                    continue
+                detached = self._detach_http_bridge_session_locked(key, expected_session=session)
+                if detached is None:
+                    continue
+                _log_http_bridge_event(
+                    "evict_account_binding_changed",
+                    key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                sessions_to_close.append(detached)
+
+        for session in sessions_to_close:
+            await self._close_http_bridge_session_bounded(session, reason="account_binding_changed")
+        return len(sessions_to_close)
+
     async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
         tasks = [
             task

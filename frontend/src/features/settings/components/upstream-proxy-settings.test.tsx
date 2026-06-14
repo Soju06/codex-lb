@@ -68,8 +68,11 @@ describe("UpstreamProxySettings", () => {
 
     await user.type(within(dialog).getByLabelText("Name"), "Backup proxy");
     await user.type(within(dialog).getByLabelText("Host"), "backup.proxy.test");
-    await user.clear(within(dialog).getByLabelText("Port"));
-    await user.type(within(dialog).getByLabelText("Port"), "8081");
+    const portInput = within(dialog).getByLabelText("Port");
+    expect(portInput).toHaveAttribute("inputmode", "numeric");
+    expect(portInput).not.toHaveAttribute("pattern");
+    await user.clear(portInput);
+    await user.type(portInput, "8081");
     await user.click(within(dialog).getByRole("button", { name: "Create endpoint" }));
 
     await waitFor(() => {

@@ -16,6 +16,18 @@ When an account has an explicit upstream proxy pool binding, every ChatGPT/OpenA
 - **THEN** the operation MUST resolve and use a route from the bound pool before opening the upstream connection
 - **AND** it MUST fail closed instead of falling back to direct egress when no bound route is available.
 
+#### Scenario: Auth import does not perform direct usage refresh when proxy routing is required
+- **GIVEN** upstream proxy routing is enabled
+- **AND** an imported account has no usable account-bound or default proxy route
+- **WHEN** an operator imports that account from `auth.json`
+- **THEN** the import MUST save the account as paused before any usage-refresh network request is opened
+- **AND** it MUST NOT perform the import-time usage refresh through direct egress.
+
+#### Scenario: Proxy binding releases import-paused account
+- **GIVEN** an account was paused because proxy routing was required during `auth.json` import
+- **WHEN** an operator saves an active upstream proxy binding for that account
+- **THEN** the account SHALL be reactivated so it can enter the routed account pool.
+
 ### Requirement: Codex upstream Codex client must require a resolved route and built-in TLS fingerprint
 Affected Codex upstream HTTP and websocket calls MUST use the Codex upstream client with an explicit resolved route and the built-in Codex CLI TLS fingerprint.
 

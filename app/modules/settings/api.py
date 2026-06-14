@@ -20,7 +20,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
 from app.core.upstream_proxy import resolve_proxy_endpoint
-from app.db.models import Account, AccountProxyBinding, ProxyEndpoint, ProxyPool, ProxyPoolMember
+from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_settings_context
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
@@ -47,6 +47,7 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 UPSTREAM_PROXY_TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
 UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS = 8.0
 HTTP_PROXY_AUTHENTICATION_REQUIRED = 407
+IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
 
 
 def _is_non_loopback_ipv4(value: str | None) -> bool:
@@ -387,9 +388,11 @@ async def _validate_proxy_pool_id(context: SettingsContext, pool_id: str | None)
         raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
 
 
-async def _validate_account_id(context: SettingsContext, account_id: str) -> None:
-    if await context.session.get(Account, account_id) is None:
+async def _get_account_or_error(context: SettingsContext, account_id: str) -> Account:
+    account = await context.session.get(Account, account_id)
+    if account is None:
         raise DashboardBadRequestError("Account not found", code="account_not_found")
+    return account
 
 
 def _is_missing_proxy_endpoint_error(exc: Exception) -> bool:
@@ -420,7 +423,7 @@ async def put_account_proxy_binding(
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> AccountProxyBindingResponse:
-    await _validate_account_id(context, account_id)
+    account = await _get_account_or_error(context, account_id)
     await _validate_proxy_pool_id(context, payload.pool_id)
     row = (
         (
@@ -437,6 +440,15 @@ async def put_account_proxy_binding(
     else:
         row.pool_id = payload.pool_id
         row.is_active = payload.is_active
+    if (
+        payload.is_active
+        and account.status == AccountStatus.PAUSED
+        and account.deactivation_reason == IMPORT_PROXY_REQUIRED_PAUSE_REASON
+    ):
+        account.status = AccountStatus.ACTIVE
+        account.deactivation_reason = None
+        account.reset_at = None
+        account.blocked_at = None
     await context.session.commit()
     await context.session.refresh(row)
     return AccountProxyBindingResponse(account_id=row.account_id, pool_id=row.pool_id, is_active=row.is_active)

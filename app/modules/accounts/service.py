@@ -23,8 +23,9 @@ from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
@@ -71,6 +72,7 @@ PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # the value is distinguishable from any real HTTP status the upstream might
 # return.
 PROBE_NETWORK_FAILURE_STATUS = 0
+IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
 
 
 class InvalidAuthJsonError(Exception):
@@ -306,7 +308,17 @@ class AccountsService:
         )
 
         saved = await self._repo.upsert_account_slot(account)
-        if self._usage_repo and self._usage_updater:
+        import_usage_refresh_allowed = await self._import_usage_refresh_allowed(saved)
+        if not import_usage_refresh_allowed:
+            await self._repo.update_status(
+                saved.id,
+                AccountStatus.PAUSED,
+                IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+                None,
+                blocked_at=None,
+            )
+            saved = await self._repo.get_by_id(saved.id) or saved
+        if import_usage_refresh_allowed and self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)
         if saved.status == AccountStatus.ACTIVE:
@@ -321,6 +333,34 @@ class AccountsService:
             plan_type=saved.plan_type,
             status=saved.status,
         )
+
+    async def _import_usage_refresh_allowed(self, account: Account) -> bool:
+        try:
+            route = await resolve_upstream_route(
+                self._repo.session,
+                account_id=account.id,
+                operation="usage_refresh",
+                scope="account",
+                encryptor=self._encryptor,
+            )
+        except UpstreamProxyRouteError as exc:
+            logger.info(
+                "Pausing imported account until upstream proxy binding is available account_id=%s reason=%s",
+                account.id,
+                exc.reason,
+            )
+            return False
+        if route is not None:
+            return True
+
+        settings = await self._repo.session.get(DashboardSettings, 1)
+        if settings is not None and settings.upstream_proxy_routing_enabled:
+            logger.info(
+                "Pausing imported account until upstream proxy default pool is configured account_id=%s",
+                account.id,
+            )
+            return False
+        return True
 
     async def reactivate_account(self, account_id: str) -> bool:
         account = await self._repo.get_by_id(account_id)

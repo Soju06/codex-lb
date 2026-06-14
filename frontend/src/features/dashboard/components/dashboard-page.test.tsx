@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders } from "@/test/utils";
 import { createDashboardOverview, createDashboardProjections } from "@/test/mocks/factories";
@@ -7,10 +8,13 @@ import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 import { DashboardPage } from "./dashboard-page";
 
-const { accountSummaryLineSpy } = vi.hoisted(() => ({
+const { accountCardsSpy, accountListSpy, accountSummaryLineSpy } = vi.hoisted(() => ({
+  accountCardsSpy: vi.fn(),
+  accountListSpy: vi.fn(),
   accountSummaryLineSpy: vi.fn(),
 }));
 
@@ -32,7 +36,17 @@ vi.mock("@/features/dashboard/utils", () => ({
 }));
 
 vi.mock("@/features/dashboard/components/account-cards", () => ({
-  AccountCards: () => <div data-testid="account-cards" />,
+  AccountCards: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
+    accountCardsSpy(accounts);
+    return <div data-testid="account-cards">Cards for {accounts.length} accounts</div>;
+  },
+}));
+
+vi.mock("@/features/dashboard/components/account-list", () => ({
+  AccountList: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
+    accountListSpy(accounts);
+    return <div data-testid="account-list">List for {accounts.length} accounts</div>;
+  },
 }));
 
 vi.mock("@/features/dashboard/components/account-summary-line", () => ({
@@ -78,15 +92,22 @@ const buildDashboardViewMock = vi.mocked(buildDashboardView);
 
 describe("DashboardPage", () => {
   beforeEach(() => {
+    accountCardsSpy.mockReset();
+    accountListSpy.mockReset();
     accountSummaryLineSpy.mockReset();
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
     useRequestLogsMock.mockReset();
     buildDashboardViewMock.mockReset();
+    useDashboardPreferencesStore.setState({
+      accountBurnrateEnabled: true,
+      accountViewMode: "cards",
+      initialized: true,
+    });
   });
 
-  it("renders the account summary line in the Accounts header using overview accounts", () => {
+  function mockReadyDashboard() {
     const overview = createDashboardOverview();
 
     useAccountMutationsMock.mockReturnValue({
@@ -153,6 +174,12 @@ describe("DashboardPage", () => {
       requestLogs: [],
     } as ReturnType<typeof buildDashboardView>);
 
+    return overview;
+  }
+
+  it("renders the account summary line in the Accounts header using overview accounts", () => {
+    const overview = mockReadyDashboard();
+
     renderWithProviders(<DashboardPage />);
 
     const accountsHeader = screen.getByRole("heading", { name: "Accounts" }).parentElement;
@@ -162,5 +189,30 @@ describe("DashboardPage", () => {
       "Summary for 2 accounts",
     );
     expect(accountSummaryLineSpy).toHaveBeenCalledWith(overview.accounts);
+  });
+
+  it("defaults the Accounts section to card view", () => {
+    const overview = mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("account-cards")).toHaveTextContent("Cards for 2 accounts");
+    expect(screen.queryByTestId("account-list")).not.toBeInTheDocument();
+    expect(accountCardsSpy).toHaveBeenCalledWith(overview.accounts);
+    expect(screen.getByRole("radio", { name: "View accounts as cards" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("switches the Accounts section to list view", async () => {
+    const user = userEvent.setup();
+    const overview = mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    await user.click(screen.getByRole("radio", { name: "View accounts as list" }));
+
+    expect(screen.getByTestId("account-list")).toHaveTextContent("List for 2 accounts");
+    expect(screen.queryByTestId("account-cards")).not.toBeInTheDocument();
+    expect(accountListSpy).toHaveBeenCalledWith(overview.accounts);
+    expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("list");
   });
 });

@@ -6,7 +6,9 @@ import { RefreshCw } from "lucide-react";
 import { AlertMessage } from "@/components/alert-message";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
+import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
+import { AccountViewModeToggle } from "@/features/dashboard/components/account-view-mode-toggle";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
@@ -36,6 +38,8 @@ export function DashboardPage() {
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
+  const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
+  const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
@@ -218,12 +222,19 @@ export function DashboardPage() {
           )}
 
           <section className="space-y-4">
-            <div className="flex items-center gap-3">
-              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
-              <AccountSummaryLine accounts={overview?.accounts ?? []} />
-              <div className="h-px flex-1 bg-border" />
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
+                <AccountSummaryLine accounts={overview?.accounts ?? []} />
+              </div>
+              <div className="h-px min-w-8 flex-1 bg-border" />
+              <AccountViewModeToggle value={accountViewMode} onChange={setAccountViewMode} />
             </div>
-            <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            {accountViewMode === "list" ? (
+              <AccountList accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            ) : (
+              <AccountCards accounts={overview?.accounts ?? []} onAction={handleAccountAction} />
+            )}
           </section>
 
           <section className="space-y-4">

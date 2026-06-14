@@ -809,6 +809,52 @@ def test_http_bridge_request_text_replaces_client_installation_id() -> None:
     }
 
 
+def test_http_bridge_request_text_rejects_installation_metadata_size_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account.codex_installation_id = "account-installation"
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-http-installation-size",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","input":"x"}',
+    )
+    stamped_text = service._http_bridge_text_with_account_installation_id(
+        session,
+        request_state,
+        request_state.request_text or "{}",
+    )
+    max_bytes = len(stamped_text.encode("utf-8")) - 1
+    request_state.request_text = '{"type":"response.create","input":"x"}'
+    assert len((request_state.request_text or "").encode("utf-8")) < max_bytes
+
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", max_bytes + 1, raising=False)
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", max_bytes, raising=False)
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        service._http_bridge_text_with_account_installation_id(
+            session,
+            request_state,
+            request_state.request_text or "{}",
+        )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.payload["error"]["code"] == "payload_too_large"
+
+
+def test_submit_http_bridge_request_uses_bridge_installation_metadata_helper() -> None:
+    source = inspect.getsource(proxy_service.ProxyService._submit_http_bridge_request)
+
+    assert "_response_create_text_with_account_installation_id(" not in source
+    assert source.count("_http_bridge_text_with_account_installation_id(") >= 3
+
+
 @pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_skips_prune_when_pending_lock_is_wedged(
     monkeypatch: pytest.MonkeyPatch,

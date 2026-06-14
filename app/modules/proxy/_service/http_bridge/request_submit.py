@@ -517,8 +517,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
             )
-        text_data = _response_create_text_with_account_installation_id(text_data, account=session.account)
-        request_state.request_text = text_data
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
@@ -548,8 +547,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session.queued_request_count += 1
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
-            text_data = _response_create_text_with_account_installation_id(text_data, account=session.account)
-            request_state.request_text = text_data
+            text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
             self._start_request_state_api_key_reservation_heartbeat(
                 request_state,
                 api_key=request_state.api_key,

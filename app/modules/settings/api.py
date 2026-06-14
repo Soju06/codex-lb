@@ -5,8 +5,11 @@ import os
 import socket
 import time
 
+import aiohttp
 import httpx
+from aiohttp_socks import ProxyConnector
 from fastapi import APIRouter, Body, Depends, Request
+from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -16,13 +19,14 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.clients.http import _build_ssl_context
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_settings_context
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
@@ -234,12 +238,7 @@ async def test_upstream_proxy_endpoint(
     endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
     started = time.monotonic()
     try:
-        async with httpx.AsyncClient(
-            proxy=endpoint.proxy_url,
-            timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
-            follow_redirects=False,
-        ) as client:
-            response = await client.get(UPSTREAM_PROXY_TEST_URL)
+        status_code = await _probe_upstream_proxy_endpoint(endpoint)
     except Exception as exc:
         return UpstreamProxyEndpointTestResponse(
             endpoint_id=endpoint.id,
@@ -247,19 +246,19 @@ async def test_upstream_proxy_endpoint(
             elapsed_ms=_elapsed_ms(started),
             error=type(exc).__name__,
         )
-    if response.status_code == HTTP_PROXY_AUTHENTICATION_REQUIRED:
+    if status_code == HTTP_PROXY_AUTHENTICATION_REQUIRED:
         return UpstreamProxyEndpointTestResponse(
             endpoint_id=endpoint.id,
             ok=False,
-            status_code=response.status_code,
+            status_code=status_code,
             elapsed_ms=_elapsed_ms(started),
             error="proxy_auth_failed",
         )
-    ok = response.status_code < 500
+    ok = status_code < 500
     return UpstreamProxyEndpointTestResponse(
         endpoint_id=endpoint.id,
         ok=ok,
-        status_code=response.status_code,
+        status_code=status_code,
         elapsed_ms=_elapsed_ms(started),
         error=None if ok else "upstream_probe_failed",
     )
@@ -440,6 +439,7 @@ async def put_account_proxy_binding(
         account.deactivation_reason = None
         account.reset_at = None
         account.blocked_at = None
+        clear_account_routing_unavailable(account_id)
         get_account_selection_cache().invalidate()
     await context.session.commit()
     await context.session.refresh(row)
@@ -466,6 +466,33 @@ def _account_proxy_binding_should_reactivate(account: Account) -> bool:
         or account.status == AccountStatus.DEACTIVATED
         and (reason == "proxy_unreachable" or reason.startswith("proxy_unreachable:"))
     )
+
+
+async def _probe_upstream_proxy_endpoint(endpoint) -> int:
+    if endpoint.scheme.startswith("socks"):
+        connector = ProxyConnector(
+            host=endpoint.host,
+            port=endpoint.port,
+            proxy_type=ProxyType.SOCKS5,
+            username=endpoint.username,
+            password=endpoint.password,
+            rdns=endpoint.proxy_url.split(":", 1)[0] == "socks5h",
+            ssl=_build_ssl_context(),
+        )
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
+            trust_env=False,
+        ) as client:
+            response = await client.get(UPSTREAM_PROXY_TEST_URL, allow_redirects=False)
+            return response.status
+    async with httpx.AsyncClient(
+        proxy=endpoint.proxy_url,
+        timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
+        follow_redirects=False,
+    ) as client:
+        response = await client.get(UPSTREAM_PROXY_TEST_URL)
+        return response.status_code
 
 
 def _elapsed_ms(started: float) -> int:

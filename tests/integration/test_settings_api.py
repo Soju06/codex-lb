@@ -517,11 +517,15 @@ async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, mon
     captured: dict[str, object] = {}
 
     class _Response:
-        status_code = 204
+        status = 204
 
-    class _FakeAsyncClient:
+    class _FakeConnector:
         def __init__(self, **kwargs):
-            captured["client_kwargs"] = kwargs
+            captured["connector_kwargs"] = kwargs
+
+    class _FakeAiohttpSession:
+        def __init__(self, **kwargs):
+            captured["session_kwargs"] = kwargs
 
         async def __aenter__(self):
             return self
@@ -529,11 +533,13 @@ async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, mon
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def get(self, url):
+        async def get(self, url, **kwargs):
             captured["url"] = url
+            captured["get_kwargs"] = kwargs
             return _Response()
 
-    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("app.modules.settings.api.ProxyConnector", _FakeConnector)
+    monkeypatch.setattr("app.modules.settings.api.aiohttp.ClientSession", _FakeAiohttpSession)
 
     endpoint = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
@@ -555,9 +561,14 @@ async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, mon
     assert payload["ok"] is True
     assert payload["statusCode"] == 204
     assert payload["error"] is None
-    client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
+    connector_kwargs = cast(dict[str, Any], captured["connector_kwargs"])
+    session_kwargs = cast(dict[str, Any], captured["session_kwargs"])
     assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
-    assert client_kwargs["proxy"] == "socks5h://proxy.internal:1080"
+    assert cast(dict[str, Any], captured["get_kwargs"])["allow_redirects"] is False
+    assert connector_kwargs["host"] == "proxy.internal"
+    assert connector_kwargs["port"] == 1080
+    assert connector_kwargs["rdns"] is True
+    assert session_kwargs["trust_env"] is False
 
 
 @pytest.mark.asyncio
@@ -643,10 +654,15 @@ async def test_account_proxy_binding_rejects_missing_targets(async_client):
 
 @pytest.mark.asyncio
 async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async_client):
-    from app.modules.proxy.account_cache import get_account_selection_cache
+    from app.modules.proxy.account_cache import (
+        get_account_selection_cache,
+        is_account_routing_unavailable,
+        mark_account_routing_unavailable,
+    )
 
     cache_generation = get_account_selection_cache().generation
     account_id = await _import_account(async_client, "acc-settings-proxy-repair", "settings-proxy-repair@example.com")
+    mark_account_routing_unavailable(account_id)
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
         assert account is not None
@@ -676,6 +692,7 @@ async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async
         assert account.status == AccountStatus.ACTIVE
         assert account.deactivation_reason is None
     assert get_account_selection_cache().generation > cache_generation
+    assert is_account_routing_unavailable(account_id) is False
 
 
 @pytest.mark.asyncio

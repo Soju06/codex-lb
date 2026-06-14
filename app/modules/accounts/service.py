@@ -8,6 +8,7 @@ from typing import cast
 
 import aiohttp
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 
 from app.core.auth import (
     DEFAULT_EMAIL,
@@ -24,6 +25,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
+from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.modules.accounts.auth_manager import AuthManager
@@ -353,7 +355,12 @@ class AccountsService:
         if route is not None:
             return True
 
-        settings = await self._repo.session.get(DashboardSettings, 1)
+        try:
+            settings = await self._repo.session.get(DashboardSettings, 1)
+        except OperationalError as exc:
+            if not _is_missing_upstream_proxy_schema(exc):
+                raise
+            return True
         if settings is not None and settings.upstream_proxy_routing_enabled:
             logger.info(
                 "Pausing imported account until upstream proxy default pool is configured account_id=%s",

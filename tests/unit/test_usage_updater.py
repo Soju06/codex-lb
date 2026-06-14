@@ -122,6 +122,8 @@ async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight_withou
 
 def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuses() -> None:
     active_b = _make_account("acc_b", "workspace_b")
+    paused = _make_account("acc_paused", "workspace_paused")
+    paused.status = AccountStatus.PAUSED
     deactivated = _make_account("acc_deactivated", "workspace_deactivated")
     deactivated.status = AccountStatus.DEACTIVATED
     reauth_required = _make_account("acc_reauth", "workspace_reauth")
@@ -129,7 +131,7 @@ def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuse
     active_a = _make_account("acc_a", "workspace_a")
 
     ordered = refresh_scheduler_module._ordered_usage_refresh_accounts(
-        [active_b, deactivated, reauth_required, active_a]
+        [active_b, paused, deactivated, reauth_required, active_a]
     )
 
     assert [account.id for account in ordered] == ["acc_a", "acc_b"]

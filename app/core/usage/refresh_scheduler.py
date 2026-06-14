@@ -173,7 +173,7 @@ def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
         (
             account
             for account in accounts
-            if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
+            if account.status not in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
         ),
         key=lambda account: account.id,
     )

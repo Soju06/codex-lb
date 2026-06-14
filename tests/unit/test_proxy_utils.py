@@ -6354,6 +6354,79 @@ async def test_stream_with_retry_keeps_sse_alive_while_account_capacity_recovers
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 1.0
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_capacity_budget")
+    deadlines: list[float] = []
+    sleeps: list[float] = []
+    now = 1000.0
+
+    def monotonic() -> float:
+        return now
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", monotonic)
+    monkeypatch.setattr(streaming_retry_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 300.0,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 300.0)
+
+    async def select_account(deadline: float, **_kwargs: object) -> AccountSelection:
+        deadlines.append(deadline)
+        if len(deadlines) == 1:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 300s",
+                error_code="no_accounts",
+            )
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_capacity_budget"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-capacity-budget"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    keepalive = json.loads(chunks[0].split("data: ", 1)[1])
+
+    assert sleeps == [1.0]
+    assert keepalive["retry_after_seconds"] == 1
+    assert deadlines == [1001.0, 1001.0]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

@@ -326,16 +326,20 @@ class _StreamingRetryMixin:
                     ):
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
                         if recovery_sleep_seconds is not None:
+                            remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                            if remaining_budget_seconds <= 0:
+                                break
                             wait_started_at = time.monotonic()
+                            remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
                             _facade().logger.info(
                                 "Waiting for an account to recover before retrying stream selection "
-                                "request_id=%s model=%s sleep_seconds=%.1f error=%s",
+                                "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
                                 request_id,
                                 payload.model,
+                                remaining_sleep_seconds,
                                 recovery_sleep_seconds,
                                 selection.error_message,
                             )
-                            remaining_sleep_seconds = recovery_sleep_seconds
                             while remaining_sleep_seconds > 0:
                                 yield format_sse_event(
                                     cast(
@@ -355,10 +359,6 @@ class _StreamingRetryMixin:
                                 )
                                 await asyncio.sleep(chunk_seconds)
                                 remaining_sleep_seconds -= chunk_seconds
-                            deadline = time.monotonic() + _facade()._stream_request_budget_seconds(
-                                base_settings,
-                                request_transport=request_transport,
-                            )
                             continue
                     break
                 if not account:

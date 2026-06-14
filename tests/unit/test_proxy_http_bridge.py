@@ -1168,6 +1168,104 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
     assert get_or_create.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+    )
+    get_or_create = AsyncMock(
+        side_effect=ProxyResponseError(
+            503,
+            openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+        )
+    )
+    now = 100.0
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-capacity-create-budget",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=now,
+        transport="http",
+    )
+
+    def fake_prepare(
+        _prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id
+        return request_state, '{"type":"response.create"}'
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=1.0,
+            http_responses_session_bridge_request_budget_seconds=1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: now),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 120.0)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 120.0)
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    )
+    chunks: list[str] = []
+
+    with pytest.raises(ProxyResponseError):
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sid-capacity-create-budget"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            chunks.append(chunk)
+
+    keepalive = proxy_service.parse_sse_data_json(chunks[0])
+
+    assert keepalive is not None
+    assert keepalive["type"] == "codex.keepalive"
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert get_or_create.await_count == 1
+
+
 def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:
     assert proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn", None).strength == "hard"
     assert proxy_service._HTTPBridgeSessionKey("session_header", "session", None).strength == "hard"

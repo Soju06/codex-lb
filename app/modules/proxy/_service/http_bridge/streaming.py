@@ -665,6 +665,8 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                         ):
                             yield line
+                        if _service_time().monotonic() >= request_deadline:
+                            raise
                         continue
                     raise
                 _log_http_bridge_event(

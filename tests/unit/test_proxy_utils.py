@@ -70,10 +70,10 @@ def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     assert _account_selection_recovery_sleep_seconds(selection) == 300.0
 
 
-def test_account_selection_recovery_sleep_uses_default_for_no_available_accounts():
+def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 
-    assert _account_selection_recovery_sleep_seconds(selection) == 30.0
+    assert _account_selection_recovery_sleep_seconds(selection) is None
 
 
 @pytest.mark.parametrize(

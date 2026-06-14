@@ -536,6 +536,7 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
     keepalive = await asyncio.wait_for(anext(stream), timeout=1.0)
     payload = proxy_service.parse_sse_data_json(keepalive)
 
+    assert payload is not None
     assert payload["type"] == "codex.keepalive"
     assert payload["status"] == "waiting_for_account_capacity"
     assert payload["request_id"] == "req-capacity-wait"
@@ -1145,6 +1146,8 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
     keepalive = proxy_service.parse_sse_data_json(chunks[0])
     completed = proxy_service.parse_sse_data_json(chunks[-1])
 
+    assert keepalive is not None
+    assert completed is not None
     assert keepalive["type"] == "codex.keepalive"
     assert keepalive["status"] == "waiting_for_account_capacity"
     assert completed["type"] == "response.completed"

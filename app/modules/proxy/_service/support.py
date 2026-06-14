@@ -65,9 +65,6 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
             _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS,
         )
 
-    if "no available accounts" in lowered:
-        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
-
     return None
 
 

@@ -73,6 +73,8 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 
+CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+
 IGNORE_INBOUND_HEADERS = {
     "authorization",
     "chatgpt-account-id",
@@ -80,6 +82,7 @@ IGNORE_INBOUND_HEADERS = {
     "host",
     "forwarded",
     "x-real-ip",
+    CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
 }
 
@@ -440,6 +443,21 @@ def _should_drop_inbound_header(name: str) -> bool:
 
 def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
+
+
+def apply_codex_installation_metadata(payload: dict[str, JsonValue], codex_installation_id: str | None) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata: dict[str, JsonValue] = {}
+    if is_json_mapping(raw_metadata):
+        for key, value in raw_metadata.items():
+            if isinstance(key, str) and key.lower() != CODEX_INSTALLATION_ID_HEADER:
+                client_metadata[key] = value
+    if codex_installation_id:
+        client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
+    if client_metadata:
+        payload["client_metadata"] = client_metadata
+    else:
+        payload.pop("client_metadata", None)
 
 
 def _build_upstream_headers(
@@ -2121,6 +2139,7 @@ async def stream_responses(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    codex_installation_id: str | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2137,6 +2156,7 @@ async def stream_responses(
             codex_client=codex_client,
             route_trace=route_trace,
             allow_direct_egress=effective_allow_direct_egress,
+            codex_installation_id=codex_installation_id,
         ):
             yield event_block
 
@@ -2154,6 +2174,7 @@ async def _stream_responses_with_session(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    codex_installation_id: str | None = None,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2187,7 +2208,8 @@ async def _stream_responses_with_session(
     error_code: str | None = None
     error_message: str | None = None
     client_session = session
-    payload_dict = payload.to_payload()
+    payload_dict = dict(payload.to_payload())
+    apply_codex_installation_metadata(payload_dict, codex_installation_id)
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,

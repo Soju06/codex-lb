@@ -202,6 +202,57 @@ def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None
     assert check_schema_drift(url) == ()
 
 
+def test_accounts_codex_installation_id_migration_backfills_existing_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "codex-installation-id.db"
+    url = _db_url(db_path)
+    parent_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
+    target_revision = "20260613_000000_add_accounts_codex_installation_id"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO accounts "
+                    "(id, email, plan_type, access_token_encrypted, refresh_token_encrypted, "
+                    "id_token_encrypted, last_refresh, status, deactivation_reason) "
+                    "VALUES (:id, :email, :plan_type, :access_token, :refresh_token, "
+                    ":id_token, :last_refresh, :status, :deactivation_reason)"
+                ),
+                {
+                    "id": "acc_codex_installation_backfill",
+                    "email": "codex-installation@example.com",
+                    "plan_type": "plus",
+                    "access_token": b"access",
+                    "refresh_token": b"refresh",
+                    "id_token": b"id",
+                    "last_refresh": "2026-06-10 00:00:00",
+                    "status": "active",
+                    "deactivation_reason": None,
+                },
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, target_revision, bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("accounts")}
+            value = connection.execute(
+                text("SELECT codex_installation_id FROM accounts WHERE id = :id"),
+                {"id": "acc_codex_installation_backfill"},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert columns["codex_installation_id"]["nullable"] is False
+    assert isinstance(value, str)
+    assert len(value) == 36
+
+
 def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "reauth-status.db"
     url = _db_url(db_path)

@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
     ADDITIONAL_QUOTA_EXHAUSTED,
@@ -1541,6 +1542,34 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
     assert account.status == AccountStatus.REAUTH_REQUIRED
     assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
     assert all(update["status"] != AccountStatus.ACTIVE for update in accounts_repo.status_updates)
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_marks_account_routing_unavailable() -> None:
+    account = _make_account("acc-permanent-routing-unavailable", "permanent-routing@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_permanent_failure(account, "refresh_token_expired")
+
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is True
+
+
+@pytest.mark.asyncio
+async def test_mark_rate_limit_does_not_mark_account_routing_unavailable() -> None:
+    account = _make_account("acc-rate-limit-stays-routable", "rate-limit-routing@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_rate_limit(account, {"message": "Try again in 1s"})
+
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert is_account_routing_unavailable(account.id) is False
 
 
 @pytest.mark.asyncio

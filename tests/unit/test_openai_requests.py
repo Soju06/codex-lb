@@ -70,6 +70,18 @@ def test_compact_store_false_is_preserved():
     assert "store" not in request.to_payload()
 
 
+def test_compact_client_metadata_is_stripped():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "client_metadata": {"x-codex-installation-id": "client-installation"},
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert "client_metadata" not in request.to_payload()
+
+
 def test_known_unsupported_upstream_fields_are_stripped():
     payload = {
         "model": "gpt-5.1",

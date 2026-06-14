@@ -759,6 +759,7 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
     payload.pop("parallel_tool_calls", None)
+    payload.pop("client_metadata", None)
     return payload
 
 

@@ -21,6 +21,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
+    apply_codex_installation_metadata,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
@@ -181,6 +182,26 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    payload = json.loads(text_data)
+    if not isinstance(payload, dict):
+        return text_data
+    apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _enforce_http_bridge_response_create_text_size(
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    original_request_text = request_state.request_text
+    request_state.request_text = text_data
+    try:
+        _enforce_response_create_size_limit(request_state)
+    finally:
+        request_state.request_text = original_request_text
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -310,6 +331,27 @@ class _HTTPBridgeRequestSubmitMixin:
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
 
+    def _http_bridge_text_with_account_installation_id(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> str:
+        codex_installation_id = getattr(session.account, "codex_installation_id", None)
+        updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
+        if request_state.fresh_upstream_request_text is not None:
+            updated_fresh_text = _text_with_account_installation_id(
+                request_state.fresh_upstream_request_text,
+                codex_installation_id,
+            )
+            _enforce_http_bridge_response_create_text_size(request_state, updated_fresh_text)
+            request_state.fresh_upstream_request_text = updated_fresh_text
+        if updated_text == text_data:
+            return text_data
+        request_state.request_text = updated_text
+        _enforce_response_create_size_limit(request_state)
+        return updated_text
+
     async def _inline_http_bridge_image_urls(
         self: Any,
         text_data: str,
@@ -382,6 +424,7 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
     ) -> None:
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
                 "submit_after_response_event",
@@ -915,6 +958,7 @@ class _HTTPBridgeRequestSubmitMixin:
         send_request: bool = True,
     ) -> bool:
         retry_text_data = text_data
+        using_fresh_replay = False
         if request_state.previous_response_id is not None and send_request:
             # After an ambiguous websocket send failure we cannot prove whether
             # upstream already accepted the continuation. Re-sending the same
@@ -932,6 +976,7 @@ class _HTTPBridgeRequestSubmitMixin:
             ):
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
+            using_fresh_replay = True
         if request_state.replay_count >= 1:
             return False
         if request_state.response_event_count > 0:
@@ -953,7 +998,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 restart_reader=True,
             )
             if send_request:
-                if retry_text_data != text_data:
+                retry_text_data = self._http_bridge_text_with_account_installation_id(
+                    session,
+                    request_state,
+                    retry_text_data,
+                )
+                if using_fresh_replay:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
@@ -1018,6 +1068,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1084,6 +1135,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
@@ -1151,8 +1203,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
-            retry_text = _response_create_text_with_account_installation_id(retry_text, account=session.account)
-            request_state.request_text = retry_text
+            retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await session.upstream.send_text(retry_text)
             session.last_used_at = _service_time().monotonic()
             return True

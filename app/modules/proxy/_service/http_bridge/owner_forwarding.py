@@ -42,9 +42,6 @@ from app.core.openai.requests import (
 )
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import (
-    AccountStatus,
-)
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -61,6 +58,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_request,
@@ -183,7 +181,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     candidate_keys.append(alias_key)
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
-                if session is None or session.closed or session.account.status != AccountStatus.ACTIVE:
+                if session is None or session.closed or not _http_bridge_session_account_active(session):
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
@@ -220,7 +218,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 candidate_keys.append(previous_key)
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
-                if session is None or session.closed or session.account.status != AccountStatus.ACTIVE:
+                if session is None or session.closed or not _http_bridge_session_account_active(session):
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue

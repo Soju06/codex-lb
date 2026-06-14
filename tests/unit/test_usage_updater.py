@@ -120,6 +120,43 @@ async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight_withou
     assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
 
 
+def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuses() -> None:
+    active_b = _make_account("acc_b", "workspace_b")
+    deactivated = _make_account("acc_deactivated", "workspace_deactivated")
+    deactivated.status = AccountStatus.DEACTIVATED
+    reauth_required = _make_account("acc_reauth", "workspace_reauth")
+    reauth_required.status = AccountStatus.REAUTH_REQUIRED
+    active_a = _make_account("acc_a", "workspace_a")
+
+    ordered = refresh_scheduler_module._ordered_usage_refresh_accounts(
+        [active_b, deactivated, reauth_required, active_a]
+    )
+
+    assert [account.id for account in ordered] == ["acc_a", "acc_b"]
+
+
+def test_usage_refresh_scheduler_splits_interval_across_accounts() -> None:
+    assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 4) == 30.0
+    assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 240) == 0.5
+    assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 0) == 120.0
+
+
+def test_usage_refresh_scheduler_rotates_one_account_per_slice() -> None:
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=120, enabled=True)
+    accounts = [_make_account("acc_a", "workspace_a"), _make_account("acc_b", "workspace_b")]
+
+    first, first_cycle_complete = scheduler._select_next_account(accounts)
+    second, second_cycle_complete = scheduler._select_next_account(accounts)
+    third, third_cycle_complete = scheduler._select_next_account(accounts)
+
+    assert first is accounts[0]
+    assert first_cycle_complete is False
+    assert second is accounts[1]
+    assert second_cycle_complete is True
+    assert third is accounts[0]
+    assert third_cycle_complete is False
+
+
 @dataclass(frozen=True, slots=True)
 class UsageEntry:
     account_id: str
@@ -1621,38 +1658,54 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
     assert len(accounts_repo.status_updates) == 0
 
 
+@pytest.mark.parametrize(
+    ("error_code", "message", "message_hint"),
+    [
+        (
+            "token_invalidated",
+            "Your authentication token has been invalidated. Please try signing in again.",
+            "invalidated",
+        ),
+        (
+            "app_session_terminated",
+            "Your session has been terminated. Please sign in again.",
+            "terminated",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_usage_updater_marks_token_invalidated_as_reauth_required(monkeypatch) -> None:
+async def test_usage_updater_marks_session_failures_as_reauth_required(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    message: str,
+    message_hint: str,
+) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
     from app.core.config.settings import get_settings
 
     get_settings.cache_clear()
 
-    async def stub_fetch_usage_401_token_invalidated(**_: Any) -> UsagePayload:
-        raise UsageFetchError(
-            401,
-            "Your authentication token has been invalidated. Please try signing in again.",
-            code="token_invalidated",
-        )
+    async def stub_fetch_usage_401_session_failure(**_: Any) -> UsagePayload:
+        raise UsageFetchError(401, message, code=error_code)
 
-    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_token_invalidated)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_session_failure)
 
     usage_repo = StubUsageRepository()
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
-    acc = _make_account("acc_401_token_invalidated", "workspace_token_invalidated", email="reauth@example.com")
+    acc = _make_account(f"acc_401_{error_code}", f"workspace_{error_code}", email="reauth@example.com")
     accounts_repo.accounts_by_id[acc.id] = acc
 
     await updater.refresh_accounts([acc], latest_usage={})
 
     assert len(accounts_repo.status_updates) == 1
     update = accounts_repo.status_updates[0]
-    assert update["account_id"] == "acc_401_token_invalidated"
+    assert update["account_id"] == f"acc_401_{error_code}"
     assert update["status"] == AccountStatus.REAUTH_REQUIRED
     assert "401" in update["deactivation_reason"]
-    assert "invalidated" in update["deactivation_reason"]
+    assert message_hint in update["deactivation_reason"]
     assert acc.status == AccountStatus.REAUTH_REQUIRED
 
 

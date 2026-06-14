@@ -33,6 +33,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
+    apply_codex_installation_metadata,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
@@ -440,6 +441,27 @@ def _facade() -> Any:
 def _raise_proxy_budget_exhausted() -> NoReturn:
     _facade()._raise_proxy_budget_exhausted()
     raise AssertionError("proxy budget exhaustion helper returned")
+
+
+def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
+    payload = json.loads(text_data)
+    if not isinstance(payload, dict):
+        return text_data
+    codex_installation_id = getattr(account, "codex_installation_id", None)
+    apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _websocket_enforce_response_create_text_size(
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    original_request_text = request_state.request_text
+    request_state.request_text = text_data
+    try:
+        _facade()._enforce_response_create_size_limit(request_state)
+    finally:
+        request_state.request_text = original_request_text
 
 
 class _WebSocketMixin:
@@ -987,6 +1009,23 @@ class _WebSocketMixin:
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
+                    if (
+                        text_data is not None
+                        and request_state is not None
+                        and payload is not None
+                        and account is not None
+                        and _is_websocket_response_create(payload)
+                    ):
+                        text_data = _websocket_text_with_account_installation_id(text_data, account)
+                        if request_state.fresh_upstream_request_text is not None:
+                            fresh_upstream_request_text = _websocket_text_with_account_installation_id(
+                                request_state.fresh_upstream_request_text,
+                                account,
+                            )
+                            _websocket_enforce_response_create_text_size(request_state, fresh_upstream_request_text)
+                            request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                        request_state.request_text = text_data
+                        _facade()._enforce_response_create_size_limit(request_state)
                     if text_data is not None:
                         if (
                             request_state is not None

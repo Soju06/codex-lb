@@ -34,6 +34,10 @@ def _enum_values(enum_cls: type[Enum]) -> list[str]:
     return [str(member.value) for member in enum_cls]
 
 
+def new_codex_installation_id() -> str:
+    return str(uuid.uuid4())
+
+
 class AccountStatus(str, Enum):
     ACTIVE = "active"
     RATE_LIMITED = "rate_limited"
@@ -65,12 +69,16 @@ class Account(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_installation_id: Mapped[str] = mapped_column(
+        String(36),
+        default=new_codex_installation_id,
+        nullable=False,
+    )
     email: Mapped[str] = mapped_column(String, nullable=False)
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
     seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    codex_installation_id: Mapped[str] = mapped_column(String, default=lambda: str(uuid.uuid4()), nullable=False)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
     routing_policy: Mapped[str] = mapped_column(
         String,

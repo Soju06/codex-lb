@@ -24,6 +24,7 @@ from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
@@ -699,6 +700,113 @@ async def test_get_or_create_http_bridge_session_reuses_live_local_session_witho
     assert reused is existing
     assert reused.request_model == "gpt-5.4"
     assert reused.last_used_at > 1.0
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("request", "bridge-routing-unavailable", None)
+    stale_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-routing-unavailable"),
+        request_model="gpt-5.4-mini",
+        account=cast(Any, SimpleNamespace(id="acc-unavailable", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    replacement_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-routing-unavailable"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-fresh", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    service._http_bridge_sessions[key] = stale_session
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=replacement_session))
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    mark_account_routing_unavailable("acc-unavailable")
+    try:
+        reused = await service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="bridge-routing-unavailable"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+    finally:
+        clear_account_routing_unavailable("acc-unavailable")
+
+    assert reused is replacement_session
+    assert service._http_bridge_sessions[key] is replacement_session
+    assert stale_session.closed is True
+    await _wait_for_close_await(close_session, stale_session)
+
+
+def test_http_bridge_request_text_replaces_client_installation_id() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account.codex_installation_id = "account-installation"
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "client_metadata": {
+                "x-codex-installation-id": "client-installation",
+                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+            },
+        }
+    )
+    request_state, text_data = service._prepare_http_bridge_request(
+        payload,
+        {},
+        api_key=None,
+        api_key_reservation=None,
+    )
+    request_state.fresh_upstream_request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": [],
+            "client_metadata": {"x-codex-installation-id": "client-replay"},
+        },
+        separators=(",", ":"),
+    )
+
+    updated_text = service._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+
+    assert json.loads(updated_text)["client_metadata"] == {
+        "x-codex-installation-id": "account-installation",
+        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+    }
+    assert request_state.fresh_upstream_request_text is not None
+    assert json.loads(request_state.fresh_upstream_request_text)["client_metadata"] == {
+        "x-codex-installation-id": "account-installation",
+    }
 
 
 @pytest.mark.asyncio
@@ -9800,11 +9908,25 @@ async def test_retry_http_bridge_request_on_fresh_upstream_replays_retry_safe_in
         started_at=1.0,
         previous_response_id="resp_prev_safe",
         proxy_injected_previous_response_id=True,
-        fresh_upstream_request_text='{"type":"response.create","input":"full-history-fallback"}',
+        fresh_upstream_request_text=(
+            '{"type":"response.create","input":"full-history-fallback",'
+            '"client_metadata":{"x-codex-installation-id":"installation-a"}}'
+        ),
         fresh_upstream_request_is_retry_safe=True,
         transport="http",
     )
-    reconnect = AsyncMock()
+
+    async def reconnect(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        session.account = cast(
+            Any,
+            SimpleNamespace(
+                id="acc-2",
+                status=AccountStatus.ACTIVE,
+                codex_installation_id="installation-b",
+            ),
+        )
+
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
     recovered = await service._retry_http_bridge_request_on_fresh_upstream(

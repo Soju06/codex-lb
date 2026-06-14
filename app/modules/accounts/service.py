@@ -47,7 +47,11 @@ from app.modules.accounts.schemas import (
     OpenCodeOAuthAuth,
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import (
+    clear_account_routing_unavailable,
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+)
 from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
@@ -305,6 +309,8 @@ class AccountsService:
         if self._usage_repo and self._usage_updater:
             latest_usage = await self._usage_repo.latest_by_account(window="primary")
             await self._usage_updater.refresh_accounts([saved], latest_usage)
+        if saved.status == AccountStatus.ACTIVE:
+            clear_account_routing_unavailable(saved.id)
         get_account_selection_cache().invalidate()
         return AccountImportResponse(
             account_id=saved.id,
@@ -336,6 +342,7 @@ class AccountsService:
         if not result:
             raise AccountStateTransitionError("Account state changed; retry the operation")
         if result:
+            clear_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
         return result
 
@@ -359,6 +366,7 @@ class AccountsService:
         if not result:
             raise AccountStateTransitionError("Account state changed; retry the operation")
         if result:
+            mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
         return result
 
@@ -385,6 +393,7 @@ class AccountsService:
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         result = await self._repo.delete(account_id, delete_history=delete_history)
         if result:
+            mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
             poller = get_cache_invalidation_poller()

@@ -572,6 +572,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route": route,
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
+                        "codex_installation_id": account.codex_installation_id,
                     },
                     raise_for_status=True,
                     upstream_stream_transport_override=upstream_stream_transport,
@@ -587,6 +588,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route": route,
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
+                        "codex_installation_id": account.codex_installation_id,
                     },
                     raise_for_status=True,
                 )

@@ -51,6 +51,7 @@ from app.modules.proxy._service.support import (
     _account_selection_recovery_sleep_seconds,
     _sleep_for_account_selection_recovery,
 )
+from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -333,11 +334,13 @@ def test_filter_inbound_headers_strips_auth_and_account():
         "chatgpt-account-id": "acc_1",
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
+        "X-Codex-Installation-Id": "client-installation",
         "X-Request-Id": "req_1",
     }
     filtered = filter_inbound_headers(headers)
     assert "Authorization" not in filtered
     assert "chatgpt-account-id" not in filtered
+    assert "X-Codex-Installation-Id" not in filtered
     assert filtered["Content-Encoding"] == "gzip"
     assert filtered["Content-Type"] == "application/json"
     assert filtered["X-Request-Id"] == "req_1"
@@ -1793,6 +1796,62 @@ def test_response_create_client_metadata_preserves_existing_json_values_and_turn
         "nested": {"enabled": False},
         "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
     }
+
+
+def test_response_create_client_metadata_replaces_installation_id():
+    metadata = proxy_service._response_create_client_metadata(
+        {
+            "client_metadata": {
+                "x-codex-installation-id": "client-installation",
+                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+            }
+        },
+        headers={},
+        codex_installation_id="account-installation",
+    )
+
+    assert metadata == {
+        "x-codex-installation-id": "account-installation",
+        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+    }
+
+
+def test_response_create_client_metadata_strips_installation_id_without_account_id():
+    metadata = proxy_service._response_create_client_metadata(
+        {"client_metadata": {"x-codex-installation-id": "client-installation"}},
+        headers={},
+    )
+
+    assert metadata is None
+
+
+def test_websocket_installation_metadata_stamping_rechecks_response_create_size(monkeypatch):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_installation_size",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="websocket",
+        request_text='{"type":"response.create","input":"x"}',
+    )
+    account = cast(Any, SimpleNamespace(id="acc_ws_installation_size", codex_installation_id="account-installation"))
+    stamped_text = websocket_mixin._websocket_text_with_account_installation_id(
+        request_state.request_text or "{}",
+        account,
+    )
+    max_bytes = len(stamped_text.encode("utf-8")) - 1
+    assert len((request_state.request_text or "").encode("utf-8")) < max_bytes
+
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", max_bytes + 1, raising=False)
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", max_bytes, raising=False)
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        websocket_mixin._websocket_enforce_response_create_text_size(request_state, stamped_text)
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.payload["error"]["code"] == "payload_too_large"
 
 
 def test_response_create_client_metadata_reads_turn_metadata_case_insensitively():

@@ -89,6 +89,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_alias_key,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_matches_preferred_account,
     _http_bridge_session_retiring_with_visible_requests,
@@ -584,7 +585,7 @@ class _HTTPBridgeMixin(
                         if (
                             alias_session is None
                             or alias_session.closed
-                            or alias_session.account.status != AccountStatus.ACTIVE
+                            or not _http_bridge_session_account_active(alias_session)
                             or not _http_bridge_session_matches_preferred_account(
                                 session=alias_session,
                                 previous_response_id=previous_response_id,
@@ -618,7 +619,7 @@ class _HTTPBridgeMixin(
                             if (
                                 previous_session is not None
                                 and not previous_session.closed
-                                and previous_session.account.status == AccountStatus.ACTIVE
+                                and _http_bridge_session_account_active(previous_session)
                                 and _http_bridge_session_matches_preferred_account(
                                     session=previous_session,
                                     previous_response_id=previous_response_id,
@@ -663,7 +664,7 @@ class _HTTPBridgeMixin(
                 if (
                     existing is not None
                     and not existing.closed
-                    and existing.account.status == AccountStatus.ACTIVE
+                    and _http_bridge_session_account_active(existing)
                     and _http_bridge_session_allows_api_key(existing, api_key)
                     and _http_bridge_session_reusable_for_request(
                         session=existing,
@@ -1086,7 +1087,7 @@ class _HTTPBridgeMixin(
                     if (
                         previous_response_id is not None
                         and inflight_future is None
-                        and (existing is None or existing.closed or existing.account.status != AccountStatus.ACTIVE)
+                        and (existing is None or existing.closed or not _http_bridge_session_account_active(existing))
                     ):
                         previous_alias_key = _http_bridge_previous_response_alias_key(previous_response_id, api_key_id)
                         previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)
@@ -1095,7 +1096,7 @@ class _HTTPBridgeMixin(
                             if (
                                 previous_session is not None
                                 and not previous_session.closed
-                                and previous_session.account.status == AccountStatus.ACTIVE
+                                and _http_bridge_session_account_active(previous_session)
                             ):
                                 key = previous_session.key
                                 existing = previous_session
@@ -1345,7 +1346,7 @@ class _HTTPBridgeMixin(
                     continue
                 if (
                     not session.closed
-                    and session.account.status == AccountStatus.ACTIVE
+                    and _http_bridge_session_account_active(session)
                     and _http_bridge_session_allows_api_key(session, api_key)
                     and _http_bridge_session_reusable_for_request(
                         session=session,

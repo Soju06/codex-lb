@@ -9899,6 +9899,10 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
             error_type="server_error",
         ),
     )
+    capacity_unavailable = ProxyResponseError(
+        503,
+        proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+    )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-owner-unavailable", None),
         headers={"session_id": "sid-owner-unavailable"},
@@ -9917,7 +9921,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
     )
-    get_or_create = AsyncMock(side_effect=[owner_unavailable, session])
+    get_or_create = AsyncMock(side_effect=[owner_unavailable, capacity_unavailable, session])
     captured_request_states: list[proxy_service._WebSocketRequestState] = []
     captured_text_data: list[str] = []
 
@@ -9953,6 +9957,8 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         ),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
@@ -9978,15 +9984,22 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         )
     ]
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
-    assert get_or_create.await_count == 2
+    keepalive = proxy_service.parse_sse_data_json(chunks[0])
+    assert keepalive is not None
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
+    assert get_or_create.await_count == 3
     first_call = get_or_create.await_args_list[0]
     second_call = get_or_create.await_args_list[1]
+    third_call = get_or_create.await_args_list[2]
     assert first_call.kwargs["previous_response_id"] == "resp_completed_anchor"
     assert first_call.kwargs["preferred_account_id"] == "acc-owner"
     assert second_call.kwargs["previous_response_id"] is None
     assert second_call.kwargs["preferred_account_id"] is None
     assert second_call.kwargs["durable_lookup"] is None
+    assert third_call.kwargs["previous_response_id"] is None
+    assert third_call.kwargs["preferred_account_id"] is None
+    assert third_call.kwargs["durable_lookup"] is None
     assert captured_request_states[0].previous_response_id is None
     replay_payload = json.loads(captured_text_data[0])
     assert "previous_response_id" not in replay_payload

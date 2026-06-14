@@ -709,31 +709,8 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_trimmed_input_fingerprint = None
                 durable_full_resend_anchor_count = None
                 durable_full_resend_anchor_fingerprint = None
-                session_or_forward = await self._get_or_create_http_bridge_session(
-                    bridge_session_key,
-                    headers=dict(headers),
-                    affinity=affinity,
-                    api_key=api_key,
-                    request_model=payload.model,
-                    idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
-                        affinity=affinity,
-                        idle_ttl_seconds=idle_ttl_seconds,
-                        codex_idle_ttl_seconds=codex_idle_ttl_seconds,
-                        prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
-                    ),
-                    max_sessions=max_sessions,
-                    previous_response_id=None,
-                    gateway_safe_mode=runtime_config.gateway_safe_mode,
-                    allow_forward_to_owner=True,
-                    forwarded_request=forwarded_request,
-                    forwarded_affinity_kind=forwarded_affinity_kind,
-                    forwarded_affinity_key=forwarded_affinity_key,
-                    durable_lookup=None,
-                    request_stage=request_state.request_stage,
-                    preferred_account_id=request_state.preferred_account_id,
-                    fallback_on_preferred_account_unavailable=not file_required_preferred_account,
-                    request_usage_budget=request_state.request_usage_budget,
-                )
+                durable_lookup = None
+                continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
             forwarded_any = False

@@ -236,11 +236,15 @@ async def test_websocket_transport_error_preserves_handshake_status(route: Resol
 
 
 @pytest.mark.asyncio
-async def test_socks_websocket_uses_proxy_connector_and_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+async def test_socks_websocket_uses_proxy_connector_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+    scheme: str,
+) -> None:
     route = ResolvedUpstreamRoute(
         mode="account_bound",
         pool_id="pool_1",
-        endpoint=ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080, "u;session", "p@x:y"),
+        endpoint=ResolvedProxyEndpoint("ep_1", scheme, "proxy.test", 1080, "u;session", "p@x:y"),
     )
     _SocksConnector.calls = []
     _SocksWsSession.latest = None

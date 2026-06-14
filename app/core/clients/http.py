@@ -42,12 +42,25 @@ _closing_http_clients: list[_ManagedHttpClient] = []
 
 
 def _socks_proxy_url() -> str | None:
+    request_method_set = bool(os.environ.get("REQUEST_METHOD"))
     for var in (
-        "SOCKS_PROXY", "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
-        "socks_proxy", "all_proxy", "https_proxy", "http_proxy",
+        "SOCKS_PROXY",
+        "socks_proxy",
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
     ):
+        if request_method_set and var in ("HTTP_PROXY", "http_proxy"):
+            continue
         val = os.environ.get(var, "").strip()
-        if val.lower().startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
+        lowered = val.lower()
+        if var in ("SOCKS_PROXY", "socks_proxy") and lowered.startswith(("http://", "https://")):
+            val = f"socks5h://{val.split('://', 1)[1]}"
+            lowered = val.lower()
+        if lowered.startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
             return val
     return None
 
@@ -101,10 +114,10 @@ async def _build_http_client() -> HttpClient:
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
-        trust_env=True,
+        trust_env=not socks_url,
     )
     try:
-        if socks_url:
+        if socks_url and settings.upstream_websocket_trust_env:
             ws_connector: aiohttp.TCPConnector | ProxyConnector = ProxyConnector.from_url(
                 socks_url,
                 ssl=_build_ssl_context(),
@@ -113,11 +126,15 @@ async def _build_http_client() -> HttpClient:
         else:
             ws_connector = aiohttp.TCPConnector(ssl=_build_ssl_context())
             ws_trust_env = settings.upstream_websocket_trust_env
-        websocket_session = aiohttp.ClientSession(
-            connector=ws_connector,
-            timeout=aiohttp.ClientTimeout(total=None),
-            trust_env=ws_trust_env,
-        )
+        try:
+            websocket_session = aiohttp.ClientSession(
+                connector=ws_connector,
+                timeout=aiohttp.ClientTimeout(total=None),
+                trust_env=ws_trust_env,
+            )
+        except Exception:
+            await ws_connector.close()
+            raise
     except Exception:
         await session.close()
         raise

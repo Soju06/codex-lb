@@ -9432,6 +9432,72 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
 
 
 @pytest.mark.asyncio
+async def test_select_websocket_connect_account_waits_before_deferred_no_account(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_capacity_wait_after_failover",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    selected_account = _make_account("acc_ws_capacity_recovered_after_failover")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 120s",
+                error_code="no_accounts",
+            ),
+            AccountSelection(account=selected_account, error_message=None),
+        ]
+    )
+
+    async def fake_sleep_for_account_selection_recovery(*_args: object, **kwargs: object) -> bool:
+        heartbeat = cast(Callable[[float], Any] | None, kwargs.get("heartbeat"))
+        assert heartbeat is not None
+        await heartbeat(0.001)
+        return True
+
+    websocket_send = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        fake_sleep_for_account_selection_recovery,
+    )
+
+    result = await service._select_websocket_connect_account(
+        time.monotonic() + 10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=None,
+        require_preferred_account=False,
+        defer_no_account_error=True,
+    )
+
+    assert result is selected_account
+    assert select_account.await_count == 2
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["type"] == "codex.keepalive"
+    assert sent_payload["status"] == "waiting_for_account_capacity"
+    assert sent_payload["request_id"] == "ws_req_capacity_wait_after_failover"
+
+
+@pytest.mark.asyncio
 async def test_select_websocket_file_pin_stream_cap_does_not_fall_back(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     request_state = proxy_service._WebSocketRequestState(

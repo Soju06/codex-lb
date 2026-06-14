@@ -1569,7 +1569,7 @@ class _WebSocketMixin:
                 raise
 
             account = selection.account
-            if account is not None or defer_no_account_error:
+            if account is not None:
                 break
 
             async def _heartbeat(remaining_seconds: float) -> None:

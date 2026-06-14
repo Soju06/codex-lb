@@ -114,6 +114,36 @@ describe("useOauth", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
   });
 
+  it("does not invalidate account or dashboard queries when OAuth completion stays pending", async () => {
+    completeOauthMock.mockResolvedValue({ status: "pending", errorMessage: null });
+    const { queryClient, result } = renderUseOauth();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await act(async () => {
+      await result.current.complete();
+    });
+
+    expect(result.current.state.status).toBe("pending");
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate account or dashboard queries when OAuth completion returns an error", async () => {
+    completeOauthMock.mockResolvedValue({
+      status: "error",
+      errorMessage: "OAuth flow is not ready yet.",
+    });
+    const { queryClient, result } = renderUseOauth();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await act(async () => {
+      await result.current.complete();
+    });
+
+    expect(result.current.state.status).toBe("error");
+    expect(result.current.state.errorMessage).toBe("OAuth flow is not ready yet.");
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
   it("invalidates account and dashboard queries after device OAuth polling succeeds", async () => {
     startOauthMock.mockResolvedValue({
       flowId: "flow-device",

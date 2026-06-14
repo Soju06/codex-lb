@@ -134,7 +134,7 @@ export function useOauth() {
 
   const complete = useCallback(async () => {
     try {
-      await completeOauth({
+      const response = await completeOauth({
         ...(state.flowId ? { flowId: state.flowId } : {}),
         deviceAuthId: state.deviceAuthId ?? undefined,
         userCode: state.userCode ?? undefined,
@@ -142,10 +142,13 @@ export function useOauth() {
       setState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
-          status: "success",
+          status: response.status === "success" ? "success" : response.status === "error" ? "error" : "pending",
+          errorMessage: response.errorMessage ?? null,
         }),
       );
-      invalidateAccountRelatedQueries(queryClient);
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({

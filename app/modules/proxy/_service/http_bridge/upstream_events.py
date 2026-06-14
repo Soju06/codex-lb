@@ -38,6 +38,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
@@ -178,7 +179,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
-                    proxy_request_budget_seconds=runtime_settings.http_responses_session_bridge_request_budget_seconds,
+                    proxy_request_budget_seconds=_http_bridge_request_budget_seconds(runtime_settings),
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
                 try:

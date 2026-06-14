@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -12,7 +12,10 @@ import { CostPerDayChart } from "./cost-per-day-chart";
 import { TokensPerDayChart } from "./tokens-per-day-chart";
 import { ModelDistributionDonut } from "./model-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
-import { daysAgoLocalISO, localDateISO } from "../date";
+import { daysAgoLocalISO, getBrowserReportsTimeZone, localDateISO } from "../date";
+
+const REPORTS_TIMEZONE_REFRESH_INTERVAL_MS = 60_000;
+const DEFAULT_PRESET_DAYS = 7;
 
 const createDefaultFilters = (): ReportsFiltersState => ({
   startDate: daysAgoLocalISO(6),
@@ -30,12 +33,42 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     ...createDefaultFilters(),
     ...initialFilters,
   }));
-  const reportsQuery = useReports(filters);
+  const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(
+    DEFAULT_PRESET_DAYS,
+  );
+  const [reportsTimeZone, setReportsTimeZone] = useState<string | undefined>(() =>
+    getBrowserReportsTimeZone(),
+  );
+
+  useEffect(() => {
+    const refreshReportsTimeZone = () => {
+      setReportsTimeZone((currentTimeZone) => {
+        const nextTimeZone = getBrowserReportsTimeZone();
+        return currentTimeZone === nextTimeZone ? currentTimeZone : nextTimeZone;
+      });
+    };
+
+    const intervalId = window.setInterval(
+      refreshReportsTimeZone,
+      REPORTS_TIMEZONE_REFRESH_INTERVAL_MS,
+    );
+
+    window.addEventListener("focus", refreshReportsTimeZone);
+    document.addEventListener("visibilitychange", refreshReportsTimeZone);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshReportsTimeZone);
+      document.removeEventListener("visibilitychange", refreshReportsTimeZone);
+    };
+  }, []);
+
+  const reportsQuery = useReports(filters, reportsTimeZone);
   const modelCatalogFilters = useMemo(
     () => ({ ...filters, model: "" }),
     [filters],
   );
-  const modelCatalogQuery = useReports(modelCatalogFilters);
+  const modelCatalogQuery = useReports(modelCatalogFilters, reportsTimeZone);
   const accountsQuery = useQuery({
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
@@ -80,6 +113,25 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     ]);
   };
 
+  const handlePresetSelect = (days: number) => {
+    setSelectedPresetDays(days);
+    setFilters((current) => ({
+      ...current,
+      startDate: daysAgoLocalISO(days - 1),
+      endDate: localDateISO(),
+    }));
+  };
+
+  const handleFiltersChange = (nextFilters: ReportsFiltersState) => {
+    if (
+      nextFilters.startDate !== filters.startDate ||
+      nextFilters.endDate !== filters.endDate
+    ) {
+      setSelectedPresetDays(null);
+    }
+    setFilters(nextFilters);
+  };
+
   return (
     <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-6 px-4 py-8 sm:px-6">
       <div>
@@ -93,9 +145,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
       <ReportsFilters
         filters={filters}
+        selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
         modelOptions={modelOptions}
-        onFiltersChange={setFilters}
+        onPresetSelect={handlePresetSelect}
+        onFiltersChange={handleFiltersChange}
       />
 
       {mainReportsError ? (
@@ -120,7 +174,10 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         </div>
       ) : reportsQuery.data ? (
         <>
-          <ReportsSummaryCards summary={reportsQuery.data.summary} />
+          <ReportsSummaryCards
+            summary={reportsQuery.data.summary}
+            comparison={reportsQuery.data.comparison}
+          />
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <CostPerDayChart data={reportsQuery.data.daily} />
             <TokensPerDayChart data={reportsQuery.data.daily} />
@@ -130,7 +187,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
               <ModelDistributionDonut data={reportsQuery.data.byModel} />
             </div>
             <div className="lg:col-span-2">
-              <DailyDetailTable data={reportsQuery.data.daily} />
+              <DailyDetailTable
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </div>
           </div>
         </>

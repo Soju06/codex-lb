@@ -23,6 +23,7 @@ from app.db.models import (
     StickySession,
     UsageHistory,
 )
+from app.db.session import sqlite_writer_section
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 
 _SETTINGS_ROW_ID = 1
@@ -151,6 +152,20 @@ class AccountsRepository:
         merge_by_email: bool | None = None,
         merge_by_chatgpt_identity: bool = False,
     ) -> Account:
+        async with sqlite_writer_section():
+            return await self._upsert_unlocked(
+                account,
+                merge_by_email=merge_by_email,
+                merge_by_chatgpt_identity=merge_by_chatgpt_identity,
+            )
+
+    async def _upsert_unlocked(
+        self,
+        account: Account,
+        *,
+        merge_by_email: bool | None = None,
+        merge_by_chatgpt_identity: bool = False,
+    ) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
         if merge_by_email is None:
@@ -246,6 +261,20 @@ class AccountsRepository:
         return await self.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
 
     async def upsert_account_slot(
+        self,
+        account: Account,
+        *,
+        preserve_unknown_workspace_duplicates: bool | None = None,
+        preserve_identity_slots: bool = False,
+    ) -> Account:
+        async with sqlite_writer_section():
+            return await self._upsert_account_slot_unlocked(
+                account,
+                preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+                preserve_identity_slots=preserve_identity_slots,
+            )
+
+    async def _upsert_account_slot_unlocked(
         self,
         account: Account,
         *,
@@ -448,28 +477,30 @@ class AccountsRepository:
         reset_at: int | None = None,
         blocked_at: int | None | object = _UNSET,
     ) -> bool:
-        values: dict[str, object | None] = {
-            "status": status,
-            "deactivation_reason": deactivation_reason,
-            "reset_at": reset_at,
-        }
-        if blocked_at is not _UNSET:
-            values["blocked_at"] = blocked_at
-        result = await self._session.execute(
-            update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            values: dict[str, object | None] = {
+                "status": status,
+                "deactivation_reason": deactivation_reason,
+                "reset_at": reset_at,
+            }
+            if blocked_at is not _UNSET:
+                values["blocked_at"] = blocked_at
+            result = await self._session.execute(
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
-        result = await self._session.execute(
-            update(Account)
-            .where(Account.id == account_id)
-            .values(security_work_authorized=enabled)
-            .returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(security_work_authorized=enabled)
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_status_if_current(
         self,
@@ -484,72 +515,83 @@ class AccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
     ) -> bool:
-        values: dict[str, object | None] = {
-            "status": status,
-            "deactivation_reason": deactivation_reason,
-            "reset_at": reset_at,
-        }
-        if blocked_at is not _UNSET:
-            values["blocked_at"] = blocked_at
-        stmt = (
-            update(Account)
-            .where(Account.id == account_id)
-            .where(Account.status == expected_status)
-            .values(**values)
-            .returning(Account.id)
-        )
-        if expected_deactivation_reason is None:
-            stmt = stmt.where(Account.deactivation_reason.is_(None))
-        else:
-            stmt = stmt.where(Account.deactivation_reason == expected_deactivation_reason)
-        if expected_reset_at is None:
-            stmt = stmt.where(Account.reset_at.is_(None))
-        else:
-            stmt = stmt.where(Account.reset_at == expected_reset_at)
-        if expected_blocked_at is not _UNSET:
-            if expected_blocked_at is None:
-                stmt = stmt.where(Account.blocked_at.is_(None))
+        async with sqlite_writer_section():
+            values: dict[str, object | None] = {
+                "status": status,
+                "deactivation_reason": deactivation_reason,
+                "reset_at": reset_at,
+            }
+            if blocked_at is not _UNSET:
+                values["blocked_at"] = blocked_at
+            stmt = (
+                update(Account)
+                .where(Account.id == account_id)
+                .where(Account.status == expected_status)
+                .values(**values)
+                .returning(Account.id)
+            )
+            if expected_deactivation_reason is None:
+                stmt = stmt.where(Account.deactivation_reason.is_(None))
             else:
-                stmt = stmt.where(Account.blocked_at == expected_blocked_at)
-        result = await self._session.execute(stmt)
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+                stmt = stmt.where(Account.deactivation_reason == expected_deactivation_reason)
+            if expected_reset_at is None:
+                stmt = stmt.where(Account.reset_at.is_(None))
+            else:
+                stmt = stmt.where(Account.reset_at == expected_reset_at)
+            if expected_blocked_at is not _UNSET:
+                if expected_blocked_at is None:
+                    stmt = stmt.where(Account.blocked_at.is_(None))
+                else:
+                    stmt = stmt.where(Account.blocked_at == expected_blocked_at)
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
-        result = await self._session.execute(
-            update(Account).where(Account.id == account_id).values(alias=alias).returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account).where(Account.id == account_id).values(alias=alias).returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
-        result = await self._session.execute(
-            update(Account).where(Account.id == account_id).values(limit_warmup_enabled=enabled).returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(limit_warmup_enabled=enabled)
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_routing_policy(self, account_id: str, routing_policy: str) -> bool:
-        result = await self._session.execute(
-            update(Account).where(Account.id == account_id).values(routing_policy=routing_policy).returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(routing_policy=routing_policy)
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
-        await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
-        if delete_history:
-            await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
-        else:
-            await self._session.execute(
-                update(RequestLog)
-                .where(RequestLog.account_id == account_id)
-                .values(account_id=None, deleted_at=utcnow()),
-            )
-        await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
-        result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
+            if delete_history:
+                await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+            else:
+                await self._session.execute(
+                    update(RequestLog)
+                    .where(RequestLog.account_id == account_id)
+                    .values(account_id=None, deleted_at=utcnow()),
+                )
+            await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+            result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def update_tokens(
         self,
@@ -565,29 +607,30 @@ class AccountsRepository:
         workspace_label: str | None = None,
         seat_type: str | None = None,
     ) -> bool:
-        values: dict[str, bytes | datetime | str] = {
-            "access_token_encrypted": access_token_encrypted,
-            "refresh_token_encrypted": refresh_token_encrypted,
-            "id_token_encrypted": id_token_encrypted,
-            "last_refresh": last_refresh,
-        }
-        if plan_type is not None:
-            values["plan_type"] = plan_type
-        if email is not None:
-            values["email"] = email
-        if chatgpt_account_id is not None:
-            values["chatgpt_account_id"] = chatgpt_account_id
-        if workspace_id is not None:
-            values["workspace_id"] = workspace_id
-        if workspace_label is not None:
-            values["workspace_label"] = workspace_label
-        if seat_type is not None:
-            values["seat_type"] = seat_type
-        result = await self._session.execute(
-            update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
-        )
-        await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        async with sqlite_writer_section():
+            values: dict[str, bytes | datetime | str] = {
+                "access_token_encrypted": access_token_encrypted,
+                "refresh_token_encrypted": refresh_token_encrypted,
+                "id_token_encrypted": id_token_encrypted,
+                "last_refresh": last_refresh,
+            }
+            if plan_type is not None:
+                values["plan_type"] = plan_type
+            if email is not None:
+                values["email"] = email
+            if chatgpt_account_id is not None:
+                values["chatgpt_account_id"] = chatgpt_account_id
+            if workspace_id is not None:
+                values["workspace_id"] = workspace_id
+            if workspace_label is not None:
+                values["workspace_label"] = workspace_label
+            if seat_type is not None:
+                values["seat_type"] = seat_type
+            result = await self._session.execute(
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
 
     async def workspace_slot_taken(
         self,

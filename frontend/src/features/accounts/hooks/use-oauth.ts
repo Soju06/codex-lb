@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   completeOauth,
@@ -6,6 +7,7 @@ import {
   startOauth,
   submitManualOauthCallback,
 } from "@/features/accounts/api";
+import { invalidateAccountRelatedQueries } from "@/features/accounts/query-invalidation";
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
@@ -22,7 +24,10 @@ const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
   errorMessage: null,
 });
 
+const DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS = 2;
+
 export function useOauth() {
+  const queryClient = useQueryClient();
   const [state, setState] = useState<OAuthState>(INITIAL_OAUTH_STATE);
   const pollTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
@@ -62,6 +67,9 @@ export function useOauth() {
           errorMessage: status.errorMessage,
         }),
       );
+      if (status.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({
@@ -71,7 +79,7 @@ export function useOauth() {
         }),
       );
     }
-  }, [state.flowId]);
+  }, [queryClient, state.flowId]);
 
   const start = useCallback(async (forceMethod?: "browser" | "device") => {
     clearPollTimer();
@@ -80,16 +88,19 @@ export function useOauth() {
 
     try {
       const response = await startOauth({ forceMethod });
+      const method = response.method === "device" ? "device" : "browser";
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
         status: "pending",
-        method: response.method === "device" ? "device" : "browser",
+        method,
         authorizationUrl: response.authorizationUrl,
         callbackUrl: response.callbackUrl,
         verificationUrl: response.verificationUrl,
         userCode: response.userCode,
         deviceAuthId: response.deviceAuthId,
-        intervalSeconds: response.intervalSeconds,
+        intervalSeconds:
+          response.intervalSeconds
+          ?? (method === "browser" && response.flowId ? DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS : null),
         expiresInSeconds: response.expiresInSeconds,
         errorMessage: null,
       });
@@ -123,7 +134,7 @@ export function useOauth() {
 
   const complete = useCallback(async () => {
     try {
-      await completeOauth({
+      const response = await completeOauth({
         ...(state.flowId ? { flowId: state.flowId } : {}),
         deviceAuthId: state.deviceAuthId ?? undefined,
         userCode: state.userCode ?? undefined,
@@ -131,9 +142,13 @@ export function useOauth() {
       setState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
-          status: "success",
+          status: response.status === "success" ? "success" : response.status === "error" ? "error" : "pending",
+          errorMessage: response.errorMessage ?? null,
         }),
       );
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
     } catch (error) {
       setState((prev) =>
         OAuthStateSchema.parse({
@@ -144,7 +159,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.deviceAuthId, state.flowId, state.userCode]);
+  }, [queryClient, state.deviceAuthId, state.flowId, state.userCode]);
 
   const manualCallback = useCallback(async (callbackUrl: string) => {
     try {
@@ -159,6 +174,9 @@ export function useOauth() {
           errorMessage: response.errorMessage,
         }),
       );
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+      }
       return response;
     } catch (error) {
       setState((prev) =>
@@ -170,7 +188,7 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.flowId]);
+  }, [queryClient, state.flowId]);
 
   useEffect(() => {
     if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {

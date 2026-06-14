@@ -15,17 +15,8 @@ import {
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
+import { invalidateAccountRelatedQueries } from "@/features/accounts/query-invalidation";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
-
-function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
-  void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-  void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-  void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
-  if (accountId) {
-    void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
-  }
-}
 
 /**
  * Account mutation actions without the polling query.

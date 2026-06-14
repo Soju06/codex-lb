@@ -257,6 +257,7 @@ export const OauthCompleteRequestSchema = z.object({
 
 export const OauthCompleteResponseSchema = z.object({
   status: z.string(),
+  errorMessage: z.string().nullable().optional(),
 });
 
 export const ManualOauthCallbackRequestSchema = z.object({

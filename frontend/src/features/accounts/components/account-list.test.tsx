@@ -432,6 +432,33 @@ describe("AccountList", () => {
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
 
+  it("keeps the add account action outside the scrollable account list", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-1",
+            email: "primary@example.com",
+            displayName: "Primary",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    const addAccountButton = screen.getByRole("button", { name: "Add account" });
+    const scrollRegion = screen.getByTestId("account-list-scroll-region");
+
+    expect(scrollRegion).not.toContainElement(addAccountButton);
+  });
+
   it("filters re-auth required accounts by status", async () => {
     const user = userEvent.setup();
 

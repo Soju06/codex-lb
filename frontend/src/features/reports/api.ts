@@ -6,6 +6,7 @@ export type ReportsParams = {
   endDate?: string;
   accountId?: string[];
   model?: string;
+  timezone?: string;
 };
 
 export function getReports(params: ReportsParams = {}) {
@@ -13,6 +14,7 @@ export function getReports(params: ReportsParams = {}) {
   if (params.startDate) query.set("start_date", params.startDate);
   if (params.endDate) query.set("end_date", params.endDate);
   if (params.model) query.set("model", params.model);
+  if (params.timezone) query.set("timezone", params.timezone);
   if (params.accountId) {
     for (const id of params.accountId) {
       query.append("account_id", id);

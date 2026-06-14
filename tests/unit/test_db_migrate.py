@@ -929,6 +929,21 @@ def test_create_sqlite_pre_migration_backup_consolidates_wal_rows(tmp_path: Path
     assert not Path(f"{backup}-wal").exists()
 
 
+def test_create_sqlite_pre_migration_backup_preserves_source_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    db_path.chmod(0o600)
+
+    backup = create_sqlite_pre_migration_backup(
+        db_path,
+        max_files=2,
+        now=datetime(2026, 2, 13, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert backup.stat().st_mode & 0o777 == 0o600
+
+
 class _FakeStringType:
     def __init__(self, length: int | None) -> None:
         self.length = length

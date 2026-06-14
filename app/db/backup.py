@@ -30,10 +30,12 @@ def list_sqlite_pre_migration_backups(source: Path) -> list[Path]:
 
 
 def _sqlite_backup(source: Path, backup_path: Path) -> None:
+    source_mode = source.stat().st_mode
     with sqlite3.connect(source) as source_conn:
         with sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
             backup_conn.execute("PRAGMA journal_mode=DELETE")
+    backup_path.chmod(source_mode)
 
 
 def create_sqlite_pre_migration_backup(

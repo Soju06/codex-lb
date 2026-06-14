@@ -649,6 +649,7 @@ class _HTTPBridgeStreamingMixin:
                     preferred_account_id=request_state.preferred_account_id,
                     fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                     request_usage_budget=request_state.request_usage_budget,
+                    request_deadline=request_deadline,
                 )
             except ProxyResponseError as exc:
                 if not (
@@ -809,6 +810,7 @@ class _HTTPBridgeStreamingMixin:
                             request_stage="reattach",
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
+                            request_deadline=request_deadline,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -1116,6 +1118,7 @@ class _HTTPBridgeStreamingMixin:
                             request_stage=request_state.request_stage,
                             preferred_account_id=None,
                             request_usage_budget=request_state.request_usage_budget,
+                            request_deadline=request_deadline,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -1283,6 +1286,7 @@ class _HTTPBridgeStreamingMixin:
                             file_required_preferred_account and retry_preferred_account_id is not None
                         ),
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
+                        request_deadline=request_deadline,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)

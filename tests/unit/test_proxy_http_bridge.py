@@ -1181,6 +1181,9 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
     assert keepalive["status"] == "waiting_for_account_capacity"
     assert completed["type"] == "response.completed"
     assert get_or_create.await_count == 2
+    expected_deadline = request_state.started_at + 120.0
+    assert get_or_create.await_args_list[0].kwargs["request_deadline"] == pytest.approx(expected_deadline)
+    assert get_or_create.await_args_list[1].kwargs["request_deadline"] == pytest.approx(expected_deadline)
 
 
 @pytest.mark.asyncio

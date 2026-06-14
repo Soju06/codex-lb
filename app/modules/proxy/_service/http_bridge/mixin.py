@@ -451,6 +451,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
+        request_deadline: float | None = None,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -477,6 +478,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
+        request_deadline: float | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -502,6 +504,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
+        request_deadline: float | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         api_key_id = api_key.id if api_key is not None else None
@@ -1399,6 +1402,7 @@ class _HTTPBridgeMixin(
                     "require_preferred_account": require_preferred_account,
                     "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
                     "request_usage_budget": request_usage_budget,
+                    "request_deadline": request_deadline,
                 }
                 try:
                     create_signature = inspect.signature(create_session)
@@ -1414,6 +1418,12 @@ class _HTTPBridgeMixin(
                     and "request_usage_budget" not in create_signature.parameters
                 ):
                     create_kwargs.pop("request_usage_budget", None)
+                if (
+                    create_signature is not None
+                    and not create_accepts_var_keyword
+                    and "request_deadline" not in create_signature.parameters
+                ):
+                    create_kwargs.pop("request_deadline", None)
                 created_session = await create_session(key, **create_kwargs)
                 await self._claim_durable_http_bridge_session(
                     created_session,
@@ -1859,6 +1869,7 @@ class _HTTPBridgeMixin(
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
+        request_deadline: float | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -1869,9 +1880,13 @@ class _HTTPBridgeMixin(
             started_at=_service_time().monotonic(),
             transport=_REQUEST_TRANSPORT_HTTP,
         )
-        deadline = _websocket_connect_deadline(
-            request_state,
-            _http_bridge_request_budget_seconds(_service_get_settings()),
+        deadline = (
+            request_deadline
+            if request_deadline is not None
+            else _websocket_connect_deadline(
+                request_state,
+                _http_bridge_request_budget_seconds(_service_get_settings()),
+            )
         )
         settings = await _service_get_settings_cache().get()
         excluded_account_ids: set[str] = set()

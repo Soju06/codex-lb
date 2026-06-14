@@ -319,7 +319,6 @@ class _StreamingRetryMixin:
                     if (
                         not account
                         and not _facade()._is_local_account_cap_code(selection.error_code)
-                        and not (require_preferred_account and preferred_account_id is not None)
                         and not (propagate_http_errors and last_transient_exc is not None)
                         and last_retryable_stream_error is None
                         and last_security_work_retry_error is None

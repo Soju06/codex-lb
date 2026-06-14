@@ -87,6 +87,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_instance,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_matches_preferred_account,
@@ -1868,7 +1869,10 @@ class _HTTPBridgeMixin(
             started_at=_service_time().monotonic(),
             transport=_REQUEST_TRANSPORT_HTTP,
         )
-        deadline = _websocket_connect_deadline(request_state, _service_get_settings().proxy_request_budget_seconds)
+        deadline = _websocket_connect_deadline(
+            request_state,
+            _http_bridge_request_budget_seconds(_service_get_settings()),
+        )
         settings = await _service_get_settings_cache().get()
         excluded_account_ids: set[str] = set()
         retry_same_account_once = preferred_account_id is not None
@@ -2121,7 +2125,10 @@ class _HTTPBridgeMixin(
                             "HTTP responses session bridge reader did not shut down cleanly",
                         ),
                     )
-        deadline = _websocket_connect_deadline(request_state, _service_get_settings().proxy_request_budget_seconds)
+        deadline = _websocket_connect_deadline(
+            request_state,
+            _http_bridge_request_budget_seconds(_service_get_settings()),
+        )
         settings = await _service_get_settings_cache().get()
         session.api_key = request_state.api_key
         skip_same_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY

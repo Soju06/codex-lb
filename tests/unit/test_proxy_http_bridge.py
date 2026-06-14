@@ -23,6 +23,7 @@ from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 
@@ -1509,6 +1510,62 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
 
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    sleep_calls: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 120s",
+            error_code="no_accounts",
+        )
+
+    async def sleep_for_recovery(*_args: object, **kwargs: object) -> bool:
+        sleep_calls.append(kwargs)
+        return False
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-bridge-budget",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=0.001,
+            http_responses_session_bridge_request_budget_seconds=120.0,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+
+    with pytest.raises(ProxyResponseError):
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert sleep_calls
+    assert sleep_calls[0]["max_sleep_seconds"] == pytest.approx(119.5)
 
 
 async def test_select_account_with_budget_required_file_pin_does_not_fallback_on_account_cap(

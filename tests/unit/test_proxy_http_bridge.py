@@ -1078,7 +1078,7 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=time.monotonic(),
+        started_at=time.monotonic() - 10.0,
         transport="http",
     )
 
@@ -1113,7 +1113,14 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
         "get_settings_cache",
         lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=0.001,
+            http_responses_session_bridge_request_budget_seconds=120.0,
+        ),
+    )
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)

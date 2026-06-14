@@ -605,7 +605,8 @@ class _HTTPBridgeStreamingMixin:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
-        request_deadline = request_state.started_at + _service_get_settings().proxy_request_budget_seconds
+        settings = _service_get_settings()
+        request_deadline = request_state.started_at + settings.http_responses_session_bridge_request_budget_seconds
         while True:
             try:
                 session_or_forward = await self._get_or_create_http_bridge_session(

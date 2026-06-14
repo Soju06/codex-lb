@@ -168,6 +168,7 @@ function SortHeader({
 }) {
   const active = activeSort?.key === sortKey;
   const Icon = active ? (activeSort.direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  const sortLabel = active ? `${label}, sorted ${activeSort.direction === "asc" ? "ascending" : "descending"}` : label;
   return (
     <button
       type="button"
@@ -175,7 +176,7 @@ function SortHeader({
         "inline-flex min-w-0 items-center gap-1 text-left uppercase tracking-wider transition-colors hover:text-foreground",
         active ? "text-foreground" : "text-muted-foreground",
       )}
-      aria-sort={active ? (activeSort.direction === "asc" ? "ascending" : "descending") : "none"}
+      aria-label={sortLabel}
       onClick={() => onSort(sortKey)}
     >
       <span className="truncate">{label}</span>

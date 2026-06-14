@@ -106,12 +106,12 @@ describe("AccountList", () => {
     await user.click(screen.getByRole("button", { name: "Account" }));
 
     expect(rowNames()).toEqual(["Alpha Account", "Beta Account", "Charlie Account"]);
-    expect(screen.getByRole("button", { name: "Account" })).toHaveAttribute("aria-sort", "ascending");
+    expect(screen.getByRole("button", { name: "Account, sorted ascending" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Account" }));
+    await user.click(screen.getByRole("button", { name: "Account, sorted ascending" }));
 
     expect(rowNames()).toEqual(["Charlie Account", "Beta Account", "Alpha Account"]);
-    expect(screen.getByRole("button", { name: "Account" })).toHaveAttribute("aria-sort", "descending");
+    expect(screen.getByRole("button", { name: "Account, sorted descending" })).toBeInTheDocument();
   });
 
   it("sorts quota by the lowest visible remaining quota percent", async () => {

@@ -151,6 +151,44 @@ describe("useOauth", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
   });
 
+  it("polls browser OAuth status and invalidates caches after browser success", async () => {
+    startOauthMock.mockResolvedValue({
+      flowId: "flow-browser",
+      method: "browser",
+      authorizationUrl: "https://auth.example.com/authorize",
+      callbackUrl: "http://127.0.0.1:1455/auth/callback",
+      verificationUrl: null,
+      userCode: null,
+      deviceAuthId: null,
+      intervalSeconds: null,
+      expiresInSeconds: null,
+    });
+    getOauthStatusMock.mockResolvedValue({
+      status: "success",
+      errorMessage: null,
+    });
+
+    const { queryClient, result } = renderUseOauth();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await act(async () => {
+      await result.current.start("browser");
+    });
+
+    expect(result.current.state.intervalSeconds).toBe(2);
+
+    await act(async () => {
+      await result.current.poll();
+    });
+
+    expect(getOauthStatusMock).toHaveBeenCalledWith("flow-browser");
+    expect(result.current.state.status).toBe("success");
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+  });
+
   it("updates state to success after a successful manual callback", async () => {
     startOauthMock.mockResolvedValue({
       flowId: "flow-browser",

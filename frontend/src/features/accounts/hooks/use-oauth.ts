@@ -24,6 +24,8 @@ const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
   errorMessage: null,
 });
 
+const DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS = 2;
+
 export function useOauth() {
   const queryClient = useQueryClient();
   const [state, setState] = useState<OAuthState>(INITIAL_OAUTH_STATE);
@@ -86,16 +88,19 @@ export function useOauth() {
 
     try {
       const response = await startOauth({ forceMethod });
+      const method = response.method === "device" ? "device" : "browser";
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
         status: "pending",
-        method: response.method === "device" ? "device" : "browser",
+        method,
         authorizationUrl: response.authorizationUrl,
         callbackUrl: response.callbackUrl,
         verificationUrl: response.verificationUrl,
         userCode: response.userCode,
         deviceAuthId: response.deviceAuthId,
-        intervalSeconds: response.intervalSeconds,
+        intervalSeconds:
+          response.intervalSeconds
+          ?? (method === "browser" && response.flowId ? DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS : null),
         expiresInSeconds: response.expiresInSeconds,
         errorMessage: null,
       });

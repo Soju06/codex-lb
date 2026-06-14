@@ -15,6 +15,15 @@ The invalidation helper SHALL be reusable without importing account hook modules
 - **AND** invalidates the dashboard overview query
 - **AND** invalidates the dashboard projections query
 
+#### Scenario: Browser OAuth status success refreshes dashboard-visible account data
+
+- **WHEN** a browser OAuth flow starts with a tracked flow id
+- **AND** the OAuth status endpoint later reports success
+- **THEN** the SPA invalidates the account list query
+- **AND** invalidates account trend queries
+- **AND** invalidates the dashboard overview query
+- **AND** invalidates the dashboard projections query
+
 #### Scenario: Device OAuth completion refreshes dashboard-visible account data
 
 - **WHEN** a device-code OAuth completion request succeeds

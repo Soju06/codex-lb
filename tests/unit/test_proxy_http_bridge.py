@@ -1319,7 +1319,11 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
     saturated_session = _make_bridge_session(key_value="soft-queue-full", queued_request_count=8)
     saturated_session.key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "soft-queue-full", None)
     reroute_session = _make_bridge_session(key_value="soft-reroute")
-    get_or_create = AsyncMock(side_effect=[saturated_session, reroute_session])
+    capacity_unavailable = ProxyResponseError(
+        503,
+        proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+    )
+    get_or_create = AsyncMock(side_effect=[saturated_session, capacity_unavailable, reroute_session])
 
     async def fake_stream_events(
         session: proxy_service._HTTPBridgeSession,
@@ -1364,6 +1368,8 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
 
     caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
     chunks = [
@@ -1384,12 +1390,19 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
         )
     ]
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
-    assert get_or_create.await_count == 2
+    keepalive = proxy_service.parse_sse_data_json(chunks[0])
+    assert keepalive is not None
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
+    assert get_or_create.await_count == 3
     reroute_key = get_or_create.await_args_list[1].args[0]
+    retry_reroute_key = get_or_create.await_args_list[2].args[0]
     assert reroute_key.affinity_kind == "internal_soft_affinity_reroute"
     assert reroute_key.strength == "soft"
+    assert retry_reroute_key.affinity_kind == "internal_soft_affinity_reroute"
+    assert retry_reroute_key.strength == "soft"
     assert get_or_create.await_args_list[1].kwargs["previous_response_id"] is None
+    assert get_or_create.await_args_list[2].kwargs["previous_response_id"] is None
     assert "internal_soft_affinity_reroute" in caplog.text
 
 
@@ -4722,6 +4735,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    started_at = time.monotonic()
     api_key = _make_api_key(key_id="key-1", assigned_account_ids=[])
     initial_reservation = proxy_service.ApiKeyUsageReservationData(
         reservation_id="resv-initial",
@@ -4749,7 +4763,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=initial_reservation,
-        started_at=1.0,
+        started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
         previous_response_id="resp_prev_1",
@@ -4762,7 +4776,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=retried_reservation,
-        started_at=2.0,
+        started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
         previous_response_id="resp_prev_1",
@@ -4839,7 +4853,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
         yield 'data: {"type":"response.completed"}\n\n'
 
     reserve_retry = AsyncMock(return_value=retried_reservation)
-    get_or_create = AsyncMock(side_effect=[session_initial, session_retry])
+    capacity_unavailable = ProxyResponseError(
+        503,
+        proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+    )
+    get_or_create = AsyncMock(side_effect=[session_initial, capacity_unavailable, session_retry])
 
     monkeypatch.setattr(
         proxy_service,
@@ -4865,6 +4883,8 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
     monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_retry)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
 
     chunks = [
         chunk
@@ -4884,7 +4904,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
         )
     ]
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    keepalive = proxy_service.parse_sse_data_json(chunks[0])
+    assert keepalive is not None
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
+    assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]
     reserve_retry.assert_awaited_once()
 
@@ -5082,6 +5106,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    started_at = time.monotonic()
     api_key = _make_api_key(key_id="key-1", assigned_account_ids=[])
     initial_reservation = proxy_service.ApiKeyUsageReservationData(
         reservation_id="resv-initial",
@@ -5108,7 +5133,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=initial_reservation,
-        started_at=1.0,
+        started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
         previous_response_id="resp_prev_1",
@@ -5121,7 +5146,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=retried_reservation,
-        started_at=2.0,
+        started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
         previous_response_id="resp_prev_1",
@@ -5189,7 +5214,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         await event_queue.put(None)
 
     reserve_retry = AsyncMock(return_value=retried_reservation)
-    get_or_create = AsyncMock(side_effect=[owner_forward, session_retry])
+    capacity_unavailable = ProxyResponseError(
+        503,
+        proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+    )
+    get_or_create = AsyncMock(side_effect=[owner_forward, capacity_unavailable, session_retry])
 
     monkeypatch.setattr(
         proxy_service,
@@ -5217,6 +5246,8 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_retry)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
 
     chunks = [
         chunk
@@ -5236,7 +5267,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         )
     ]
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    keepalive = proxy_service.parse_sse_data_json(chunks[0])
+    assert keepalive is not None
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
+    assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]
     assert submitted_reservations == [retried_reservation]
     reserve_retry.assert_awaited_once()

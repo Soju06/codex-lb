@@ -7,7 +7,7 @@ import {
   startOauth,
   submitManualOauthCallback,
 } from "@/features/accounts/api";
-import { invalidateAccountRelatedQueries } from "@/features/accounts/hooks/use-accounts";
+import { invalidateAccountRelatedQueries } from "@/features/accounts/query-invalidation";
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({

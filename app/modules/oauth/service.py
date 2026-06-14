@@ -601,14 +601,16 @@ class OauthService:
                     preserve_unknown_workspace_duplicates=False,
                     preserve_identity_slots=True,
                 )
+                saved_id = saved.id
         else:
             saved = await self._accounts_repo.upsert_account_slot(
                 account,
                 preserve_unknown_workspace_duplicates=False,
                 preserve_identity_slots=True,
             )
+            saved_id = saved.id
 
-        clear_account_routing_unavailable(saved.id)
+        clear_account_routing_unavailable(saved_id)
         await self._invalidate_account_routing_caches()
 
     async def _invalidate_account_routing_caches(self) -> None:

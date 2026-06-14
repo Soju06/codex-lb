@@ -2191,9 +2191,9 @@ class _HTTPBridgeMixin(
                     kind="http_bridge",
                     request_stage="reattach",
                     model=session.request_model,
+                    max_sleep_seconds=_remaining_budget_seconds(deadline),
                     request_state=request_state,
                 ):
-                    deadline = _service_time().monotonic() + _service_get_settings().proxy_request_budget_seconds
                     excluded_account_ids = set(request_state.excluded_account_ids)
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)

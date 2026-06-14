@@ -605,6 +605,7 @@ class _HTTPBridgeStreamingMixin:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
+        request_deadline = request_state.started_at + _service_get_settings().proxy_request_budget_seconds
         while True:
             try:
                 session_or_forward = await self._get_or_create_http_bridge_session(
@@ -642,19 +643,24 @@ class _HTTPBridgeStreamingMixin:
                 ):
                     account_capacity_wait_seconds = _http_bridge_account_capacity_wait_seconds(exc)
                     if account_capacity_wait_seconds is not None:
+                        remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
+                        if remaining_budget_seconds <= 0:
+                            raise
+                        bounded_wait_seconds = min(account_capacity_wait_seconds, remaining_budget_seconds)
                         _code, message = _proxy_error_code_message(exc)
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge session creation "
-                            "request_id=%s model=%s sleep_seconds=%.1f error=%s",
+                            "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
                             request_id,
                             effective_payload.model,
+                            bounded_wait_seconds,
                             account_capacity_wait_seconds,
                             message,
                         )
                         async for line in _iter_account_capacity_wait_sse(
                             request_id=request_id,
                             reason=message,
-                            sleep_seconds=account_capacity_wait_seconds,
+                            sleep_seconds=bounded_wait_seconds,
                         ):
                             yield line
                         continue

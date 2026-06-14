@@ -102,12 +102,17 @@ async def _sleep_for_account_selection_recovery(
     kind: str,
     request_stage: str,
     model: str | None,
+    max_sleep_seconds: float | None = None,
     request_state: "_WebSocketRequestState | None" = None,
     heartbeat: Callable[[float], Awaitable[None]] | None = None,
 ) -> bool:
     sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
     if sleep_seconds is None:
         return False
+    if max_sleep_seconds is not None:
+        if max_sleep_seconds <= 0:
+            return False
+        sleep_seconds = min(sleep_seconds, max_sleep_seconds)
 
     if request_state is not None:
         request_state.account_capacity_waiting = True

@@ -1592,11 +1592,11 @@ class _WebSocketMixin:
                 kind="websocket",
                 request_stage=request_state.request_stage,
                 model=model,
+                max_sleep_seconds=_facade()._remaining_budget_seconds(deadline),
                 request_state=request_state,
                 heartbeat=_heartbeat,
             ):
                 break
-            deadline = time.monotonic() + _facade().get_settings().proxy_request_budget_seconds
 
         account = selection.account
         if (

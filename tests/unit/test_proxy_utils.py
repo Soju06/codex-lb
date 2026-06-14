@@ -49,6 +49,7 @@ from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy._service.support import (
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
+    _sleep_for_account_selection_recovery,
 )
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
@@ -116,6 +117,61 @@ def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch)
     assert payload["request_id"] == "req_capacity_wait"
     assert payload["waited_seconds"] == 25
     assert payload["retry_after_seconds"] == 119
+
+
+@pytest.mark.asyncio
+async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monkeypatch):
+    sleeps: list[float] = []
+    heartbeats: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async def heartbeat(remaining_seconds: float) -> None:
+        heartbeats.append(remaining_seconds)
+
+    monkeypatch.setattr(proxy_support.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(proxy_support, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 10.0)
+
+    waited = await _sleep_for_account_selection_recovery(
+        AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 120s",
+            error_code="no_accounts",
+        ),
+        request_id="req_budget_clamp",
+        kind="http_stream",
+        request_stage="initial",
+        model="gpt-5.4",
+        max_sleep_seconds=3.0,
+        heartbeat=heartbeat,
+    )
+
+    assert waited is True
+    assert sleeps == [3.0]
+    assert heartbeats == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(proxy_support.asyncio, "sleep", sleep)
+
+    waited = await _sleep_for_account_selection_recovery(
+        AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 120s",
+            error_code="no_accounts",
+        ),
+        request_id="req_budget_exhausted",
+        kind="websocket",
+        request_stage="initial",
+        model="gpt-5.4",
+        max_sleep_seconds=0.0,
+    )
+
+    assert waited is False
+    sleep.assert_not_awaited()
 
 
 def test_relative_availability_settings_default_when_stored_values_are_null():
@@ -9004,7 +9060,7 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
     monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
 
     result = await service._select_websocket_connect_account(
-        10_000.0,
+        time.monotonic() + 10_000.0,
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
@@ -9250,6 +9306,9 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
     async def fake_sleep_for_account_selection_recovery(*_args: object, **kwargs: object) -> bool:
         heartbeat = cast(Callable[[float], Any] | None, kwargs.get("heartbeat"))
         assert heartbeat is not None
+        max_sleep_seconds = kwargs.get("max_sleep_seconds")
+        assert isinstance(max_sleep_seconds, float)
+        assert max_sleep_seconds > 0
         await heartbeat(0.001)
         return True
 
@@ -9262,7 +9321,7 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
     )
 
     result = await service._select_websocket_connect_account(
-        10_000.0,
+        time.monotonic() + 10_000.0,
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,

@@ -79,12 +79,12 @@ function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
-function accountQuotaSortValue(account: AccountSummary): number {
+function accountQuotaSortValue(account: AccountSummary): number | null {
   const values = accountQuotaLabels(account)
     .map((quota) => quota.percent)
     .filter((percent): percent is number => percent !== null);
   if (values.length === 0) {
-    return -1;
+    return null;
   }
   return Math.min(...values);
 }
@@ -108,12 +108,26 @@ function accountCreditsLabel(account: AccountSummary) {
   return displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2);
 }
 
-function accountCreditsSortValue(account: AccountSummary): number {
+function accountCreditsSortValue(account: AccountSummary): number | null {
   if (account.creditsUnlimited) {
     return Number.POSITIVE_INFINITY;
   }
   const value = Number(accountCreditsLabel(account));
-  return Number.isFinite(value) ? value : -1;
+  return Number.isFinite(value) ? value : null;
+}
+
+function compareNullableNumber(a: number | null, b: number | null, direction: SortDirection): number {
+  if (a === null || b === null) {
+    if (a === b) {
+      return 0;
+    }
+    return a === null ? 1 : -1;
+  }
+  if (a === b) {
+    return 0;
+  }
+  const result = a - b;
+  return direction === "asc" ? result : -result;
 }
 
 function accountWarmupSortValue(account: AccountSummary): string {
@@ -139,10 +153,10 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
       result = compareText(formatSlug(a.planType), formatSlug(b.planType));
       break;
     case "quota":
-      result = accountQuotaSortValue(a) - accountQuotaSortValue(b);
+      result = compareNullableNumber(accountQuotaSortValue(a), accountQuotaSortValue(b), sort.direction);
       break;
     case "credits":
-      result = accountCreditsSortValue(a) - accountCreditsSortValue(b);
+      result = compareNullableNumber(accountCreditsSortValue(a), accountCreditsSortValue(b), sort.direction);
       break;
     case "warmup":
       result = compareText(accountWarmupSortValue(a), accountWarmupSortValue(b));
@@ -151,6 +165,10 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
 
   if (result === 0) {
     result = compareText(accountTitle(a), accountTitle(b));
+    return sort.direction === "asc" ? result : -result;
+  }
+  if (sort.key === "quota" || sort.key === "credits") {
+    return result;
   }
   return sort.direction === "asc" ? result : -result;
 }

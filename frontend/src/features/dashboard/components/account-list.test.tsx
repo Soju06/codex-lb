@@ -142,4 +142,77 @@ describe("AccountList", () => {
 
     expect(rowNames()).toEqual(["Low Account", "Middle Account", "Healthy Account"]);
   });
+
+  it("sorts accounts with missing quota telemetry after real quota values", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-unknown",
+            displayName: "Unknown Account",
+            usage: {
+              primaryRemainingPercent: null,
+              secondaryRemainingPercent: null,
+              monthlyRemainingPercent: null,
+            },
+          }),
+          createAccountSummary({
+            accountId: "acc-empty",
+            displayName: "Empty Account",
+            usage: { primaryRemainingPercent: 0, secondaryRemainingPercent: 0 },
+          }),
+          createAccountSummary({
+            accountId: "acc-low",
+            displayName: "Low Account",
+            usage: { primaryRemainingPercent: 18, secondaryRemainingPercent: 12 },
+          }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Quota" }));
+
+    expect(rowNames()).toEqual(["Empty Account", "Low Account", "Unknown Account"]);
+
+    await user.click(screen.getByRole("button", { name: "Quota, sorted ascending" }));
+
+    expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
+  });
+
+  it("sorts accounts with missing credit telemetry after real credit balances", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-unknown",
+            displayName: "Unknown Account",
+            creditsBalance: null,
+            remainingCreditsPrimary: null,
+            remainingCreditsSecondary: null,
+            remainingCreditsMonthly: null,
+          }),
+          createAccountSummary({
+            accountId: "acc-empty",
+            displayName: "Empty Account",
+            creditsBalance: 0,
+          }),
+          createAccountSummary({
+            accountId: "acc-low",
+            displayName: "Low Account",
+            creditsBalance: 2.5,
+          }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Credits" }));
+
+    expect(rowNames()).toEqual(["Empty Account", "Low Account", "Unknown Account"]);
+
+    await user.click(screen.getByRole("button", { name: "Credits, sorted ascending" }));
+
+    expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
+  });
 });

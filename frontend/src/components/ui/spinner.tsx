@@ -23,9 +23,9 @@ type SpinnerBlockProps = {
 
 export function SpinnerBlock({ label = "Loading...", className }: SpinnerBlockProps) {
   return (
-    <div role="status" className={cn("flex flex-col items-center gap-3", className)}>
+    <output className={cn("flex flex-col items-center gap-3", className)}>
       <Spinner />
       <p className="text-sm text-muted-foreground">{label}</p>
-    </div>
+    </output>
   );
 }

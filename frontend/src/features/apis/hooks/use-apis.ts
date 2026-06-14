@@ -22,13 +22,14 @@ function invalidateApiKeys(queryClient: ReturnType<typeof useQueryClient>) {
 export function useApiKeys() {
   const queryClient = useQueryClient();
 
-  const apiKeysQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["api-keys", "list"],
     queryFn: listApiKeys,
     select: (data) => data,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
+  const apiKeysQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const createMutation = useMutation({
     mutationFn: (payload: ApiKeyCreateRequest) => createApiKey(payload),

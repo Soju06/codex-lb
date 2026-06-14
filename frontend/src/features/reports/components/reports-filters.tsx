@@ -73,6 +73,7 @@ export function ReportsFilters({
       <div className="ml-auto flex items-center gap-2">
         <input
           type="date"
+          aria-label="Start date"
           max={maxDate}
           value={filters.startDate}
           onChange={(e) => onFiltersChange({ ...filters, startDate: e.target.value })}
@@ -81,6 +82,7 @@ export function ReportsFilters({
         <span className="text-xs text-muted-foreground">—</span>
         <input
           type="date"
+          aria-label="End date"
           max={maxDate}
           value={filters.endDate}
           onChange={(e) => onFiltersChange({ ...filters, endDate: e.target.value })}

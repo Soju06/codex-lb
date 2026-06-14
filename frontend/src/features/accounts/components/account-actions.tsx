@@ -93,12 +93,16 @@ export function AccountActions({
         </div>
       ) : null}
 
-      <label className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+      <label
+        htmlFor={`security-work-authorized-${account.accountId}`}
+        className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+      >
         <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
           <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate">Trusted Access for Cyber</span>
         </span>
         <Switch
+          id={`security-work-authorized-${account.accountId}`}
           checked={account.securityWorkAuthorized ?? false}
           disabled={busy}
           onCheckedChange={(checked) =>

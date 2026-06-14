@@ -6,13 +6,14 @@ import { createFirewallIp, deleteFirewallIp, listFirewallIps } from "@/features/
 export function useFirewall() {
   const queryClient = useQueryClient();
 
-  const firewallQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["firewall", "ips"],
     queryFn: listFirewallIps,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const firewallQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });

@@ -6,7 +6,7 @@ export const FirewallModeSchema = z.enum(FIREWALL_MODES);
 
 export const FirewallIpEntrySchema = z.object({
   ipAddress: z.string().min(1),
-  createdAt: z.string().datetime({ offset: true }),
+  createdAt: z.iso.datetime({ offset: true }),
 });
 
 export const FirewallIpsResponseSchema = z.object({

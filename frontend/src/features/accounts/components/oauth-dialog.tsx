@@ -115,6 +115,7 @@ function ManualCallbackInputBody({
       <div className="flex items-center gap-2">
         <input
           type="text"
+          aria-label="OAuth callback URL"
           value={callbackUrl}
           onChange={(e) => setCallbackUrl(e.target.value)}
           disabled={disabled}

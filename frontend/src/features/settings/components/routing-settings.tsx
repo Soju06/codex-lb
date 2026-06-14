@@ -57,6 +57,8 @@ export type RoutingSettingsProps = {
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
 
+const EMPTY_ACCOUNTS: AccountSummary[] = [];
+
 function accountLabel(account: AccountSummary): string {
   const name = account.alias?.trim() || account.displayName?.trim() || account.email?.trim() || account.accountId;
   const compactId = formatCompactAccountId(account.accountId, 6, 4);
@@ -65,7 +67,7 @@ function accountLabel(account: AccountSummary): string {
 
 export function RoutingSettings({
   settings,
-  accounts = [],
+  accounts = EMPTY_ACCOUNTS,
   accountsLoading = false,
   busy,
   onSave,

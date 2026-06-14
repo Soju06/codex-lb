@@ -20,11 +20,11 @@ function createTestQueryClient(): QueryClient {
 }
 
 function LocationSpy({ onChange }: { onChange?: (search: string) => void }) {
-  const location = useLocation();
+  const routeLocation = useLocation();
 
   useEffect(() => {
-    onChange?.(location.search);
-  }, [location.search, onChange]);
+    onChange?.(routeLocation.search);
+  }, [routeLocation.search, onChange]);
 
   return null;
 }

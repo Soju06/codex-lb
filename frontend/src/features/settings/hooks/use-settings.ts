@@ -21,10 +21,11 @@ import type {
 export function useSettings() {
   const queryClient = useQueryClient();
 
-  const settingsQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["settings", "detail"],
     queryFn: getSettings,
   });
+  const settingsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const updateSettingsMutation = useMutation({
     mutationFn: (payload: SettingsUpdateRequest) => updateSettings(payload),
@@ -47,10 +48,27 @@ export function useSettings() {
 export function useUpstreamProxyAdmin() {
   const queryClient = useQueryClient();
 
-  const upstreamProxyQuery = useQuery({
+  const {
+    data: upstreamProxyData,
+    error: upstreamProxyError,
+    isFetching: upstreamProxyIsFetching,
+    isLoading: upstreamProxyIsLoading,
+    isPending: upstreamProxyIsPending,
+    isSuccess: upstreamProxyIsSuccess,
+    refetch: refetchUpstreamProxy,
+  } = useQuery({
     queryKey: ["settings", "upstream-proxy"],
     queryFn: getUpstreamProxyAdmin,
   });
+  const upstreamProxyQuery = {
+    data: upstreamProxyData,
+    error: upstreamProxyError,
+    isFetching: upstreamProxyIsFetching,
+    isLoading: upstreamProxyIsLoading,
+    isPending: upstreamProxyIsPending,
+    isSuccess: upstreamProxyIsSuccess,
+    refetch: refetchUpstreamProxy,
+  };
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });

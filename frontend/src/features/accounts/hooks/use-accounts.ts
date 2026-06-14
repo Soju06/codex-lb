@@ -174,13 +174,14 @@ export function useAccountTrends(accountId: string | null) {
 }
 
 export function useAccounts() {
-  const accountsQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["accounts", "list"],
     queryFn: listAccounts,
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
+  const accountsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const mutations = useAccountMutations();
 

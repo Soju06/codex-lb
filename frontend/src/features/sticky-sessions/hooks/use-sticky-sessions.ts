@@ -41,7 +41,7 @@ export function useStickySessions() {
     [deferredAccountQuery, deferredKeyQuery, params],
   );
 
-  const stickySessionsQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["sticky-sessions", "list", queryParams],
     queryFn: () => listStickySessions(queryParams),
     placeholderData: (previousData) => previousData,
@@ -49,6 +49,7 @@ export function useStickySessions() {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const stickySessionsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });

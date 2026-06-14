@@ -13,7 +13,7 @@ export const LimitRuleSchema = z.object({
   maxValue: z.number(),
   currentValue: z.number(),
   modelFilter: z.string().nullable(),
-  resetAt: z.string().datetime({ offset: true }),
+  resetAt: z.iso.datetime({ offset: true }),
 });
 
 export const LimitRuleCreateSchema = z.object({
@@ -54,12 +54,12 @@ export const ApiKeySchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .default(null),
-  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   accountAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
-  createdAt: z.string().datetime({ offset: true }),
-  lastUsedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.iso.datetime({ offset: true }),
+  lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
   usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
   pooledRemainingPercentPrimary: z.number().nullable().default(null),
@@ -82,7 +82,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .nullable()
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
 });
@@ -106,7 +106,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .nullable()
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),

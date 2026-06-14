@@ -12,9 +12,9 @@ export const StickySessionEntrySchema = z.object({
   key: z.string().min(1),
   displayName: z.string().min(1),
   kind: StickySessionKindSchema,
-  createdAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.iso.datetime({ offset: true }),
+  updatedAt: z.iso.datetime({ offset: true }),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isStale: z.boolean(),
 });
 

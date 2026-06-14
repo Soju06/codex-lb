@@ -106,8 +106,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
       {!advanced ? (
         <div className="space-y-2">
           <div>
-            <label className="text-xs text-muted-foreground">Weekly token limit</label>
+            <label htmlFor="weekly-token-limit" className="text-xs text-muted-foreground">Weekly token limit</label>
             <Input
+              id="weekly-token-limit"
               type="number"
               min={1}
               value={weeklyTokenRule ? String(weeklyTokenRule.maxValue) : ""}
@@ -116,8 +117,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground">Weekly cost limit ($)</label>
+            <label htmlFor="weekly-cost-limit" className="text-xs text-muted-foreground">Weekly cost limit ($)</label>
             <Input
+              id="weekly-cost-limit"
               type="number"
               min={0.01}
               step={0.01}

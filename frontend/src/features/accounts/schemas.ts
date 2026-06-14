@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const UsageTrendPointSchema = z.object({
-  t: z.string().datetime({ offset: true }),
+  t: z.iso.datetime({ offset: true }),
   v: z.number(),
 });
 
@@ -25,7 +25,7 @@ export const AccountRequestUsageSchema = z.object({
 });
 
 export const AccountTokenStatusSchema = z.object({
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   state: z.string().nullable().optional(),
 });
 
@@ -40,8 +40,8 @@ export const AccountLimitWarmupStatusSchema = z.object({
   resetAt: z.number().int(),
   status: z.string(),
   model: z.string(),
-  attemptedAt: z.string().datetime({ offset: true }),
-  completedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  attemptedAt: z.iso.datetime({ offset: true }),
+  completedAt: z.iso.datetime({ offset: true }).nullable().optional(),
   errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
 });
@@ -76,9 +76,9 @@ export const AccountSummarySchema = z.object({
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
-  resetAtPrimary: z.string().datetime({ offset: true }).nullable().optional(),
-  resetAtSecondary: z.string().datetime({ offset: true }).nullable().optional(),
-  resetAtMonthly: z.string().datetime({ offset: true }).nullable().optional(),
+  resetAtPrimary: z.iso.datetime({ offset: true }).nullable().optional(),
+  resetAtSecondary: z.iso.datetime({ offset: true }).nullable().optional(),
+  resetAtMonthly: z.iso.datetime({ offset: true }).nullable().optional(),
   windowMinutesPrimary: z.number().nullable().optional(),
   windowMinutesSecondary: z.number().nullable().optional(),
   windowMinutesMonthly: z.number().nullable().optional(),

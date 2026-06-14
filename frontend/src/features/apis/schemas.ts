@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const ApiKeyTrendPointSchema = z.object({
-  t: z.string().datetime({ offset: true }),
+  t: z.iso.datetime({ offset: true }),
   v: z.number(),
 });
 

@@ -112,7 +112,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             />
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Allowed models</label>
+              <p className="text-sm font-medium">Allowed models</p>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
             </div>
 
@@ -128,13 +128,14 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Assigned accounts</label>
+              <p className="text-sm font-medium">Assigned accounts</p>
               <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced model</label>
+              <label htmlFor="create-api-key-enforced-model" className="text-sm font-medium">Enforced model</label>
               <Input
+                id="create-api-key-enforced-model"
                 value={enforcedModel}
                 onChange={(e) => setEnforcedModel(e.target.value)}
                 placeholder="e.g. gpt-5.3-codex"
@@ -143,9 +144,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced reasoning</label>
+              <label htmlFor="create-api-key-enforced-reasoning" className="text-sm font-medium">Enforced reasoning</label>
               <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
-                <SelectTrigger>
+                <SelectTrigger id="create-api-key-enforced-reasoning">
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
                 <SelectContent>
@@ -160,9 +161,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced service tier</label>
+              <label htmlFor="create-api-key-enforced-service-tier" className="text-sm font-medium">Enforced service tier</label>
               <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
-                <SelectTrigger>
+                <SelectTrigger id="create-api-key-enforced-service-tier">
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
                 <SelectContent>
@@ -189,7 +190,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Expiry</label>
+              <p className="text-sm font-medium">Expiry</p>
               <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
             </div>
           </div>

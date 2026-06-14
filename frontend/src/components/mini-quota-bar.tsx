@@ -13,12 +13,10 @@ export function MiniQuotaBar({ percent, testId, "aria-label": ariaLabel }: MiniQ
   }
   const clamped = Math.max(0, Math.min(100, percent));
   return (
-    <div
-      role="progressbar"
+    <progress
       aria-label={ariaLabel}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={clamped}
+      max={100}
+      value={clamped}
       data-testid={testId}
       className={cn("h-1 flex-1 overflow-hidden rounded-full", quotaBarTrack(clamped))}
     >
@@ -27,6 +25,6 @@ export function MiniQuotaBar({ percent, testId, "aria-label": ariaLabel }: MiniQ
         className={cn("h-full rounded-full", quotaBarColor(clamped))}
         style={{ width: `${clamped}%` }}
       />
-    </div>
+    </progress>
   );
 }

@@ -16,10 +16,11 @@ import type {
 export function useApiKeys() {
   const queryClient = useQueryClient();
 
-  const apiKeysQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["api-keys", "list"],
     queryFn: listApiKeys,
   });
+  const apiKeysQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });

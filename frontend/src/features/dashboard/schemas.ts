@@ -33,7 +33,7 @@ export const UsageSummaryWindowSchema = z.object({
   remainingPercent: z.number(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
-  resetAt: z.string().datetime({ offset: true }).nullable(),
+  resetAt: z.iso.datetime({ offset: true }).nullable(),
   windowMinutes: z.number().nullable(),
 });
 
@@ -70,7 +70,7 @@ export const DashboardMetricsComparisonSchema = z.object({
 });
 
 export const TrendPointSchema = z.object({
-  t: z.string().datetime({ offset: true }),
+  t: z.iso.datetime({ offset: true }),
   v: z.number(),
 });
 
@@ -86,7 +86,7 @@ export const DepletionSchema = z.object({
   riskLevel: z.enum(["safe", "warning", "danger", "critical"]),
   burnRate: z.number(),
   safeUsagePercent: z.number(),
-  projectedExhaustionAt: z.string().datetime({ offset: true }).nullable().optional(),
+  projectedExhaustionAt: z.iso.datetime({ offset: true }).nullable().optional(),
   secondsUntilExhaustion: z.number().nullable().optional(),
 });
 
@@ -118,7 +118,7 @@ export const WeeklyCreditPaceSchema = z.object({
 });
 
 export const DashboardOverviewSchema = z.object({
-  lastSyncAt: z.string().datetime({ offset: true }).nullable(),
+  lastSyncAt: z.iso.datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
   accounts: z.array(AccountSummarySchema),
   summary: z.object({
@@ -153,7 +153,7 @@ export const RequestLogCostBreakdownSchema = z.object({
 });
 
 export const RequestLogSchema = z.object({
-  requestedAt: z.string().datetime({ offset: true }),
+  requestedAt: z.iso.datetime({ offset: true }),
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
   apiKeyName: z.string().nullable().optional().default(null),

@@ -69,14 +69,18 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     [filters],
   );
   const modelCatalogQuery = useReports(modelCatalogFilters, reportsTimeZone);
-  const accountsQuery = useQuery({
+  const {
+    data: accountsData,
+    error: accountsError,
+    refetch: refetchAccounts,
+  } = useQuery({
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
   });
 
   const accountOptions = useMemo(
     () =>
-      (accountsQuery.data?.accounts ?? []).map((account) => ({
+      (accountsData?.accounts ?? []).map((account) => ({
         value: account.accountId,
         label:
           account.alias ||
@@ -85,7 +89,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           account.accountId,
         isEmail: !account.alias,
       })),
-    [accountsQuery.data],
+    [accountsData],
   );
 
   const modelOptions = useMemo(
@@ -99,7 +103,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
   const modelOptionsError = getErrorMessageOrNull(modelCatalogQuery.error);
-  const accountOptionsError = getErrorMessageOrNull(accountsQuery.error);
+  const accountOptionsError = getErrorMessageOrNull(accountsError);
 
   const hasAnyError = Boolean(
     mainReportsError || modelOptionsError || accountOptionsError,
@@ -109,7 +113,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     await Promise.allSettled([
       reportsQuery.refetch(),
       modelCatalogQuery.refetch(),
-      accountsQuery.refetch(),
+      refetchAccounts(),
     ]);
   };
 

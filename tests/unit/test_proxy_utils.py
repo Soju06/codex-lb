@@ -71,6 +71,19 @@ def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     assert _account_selection_recovery_sleep_seconds(selection) == 300.0
 
 
+def test_account_selection_recovery_sleep_treats_workspace_spend_cap_as_recoverable():
+    selection = AccountSelection(
+        account=None,
+        error_message=(
+            "You hit your spend cap set by the owner of your workspace. "
+            "Ask an owner to increase your spend cap to continue."
+        ),
+        error_code="no_accounts",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) == 30.0
+
+
 def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 

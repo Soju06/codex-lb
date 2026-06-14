@@ -70,6 +70,21 @@ async def _wait_for_close_await(close_session: AsyncMock, session: proxy_service
     raise AssertionError("expected HTTP bridge session close to be awaited")
 
 
+def test_http_bridge_account_capacity_wait_treats_workspace_spend_cap_as_recoverable() -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "no_accounts",
+            (
+                "You hit your spend cap set by the owner of your workspace. "
+                "Ask an owner to increase your spend cap to continue."
+            ),
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 30.0
+
+
 def _make_api_key(
     *,
     key_id: str,

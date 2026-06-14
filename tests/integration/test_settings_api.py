@@ -725,6 +725,44 @@ async def test_account_proxy_binding_closes_existing_bridge_sessions(async_clien
 
 
 @pytest.mark.asyncio
+async def test_account_proxy_binding_disable_closes_existing_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc-settings-proxy-disable-close",
+        "settings-proxy-disable-close@example.com",
+    )
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "disable close proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "disable close pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    enabled = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+    assert enabled.status_code == 200
+    close_sessions.reset_mock()
+
+    disabled = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": False},
+    )
+
+    assert disabled.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+
+
+@pytest.mark.asyncio
 async def test_account_proxy_binding_does_not_reactivate_session_deactivated_account(async_client):
     account_id = await _import_account(async_client, "acc-settings-proxy-reauth", "settings-proxy-reauth@example.com")
     async with SessionLocal() as session:

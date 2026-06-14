@@ -429,10 +429,12 @@ async def put_account_proxy_binding(
         .scalars()
         .one_or_none()
     )
+    close_bridge_sessions = payload.is_active
     if row is None:
         row = AccountProxyBinding(account_id=account_id, pool_id=payload.pool_id, is_active=payload.is_active)
         context.session.add(row)
     else:
+        close_bridge_sessions = row.pool_id != payload.pool_id or row.is_active != payload.is_active
         row.pool_id = payload.pool_id
         row.is_active = payload.is_active
     if payload.is_active and _account_proxy_binding_should_reactivate(account):
@@ -443,7 +445,7 @@ async def put_account_proxy_binding(
         clear_account_routing_unavailable(account_id)
         get_account_selection_cache().invalidate()
     await context.session.commit()
-    if payload.is_active:
+    if close_bridge_sessions:
         await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
     await context.session.refresh(row)
     return AccountProxyBindingResponse(account_id=row.account_id, pool_id=row.pool_id, is_active=row.is_active)

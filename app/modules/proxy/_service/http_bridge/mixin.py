@@ -2216,7 +2216,7 @@ class _HTTPBridgeMixin(
                     max_sleep_seconds=_remaining_budget_seconds(deadline),
                     request_state=request_state,
                 ):
-                    excluded_account_ids = set(request_state.excluded_account_ids)
+                    excluded_account_ids.update(request_state.excluded_account_ids)
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
                     retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids

@@ -1442,6 +1442,17 @@ class _HTTPBridgeStreamingMixin:
                             keepalive_sent = True
                             yielded_any = True
                             downstream_response_id = _websocket_downstream_response_id(request_state)
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    _account_capacity_wait_payload(
+                                        request_state,
+                                        request_id=request_state.request_id,
+                                        reason=request_state.account_capacity_wait_reason,
+                                        retry_after_seconds=request_state.account_capacity_wait_retry_after_seconds,
+                                    ),
+                                )
+                            )
                             if request_state.response_id or request_state.replay_downstream_response_id:
                                 yield format_sse_event(
                                     cast(
@@ -1453,20 +1464,6 @@ class _HTTPBridgeStreamingMixin:
                                                 "status": "in_progress",
                                             },
                                         },
-                                    )
-                                )
-                            else:
-                                yield format_sse_event(
-                                    cast(
-                                        Mapping[str, JsonValue],
-                                        _account_capacity_wait_payload(
-                                            request_state,
-                                            request_id=request_state.request_id,
-                                            reason=request_state.account_capacity_wait_reason,
-                                            retry_after_seconds=(
-                                                request_state.account_capacity_wait_retry_after_seconds
-                                            ),
-                                        ),
                                     )
                                 )
                             continue

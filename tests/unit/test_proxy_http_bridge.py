@@ -17,6 +17,7 @@ import anyio
 import pytest
 from fastapi import WebSocket
 
+from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket, UpstreamWebSocketMessage
 from app.core.config.settings import Settings
@@ -563,6 +564,75 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
     assert payload["status"] == "waiting_for_account_capacity"
     assert payload["request_id"] == "req-capacity-wait"
     assert "stream_idle_timeout" not in keepalive
+
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_capacity_wait_with_response_id_sends_explicit_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+
+    session = _make_bridge_session(key_value="sid-capacity-response")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-capacity-response",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        response_id="resp-capacity-response",
+        transport="http",
+    )
+    request_state.account_capacity_waiting = True
+    request_state.account_capacity_wait_reason = "Rate limit exceeded. Try again in 120s"
+    request_state.account_capacity_wait_started_at = time.monotonic() - 3.0
+    request_state.account_capacity_wait_retry_after_seconds = 120.0
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        target_session.pending_requests.append(request_state)
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+    )
+
+    keepalive = proxy_service.parse_sse_data_json(await asyncio.wait_for(anext(stream), timeout=1.0))
+    in_progress = proxy_service.parse_sse_data_json(await asyncio.wait_for(anext(stream), timeout=1.0))
+
+    assert keepalive is not None
+    assert keepalive["type"] == "codex.keepalive"
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert in_progress is not None
+    assert in_progress["type"] == "response.in_progress"
+    response = in_progress["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == "resp-capacity-response"
 
     await stream.aclose()
 
@@ -1695,6 +1765,73 @@ async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wai
 
     assert sleep_calls
     assert sleep_calls[0]["max_sleep_seconds"] == pytest.approx(119.5)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_preserves_exclusions_after_capacity_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    selection_kwargs: list[dict[str, object]] = []
+    account = cast(Any, SimpleNamespace(id=session.account.id, status=AccountStatus.ACTIVE))
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        if len(selection_kwargs) == 1:
+            return proxy_service.AccountSelection(account=account, error_message=None)
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 120s",
+            error_code="no_accounts",
+        )
+
+    async def fail_refresh(*_args: object, **_kwargs: object) -> Any:
+        raise RefreshError("invalid_grant", "refresh failed", True)
+
+    sleep_calls = 0
+
+    async def sleep_for_recovery(*_args: object, **_kwargs: object) -> bool:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        return sleep_calls == 1
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-exclusions",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    request_state.excluded_account_ids.add("acc-request-state")
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fail_refresh)
+    service._load_balancer = cast(
+        Any,
+        SimpleNamespace(
+            mark_permanent_failure=AsyncMock(),
+            release_account_lease=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+
+    with pytest.raises(ProxyResponseError):
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert len(selection_kwargs) == 3
+    assert selection_kwargs[2]["exclude_account_ids"] == {"acc-request-state", session.account.id}
 
 
 async def test_select_account_with_budget_required_file_pin_does_not_fallback_on_account_cap(

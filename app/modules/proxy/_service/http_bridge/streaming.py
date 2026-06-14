@@ -69,6 +69,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
+    _http_bridge_request_budget_seconds,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
@@ -606,7 +607,7 @@ class _HTTPBridgeStreamingMixin:
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
         settings = _service_get_settings()
-        request_deadline = request_state.started_at + settings.http_responses_session_bridge_request_budget_seconds
+        request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         while True:
             try:
                 session_or_forward = await self._get_or_create_http_bridge_session(

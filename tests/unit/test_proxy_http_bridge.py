@@ -94,6 +94,12 @@ def _make_api_key(
     )
 
 
+def test_http_bridge_request_budget_falls_back_to_proxy_budget() -> None:
+    settings = SimpleNamespace(proxy_request_budget_seconds=42.5)
+
+    assert http_bridge_streaming_module._http_bridge_request_budget_seconds(settings) == 42.5
+
+
 def test_websocket_top_level_error_payload_uses_error_type_not_event_type() -> None:
     payload: dict[str, proxy_service.JsonValue] = {
         "type": "error",

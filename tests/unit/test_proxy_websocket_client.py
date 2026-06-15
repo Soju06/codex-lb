@@ -348,6 +348,69 @@ async def test_connect_responses_websocket_appends_required_beta_header(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_connect_responses_websocket_drops_http_responses_beta_and_encoding_header(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {
+            "Connection": "keep-alive, X-Handshake-Debug",
+            "Keep-Alive": "timeout=5",
+            "Proxy-Authorization": "Basic secret",
+            "Proxy-Connection": "keep-alive",
+            "TE": "trailers",
+            "Trailer": "X-Trailer",
+            "Transfer-Encoding": "chunked",
+            "Upgrade": "websocket",
+            "X-Handshake-Debug": "1",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "OpenAI-Beta": "responses=experimental, assistants=v2",
+            "session_id": "session-1",
+        },
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    additional_headers = cast(dict[str, str], kwargs["additional_headers"])
+    lowered_headers = {key.lower(): value for key, value in additional_headers.items()}
+    for header_name in (
+        "accept-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "x-handshake-debug",
+    ):
+        assert header_name not in lowered_headers
+    assert additional_headers["OpenAI-Beta"] == "assistants=v2, responses_websockets=2026-02-06"
+    assert additional_headers["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
     async def fake_websocket_connect(url: str, **kwargs):
         raise InvalidStatus(

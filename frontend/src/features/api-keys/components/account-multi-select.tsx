@@ -26,6 +26,7 @@ export type AccountMultiSelectProps = {
   ariaInvalid?: boolean;
   ariaDescribedBy?: string;
   triggerClassName?: string;
+  allowPausedAccounts?: boolean;
 };
 type LimitChip = {
   key: string;
@@ -129,12 +130,17 @@ export function AccountMultiSelect({
   ariaInvalid = false,
   ariaDescribedBy,
   triggerClassName,
+  allowPausedAccounts = false,
 }: AccountMultiSelectProps) {
   const { accountsQuery } = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const selectableAccounts = useMemo(
-    () => accounts.filter((account) => isAccountAssignmentSelectable(account.status)),
-    [accounts],
+    () =>
+      accounts.filter(
+        (account) =>
+          isAccountAssignmentSelectable(account.status) || (allowPausedAccounts && account.status === "paused"),
+      ),
+    [accounts, allowPausedAccounts],
   );
   const [search, setSearch] = useState("");
 

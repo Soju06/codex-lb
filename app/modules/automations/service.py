@@ -4,9 +4,11 @@ import logging
 import os
 import random
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha1
+from typing import AsyncIterator
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -74,6 +76,12 @@ _AUTOMATION_ALWAYS_SKIPPED_ACCOUNT_STATUSES = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _automation_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
+    async with get_background_session() as session:
+        yield AccountsRepository(session)
 
 
 async def _resolve_upstream_route_for_account(
@@ -444,7 +452,10 @@ class AutomationsService:
         self._repository = repository
         self._accounts_repository = accounts_repository
         self._request_logs_repository = request_logs_repository
-        self._auth_manager = AuthManager(accounts_repository)
+        self._auth_manager = AuthManager(
+            accounts_repository,
+            refresh_repo_factory=_automation_accounts_refresh_scope,
+        )
         self._encryptor = TokenEncryptor()
 
     async def list_jobs(self, *, now_utc: datetime | None = None) -> list[AutomationJobData]:

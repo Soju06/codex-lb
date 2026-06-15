@@ -721,6 +721,7 @@ function AutomationJobDialogForm({
                     triggerId={FORM_FIELD_IDS.accounts}
                     ariaInvalid={showFieldError("accounts") ? true : undefined}
                     ariaDescribedBy={showFieldError("accounts") ? `${FORM_FIELD_IDS.accounts}-error` : undefined}
+                    allowPausedAccounts={includePausedAccounts}
                   />
                   {showFieldError("accounts") ? (
                     <p id={`${FORM_FIELD_IDS.accounts}-error`} className="text-xs text-destructive">{showFieldError("accounts")}</p>

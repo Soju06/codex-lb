@@ -909,9 +909,7 @@ async def test_rate_limit_reset_credit_migration_adds_expected_table_shape(tmp_p
             }
             assert ("accounts", "account_id", "id", "cascade") in fk_actions
 
-            index_rows = (
-                await session.execute(text("PRAGMA index_list(account_rate_limit_reset_credits)"))
-            ).fetchall()
+            index_rows = (await session.execute(text("PRAGMA index_list(account_rate_limit_reset_credits)"))).fetchall()
             index_specs: dict[str, tuple[bool, list[str]]] = {}
             for row in index_rows:
                 if len(row) < 3:

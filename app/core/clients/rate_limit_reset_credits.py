@@ -344,9 +344,7 @@ async def consume_rate_limit_reset_credit(
                 try:
                     return ConsumeCreditResponse.model_validate(data)
                 except ValidationError as exc:
-                    raise RateLimitResetCreditsFetchError(
-                        502, "Invalid consume response payload"
-                    ) from exc
+                    raise RateLimitResetCreditsFetchError(502, "Invalid consume response payload") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         logger.warning(
             "Rate limit reset credit consume error request_id=%s error=%s",

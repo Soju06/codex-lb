@@ -309,6 +309,8 @@ async def consume_rate_limit_reset_credit(
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
     client: RetryClient | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> ConsumeCreditResponse:
     settings = get_settings()
@@ -323,12 +325,22 @@ async def consume_rate_limit_reset_credit(
         "redeem_request_id": redeem_request_id or str(uuid.uuid4()),
     }
     require_route_or_direct_egress_opt_in(
-        route=None,
+        route=route,
         allow_direct_egress=allow_direct_egress,
         operation="rate limit reset credit consume",
     )
 
     try:
+        if route is not None:
+            return await _consume_via_codex(
+                url=url,
+                route=route,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                retries=retries,
+                codex_client=codex_client,
+            )
         async with lease_retry_client(client) as retry_client:
             async with retry_client.request(
                 "POST",
@@ -341,14 +353,64 @@ async def consume_rate_limit_reset_credit(
                 data = await _safe_json(resp)
                 if resp.status >= 400:
                     raise _fetch_error(data, resp.status)
-                try:
-                    return ConsumeCreditResponse.model_validate(data)
-                except ValidationError as exc:
-                    raise RateLimitResetCreditsFetchError(502, "Invalid consume response payload") from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                return _consume_payload_or_raise(data)
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
         logger.warning(
             "Rate limit reset credit consume error request_id=%s error=%s",
             get_request_id(),
             exc,
         )
         raise RateLimitResetCreditsFetchError(0, f"Consume request failed: {exc}") from exc
+
+
+async def _consume_via_codex(
+    *,
+    url: str,
+    route: ResolvedUpstreamRoute,
+    headers: dict[str, str],
+    body: JsonObject,
+    timeout_seconds: float,
+    retries: int,
+    codex_client: CodexClient | None,
+) -> ConsumeCreditResponse:
+    attempts = max(1, retries + 1)
+    owns_codex_client = codex_client is None
+    active_codex_client = codex_client or CodexClient(create_codex_session())
+    try:
+        for attempt in range(attempts):
+            try:
+                resp = await active_codex_client.request(
+                    "POST",
+                    url,
+                    route=route,
+                    headers=headers,
+                    json=body,
+                    timeout=timeout_seconds,
+                )
+            except CodexTransportError:
+                if attempt < attempts - 1:
+                    await asyncio.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise
+
+            data = await _safe_codex_json(resp)
+            status = _codex_response_status(resp)
+            if status in RETRYABLE_STATUS and attempt < attempts - 1:
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
+            if status >= 400:
+                raise _fetch_error(data, status)
+            return _consume_payload_or_raise(data)
+    finally:
+        if owns_codex_client:
+            close = getattr(active_codex_client, "close", None)
+            if callable(close):
+                await close()
+    raise RuntimeError("unreachable rate limit reset credit consume retry state")
+
+
+def _consume_payload_or_raise(data: JsonObject) -> ConsumeCreditResponse:
+    try:
+        return ConsumeCreditResponse.model_validate(data)
+    except ValidationError as exc:
+        raise RateLimitResetCreditsFetchError(502, "Invalid consume response payload") from exc

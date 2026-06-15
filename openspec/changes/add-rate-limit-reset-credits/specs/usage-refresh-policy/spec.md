@@ -41,9 +41,15 @@ The system SHALL provide an operator-triggered endpoint that redeems one rate-li
 
 The system SHALL select the available credit with the nearest `expires_at` for redemption.
 
+The system SHALL atomically claim that nearest-expiry available credit before sending the upstream consume request so concurrent reset attempts for the same account cannot consume the same stored credit twice.
+
 The system SHALL generate a client-side `redeem_request_id` (UUID v4) for each consume request.
 
+When the target account resolves to an upstream proxy route, the system SHALL send the consume request through that resolved route and SHALL only allow direct egress when no route is selected.
+
 On a successful consume response, the system SHALL mark the redeemed credit's status as `redeemed` in the local database and invalidate cached account state.
+
+If route resolution or the consume request fails after the local claim succeeds, the system SHALL return that credit to the local `available` state.
 
 #### Scenario: Operator triggers reset from account detail
 
@@ -66,6 +72,21 @@ On a successful consume response, the system SHALL mark the redeemed credit's st
 - **WHEN** the operator clicks it
 - **THEN** a confirmation dialog appears
 - **AND** on confirm, the same consume flow executes
+
+#### Scenario: Reset consume honors account-bound proxy routing
+
+- **GIVEN** an account has an explicit upstream proxy pool binding
+- **AND** that account has at least one available rate-limit reset credit
+- **WHEN** the operator confirms a reset-credit redemption
+- **THEN** the system resolves an upstream route for that account before calling `POST /wham/rate-limit-reset-credits/consume`
+- **AND** the request uses that resolved route instead of direct egress
+
+#### Scenario: Concurrent reset requests do not consume the same stored credit twice
+
+- **GIVEN** an account has exactly one available stored rate-limit reset credit
+- **WHEN** two reset-credit requests for that account arrive concurrently
+- **THEN** at most one request claims and consumes that stored credit
+- **AND** the other request selects a different available credit or fails with a clear no-credit conflict
 
 #### Scenario: Transient fetch failure preserves stored credits
 

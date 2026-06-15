@@ -232,6 +232,23 @@ describe("AccountList", () => {
     expect(screen.getByRole("button", { name: /Reset \(2\)/ })).toBeEnabled();
   });
 
+  it("disables the Reset button in read-only mode", () => {
+    render(
+      <AccountList
+        readOnly
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-1",
+            displayName: "Reset Account",
+            availableResetCount: 2,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Reset \(2\)/ })).toBeDisabled();
+  });
+
   it("hides the Reset button when no resets are available", () => {
     render(
       <AccountList

@@ -237,12 +237,55 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def claim_nearest_expiry_available_credit_id(
+        self,
+        account_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        current_time = now or utcnow()
+        target_credit_id = (
+            select(AccountRateLimitResetCredit.id)
+            .where(AccountRateLimitResetCredit.account_id == account_id)
+            .where(AccountRateLimitResetCredit.status == "available")
+            .where(AccountRateLimitResetCredit.expires_at >= current_time)
+            .order_by(AccountRateLimitResetCredit.expires_at.asc(), AccountRateLimitResetCredit.id.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            update(AccountRateLimitResetCredit)
+            .where(AccountRateLimitResetCredit.id == target_credit_id)
+            .where(AccountRateLimitResetCredit.status == "available")
+            .values(status="redeeming")
+            .returning(AccountRateLimitResetCredit.credit_id)
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+        return result.scalar_one_or_none()
+
+    async def release_claimed_credit(self, account_id: str, credit_id: str) -> bool:
+        stmt = (
+            update(AccountRateLimitResetCredit)
+            .where(AccountRateLimitResetCredit.account_id == account_id)
+            .where(AccountRateLimitResetCredit.credit_id == credit_id)
+            .where(AccountRateLimitResetCredit.status == "redeeming")
+            .values(status="available", redeemed_at=None)
+            .returning(AccountRateLimitResetCredit.id)
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def mark_credit_redeemed(self, account_id: str, credit_id: str) -> bool:
         stmt = (
             update(AccountRateLimitResetCredit)
             .where(AccountRateLimitResetCredit.account_id == account_id)
             .where(AccountRateLimitResetCredit.credit_id == credit_id)
-            .values(status="redeemed")
+            .where(AccountRateLimitResetCredit.status == "redeeming")
+            .values(status="redeemed", redeemed_at=utcnow())
             .returning(AccountRateLimitResetCredit.id)
         )
         async with sqlite_writer_section():

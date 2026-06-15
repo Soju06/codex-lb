@@ -56,6 +56,13 @@ When `nearestResetExpiryAt` is null, more than 7 days away, or the account has n
 - **WHEN** the account appears in the dashboard account table or account card
 - **THEN** no `Reset` button is shown
 
+#### Scenario: Read-only dashboard disables Reset button
+
+- **GIVEN** the dashboard is rendered for a read-only user
+- **AND** an account summary includes `availableResetCount = 2`
+- **WHEN** the account appears in the dashboard account table or account card
+- **THEN** the visible `Reset (2)` button is disabled
+
 #### Scenario: Accounts page list item shows corner reset badge
 
 - **GIVEN** an Accounts page list-item box has `availableResetCount = 2`

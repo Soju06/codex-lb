@@ -15,14 +15,15 @@ This fetch runs inside the existing 60-second background refresh loop and is sco
 - account header: `chatgpt-account-id`
 - body: `{"credit_id": "...", "redeem_request_id": "<uuid4>"}`
 
-The operator-triggered API surface is `POST /api/accounts/{account_id}/reset-credit`, which internally selects the nearest-expiry available credit, generates a UUID v4 `redeem_request_id`, calls the upstream consume endpoint, and marks the credit as `redeemed` on success.
+The operator-triggered API surface is `POST /api/accounts/{account_id}/reset-credit`, which internally atomically claims the nearest-expiry available credit, generates a UUID v4 `redeem_request_id`, resolves any account-bound upstream proxy route, calls the upstream consume endpoint, and marks the credit as `redeemed` on success.
 
 ## Persistence rule
 
 - insert new `(account_id, credit_id)` rows only
 - never overwrite existing upstream-fetched fields
 - allow local `available -> expired` transition when `now > expires_at`
-- allow local `available -> redeemed` transition after a successful consume
+- allow local `available -> redeeming -> redeemed` transition during a successful consume
+- allow local `redeeming -> available` rollback when route resolution or the upstream consume call fails
 
 ## Example
 
@@ -52,6 +53,7 @@ codex-lb stores one new row for `(acc_123, RateLimitResetCredit_one)`. A later r
 - If upstream keeps returning a credit that is already stored, the row remains deduplicated by `(account_id, credit_id)`.
 - If a stored credit expires locally before upstream stops returning it, this change treats the local `expired` state as authoritative for the available count.
 - If the consume endpoint returns an error, the credit remains `available` and the UI shows the error.
+- If an account has an upstream proxy binding, the operator-triggered consume path uses the same resolved route model as other account-scoped upstream requests and only falls back to direct egress when no route resolves.
 
 ## UI notes
 

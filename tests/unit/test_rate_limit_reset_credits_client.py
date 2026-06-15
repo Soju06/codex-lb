@@ -7,6 +7,7 @@ import pytest
 
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsFetchError,
+    consume_rate_limit_reset_credit,
     fetch_rate_limit_reset_credits,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -80,6 +81,7 @@ class StubRetryClient:
         method: str,
         url: str,
         headers: dict[str, str] | None = None,
+        json: dict[str, object] | None = None,
         timeout: object | None = None,
         retry_options: object | None = None,
     ) -> StubRequestContext:
@@ -212,3 +214,47 @@ async def test_fetch_rate_limit_reset_credits_preserves_error_code() -> None:
 
     assert excinfo.value.status_code == 401
     assert excinfo.value.code == "account_deactivated"
+
+
+@pytest.mark.asyncio
+async def test_consume_rate_limit_reset_credit_uses_resolved_codex_route() -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    client = StubCodexClient(
+        responses=[
+            StubCodexResponse(
+                payload={
+                    "code": "ok",
+                    "credit": {
+                        "id": "credit_one",
+                        "status": "redeemed",
+                        "redeemed_at": "2026-06-16T12:00:00Z",
+                    },
+                    "windows_reset": 2,
+                }
+            )
+        ]
+    )
+
+    payload = await consume_rate_limit_reset_credit(
+        access_token="access-token",
+        account_id="acc_test",
+        credit_id="credit_one",
+        redeem_request_id="redeem-123",
+        base_url="http://usage.test/backend-api",
+        timeout_seconds=2.0,
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert payload.windows_reset == 2
+    assert client.calls[0]["route"] is route
+    assert client.calls[0]["method"] == "POST"
+    assert client.calls[0]["url"] == "http://usage.test/backend-api/wham/rate-limit-reset-credits/consume"
+    assert client.calls[0]["json"] == {
+        "credit_id": "credit_one",
+        "redeem_request_id": "redeem-123",
+    }

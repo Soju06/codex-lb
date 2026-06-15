@@ -361,6 +361,7 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                     type="button"
                     size="sm"
                     variant="ghost"
+                    disabled={readOnly}
                     className={cn(
                       "gap-1 rounded-md px-2 text-xs text-muted-foreground hover:text-foreground",
                       isResetUrgent && "border border-red-500 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300",

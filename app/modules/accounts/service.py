@@ -24,6 +24,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardConflictError
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.auth_manager import AuthManager
@@ -550,16 +551,13 @@ class AccountsService:
 
     async def reset_account_credit(self, account_id: str) -> AccountResetCreditResponse | None:
         """Redeem the nearest-expiry available rate-limit reset credit."""
-        from app.core.clients.rate_limit_reset_credits import (
-            RateLimitResetCreditsFetchError,
-            consume_rate_limit_reset_credit,
-        )
+        from app.core.clients.rate_limit_reset_credits import consume_rate_limit_reset_credit
 
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
 
-        credit_id = await self._repo.get_nearest_expiry_available_credit_id(account_id)
+        credit_id = await self._repo.claim_nearest_expiry_available_credit_id(account_id)
         if credit_id is None:
             raise DashboardConflictError(
                 "No available rate-limit reset credits for this account",
@@ -573,13 +571,16 @@ class AccountsService:
         access_token = self._encryptor.decrypt(reset_account.access_token_encrypted)
 
         try:
+            route = await self._resolve_upstream_route(reset_account)
             response = await consume_rate_limit_reset_credit(
                 access_token=access_token,
                 account_id=reset_account.chatgpt_account_id,
                 credit_id=credit_id,
-                allow_direct_egress=True,
+                route=route,
+                allow_direct_egress=route is None,
             )
-        except RateLimitResetCreditsFetchError:
+        except Exception:
+            await self._repo.release_claimed_credit(account_id, credit_id)
             raise
 
         await self._repo.mark_credit_redeemed(account_id, credit_id)
@@ -592,6 +593,21 @@ class AccountsService:
             windows_reset=response.windows_reset,
             status="redeemed",
         )
+
+    async def _resolve_upstream_route(self, account: Account):
+        try:
+            return await resolve_upstream_route(
+                self._repo.session,
+                account_id=account.id,
+                operation="reset_credit_consume",
+                scope="account",
+                encryptor=self._encryptor,
+            )
+        except UpstreamProxyRouteError as exc:
+            raise DashboardConflictError(
+                f"Upstream proxy route unavailable: {exc.reason}",
+                code="upstream_proxy_unavailable",
+            ) from exc
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

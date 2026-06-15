@@ -580,3 +580,52 @@ async def test_insert_rate_limit_reset_credits_if_missing_reraises_non_duplicate
 
         with pytest.raises(IntegrityError):
             await repo.insert_rate_limit_reset_credits_if_missing([credit])
+
+
+@pytest.mark.asyncio
+async def test_claim_nearest_expiry_available_credit_id_claims_credits_in_expiry_order(db_setup):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_claim_order"))
+        await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_claim_order",
+                    credit_id="credit_soon",
+                    status="available",
+                    granted_at=now - timedelta(days=2),
+                    expires_at=now + timedelta(hours=2),
+                    redeemed_at=None,
+                ),
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_claim_order",
+                    credit_id="credit_later",
+                    status="available",
+                    granted_at=now - timedelta(days=1),
+                    expires_at=now + timedelta(days=1),
+                    redeemed_at=None,
+                ),
+            ]
+        )
+
+        first = await repo.claim_nearest_expiry_available_credit_id("acc_claim_order", now=now)
+        second = await repo.claim_nearest_expiry_available_credit_id("acc_claim_order", now=now)
+        third = await repo.claim_nearest_expiry_available_credit_id("acc_claim_order", now=now)
+        rows = (
+            await session.execute(
+                AccountRateLimitResetCredit.__table__.select()
+                .where(AccountRateLimitResetCredit.account_id == "acc_claim_order")
+                .order_by(AccountRateLimitResetCredit.credit_id)
+            )
+        ).all()
+
+    assert first == "credit_soon"
+    assert second == "credit_later"
+    assert third is None
+    assert [(row.credit_id, row.status) for row in rows] == [
+        ("credit_later", "redeeming"),
+        ("credit_soon", "redeeming"),
+    ]

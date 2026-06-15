@@ -86,6 +86,7 @@ export const AccountSummarySchema = z.object({
   creditsUnlimited: z.boolean().nullable().optional(),
   creditsBalance: z.number().nullable().optional(),
   availableResetCount: z.number().int().nonnegative().default(0),
+  nearestResetExpiryAt: z.iso.datetime({ offset: true }).nullable().optional(),
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),

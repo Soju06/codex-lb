@@ -116,6 +116,7 @@ class AccountSummary(DashboardModel):
     # group rows by email themselves. See codex-lb #787 (B).
     is_email_duplicate: bool = False
     available_reset_count: int = 0
+    nearest_reset_expiry_at: datetime | None = None
 
 
 class AccountsResponse(DashboardModel):

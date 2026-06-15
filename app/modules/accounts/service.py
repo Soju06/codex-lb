@@ -116,6 +116,9 @@ class AccountsService:
         available_reset_counts_by_account = await self._repo.count_available_rate_limit_reset_credits_by_account(
             account_ids
         )
+        nearest_reset_expiry_by_account = await self._repo.nearest_reset_expiry_by_account(
+            account_ids
+        )
         request_usage_by_account = {
             account_id: AccountRequestUsage(
                 request_count=row.request_count,
@@ -178,6 +181,7 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
             available_reset_counts_by_account=available_reset_counts_by_account,
+            nearest_reset_expiry_by_account=nearest_reset_expiry_by_account,
             encryptor=self._encryptor,
         )
 

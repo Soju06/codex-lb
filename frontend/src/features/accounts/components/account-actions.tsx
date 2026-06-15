@@ -22,10 +22,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
 } from "@/features/accounts/schemas";
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isResetExpiryUrgent(expiry: string | null | undefined): boolean {
+  if (!expiry) return false;
+  return new Date(expiry).getTime() - Date.now() < SEVEN_DAYS_MS;
+}
 
 export type AccountActionsProps = {
   account: AccountSummary;
@@ -67,6 +75,7 @@ export function AccountActions({
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const hasResets = (account.availableResetCount ?? 0) > 0;
+  const isResetUrgent = isResetExpiryUrgent(account.nearestResetExpiryAt);
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -202,8 +211,11 @@ export function AccountActions({
           <Button
             type="button"
             size="sm"
-            variant="outline"
-            className="h-8 gap-1.5 text-xs"
+            variant="ghost"
+            className={cn(
+              "h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground",
+              isResetUrgent && "border border-red-500 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300",
+            )}
             disabled={busy || readOnly}
             title="Reset rate-limit credits"
             onClick={() => setResetConfirmOpen(true)}

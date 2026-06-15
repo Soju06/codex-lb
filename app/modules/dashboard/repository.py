@@ -109,5 +109,11 @@ class DashboardRepository:
     ) -> dict[str, int]:
         return await self._accounts_repo.count_available_rate_limit_reset_credits_by_account(account_ids)
 
+    async def nearest_reset_expiry_by_account(
+        self,
+        account_ids: list[str],
+    ) -> dict[str, "datetime"]:
+        return await self._accounts_repo.nearest_reset_expiry_by_account(account_ids)
+
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repo.get_or_create()

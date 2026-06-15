@@ -199,6 +199,26 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return {str(account_id): int(count) for account_id, count in result.all()}
 
+    async def nearest_reset_expiry_by_account(
+        self,
+        account_ids: list[str] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, datetime]:
+        stmt = (
+            select(
+                AccountRateLimitResetCredit.account_id,
+                func.min(AccountRateLimitResetCredit.expires_at),
+            )
+            .where(AccountRateLimitResetCredit.status == "available")
+            .where(AccountRateLimitResetCredit.expires_at >= (now or utcnow()))
+            .group_by(AccountRateLimitResetCredit.account_id)
+        )
+        if account_ids:
+            stmt = stmt.where(AccountRateLimitResetCredit.account_id.in_(account_ids))
+        result = await self._session.execute(stmt)
+        return {str(account_id): expiry for account_id, expiry in result.all()}
+
     async def get_nearest_expiry_available_credit_id(
         self,
         account_id: str,

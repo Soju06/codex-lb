@@ -16,6 +16,13 @@ const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
 const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 6rem minmax(8rem,0.8fr) auto";
 
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isResetExpiryUrgent(expiry: string | null | undefined): boolean {
+  if (!expiry) return false;
+  return new Date(expiry).getTime() - Date.now() < SEVEN_DAYS_MS;
+}
+
 type AccountListProps = {
   accounts: AccountSummary[];
   readOnly?: boolean;
@@ -306,6 +313,7 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const warmupDetail = account.limitWarmup
             ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
+          const isResetUrgent = isResetExpiryUrgent(account.nearestResetExpiryAt);
           return (
             <div
               key={account.accountId}
@@ -352,8 +360,11 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
-                    className="h-7 gap-1 rounded-md px-2 text-xs"
+                    variant="ghost"
+                    className={cn(
+                      "gap-1 rounded-md px-2 text-xs text-muted-foreground hover:text-foreground",
+                      isResetUrgent && "border border-red-500 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300",
+                    )}
                     title="Reset rate-limit credits"
                     onClick={() => onAction?.(account, "reset-credit")}
                   >

@@ -15,6 +15,13 @@ import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, for
 
 export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | "reset-credit";
 
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isResetExpiryUrgent(expiry: string | null | undefined): boolean {
+  if (!expiry) return false;
+  return new Date(expiry).getTime() - Date.now() < SEVEN_DAYS_MS;
+}
+
 export type AccountCardProps = {
   account: AccountSummary;
   showAccountId?: boolean;
@@ -105,6 +112,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const warmupDetail = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
+  const isResetUrgent = isResetExpiryUrgent(account.nearestResetExpiryAt);
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -190,8 +198,11 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <Button
             type="button"
             size="sm"
-            variant="outline"
-            className="h-7 gap-1.5 rounded-lg text-xs"
+            variant="ghost"
+            className={cn(
+              "h-7 gap-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground",
+              isResetUrgent && "border border-red-500 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300",
+            )}
             disabled={readOnly}
             title="Reset rate-limit credits"
             onClick={() => onAction?.(account, "reset-credit")}

@@ -121,6 +121,7 @@ export function createAccountSummary(
 		creditsUnlimited: false,
 		creditsBalance: 932,
 		availableResetCount: 0,
+		nearestResetExpiryAt: null,
 		auth: {
 			access: { expiresAt: offsetIso(30), state: null },
 			refresh: { state: "stored" },

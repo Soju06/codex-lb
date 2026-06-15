@@ -72,6 +72,9 @@ class DashboardService:
         available_reset_counts_by_account = (
             await self._repo.count_available_rate_limit_reset_credits_by_account(account_ids)
         )
+        nearest_reset_expiry_by_account = (
+            await self._repo.nearest_reset_expiry_by_account(account_ids)
+        )
 
         account_summaries = sorted(
             build_account_summaries(
@@ -81,6 +84,7 @@ class DashboardService:
                 monthly_usage=monthly_usage,
                 limit_warmups_by_account=limit_warmups_by_account,
                 available_reset_counts_by_account=available_reset_counts_by_account,
+                nearest_reset_expiry_by_account=nearest_reset_expiry_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
             ),

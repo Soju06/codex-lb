@@ -581,6 +581,10 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/softkleenex"><img src="https://avatars.githubusercontent.com/u/92619941?v=4?s=100" width="100px;" alt="softkleenex"/><br /><sub><b>softkleenex</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=softkleenex" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=softkleenex" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/plastictaste"><img src="https://avatars.githubusercontent.com/u/261646970?v=4?s=100" width="100px;" alt="plastictaste"/><br /><sub><b>plastictaste</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Documentation">📖</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/n3crosis"><img src="https://avatars.githubusercontent.com/u/11072158?v=4?s=100" width="100px;" alt="n3crosis"/><br /><sub><b>n3crosis</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/copilot"><img src="https://github.com/copilot.png?s=100" width="100px;" alt="copilot"/><br /><sub><b>copilot</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=copilot" title="Code">💻</a></td>
+    </tr>
   </tbody>
 </table>
 

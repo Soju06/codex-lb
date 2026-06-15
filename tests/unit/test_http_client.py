@@ -83,7 +83,7 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     ):
         await http_module.init_http_client()
 
-    assert ssl_context_factory.call_count == 2
+    assert ssl_context_factory.call_count == 1
     assert tcp_connector_cls.call_args_list[0].kwargs == {
         "limit": 100,
         "limit_per_host": 50,
@@ -92,6 +92,188 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     assert tcp_connector_cls.call_args_list[1].kwargs == {"ssl": ssl_context}
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is websocket_connector
+
+    await http_module.close_http_client()
+
+
+def test_socks_proxy_url_detects_lowercase_socks_proxy() -> None:
+    with patch.dict("os.environ", {"socks_proxy": "socks5://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_strips_whitespace_from_env_value() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "  socks5://proxy.example.com:1080  "}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_normalizes_http_scheme_for_socks_proxy_env() -> None:
+    with patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_normalizes_socks5h_for_proxy_connector() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "socks5h://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_normalizes_socks4a_for_proxy_connector() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "socks4a://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks4://proxy.example.com:1080"
+
+
+def test_socks_proxy_config_preserves_socks4a_remote_dns() -> None:
+    config = http_module._socks_proxy_config({"SOCKS_PROXY": "socks4a://proxy.example.com:1080"})
+    assert config is not None
+    assert config.connector_url == "socks4://proxy.example.com:1080"
+    assert config.rdns is True
+
+
+def test_socks_proxy_url_skips_http_proxy_when_request_method_set() -> None:
+    env = {"REQUEST_METHOD": "GET", "HTTP_PROXY": "socks5://proxy.example.com:1080"}
+    with patch.dict("os.environ", env, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url is None
+
+
+@pytest.mark.asyncio
+async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
+    await http_module.close_http_client()
+
+    http_session = MagicMock()
+    websocket_session = MagicMock()
+    websocket_session.close = AsyncMock()
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+    proxy_connector = MagicMock()
+    ssl_context = MagicMock()
+    socks_settings = SimpleNamespace(
+        http_connector_limit=100,
+        http_connector_limit_per_host=50,
+        upstream_websocket_trust_env=True,
+    )
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=socks_settings),
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context),
+        patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session],
+        ) as client_session_cls,
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+        patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True),
+    ):
+        ws_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        client = await http_module.init_http_client()
+
+    assert client.session is http_session
+    assert client.websocket_session is websocket_session
+    assert proxy_connector_cls.from_url.call_count == 2
+    assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks5://proxy.example.com:1080",
+        "socks5://proxy.example.com:1080",
+    ]
+    assert client_session_cls.call_args_list[0].kwargs["connector"] is proxy_connector
+    assert client_session_cls.call_args_list[1].kwargs["connector"] is ws_proxy_connector
+    # trust_env must be False for both sessions when SOCKS proxy is active (avoids double-proxying)
+    assert client_session_cls.call_args_list[0].kwargs["trust_env"] is False
+    assert client_session_cls.call_args_list[1].kwargs["trust_env"] is False
+
+    await http_module.close_http_client()
+
+
+@pytest.mark.asyncio
+async def test_init_http_client_uses_settings_proxy_env_for_socks_url() -> None:
+    await http_module.close_http_client()
+
+    http_session = MagicMock()
+    websocket_session = MagicMock()
+    websocket_session.close = AsyncMock()
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+    proxy_connector = MagicMock()
+    ssl_context = MagicMock()
+
+    class _Settings(SimpleNamespace):
+        def upstream_websocket_proxy_env(self):
+            return {"SOCKS_PROXY": "socks5://settings-proxy.example.com:1080"}
+
+    socks_settings = _Settings(
+        http_connector_limit=100,
+        http_connector_limit_per_host=50,
+        upstream_websocket_trust_env=True,
+    )
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=socks_settings),
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context),
+        patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session],
+        ) as client_session_cls,
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+        patch.dict("os.environ", {}, clear=True),
+    ):
+        ws_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        await http_module.init_http_client()
+
+    assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks5://settings-proxy.example.com:1080",
+        "socks5://settings-proxy.example.com:1080",
+    ]
+    assert client_session_cls.call_args_list[0].kwargs["connector"] is proxy_connector
+    assert client_session_cls.call_args_list[0].kwargs["trust_env"] is False
+    assert client_session_cls.call_args_list[1].kwargs["connector"] is ws_proxy_connector
+    assert client_session_cls.call_args_list[1].kwargs["trust_env"] is False
+
+    await http_module.close_http_client()
+
+
+@pytest.mark.asyncio
+async def test_init_http_client_preserves_socks4a_remote_dns_for_proxy_connector() -> None:
+    await http_module.close_http_client()
+
+    http_session = MagicMock()
+    websocket_session = MagicMock()
+    websocket_session.close = AsyncMock()
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+    proxy_connector = MagicMock()
+    ssl_context = MagicMock()
+    socks_settings = SimpleNamespace(
+        http_connector_limit=100,
+        http_connector_limit_per_host=50,
+        upstream_websocket_trust_env=True,
+    )
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=socks_settings),
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context),
+        patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session],
+        ),
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+        patch.dict("os.environ", {"SOCKS_PROXY": "socks4a://proxy.example.com:1080"}, clear=True),
+    ):
+        ws_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        await http_module.init_http_client()
+
+    assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks4://proxy.example.com:1080",
+        "socks4://proxy.example.com:1080",
+    ]
+    assert [call.kwargs["rdns"] for call in proxy_connector_cls.from_url.call_args_list] == [True, True]
 
     await http_module.close_http_client()
 

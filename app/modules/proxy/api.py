@@ -2626,6 +2626,23 @@ async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
+def _consume_first_stream_task_exception(first_task: asyncio.Task[str]) -> None:
+    if first_task.cancelled():
+        return
+    try:
+        first_task.exception()
+    except asyncio.CancelledError:
+        return
+
+
+async def _await_first_stream_item_probe(first_task: asyncio.Task[str], timeout_seconds: float) -> str:
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done:
+        first_task.add_done_callback(_consume_first_stream_task_exception)
+        raise TimeoutError
+    return await first_task
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
@@ -2636,10 +2653,7 @@ async def _probe_stream_startup_error(
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
     first_task = asyncio.create_task(_read_first_stream_item(stream))
     try:
-        first = await asyncio.wait_for(
-            asyncio.shield(first_task),
-            timeout=timeout_seconds,
-        )
+        first = await _await_first_stream_item_probe(first_task, timeout_seconds)
     except TimeoutError:
         return _prepend_first_task(first_task, stream), None
     except StopAsyncIteration:
@@ -2948,10 +2962,7 @@ async def _probe_chat_stream_startup_error(
     for _ in range(max_startup_events):
         first_task = asyncio.create_task(_read_first_stream_item(stream))
         try:
-            first = await asyncio.wait_for(
-                asyncio.shield(first_task),
-                timeout=timeout_seconds,
-            )
+            first = await _await_first_stream_item_probe(first_task, timeout_seconds)
         except TimeoutError:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
         except StopAsyncIteration:

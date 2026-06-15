@@ -1,0 +1,4 @@
+- [x] Add a Responses API compatibility requirement for startup probe task ownership.
+- [x] Consume first-item task exceptions when a timed-out startup probe stream is abandoned.
+- [x] Add unit regression coverage for Responses and chat-completions startup probes.
+- [x] Run targeted tests and OpenSpec validation.

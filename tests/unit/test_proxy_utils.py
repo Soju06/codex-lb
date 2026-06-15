@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import ssl
@@ -210,6 +211,65 @@ def _without_installation_metadata(value: Any) -> Any:
 
 def _json_text_without_installation_metadata(text: str) -> Any:
     return _without_installation_metadata(json.loads(text))
+
+
+async def _raise_proxy_response_error_after_timeout() -> AsyncIterator[str]:
+    await asyncio.sleep(0.02)
+    raise proxy_module.ProxyResponseError(429, openai_error("rate_limit_exceeded", "upstream quota reached"))
+    yield ""
+
+
+async def _collect_unhandled_loop_exceptions() -> tuple[
+    asyncio.AbstractEventLoop,
+    list[dict[str, Any]],
+    Callable[[asyncio.AbstractEventLoop, dict[str, Any]], object] | None,
+]:
+    loop = asyncio.get_running_loop()
+    captured: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: captured.append(context))
+    return loop, captured, previous_handler
+
+
+async def _finish_unobserved_task_cleanup() -> None:
+    for _ in range(5):
+        gc.collect()
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_responses_startup_probe_timeout_consumes_abandoned_first_task_exception():
+    loop, captured, previous_handler = await _collect_unhandled_loop_exceptions()
+    try:
+        stream, startup_error = await proxy_api._probe_stream_startup_error(
+            _raise_proxy_response_error_after_timeout(),
+            timeout_seconds=0.001,
+        )
+        assert startup_error is None
+        del stream
+        await _finish_unobserved_task_cleanup()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_chat_startup_probe_timeout_consumes_abandoned_first_task_exception():
+    loop, captured, previous_handler = await _collect_unhandled_loop_exceptions()
+    try:
+        stream, startup_error = await proxy_api._probe_chat_stream_startup_error(
+            _raise_proxy_response_error_after_timeout(),
+            timeout_seconds=0.001,
+            max_startup_events=1,
+        )
+        assert startup_error is None
+        del stream
+        await _finish_unobserved_task_cleanup()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert captured == []
 
 
 def test_relative_availability_settings_default_when_stored_values_are_null():

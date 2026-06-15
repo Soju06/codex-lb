@@ -85,10 +85,12 @@ export function DashboardPage() {
           navigate(`/accounts?selected=${account.accountId}`);
           break;
         case "warmup-toggle":
-          void limitWarmupMutation.mutateAsync({
-            accountId: account.accountId,
-            enabled: !account.limitWarmupEnabled,
-          });
+          if (canWrite) {
+            void limitWarmupMutation.mutateAsync({
+              accountId: account.accountId,
+              enabled: !account.limitWarmupEnabled,
+            });
+          }
           break;
       }
     },

@@ -616,13 +616,14 @@ class _CompactMixin:
                             error.code if error else None,
                             error.type if error else None,
                         )
+                        error_message = error.message if error and error.message is not None else ""
                         if (
                             code == "upstream_unavailable"
                             and exc.retryable_same_contract
                             and (
                                 exc.failure_exception_type in {"TimeoutError", "ServerTimeoutError"}
-                                or "timed out" in (error.message if error else "").lower()
-                                or "timeout" in (error.message if error else "").lower()
+                                or "timed out" in error_message.lower()
+                                or "timeout" in error_message.lower()
                             )
                         ):
                             logger.warning(

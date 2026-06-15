@@ -151,6 +151,12 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     requires_auth = password_required or settings.totp_required_on_login
     guest_access_enabled = settings.guest_access_enabled
     guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
+    passwordless_guest_fallback_allowed = not (
+        get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER
+        and requires_auth
+        and guest_access_enabled
+        and not guest_password_required
+    )
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     state = get_dashboard_session_store().get(session_id)
 
@@ -167,7 +173,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
         state is not None
         and state.role == DashboardRole.GUEST
         and guest_access_enabled
-        and (not guest_password_required or state.guest_verified)
+        and ((not guest_password_required and passwordless_guest_fallback_allowed) or state.guest_verified)
     ):
         return _set_dashboard_principal(request, guest_principal())
     if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
@@ -193,7 +199,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
             admin_principal(auth_mode=DashboardAuthMode.STANDARD),
         )
 
-    if guest_access_enabled and not guest_password_required:
+    if guest_access_enabled and not guest_password_required and passwordless_guest_fallback_allowed:
         return _set_dashboard_principal(request, guest_principal())
 
     if not password_required and settings.totp_required_on_login:

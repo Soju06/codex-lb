@@ -319,7 +319,7 @@ async def login_guest(
     if (
         get_settings().dashboard_auth_mode == DashboardAuthMode.TRUSTED_HEADER
         and get_dashboard_request_auth(request) is None
-        and settings.password_hash is None
+        and settings.guest_password_hash is None
     ):
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
 

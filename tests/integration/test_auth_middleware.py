@@ -552,6 +552,52 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
 
 
 @pytest.mark.asyncio
+async def test_trusted_header_mode_blocks_passwordless_guest_login_on_proxied_local_backend_without_auth_header(
+    app_instance,
+    monkeypatch,
+):
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.TRUSTED_HEADER,
+        trust_proxy_headers=True,
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        proxy_headers = {"Remote-User": "admin@example.com"}
+        async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
+            setup = await local_client.post(
+                "/api/dashboard-auth/password/setup",
+                json={"password": "password123"},
+                headers=proxy_headers,
+            )
+            assert setup.status_code == 200
+
+            read_settings = await local_client.get("/api/settings", headers=proxy_headers)
+            assert read_settings.status_code == 200
+            current = read_settings.json()
+            current["guestAccessEnabled"] = True
+            enabled_settings = await local_client.put(
+                "/api/settings",
+                json=current,
+                headers=proxy_headers,
+            )
+            assert enabled_settings.status_code == 200
+            assert enabled_settings.json()["guestPasswordConfigured"] is False
+
+        direct_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        proxied_headers = {"X-Forwarded-For": "203.0.113.24"}
+        async with AsyncClient(transport=direct_transport, base_url="http://localhost") as direct_client:
+            guest_login = await direct_client.post(
+                "/api/dashboard-auth/guest/login",
+                json={},
+                headers=proxied_headers,
+            )
+            assert guest_login.status_code == 401
+            assert guest_login.json()["error"]["code"] == "proxy_auth_required"
+
+
+@pytest.mark.asyncio
 async def test_trusted_header_mode_allows_proxy_header_and_password_fallback(async_client, monkeypatch):
     _set_dashboard_auth_env(
         monkeypatch,

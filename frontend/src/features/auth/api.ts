@@ -29,6 +29,7 @@ export function setupPassword(payload: PasswordSetupRequest) {
 export function loginPassword(payload: LoginRequest) {
   return post(`${AUTH_BASE_PATH}/password/login`, AuthSessionSchema, {
     body: payload,
+    suppressUnauthorizedHandler: true,
   });
 }
 

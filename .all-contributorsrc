@@ -787,6 +787,16 @@
         "test",
         "bug"
       ]
+    },
+    {
+      "login": "WangErgouaaaa",
+      "name": "Guanwei Chen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/117421439?v=4",
+      "profile": "https://github.com/WangErgouaaaa",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

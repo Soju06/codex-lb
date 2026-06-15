@@ -138,8 +138,9 @@ class _StreamingRetryMixin:
         start = time.monotonic()
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
-        deadline = start + _facade()._stream_request_budget_seconds(
+        deadline = start + _facade()._responses_request_budget_seconds(
             base_settings,
+            codex_session_affinity=codex_session_affinity,
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts

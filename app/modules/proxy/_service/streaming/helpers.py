@@ -383,7 +383,6 @@ from app.modules.proxy.durable_bridge_coordinator import (
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
-    classify_upstream_failure,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -693,6 +692,19 @@ def _call_stream_with_supported_optional_kwargs(
     return func(*args, **_facade()._supported_optional_kwargs(func, optional_kwargs, required_kwargs))
 
 
+def _responses_request_budget_seconds(
+    settings: object,
+    *,
+    codex_session_affinity: bool,
+    request_transport: str,
+) -> float:
+    if request_transport == _REQUEST_TRANSPORT_HTTP and codex_session_affinity:
+        budget = getattr(settings, "http_responses_session_bridge_codex_request_budget_seconds", None)
+        if budget is not None:
+            return float(budget)
+    return _stream_request_budget_seconds(settings, request_transport=request_transport)
+
+
 def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
     if request_transport == _REQUEST_TRANSPORT_HTTP:
         budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
@@ -747,12 +759,13 @@ async def _handle_stream_error(
     error: UpstreamError,
     code: str,
     http_status: int | None = None,
+    phase: str = "first_event",
 ) -> ClassifiedFailure:
-    classified = classify_upstream_failure(
+    classified = _facade().classify_upstream_failure(
         error_code=code,
         error=error,
         http_status=http_status,
-        phase="first_event",
+        phase=phase,
     )
     if _facade()._is_account_neutral_error_code(code):
         return classified
@@ -762,6 +775,18 @@ async def _handle_stream_error(
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:
         await proxy._load_balancer.mark_permanent_failure(account, code)
+    elif phase == "connect" and http_status == 403:
+        cooldown_seconds = max(0.0, float(_facade().get_settings().proxy_connect_forbidden_cooldown_seconds))
+        await proxy._load_balancer.mark_temporary_cooldown(account, cooldown_seconds)
+        _facade().logger.info(
+            "Applied connect-phase forbidden cooldown account_id=%s request_id=%s code=%s "
+            "status=%s cooldown_seconds=%.1f",
+            account.id,
+            get_request_id(),
+            code,
+            http_status,
+            cooldown_seconds,
+        )
     else:
         await proxy._load_balancer.record_error(account)
         _facade().logger.info(

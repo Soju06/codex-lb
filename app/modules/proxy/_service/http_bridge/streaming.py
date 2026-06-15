@@ -765,6 +765,7 @@ class _HTTPBridgeStreamingMixin:
                     headers=headers,
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
+                    proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
                     downstream_turn_state=downstream_turn_state,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,

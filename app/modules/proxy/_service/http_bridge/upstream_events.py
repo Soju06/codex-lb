@@ -89,6 +89,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _record_continuity_fail_closed as _record_continuity_fail_closed,
+)
+from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
 )
 from app.modules.proxy._service.observability import (
@@ -556,6 +559,15 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
+            _record_continuity_fail_closed(
+                surface="http_bridge_stream",
+                reason="previous_response_not_found_unmatched",
+                previous_response_id=previous_response_id_hint,
+                upstream_error_code=_normalize_error_code(
+                    _websocket_event_error_code(event_type, payload),
+                    _websocket_event_error_type(event_type, payload),
+                ),
+            )
             session.upstream_control.reconnect_requested = True
             return
 

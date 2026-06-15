@@ -275,6 +275,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         headers: Mapping[str, str],
         api_key_reservation: ApiKeyUsageReservationData | None,
         codex_session_affinity: bool,
+        proxy_request_budget_seconds: float,
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
@@ -317,6 +318,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                proxy_request_budget_seconds=proxy_request_budget_seconds,
             ):
                 forwarded_any = True
                 event_payload = parse_sse_data_json(event_block)

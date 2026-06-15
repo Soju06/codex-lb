@@ -11,7 +11,8 @@ The repo already has a working `/responses/compact` path that can fetch the comp
 - Fail closed when a present trigger is duplicated or not final.
 - Reuse the existing compact service path instead of building a second compaction implementation.
 - Emit a raw SSE sequence that contains exactly one compaction output item and a terminal completion event.
-- Leave `/responses/compact` and public `/v1/responses` behavior unchanged.
+- Normalize Codex-affinity `/backend-api/codex/responses/compact` JSON responses that carry remote-compaction-v2 historical message output so the client receives one compact item.
+- Leave OpenAI-style `/v1/responses/compact` and public `/v1/responses` behavior unchanged.
 
 **Non-Goals:**
 - Redesign the Codex compaction protocol.
@@ -40,7 +41,8 @@ The repo already has a working `/responses/compact` path that can fetch the comp
    - Alternative considered: accept any upstream shape and forward it as-is. Rejected because the downstream collector requires a single compaction output item.
 
 5. Keep the bridge narrow.
-   - `/responses/compact` remains unchanged.
+   - Codex-affinity `/backend-api/codex/responses/compact` may normalize remote-compaction-v2 output into a single compaction item.
+   - OpenAI-style `/v1/responses/compact` remains unchanged.
    - `/v1/responses` remains unchanged.
    - The raw Codex route continues to bypass the public OpenAI SDK stream normalizer.
 

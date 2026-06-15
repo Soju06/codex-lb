@@ -7,7 +7,8 @@ Codex clients now send a terminal `compaction_trigger` item on normal `/backend-
 - Detect a terminal top-level `compaction_trigger` item on `/backend-api/codex/responses`.
 - Strip the trigger before calling upstream compact handling, then synthesize the raw SSE response Codex expects: one compaction output item followed by terminal completion.
 - When a request includes `compaction_trigger`, reject malformed placement where it is duplicated or not the final top-level input item with a 400 OpenAI error.
-- Keep the existing `/responses/compact` endpoint unchanged for direct compact callers.
+- Normalize Codex-affinity `/backend-api/codex/responses/compact` responses that include remote-compaction-v2 historical message output so direct compact callers still receive the single compact output item the Codex client expects.
+- Keep OpenAI-style `/v1/responses/compact` unchanged.
 
 ## Capabilities
 
@@ -15,7 +16,7 @@ Codex clients now send a terminal `compaction_trigger` item on normal `/backend-
 - None.
 
 ### Modified Capabilities
-- `responses-api-compat`: Codex responses turns gain explicit compaction-trigger handling and fail-closed validation for malformed trigger placement.
+- `responses-api-compat`: Codex responses turns gain explicit compaction-trigger handling, fail-closed validation for malformed trigger placement, and Codex-affinity compact output normalization for remote-compaction-v2 payloads.
 
 ## Impact
 

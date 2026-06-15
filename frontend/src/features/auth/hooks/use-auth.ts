@@ -1,4 +1,4 @@
-import { setUnauthorizedHandler } from "@/lib/api-client";
+import { ApiError, setUnauthorizedHandler } from "@/lib/api-client";
 import { create } from "zustand";
 
 import {
@@ -14,6 +14,8 @@ import type {
   DashboardPermission,
   DashboardRole,
 } from "@/features/auth/schemas";
+
+let isAdminLoginInProgress = false;
 
 type AuthState = {
   passwordRequired: boolean;
@@ -101,15 +103,21 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
   login: async (password) => {
     set({ loading: true, error: null });
+    isAdminLoginInProgress = true;
     try {
       const session = await loginPassword({ password });
       return applySession(set, session);
     } catch (error) {
+      const shouldKeepAdminLogin =
+        useAuthStore.getState().adminLoginRequested ||
+        (error instanceof ApiError && error.status === 401);
       set({
         error: error instanceof Error ? error.message : "Login failed",
+        adminLoginRequested: shouldKeepAdminLogin,
       });
       throw error;
     } finally {
+      isAdminLoginInProgress = false;
       set({ loading: false, initialized: true });
     }
   },
@@ -171,7 +179,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
-  if (useAuthStore.getState().adminLoginRequested) {
+  if (isAdminLoginInProgress || useAuthStore.getState().adminLoginRequested) {
     useAuthStore.setState({ initialized: true });
     return;
   }

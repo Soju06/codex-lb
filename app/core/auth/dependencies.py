@@ -163,11 +163,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     has_admin_fallback_session = (
         state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified
     )
-    if (
-        get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER
-        and not is_local_request(request)
-        and not has_admin_fallback_session
-    ):
+    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_admin_fallback_session:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
     if (
         state is not None

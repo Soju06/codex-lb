@@ -53,8 +53,8 @@ async def test_validate_dashboard_session_blocks_passwordless_guest_fallback_in_
         lambda: SimpleNamespace(get=lambda _session_id: None),
     )
 
-    with pytest.raises(DashboardAuthError, match="Authentication is required") as exc_info:
+    with pytest.raises(DashboardAuthError, match="Reverse proxy authentication is required") as exc_info:
         await auth_dependencies.validate_dashboard_session(request)
 
-    assert exc_info.value.code == "authentication_required"
+    assert exc_info.value.code == "proxy_auth_required"
     assert getattr(request.state, "dashboard_principal", None) is None

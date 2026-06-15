@@ -632,7 +632,7 @@ async def test_trusted_header_mode_allows_proxy_header_and_password_fallback(asy
     async_client.cookies.clear()
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
-    assert blocked.json()["error"]["code"] == "authentication_required"
+    assert blocked.json()["error"]["code"] == "proxy_auth_required"
 
     fallback_login = await async_client.post(
         "/api/dashboard-auth/password/login",

@@ -11,10 +11,11 @@ export type AccountProxyBindingProps = {
   account: AccountSummary;
   admin: UpstreamProxyAdmin | null;
   busy: boolean;
+  readOnly?: boolean;
   onSave: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
 };
 
-export function AccountProxyBinding({ account, admin, busy, onSave }: AccountProxyBindingProps) {
+export function AccountProxyBinding({ account, admin, busy, readOnly = false, onSave }: AccountProxyBindingProps) {
   const binding = admin?.bindings.find((item) => item.accountId === account.accountId) ?? null;
   const initialPoolId = binding?.poolId ?? admin?.pools[0]?.id ?? "";
   const [selectedPoolId, setSelectedPoolId] = useState(initialPoolId);
@@ -43,7 +44,7 @@ export function AccountProxyBinding({ account, admin, busy, onSave }: AccountPro
         <Switch
           aria-label="Enable account proxy binding"
           checked={active}
-          disabled={busy || !binding}
+          disabled={busy || readOnly || !binding}
           onCheckedChange={(checked) => {
             const poolId = binding?.poolId ?? selectedPoolId;
             if (!poolId) return;
@@ -52,7 +53,11 @@ export function AccountProxyBinding({ account, admin, busy, onSave }: AccountPro
         />
       </div>
       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <Select value={selectedPoolId} onValueChange={setSelectedPoolId} disabled={busy || admin.pools.length === 0}>
+        <Select
+          value={selectedPoolId}
+          onValueChange={setSelectedPoolId}
+          disabled={busy || readOnly || admin.pools.length === 0}
+        >
           <SelectTrigger className="h-8 w-full min-w-0 text-xs sm:w-auto sm:flex-1" aria-label="Account proxy pool">
             <SelectValue placeholder="Select proxy pool" />
           </SelectTrigger>
@@ -67,7 +72,7 @@ export function AccountProxyBinding({ account, admin, busy, onSave }: AccountPro
           size="sm"
           variant="outline"
           className="h-8 text-xs sm:w-28"
-          disabled={busy || !selectedPoolId}
+          disabled={busy || readOnly || !selectedPoolId}
           onClick={() => void onSave(account.accountId, { poolId: selectedPoolId, isActive: true })}
         >
           Save binding

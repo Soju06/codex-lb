@@ -37,6 +37,7 @@ export type AccountDetailProps = {
     routingPolicy: AccountRoutingPolicy,
   ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onResetCredit?: (accountId: string) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
 };
@@ -56,6 +57,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
+  onResetCredit,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
 }: AccountDetailProps) {
@@ -151,6 +153,7 @@ export function AccountDetail({
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
+        onResetCredit={onResetCredit}
       />
     </div>
   );

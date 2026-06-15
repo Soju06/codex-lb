@@ -8,6 +8,7 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountResetCreditResponseSchema,
   AccountUpdateRequestSchema,
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
@@ -122,6 +123,13 @@ export function deleteAccount(accountId: string, deleteHistory = false) {
   return del(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
     AccountActionResponseSchema,
+  );
+}
+
+export function resetAccountCredit(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/reset-credit`,
+    AccountResetCreditResponseSchema,
   );
 }
 

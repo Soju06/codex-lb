@@ -13,7 +13,7 @@ import {
 } from "@/utils/account-status";
 import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
-export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
+export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | "reset-credit";
 
 export type AccountCardProps = {
   account: AccountSummary;
@@ -192,8 +192,9 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             size="sm"
             variant="outline"
             className="h-7 gap-1.5 rounded-lg text-xs"
-            disabled
+            disabled={readOnly}
             title="Reset rate-limit credits"
+            onClick={() => onAction?.(account, "reset-credit")}
           >
             <RotateCcw className="h-3.5 w-3.5" />
             {`Reset (${account.availableResetCount ?? 0})`}

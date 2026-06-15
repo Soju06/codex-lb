@@ -35,6 +35,38 @@ Transient reset-credit fetch failures MUST NOT clear previously stored credits o
 - **THEN** the row status becomes `expired`
 - **AND** it is excluded from the available reset count
 
+### Requirement: Operator can redeem a rate-limit reset credit
+
+The system SHALL provide an operator-triggered endpoint that redeems one rate-limit reset credit for a given account by sending `POST /wham/rate-limit-reset-credits/consume` to the upstream API.
+
+The system SHALL select the available credit with the nearest `expires_at` for redemption.
+
+The system SHALL generate a client-side `redeem_request_id` (UUID v4) for each consume request.
+
+On a successful consume response, the system SHALL mark the redeemed credit's status as `redeemed` in the local database and invalidate cached account state.
+
+#### Scenario: Operator triggers reset from account detail
+
+- **GIVEN** an account has at least one available rate-limit reset credit
+- **WHEN** the operator clicks the Reset button in the account detail panel
+- **THEN** a confirmation dialog appears
+- **AND** on confirm, the system selects the nearest-expiry available credit
+- **AND** sends the consume request to the upstream API
+- **AND** marks the credit as redeemed on success
+
+#### Scenario: No available credits
+
+- **GIVEN** an account has zero available rate-limit reset credits
+- **WHEN** the operator attempts to trigger a reset
+- **THEN** the request fails with a clear error
+
+#### Scenario: Operator triggers reset from dashboard
+
+- **GIVEN** a dashboard account card or list row shows a Reset button
+- **WHEN** the operator clicks it
+- **THEN** a confirmation dialog appears
+- **AND** on confirm, the same consume flow executes
+
 #### Scenario: Transient fetch failure preserves stored credits
 
 - **GIVEN** an account has one or more stored reset-credit rows that still count as available

@@ -45,6 +45,7 @@ export function AccountsPage() {
     deleteMutation,
     routingPolicyMutation,
     exportAuthMutation,
+    resetCreditMutation,
   } = useAccounts();
   const { upstreamProxyQuery, accountBindingMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
@@ -186,6 +187,9 @@ export function AccountsPage() {
                 accountId,
                 routingPolicy,
               })
+            }
+            onResetCredit={(accountId) =>
+              void resetCreditMutation.mutateAsync(accountId)
             }
             onSecurityWorkAuthorizedChange={(accountId, enabled) =>
               void updateMutation.mutateAsync({

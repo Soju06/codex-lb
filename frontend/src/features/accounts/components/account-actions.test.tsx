@@ -152,7 +152,8 @@ describe("AccountActions", () => {
     expect(onProbe).not.toHaveBeenCalled();
   });
 
-  it("renders a disabled reset button with the available reset count", () => {
+  it("shows an enabled reset button when resets are available and handler provided", () => {
+    const onResetCredit = vi.fn();
     const account = createAccountSummary({ availableResetCount: 3 });
 
     render(
@@ -168,14 +169,43 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onResetCredit={onResetCredit}
       />,
     );
 
     const resetButton = screen.getByRole("button", { name: /Reset \(3\)/ });
-    expect(resetButton).toBeDisabled();
+    expect(resetButton).toBeEnabled();
   });
 
-  it("disables the reset button when no resets are available", () => {
+  it("opens a confirmation dialog on reset click", async () => {
+    const user = userEvent.setup();
+    const onResetCredit = vi.fn();
+    const account = createAccountSummary({ availableResetCount: 2 });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+        onResetCredit={onResetCredit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Reset \(2\)/ }));
+    expect(screen.getByText("Reset rate limit")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+    expect(onResetCredit).toHaveBeenCalledWith(account.accountId);
+  });
+
+  it("hides the reset button when no resets are available", () => {
     const account = createAccountSummary({ availableResetCount: 0 });
 
     render(
@@ -191,9 +221,10 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onResetCredit={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Reset \(0\)/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Reset/ })).not.toBeInTheDocument();
   });
 });

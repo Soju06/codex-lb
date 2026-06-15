@@ -42,9 +42,11 @@ codex-lb stores one new row for `(acc_123, RateLimitResetCredit_one)`. A later r
 
 ## UI notes
 
-- The Accounts navigation badge and per-account badges are intended to use the same compact circular badge style already used elsewhere in the dashboard.
+- The Accounts navigation badge uses an inline circular badge style on the nav tab.
+- On the Accounts page, each list-item box shows a circular corner badge pinned to the top-right of the box when `availableResetCount > 0`. The badge is hidden when the count is zero.
+- The dashboard account table and account card do NOT show a badge next to the status. Instead, both surfaces show a disabled `Reset (N)` button next to the Details action when `availableResetCount > 0`, and hide it when the count is zero.
 - The disabled `Reset (N)` control is present for visibility only in this read-only rollout.
-- On the account detail view, the disabled `Reset (N)` control remains positioned next to `Export` so operators can see the intended future workflow entry point without consume behavior in this change.
+- On the account detail panel, the disabled `Reset (N)` control is positioned next to `Export` so operators can see the intended future workflow entry point without consume behavior in this change.
 
 ## Future follow-up
 

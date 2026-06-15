@@ -354,8 +354,8 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                     size="sm"
                     variant="outline"
                     className="h-7 gap-1 rounded-md px-2 text-xs"
-                    disabled
                     title="Reset rate-limit credits"
+                    onClick={() => onAction?.(account, "reset-credit")}
                   >
                     <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                     {`Reset (${account.availableResetCount ?? 0})`}

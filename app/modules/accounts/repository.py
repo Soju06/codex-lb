@@ -199,6 +199,35 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return {str(account_id): int(count) for account_id, count in result.all()}
 
+    async def get_nearest_expiry_available_credit_id(
+        self,
+        account_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        stmt = (
+            select(AccountRateLimitResetCredit.credit_id)
+            .where(AccountRateLimitResetCredit.account_id == account_id)
+            .where(AccountRateLimitResetCredit.status == "available")
+            .where(AccountRateLimitResetCredit.expires_at >= (now or utcnow()))
+            .order_by(AccountRateLimitResetCredit.expires_at.asc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def mark_credit_redeemed(self, account_id: str, credit_id: str) -> bool:
+        stmt = (
+            update(AccountRateLimitResetCredit)
+            .where(AccountRateLimitResetCredit.account_id == account_id)
+            .where(AccountRateLimitResetCredit.credit_id == credit_id)
+            .values(status="redeemed")
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+        return int(result.rowcount or 0) > 0
+
     async def list_request_usage_summary_by_account(
         self,
         account_ids: list[str] | None = None,

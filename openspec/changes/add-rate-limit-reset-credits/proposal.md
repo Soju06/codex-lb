@@ -1,6 +1,6 @@
 ## Why
 
-Operators need to see banked rate-limit reset credits per account without manually inspecting upstream state.
+Operators need to see banked rate-limit reset credits per account without manually inspecting upstream state, and redeem them when an account is rate-limited.
 
 ## What Changes
 
@@ -9,10 +9,7 @@ Operators need to see banked rate-limit reset credits per account without manual
 - locally mark stored rows `expired` when `now > expires_at`
 - expose `availableResetCount` through shared account payloads
 - show reset counts in dashboard/accounts UI
-
-## Out of Scope
-
-- `POST /wham/rate-limit-reset-credits/consume`
-- `credit_id` selection
-- `redeem_request_id` generation
-- any reset redemption workflow
+- enable operator-triggered redemption via `POST /wham/rate-limit-reset-credits/consume`
+- select the nearest-expiry available credit for redemption
+- show a confirmation dialog before submitting the consume request
+- mark redeemed credits in the local database after a successful consume response

@@ -109,12 +109,12 @@ describe("AccountCard", () => {
     expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
   });
 
-  it("shows a disabled Reset button when reset count is greater than zero", () => {
+  it("shows an enabled Reset button when reset count is greater than zero", () => {
     const account = createAccountSummary({ availableResetCount: 4 });
 
     render(<AccountCard account={account} />);
 
-    expect(screen.getByRole("button", { name: /Reset \(4\)/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Reset \(4\)/ })).toBeEnabled();
   });
 
   it("hides the Reset button when no resets are available", () => {

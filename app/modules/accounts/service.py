@@ -22,6 +22,7 @@ from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidatio
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardConflictError
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
@@ -39,6 +40,7 @@ from app.modules.accounts.schemas import (
     AccountOpenCodeAuthExportResponse,
     AccountProbeResponse,
     AccountRequestUsage,
+    AccountResetCreditResponse,
     AccountSummary,
     AccountTrendsResponse,
     CodexAuthJson,
@@ -543,6 +545,51 @@ class AccountsService:
                 exc,
             )
             return PROBE_NETWORK_FAILURE_STATUS
+
+    async def reset_account_credit(self, account_id: str) -> AccountResetCreditResponse | None:
+        """Redeem the nearest-expiry available rate-limit reset credit."""
+        from app.core.clients.rate_limit_reset_credits import (
+            RateLimitResetCreditsFetchError,
+            consume_rate_limit_reset_credit,
+        )
+
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+
+        credit_id = await self._repo.get_nearest_expiry_available_credit_id(account_id)
+        if credit_id is None:
+            raise DashboardConflictError(
+                "No available rate-limit reset credits for this account",
+                code="no_available_reset_credits",
+            )
+
+        reset_account = account
+        if self._auth_manager is not None:
+            reset_account = await self._auth_manager.ensure_fresh(account, force=False)
+
+        access_token = self._encryptor.decrypt(reset_account.access_token_encrypted)
+
+        try:
+            response = await consume_rate_limit_reset_credit(
+                access_token=access_token,
+                account_id=reset_account.chatgpt_account_id,
+                credit_id=credit_id,
+                allow_direct_egress=True,
+            )
+        except RateLimitResetCreditsFetchError:
+            raise
+
+        await self._repo.mark_credit_redeemed(account_id, credit_id)
+
+        get_account_selection_cache().invalidate()
+
+        return AccountResetCreditResponse(
+            account_id=account_id,
+            credit_id=credit_id,
+            windows_reset=response.windows_reset,
+            status="redeemed",
+        )
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

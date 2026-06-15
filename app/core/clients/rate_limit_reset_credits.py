@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime
 
 import aiohttp
@@ -276,3 +277,80 @@ def _retry_options(attempts: int) -> ExponentialRetry:
 
 def _retry_delay_seconds(attempt: int) -> float:
     return min(RETRY_MAX_TIMEOUT, RETRY_START_TIMEOUT * (2.0**attempt))
+
+
+class ConsumedCreditPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = None
+    status: str | None = None
+    redeemed_at: datetime | None = None
+
+
+class ConsumeCreditResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    code: str | None = None
+    credit: ConsumedCreditPayload | None = None
+    windows_reset: int | None = None
+
+
+def _consume_url(base_url: str) -> str:
+    return f"{_credits_url(base_url)}/consume"
+
+
+async def consume_rate_limit_reset_credit(
+    *,
+    access_token: str,
+    account_id: str | None,
+    credit_id: str,
+    redeem_request_id: str | None = None,
+    base_url: str | None = None,
+    timeout_seconds: float | None = None,
+    max_retries: int | None = None,
+    client: RetryClient | None = None,
+    allow_direct_egress: bool = False,
+) -> ConsumeCreditResponse:
+    settings = get_settings()
+    usage_base = base_url or settings.upstream_base_url
+    url = _consume_url(usage_base)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
+    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    headers = _credits_headers(access_token, account_id)
+    retry_options = _retry_options(retries + 1)
+    body = {
+        "credit_id": credit_id,
+        "redeem_request_id": redeem_request_id or str(uuid.uuid4()),
+    }
+    require_route_or_direct_egress_opt_in(
+        route=None,
+        allow_direct_egress=allow_direct_egress,
+        operation="rate limit reset credit consume",
+    )
+
+    try:
+        async with lease_retry_client(client) as retry_client:
+            async with retry_client.request(
+                "POST",
+                url,
+                headers=headers,
+                json=body,
+                timeout=timeout,
+                retry_options=retry_options,
+            ) as resp:
+                data = await _safe_json(resp)
+                if resp.status >= 400:
+                    raise _fetch_error(data, resp.status)
+                try:
+                    return ConsumeCreditResponse.model_validate(data)
+                except ValidationError as exc:
+                    raise RateLimitResetCreditsFetchError(
+                        502, "Invalid consume response payload"
+                    ) from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.warning(
+            "Rate limit reset credit consume error request_id=%s error=%s",
+            get_request_id(),
+            exc,
+        )
+        raise RateLimitResetCreditsFetchError(0, f"Consume request failed: {exc}") from exc

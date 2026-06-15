@@ -1,9 +1,10 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { AccountList } from "@/features/dashboard/components/account-list";
@@ -49,7 +50,7 @@ export function DashboardPage() {
   const dashboardQuery = useDashboard(overviewTimeframe);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
-  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
+  const { resumeMutation, limitWarmupMutation, resetCreditMutation } = useAccountMutations();
 
   const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
 
@@ -69,6 +70,8 @@ export function DashboardPage() {
     },
     [searchParams, setSearchParams],
   );
+
+  const [resetConfirmAccount, setResetConfirmAccount] = useState<AccountSummary | null>(null);
 
   const handleAccountAction = useCallback(
     (account: AccountSummary, action: string) => {
@@ -92,9 +95,14 @@ export function DashboardPage() {
             });
           }
           break;
+        case "reset-credit":
+          if (canWrite) {
+            setResetConfirmAccount(account);
+          }
+          break;
       }
     },
-    [canWrite, limitWarmupMutation, navigate, resumeMutation],
+    [canWrite, limitWarmupMutation, navigate, resumeMutation, setResetConfirmAccount],
   );
 
   const overview = dashboardQuery.data;
@@ -290,6 +298,26 @@ export function DashboardPage() {
         </>
       )}
 
+      <ConfirmDialog
+        open={resetConfirmAccount !== null}
+        title="Reset rate limit"
+        description={
+          resetConfirmAccount
+            ? `Redeem one rate-limit reset credit for ${resetConfirmAccount.displayName || resetConfirmAccount.email}? The nearest-expiry credit will be used.`
+            : undefined
+        }
+        confirmLabel="Reset"
+        cancelLabel="Cancel"
+        onOpenChange={(open) => {
+          if (!open) setResetConfirmAccount(null);
+        }}
+        onConfirm={() => {
+          if (resetConfirmAccount) {
+            void resetCreditMutation.mutateAsync(resetConfirmAccount.accountId);
+            setResetConfirmAccount(null);
+          }
+        }}
+      />
     </div>
   );
 }

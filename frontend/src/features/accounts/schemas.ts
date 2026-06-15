@@ -309,3 +309,13 @@ export type RuntimeConnectAddressResponse = z.infer<
 >;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;
 export type ImportState = z.infer<typeof ImportStateSchema>;
+
+export const AccountResetCreditResponseSchema = z.object({
+  accountId: z.string(),
+  creditId: z.string(),
+  windowsReset: z.number().int().nullable().optional(),
+  status: z.string(),
+});
+export type AccountResetCreditResponse = z.infer<
+  typeof AccountResetCreditResponseSchema
+>;

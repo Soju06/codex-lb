@@ -8,8 +8,9 @@ import {
   importAccount,
   listAccounts,
   pauseAccount,
-  reactivateAccount,
   probeAccount,
+  reactivateAccount,
+  resetAccountCredit,
   setAccountAlias,
   updateAccount,
   updateAccountLimitWarmup,
@@ -177,6 +178,18 @@ export function useAccountMutations() {
     },
   });
 
+  const resetCreditMutation = useMutation({
+    mutationFn: (accountId: string) => resetAccountCredit(accountId),
+    onSuccess: (data) => {
+      toast.success(`Rate limit reset redeemed (windows reset: ${data.windowsReset ?? 0})`);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Reset credit failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -188,6 +201,7 @@ export function useAccountMutations() {
     limitWarmupMutation,
     routingPolicyMutation,
     updateMutation,
+    resetCreditMutation,
   };
 }
 

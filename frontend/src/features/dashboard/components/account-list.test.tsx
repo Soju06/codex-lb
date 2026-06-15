@@ -216,7 +216,7 @@ describe("AccountList", () => {
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
   });
 
-  it("shows a disabled Reset button when reset count is greater than zero", () => {
+  it("shows an enabled Reset button when reset count is greater than zero", () => {
     render(
       <AccountList
         accounts={[
@@ -229,7 +229,7 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Reset \(2\)/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Reset \(2\)/ })).toBeEnabled();
   });
 
   it("hides the Reset button when no resets are available", () => {

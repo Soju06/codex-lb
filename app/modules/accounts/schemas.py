@@ -277,3 +277,10 @@ class AccountAliasRequest(DashboardModel):
 class AccountAliasResponse(DashboardModel):
     account_id: str
     alias: str | None = None
+
+
+class AccountResetCreditResponse(DashboardModel):
+    account_id: str
+    credit_id: str
+    windows_reset: int | None = None
+    status: str = "redeemed"

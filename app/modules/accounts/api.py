@@ -26,6 +26,7 @@ from app.modules.accounts.schemas import (
     AccountProbeRequest,
     AccountProbeResponse,
     AccountReactivateResponse,
+    AccountResetCreditResponse,
     AccountRoutingPolicyUpdateRequest,
     AccountRoutingPolicyUpdateResponse,
     AccountsResponse,
@@ -301,3 +302,33 @@ async def delete_account(
         details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")
+
+
+@router.post("/{account_id}/reset-credit", response_model=AccountResetCreditResponse)
+async def reset_account_credit(
+    request: Request,
+    account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountResetCreditResponse:
+    from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsFetchError
+
+    try:
+        result = await context.service.reset_account_credit(account_id)
+    except RateLimitResetCreditsFetchError as exc:
+        raise DashboardConflictError(
+            f"Reset credit consume failed: {exc.message}",
+            code="reset_credit_consume_failed",
+        ) from exc
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_reset_credit",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "credit_id": result.credit_id,
+            "windows_reset": result.windows_reset,
+        },
+    )
+    return result

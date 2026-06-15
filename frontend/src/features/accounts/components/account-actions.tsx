@@ -10,7 +10,9 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
+import { useState } from "react";
 
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -41,6 +43,7 @@ export type AccountActionsProps = {
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
   ) => void;
+  onResetCredit?: (accountId: string) => void;
 };
 
 export function AccountActions({
@@ -56,11 +59,14 @@ export function AccountActions({
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
+  onResetCredit,
 }: AccountActionsProps) {
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const hasResets = (account.availableResetCount ?? 0) > 0;
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -192,17 +198,20 @@ export function AccountActions({
           Export
         </Button>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 gap-1.5 text-xs"
-          disabled
-          title="Reset rate-limit credits"
-        >
-          <RotateCcw className="h-3.5 w-3.5" />
-          Reset ({account.availableResetCount ?? 0})
-        </Button>
+        {hasResets && onResetCredit ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 text-xs"
+            disabled={busy || readOnly}
+            title="Reset rate-limit credits"
+            onClick={() => setResetConfirmOpen(true)}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            {`Reset (${account.availableResetCount ?? 0})`}
+          </Button>
+        ) : null}
 
         <Button
           type="button"
@@ -216,6 +225,19 @@ export function AccountActions({
           Delete
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="Reset rate limit"
+        description={`Redeem one rate-limit reset credit for ${account.displayName || account.email}? The nearest-expiry credit will be used.`}
+        confirmLabel="Reset"
+        cancelLabel="Cancel"
+        onOpenChange={setResetConfirmOpen}
+        onConfirm={() => {
+          setResetConfirmOpen(false);
+          onResetCredit?.(account.accountId);
+        }}
+      />
     </div>
   );
 }

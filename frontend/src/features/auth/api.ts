@@ -36,6 +36,7 @@ export function loginPassword(payload: LoginRequest) {
 export function loginGuest(payload: GuestLoginRequest = {}) {
   return post(`${AUTH_BASE_PATH}/guest/login`, AuthSessionSchema, {
     body: payload,
+    suppressUnauthorizedHandler: true,
   });
 }
 

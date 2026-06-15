@@ -37,6 +37,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _prompt_cache_key_from_request_model,
+    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
@@ -239,12 +240,9 @@ class _FileOpsMixin:
         ``chatgpt-account-id``).
 
         The pin is only skipped for stronger client-supplied
-        continuation signals: an explicit ``prompt_cache_key``, a
-        client-supplied turn-state header, or a
-        ``previous_response_id``. Plain session headers are only
-        account-affinity hints; they do not prove that an account-
-        scoped file exists on the sticky account, so file pins remain
-        authoritative for upload-then-converse first turns.
+        continuation signals: an explicit ``prompt_cache_key``, a Codex
+        session header, a client-supplied turn-state header, or a
+        ``previous_response_id``.
 
         Note: ``_sticky_key_for_responses_request`` can *derive* and
         write a ``prompt_cache_key`` onto the payload when openai cache
@@ -286,6 +284,8 @@ class _FileOpsMixin:
         # as a client-supplied continuation marker.
         turn_state_value = _sticky_key_from_turn_state_header(headers)
         if turn_state_value is not None and not _is_synthesized_turn_state(turn_state_value):
+            return None
+        if _sticky_key_from_session_header(headers) is not None:
             return None
         if getattr(payload, "previous_response_id", None):
             return None

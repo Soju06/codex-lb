@@ -647,8 +647,8 @@ async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
 
 
 @pytest.mark.asyncio
-async def test_session_header_aliases_do_not_block_file_id_pin(async_client):
-    """Session aliases are affinity hints, not file ownership proof."""
+async def test_session_header_aliases_override_file_id_pin(async_client):
+    """Codex session headers are stronger affinity than file pins."""
     await _import_account(async_client, "acc_session_file_a", "session-file-a@example.com")
 
     from app.core.openai.requests import ResponsesRequest
@@ -679,4 +679,4 @@ async def test_session_header_aliases_do_not_block_file_id_pin(async_client):
         {"x-codex-session-id": "codex-session-123"},
     ):
         resolved = await service._resolve_file_account_for_responses(payload, headers)
-        assert resolved == "acc_session_file_a"
+        assert resolved is None

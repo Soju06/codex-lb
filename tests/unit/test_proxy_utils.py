@@ -15571,6 +15571,15 @@ async def test_process_upstream_websocket_text_masks_previous_response_not_found
             separators=(",", ":"),
         ),
         previous_response_id="resp_anchor",
+        fresh_upstream_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        fresh_upstream_request_is_retry_safe=True,
     )
     pending_requests = deque([inflight_request, followup_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()

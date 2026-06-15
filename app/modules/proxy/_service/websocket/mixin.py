@@ -2903,6 +2903,7 @@ class _WebSocketMixin:
             retry_is_previous_response_not_found
             and request_state.fresh_upstream_request_is_retry_safe
             and request_state.fresh_upstream_request_text
+            and retry_error_code is not None
         )
         if retry_safe_previous_response_not_found:
             downstream_text = text

@@ -1868,6 +1868,14 @@ def test_find_sse_separator_prefers_earliest_separator():
     assert result == (10, 2)
 
 
+def test_find_sse_separator_accepts_cr_only_blank_line():
+    buffer = b"event: one\r\rdata: two\n\n"
+
+    result = proxy_module._find_sse_separator(buffer)
+
+    assert result == (10, 2)
+
+
 def test_pop_sse_event_returns_first_event_and_mutates_buffer():
     buffer = bytearray(b"data: one\n\ndata: two\n\n")
 
@@ -2899,6 +2907,16 @@ async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big()
     assert len(chunks) == 1
     assert chunks[0].startswith("data: ")
     assert chunks[0].endswith("\n\n")
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_events_accepts_cr_only_blank_line_separator():
+    response = _DummyResponse([b'data: {"type":"response.completed"}\r\r'])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 1024)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == ['data: {"type":"response.completed"}\r\r']
 
 
 @pytest.mark.asyncio

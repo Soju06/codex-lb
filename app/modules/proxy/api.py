@@ -150,6 +150,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
         "message",
+        "compaction",
         "function_call",
         "function_call_output",
         "reasoning",
@@ -2473,10 +2474,25 @@ async def _compact_responses(
         )
     finally:
         await _release_reservation(reservation)
+    result_payload = result.model_dump(mode="json", exclude_none=True)
+    if codex_session_affinity:
+        result_payload = _normalize_codex_remote_compaction_v2_result(result, result_payload)
     return JSONResponse(
-        content=result.model_dump(mode="json", exclude_none=True),
+        content=result_payload,
         headers=rate_limit_headers,
     )
+
+
+def _normalize_codex_remote_compaction_v2_result(
+    payload: CompactResponsePayload,
+    result_payload: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    compaction_item = _compact_response_output_item(payload)
+    if compaction_item is None:
+        return result_payload
+    normalized = dict(result_payload)
+    normalized["output"] = [compaction_item]
+    return normalized
 
 
 def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, JsonValue] | None:

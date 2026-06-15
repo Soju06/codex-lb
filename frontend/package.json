@@ -24,7 +24,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
-    "geist": "^1.7.2",
     "input-otp": "^1.4.2",
     "lucide-react": "^1.17.0",
     "radix-ui": "^1.5.0",

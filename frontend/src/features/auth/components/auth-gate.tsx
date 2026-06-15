@@ -20,8 +20,7 @@ export function AuthGate({ children }: PropsWithChildren) {
 
   useEffect(() => {
     void refreshSessionStable();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshSessionStable]);
 
   if (!initialized && loading) {
     return (

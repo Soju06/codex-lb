@@ -17,7 +17,7 @@ const dashboardPasswordSchema = z
     message: `Password must be at most ${MAX_DASHBOARD_PASSWORD_BYTES} bytes when encoded as UTF-8.`,
   });
 
-export const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "disabled"]);
+const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "disabled"]);
 
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),

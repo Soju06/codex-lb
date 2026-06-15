@@ -51,10 +51,6 @@ export function useStickySessions() {
   });
   const stickySessionsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
-  };
-
   const setOffset = (offset: number) => {
     setParams((current) => ({ ...current, offset }));
   };
@@ -87,7 +83,7 @@ export function useStickySessions() {
       } else {
         toast.error("No selected sessions could be deleted");
       }
-      await invalidate();
+      await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to delete sticky sessions");
@@ -109,7 +105,7 @@ export function useStickySessions() {
       } else {
         toast.error("No filtered sessions could be deleted");
       }
-      await invalidate();
+      await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to delete filtered sticky sessions");
@@ -120,7 +116,7 @@ export function useStickySessions() {
     mutationFn: (staleOnly: boolean) => purgeStickySessions({ staleOnly }),
     onSuccess: (response) => {
       toast.success(`Purged ${response.deletedCount} sticky sessions`);
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to purge sticky sessions");

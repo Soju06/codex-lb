@@ -85,6 +85,7 @@ async def test_spa_route_path_returns_index_html(async_client, tmp_path):
         response = await async_client.get("/dashboard/settings")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
+        assert response.headers["cache-control"] == "no-cache"
         assert response.headers["X-App-Version"] == __version__
     finally:
         if created:

@@ -279,7 +279,7 @@ export function AccountList({ accounts, onAction }: AccountListProps) {
         style={{ maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
       >
         <div
-          className="grid gap-3 bg-muted/35 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
+          className="sticky top-0 z-10 grid gap-3 border-b bg-card/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-card/85"
           style={{ gridTemplateColumns: ACCOUNT_LIST_COLUMNS }}
         >
           {SORTABLE_HEADERS.map((header) => (

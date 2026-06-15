@@ -1,16 +1,15 @@
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
+const supportedTimeZones =
+  typeof Intl.supportedValuesOf === "function"
+    ? new Set(Intl.supportedValuesOf("timeZone"))
+    : null;
 
 function isValidTimeZone(timeZone: string | undefined): timeZone is string {
   if (!timeZone) {
     return false;
   }
 
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone });
-    return true;
-  } catch {
-    return false;
-  }
+  return timeZone === "UTC" || supportedTimeZones?.has(timeZone) === true;
 }
 
 export function getBrowserReportsTimeZone(): string | undefined {

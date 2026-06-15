@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,15 @@ function makeDefaultRule(): LimitRuleCreate {
     maxValue: 0,
     modelFilter: null,
   };
+}
+
+function ruleFallbackKey(rule: LimitRuleCreate): string {
+  return [
+    rule.limitType,
+    rule.limitWindow,
+    rule.modelFilter ?? "all-models",
+    String(rule.maxValue),
+  ].join(":");
 }
 
 export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
@@ -89,6 +98,18 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   const removeRule = (index: number) => {
     onChange(rules.filter((_, i) => i !== index));
   };
+  const keyedRules = useMemo(() => {
+    const seenCounts = new Map<string, number>();
+    return rules.map((rule) => {
+      const baseKey = ruleFallbackKey(rule);
+      const seenCount = seenCounts.get(baseKey) ?? 0;
+      seenCounts.set(baseKey, seenCount + 1);
+      return {
+        key: seenCount === 0 ? baseKey : `${baseKey}:${seenCount + 1}`,
+        rule,
+      };
+    });
+  }, [rules]);
 
   return (
     <div className="space-y-3">
@@ -135,9 +156,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
         </div>
       ) : (
         <div className="space-y-2">
-          {rules.map((rule, index) => (
+          {keyedRules.map(({ key, rule }, index) => (
             <LimitRuleCard
-              key={index}
+              key={key}
               rule={rule}
               onChange={(updated) => updateRule(index, updated)}
               onRemove={() => removeRule(index)}

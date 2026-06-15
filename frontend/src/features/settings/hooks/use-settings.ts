@@ -70,16 +70,12 @@ export function useUpstreamProxyAdmin() {
     refetch: refetchUpstreamProxy,
   };
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
-    void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
-  };
-
   const createEndpointMutation = useMutation({
     mutationFn: (payload: UpstreamProxyEndpointCreateRequest) => createUpstreamProxyEndpoint(payload),
     onSuccess: () => {
       toast.success("Proxy endpoint created");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Proxy endpoint creation failed");
@@ -90,7 +86,8 @@ export function useUpstreamProxyAdmin() {
     mutationFn: (payload: UpstreamProxyPoolCreateRequest) => createUpstreamProxyPool(payload),
     onSuccess: () => {
       toast.success("Proxy pool created");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Proxy pool creation failed");
@@ -102,7 +99,8 @@ export function useUpstreamProxyAdmin() {
       addUpstreamProxyPoolMember(poolId, payload),
     onSuccess: () => {
       toast.success("Proxy pool member added");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Proxy pool update failed");
@@ -114,7 +112,8 @@ export function useUpstreamProxyAdmin() {
       putAccountProxyBinding(accountId, payload),
     onSuccess: () => {
       toast.success("Account proxy binding saved");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Account proxy binding failed");

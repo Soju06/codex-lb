@@ -6,7 +6,7 @@ export const LIMIT_WINDOWS = ["daily", "weekly", "monthly", "5h", "7d"] as const
 export type LimitType = (typeof LIMIT_TYPES)[number];
 export type LimitWindowType = (typeof LIMIT_WINDOWS)[number];
 
-export const LimitRuleSchema = z.object({
+const LimitRuleSchema = z.object({
   id: z.number(),
   limitType: z.enum(LIMIT_TYPES),
   limitWindow: z.enum(LIMIT_WINDOWS),
@@ -23,14 +23,14 @@ export const LimitRuleCreateSchema = z.object({
   modelFilter: z.string().nullable().optional(),
 });
 
-export const ApiKeyUsageSummarySchema = z.object({
+const ApiKeyUsageSummarySchema = z.object({
   requestCount: z.number().int().nonnegative(),
   totalTokens: z.number().int().nonnegative(),
   cachedInputTokens: z.number().int().nonnegative(),
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
-export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
@@ -122,6 +122,6 @@ export type ApiKeyCreateRequest = z.infer<typeof ApiKeyCreateRequestSchema>;
 export type ApiKeyCreateResponse = z.infer<typeof ApiKeyCreateResponseSchema>;
 export type ApiKeyUpdateRequest = z.infer<typeof ApiKeyUpdateRequestSchema>;
 
-export const ModelItemSchema = z.object({ id: z.string(), name: z.string() });
+const ModelItemSchema = z.object({ id: z.string(), name: z.string() });
 export const ModelsResponseSchema = z.object({ models: z.array(ModelItemSchema) });
 export type ModelItem = z.infer<typeof ModelItemSchema>;

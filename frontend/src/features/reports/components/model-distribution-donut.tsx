@@ -26,8 +26,8 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                 outerRadius={65}
                 strokeWidth={0}
               >
-                {data.map((_, i) => (
-                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                {data.map((entry, i) => (
+                  <Cell key={entry.model} fill={COLORS[i % COLORS.length]} />
                 ))}
               </Pie>
               <Tooltip

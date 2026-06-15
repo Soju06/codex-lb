@@ -46,7 +46,7 @@ function parseWorkingDays(value: string): Set<number> {
 }
 
 function serializeWorkingDays(days: Set<number>): string {
-  return [...days].sort((a, b) => a - b).join(",");
+  return Array.from(days).toSorted((a, b) => a - b).join(",");
 }
 
 export type RoutingSettingsProps = {
@@ -168,14 +168,19 @@ export function RoutingSettings({
       policy: policy.routingPolicy,
       hasOverride: Object.prototype.hasOwnProperty.call(additionalQuotaOverrides, policy.quotaKey),
     })),
-    ...Object.entries(additionalQuotaOverrides)
-      .filter(([quotaKey]) => !knownAdditionalQuotaKeys.has(quotaKey))
-      .map(([quotaKey, policy]) => ({
-        quotaKey,
-        label: quotaKey,
-        policy,
-        hasOverride: true,
-      })),
+    ...Object.entries(additionalQuotaOverrides).reduce<
+      Array<{ quotaKey: string; label: string; policy: AdditionalQuotaRoutingPolicy; hasOverride: boolean }>
+    >((rows, [quotaKey, policy]) => {
+      if (!knownAdditionalQuotaKeys.has(quotaKey)) {
+        rows.push({
+          quotaKey,
+          label: quotaKey,
+          policy,
+          hasOverride: true,
+        });
+      }
+      return rows;
+    }, []),
   ];
   const parsedStickyPrimaryThreshold = Number.parseFloat(stickyPrimaryThreshold);
   const stickyPrimaryThresholdValid =

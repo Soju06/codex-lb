@@ -101,9 +101,12 @@ export function StickySessionsSection() {
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const selectedEntries = useMemo(
     () =>
-      entries
-        .filter((entry) => selectedRowIdSet.has(stickySessionRowId(entry)))
-        .map(({ key, kind }) => ({ key, kind })),
+      entries.reduce<StickySessionIdentifier[]>((selected, entry) => {
+        if (selectedRowIdSet.has(stickySessionRowId(entry))) {
+          selected.push({ key: entry.key, kind: entry.kind });
+        }
+        return selected;
+      }, []),
     [entries, selectedRowIdSet],
   );
   const selectedCount = selectedEntries.length;

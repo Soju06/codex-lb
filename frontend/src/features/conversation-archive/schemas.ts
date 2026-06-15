@@ -8,7 +8,7 @@ export const ConversationArchiveFileSchema = z.object({
   modifiedAt: z.iso.datetime({ offset: true }),
 });
 
-export const ConversationArchiveRecordSchema = z.object({
+const ConversationArchiveRecordSchema = z.object({
   fileName: z.string().nullable().default(null),
   timestamp: z.iso.datetime({ offset: true }).nullable(),
   requestId: z.string().nullable(),

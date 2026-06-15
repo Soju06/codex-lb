@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const ApiKeyTrendPointSchema = z.object({
+const ApiKeyTrendPointSchema = z.object({
   t: z.iso.datetime({ offset: true }),
   v: z.number(),
 });
@@ -11,7 +11,7 @@ export const ApiKeyTrendsResponseSchema = z.object({
   tokens: z.array(ApiKeyTrendPointSchema),
 });
 
-export const ApiKeyAccountCostSchema = z.object({
+const ApiKeyAccountCostSchema = z.object({
   accountId: z.string().nullable().default(null),
   email: z.string().nullable().default(null),
   costUsd: z.number().default(0),

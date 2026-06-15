@@ -112,7 +112,7 @@ export function QuotaPlannerSection() {
         return null;
       }
       const nextDays = checked
-        ? [...new Set([...base.workingDays, day])].sort()
+        ? Array.from(new Set([...base.workingDays, day])).toSorted((a, b) => a - b)
         : base.workingDays.filter((value) => value !== day);
       return { ...base, workingDays: nextDays.length > 0 ? nextDays : base.workingDays };
     });

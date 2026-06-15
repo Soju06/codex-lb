@@ -15,15 +15,11 @@ export function useFirewall() {
   });
   const firewallQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
-  };
-
   const createMutation = useMutation({
     mutationFn: (ipAddress: string) => createFirewallIp({ ipAddress }),
     onSuccess: () => {
       toast.success("IP added to firewall");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to add firewall IP");
@@ -34,7 +30,7 @@ export function useFirewall() {
     mutationFn: (ipAddress: string) => deleteFirewallIp(ipAddress),
     onSuccess: () => {
       toast.success("IP removed from firewall");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to remove firewall IP");

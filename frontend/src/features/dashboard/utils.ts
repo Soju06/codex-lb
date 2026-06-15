@@ -466,7 +466,7 @@ function totalWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[]): num
 
 function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], amountCredits: number): void {
   let remainingToConsume = amountCredits;
-  const spendOrder = [...accounts].sort((a, b) => a.resetAtMs - b.resetAtMs);
+  const spendOrder = accounts.toSorted((a, b) => a.resetAtMs - b.resetAtMs);
 
   for (const account of spendOrder) {
     if (remainingToConsume <= 0) {
@@ -485,11 +485,15 @@ function buildEmptyWeeklyPoolProjection(
   nowMs: number,
 ): WeeklyPoolProjection {
   const resetEvents = accounts
-    .filter((account) => account.resetAtMs > nowMs)
-    .map((account) => ({
-      fullCredits: account.fullCredits,
-      resetAtMs: account.resetAtMs,
-    }))
+    .reduce<Array<Pick<WeeklyResetEvent, "fullCredits" | "resetAtMs">>>((events, account) => {
+      if (account.resetAtMs > nowMs) {
+        events.push({
+          fullCredits: account.fullCredits,
+          resetAtMs: account.resetAtMs,
+        });
+      }
+      return events;
+    }, [])
     .sort((a, b) => a.resetAtMs - b.resetAtMs);
 
   if (resetEvents.length === 0) {

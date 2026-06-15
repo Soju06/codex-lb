@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DailyReportRowSchema = z.object({
+const DailyReportRowSchema = z.object({
   date: z.string(),
   requests: z.number(),
   inputTokens: z.number(),
@@ -11,20 +11,20 @@ export const DailyReportRowSchema = z.object({
   errorCount: z.number(),
 });
 
-export const ModelCostEntrySchema = z.object({
+const ModelCostEntrySchema = z.object({
   model: z.string(),
   costUsd: z.number(),
   percentage: z.number(),
 });
 
-export const AccountCostEntrySchema = z.object({
+const AccountCostEntrySchema = z.object({
   accountId: z.string().nullable(),
   alias: z.string().nullable(),
   costUsd: z.number(),
   requests: z.number(),
 });
 
-export const ReportSummarySchema = z.object({
+const ReportSummarySchema = z.object({
   totalCostUsd: z.number(),
   totalInputTokens: z.number(),
   totalOutputTokens: z.number(),
@@ -36,13 +36,13 @@ export const ReportSummarySchema = z.object({
   avgRequestsPerDay: z.number(),
 });
 
-export const ReportComparisonPreviousSchema = z.object({
+const ReportComparisonPreviousSchema = z.object({
   totalCostUsd: z.number(),
   totalTokens: z.number(),
   totalRequests: z.number(),
 });
 
-export const ReportComparisonSchema = z.object({
+const ReportComparisonSchema = z.object({
   canCompare: z.boolean(),
   previous: ReportComparisonPreviousSchema,
 });

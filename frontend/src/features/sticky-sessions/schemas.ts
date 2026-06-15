@@ -1,12 +1,12 @@
 import { z } from "zod";
 
-export const STICKY_SESSION_KINDS = ["codex_session", "sticky_thread", "prompt_cache"] as const;
-export const STICKY_SESSION_SORT_FIELDS = ["updated_at", "created_at", "account", "key"] as const;
-export const STICKY_SESSION_SORT_DIRECTIONS = ["asc", "desc"] as const;
+const STICKY_SESSION_KINDS = ["codex_session", "sticky_thread", "prompt_cache"] as const;
+const STICKY_SESSION_SORT_FIELDS = ["updated_at", "created_at", "account", "key"] as const;
+const STICKY_SESSION_SORT_DIRECTIONS = ["asc", "desc"] as const;
 
-export const StickySessionKindSchema = z.enum(STICKY_SESSION_KINDS);
-export const StickySessionSortBySchema = z.enum(STICKY_SESSION_SORT_FIELDS);
-export const StickySessionSortDirSchema = z.enum(STICKY_SESSION_SORT_DIRECTIONS);
+const StickySessionKindSchema = z.enum(STICKY_SESSION_KINDS);
+const StickySessionSortBySchema = z.enum(STICKY_SESSION_SORT_FIELDS);
+const StickySessionSortDirSchema = z.enum(STICKY_SESSION_SORT_DIRECTIONS);
 
 export const StickySessionEntrySchema = z.object({
   key: z.string().min(1),
@@ -34,7 +34,7 @@ export const StickySessionsDeleteRequestSchema = z.object({
     ),
 });
 
-export const StickySessionDeleteFailureSchema = z.object({
+const StickySessionDeleteFailureSchema = z.object({
   key: z.string().min(1),
   kind: StickySessionKindSchema,
   reason: z.string().min(1),

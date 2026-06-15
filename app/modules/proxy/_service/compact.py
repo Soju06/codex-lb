@@ -611,6 +611,34 @@ class _CompactMixin:
                             upstream_budget,
                         )
                         return response
+                    except ProxyResponseError as exc:
+                        error = _parse_openai_error(exc.payload)
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        )
+                        if (
+                            code == "upstream_unavailable"
+                            and exc.retryable_same_contract
+                            and (
+                                exc.failure_exception_type in {"TimeoutError", "ServerTimeoutError"}
+                                or "timed out" in (error.message if error else "").lower()
+                                or "timeout" in (error.message if error else "").lower()
+                            )
+                        ):
+                            logger.warning(
+                                "Compact inner upstream timeout surfaced request_id=%s account_id=%s "
+                                "elapsed_seconds=%.2f timeout_seconds=%.2f",
+                                request_id,
+                                target.id,
+                                time.monotonic() - upstream_started_at,
+                                upstream_budget,
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+                            ) from exc
+                        raise
                     except asyncio.TimeoutError as exc:
                         logger.warning(
                             "Compact upstream call timed out request_id=%s account_id=%s elapsed_seconds=%.2f "

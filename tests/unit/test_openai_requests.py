@@ -1064,6 +1064,54 @@ def test_compact_trimming_keeps_selected_tool_calls_with_matching_outputs():
     assert tool_output in dumped_input
 
 
+def test_compact_trimming_reconciles_duplicate_tool_call_ids_by_occurrence():
+    first_tool_call = {
+        "type": "function_call",
+        "name": "shell",
+        "call_id": "call_reused",
+        "arguments": '{"cmd":"long-running"}',
+    }
+    first_tool_output = {
+        "type": "function_call_output",
+        "call_id": "call_reused",
+        "output": "huge historical output " + "z" * 500_000,
+    }
+    latest_tool_call = {
+        "type": "function_call",
+        "name": "shell",
+        "call_id": "call_reused",
+        "arguments": '{"cmd":"status"}',
+    }
+    latest_tool_output = {
+        "type": "function_call_output",
+        "call_id": "call_reused",
+        "output": "Process exited",
+    }
+    input_items = [
+        first_tool_call,
+        first_tool_output,
+        {"role": "assistant", "content": "x" * 500_000},
+        latest_tool_call,
+        latest_tool_output,
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert first_tool_call not in dumped_input
+    assert first_tool_output not in dumped_input
+    assert latest_tool_call in dumped_input
+    assert latest_tool_output in dumped_input
+
+
 def test_compact_trimming_drops_head_tool_call_when_output_exceeds_budget():
     tool_call = {
         "type": "function_call",

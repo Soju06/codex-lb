@@ -224,19 +224,4 @@ describe("AccountListItem", () => {
     expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });
 
-  it("shows an available reset badge when reset count is greater than zero", () => {
-    const account = createAccountSummary({ availableResetCount: 4 });
-
-    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
-
-    expect(screen.getByTestId("available-reset-badge")).toHaveTextContent("4");
-  });
-
-  it("hides the available reset badge when no resets are available", () => {
-    const account = createAccountSummary({ availableResetCount: 0 });
-
-    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
-
-    expect(screen.queryByTestId("available-reset-badge")).not.toBeInTheDocument();
-  });
 });

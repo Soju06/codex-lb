@@ -14,7 +14,7 @@ import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, for
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
-const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 6rem minmax(8rem,0.8fr) 4.5rem 6.5rem";
+const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 6rem minmax(8rem,0.8fr) auto";
 
 type AccountListProps = {
   accounts: AccountSummary[];
@@ -292,7 +292,6 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
               onSort={handleSort}
             />
           ))}
-          <span>Resets</span>
           <span className="text-right">Actions</span>
         </div>
         {sortedAccounts.map((account, index) => {
@@ -337,12 +336,6 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
               </div>
-              <span
-                data-testid="account-list-resets"
-                className="text-xs tabular-nums text-muted-foreground"
-              >
-                {account.availableResetCount ?? 0}
-              </span>
               <div className="flex justify-end gap-1">
                 <Button
                   type="button"
@@ -355,6 +348,19 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
+                {(account.availableResetCount ?? 0) > 0 ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 rounded-md px-2 text-xs"
+                    disabled
+                    title="Reset rate-limit credits"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                    {`Reset (${account.availableResetCount ?? 0})`}
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"

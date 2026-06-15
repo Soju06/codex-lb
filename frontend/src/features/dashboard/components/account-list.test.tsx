@@ -216,7 +216,7 @@ describe("AccountList", () => {
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
   });
 
-  it("renders a Resets column with the available reset count", () => {
+  it("shows a disabled Reset button when reset count is greater than zero", () => {
     render(
       <AccountList
         accounts={[
@@ -229,7 +229,22 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getByText("Resets")).toBeInTheDocument();
-    expect(screen.getByTestId("account-list-resets")).toHaveTextContent("2");
+    expect(screen.getByRole("button", { name: /Reset \(2\)/ })).toBeDisabled();
+  });
+
+  it("hides the Reset button when no resets are available", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-1",
+            displayName: "Empty Account",
+            availableResetCount: 0,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /^Reset/ })).not.toBeInTheDocument();
   });
 });

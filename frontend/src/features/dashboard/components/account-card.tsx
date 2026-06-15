@@ -127,15 +127,6 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           ) : null}
         </div>
         <div className="flex items-center gap-2">
-          {account.availableResetCount > 0 ? (
-            <span
-              data-testid="available-reset-badge"
-              aria-label={`${account.availableResetCount} rate-limit resets available`}
-              className="flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
-            >
-              {account.availableResetCount}
-            </span>
-          ) : null}
           <StatusBadge status={status} />
         </div>
       </div>
@@ -195,6 +186,19 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <ExternalLink className="h-3 w-3" />
           Details
         </Button>
+        {(account.availableResetCount ?? 0) > 0 ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 rounded-lg text-xs"
+            disabled
+            title="Reset rate-limit credits"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            {`Reset (${account.availableResetCount ?? 0})`}
+          </Button>
+        ) : null}
         {status === "paused" && (
           <Button
             type="button"

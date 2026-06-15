@@ -107,15 +107,6 @@ export function AccountListItem({
           />
         ) : null}
         <StatusBadge status={status} />
-        {account.availableResetCount > 0 ? (
-          <span
-            data-testid="available-reset-badge"
-            aria-label={`${account.availableResetCount} rate-limit resets available`}
-            className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
-          >
-            {account.availableResetCount}
-          </span>
-        ) : null}
       </div>
       <div
         className={cn(

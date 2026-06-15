@@ -168,6 +168,7 @@ class AccountsRepository:
             .where(AccountRateLimitResetCredit.status == "available")
             .where(AccountRateLimitResetCredit.expires_at < (now or utcnow()))
             .values(status="expired")
+            .returning(AccountRateLimitResetCredit.id)
         )
         if account_id is not None:
             stmt = stmt.where(AccountRateLimitResetCredit.account_id == account_id)
@@ -176,7 +177,7 @@ class AccountsRepository:
             result = await self._session.execute(stmt)
             await self._session.commit()
 
-        return int(result.rowcount or 0)
+        return len(result.scalars().all())
 
     async def count_available_rate_limit_reset_credits_by_account(
         self,
@@ -242,11 +243,12 @@ class AccountsRepository:
             .where(AccountRateLimitResetCredit.account_id == account_id)
             .where(AccountRateLimitResetCredit.credit_id == credit_id)
             .values(status="redeemed")
+            .returning(AccountRateLimitResetCredit.id)
         )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt)
             await self._session.commit()
-        return int(result.rowcount or 0) > 0
+        return result.scalar_one_or_none() is not None
 
     async def list_request_usage_summary_by_account(
         self,

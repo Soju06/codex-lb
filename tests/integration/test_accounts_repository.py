@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.sql.elements import ClauseElement
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountRateLimitResetCredit, AccountStatus
@@ -569,7 +569,7 @@ async def test_insert_rate_limit_reset_credits_if_missing_reraises_non_duplicate
 
         original_execute = session.execute
 
-        async def execute_without_existing_pairs(statement: ClauseElement, *args: object, **kwargs: object):
+        async def execute_without_existing_pairs(statement: Any, *args: Any, **kwargs: Any) -> Any:
             return await original_execute(statement, *args, **kwargs)
 
         async def commit_with_non_duplicate_integrity_error() -> None:

@@ -763,6 +763,58 @@ async def test_account_proxy_binding_disable_closes_existing_bridge_sessions(asy
 
 
 @pytest.mark.asyncio
+async def test_account_proxy_binding_rebind_active_account_closes_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+
+    account_id = await _import_account(
+        async_client,
+        "acc-settings-proxy-rebind-close",
+        "settings-proxy-rebind-close@example.com",
+    )
+
+    endpoint_one = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "rebind close proxy one", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint_one.status_code == 200
+    pool_one = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "rebind close pool one", "endpointIds": [endpoint_one.json()["id"]]},
+    )
+    assert pool_one.status_code == 200
+
+    endpoint_two = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "rebind close proxy two", "scheme": "http", "host": "proxy-2.test", "port": 8080},
+    )
+    assert endpoint_two.status_code == 200
+    pool_two = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "rebind close pool two", "endpointIds": [endpoint_two.json()["id"]]},
+    )
+    assert pool_two.status_code == 200
+
+    first_binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool_one.json()["id"], "isActive": True},
+    )
+    assert first_binding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+    close_sessions.reset_mock()
+
+    rebinding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool_two.json()["id"], "isActive": True},
+    )
+    assert rebinding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+
+
+@pytest.mark.asyncio
 async def test_account_proxy_binding_does_not_reactivate_session_deactivated_account(async_client):
     account_id = await _import_account(async_client, "acc-settings-proxy-reauth", "settings-proxy-reauth@example.com")
     async with SessionLocal() as session:

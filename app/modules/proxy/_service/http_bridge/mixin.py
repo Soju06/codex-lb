@@ -11,9 +11,7 @@ import aiohttp
 import anyio
 
 from app.core import shutdown as shutdown_state
-from app.core.auth.refresh import (
-    RefreshError,
-)
+from app.core.auth.refresh import RefreshError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -37,9 +35,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.config.settings import Settings
-from app.core.errors import (
-    openai_error,
-)
+from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,

@@ -186,6 +186,8 @@ async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeyp
 
     assert waited is False
     sleep.assert_not_awaited()
+
+
 def _without_installation_metadata(value: Any) -> Any:
     if isinstance(value, list):
         return [_without_installation_metadata(item) for item in value]

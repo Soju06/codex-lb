@@ -13,7 +13,7 @@ import {
 } from "@/utils/account-status";
 import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
-type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
+export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
 
 export type AccountCardProps = {
   account: AccountSummary;

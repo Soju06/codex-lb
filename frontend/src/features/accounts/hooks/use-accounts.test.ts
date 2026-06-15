@@ -61,7 +61,7 @@ describe("useAccounts", () => {
     });
   });
 
-  it("exports auth for an account without invalidating account queries", async () => {
+  it("exports auth for an account while only invalidating the account list", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -75,7 +75,7 @@ describe("useAccounts", () => {
 
     await result.current.exportAuthMutation.mutateAsync(firstAccountId as string);
 
-    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });

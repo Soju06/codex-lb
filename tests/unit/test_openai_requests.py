@@ -877,6 +877,32 @@ def test_compact_trimming_drops_oversized_leading_item():
     assert content[0]["text"].startswith("[compact trim] Omitted 1 input items")
 
 
+def test_compact_trimming_preserves_oversized_latest_item():
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "middle context " + "y" * 500_000},
+        {"role": "user", "content": "latest request " + "x" * 500_000},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == input_items[0]
+    assert dumped_input[-1] == input_items[-1]
+    assert input_items[1] not in dumped_input
+    marker = cast(Mapping[str, object], dumped_input[1])
+    assert marker["type"] == "message"
+    content = cast(list[Mapping[str, str]], marker["content"])
+    assert content[0]["text"].startswith("[compact trim] Omitted 1 input items")
+
+
 def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     goal_context = {
         "type": "message",

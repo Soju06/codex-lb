@@ -1037,6 +1037,7 @@ def _compact_trim_suffix_indices(
         if indices and used + token_count > token_budget:
             break
         if not indices and token_count > token_budget:
+            indices.add(index)
             break
         used += token_count
         indices.add(index)

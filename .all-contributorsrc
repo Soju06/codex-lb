@@ -737,6 +737,25 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "n3crosis",
+      "name": "n3crosis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11072158?v=4",
+      "profile": "https://github.com/n3crosis",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "copilot",
+      "name": "copilot",
+      "avatar_url": "https://github.com/copilot.png",
+      "profile": "https://github.com/copilot",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

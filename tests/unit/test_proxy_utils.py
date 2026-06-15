@@ -20582,6 +20582,25 @@ def test_prepare_response_bridge_request_state_preserves_codex_request_kind():
     assert request_state.request_kind == "prewarm"
 
 
+def test_prepare_response_bridge_request_state_reads_codex_request_kind_from_client_metadata():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hello", "input": []})
+
+    request_state, _text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata={"x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"})},
+        headers={},
+    )
+
+    assert request_state.request_kind == "prewarm"
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
     request_logs = _RequestLogsRecorder()
@@ -21224,6 +21243,73 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     assert not session.pending_requests
     assert session.upstream_control.reconnect_requested is False
     assert session.upstream_control.retire_after_drain is False
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_does_not_anchor_empty_prewarm(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_http_bridge_empty_prewarm")
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_http_bridge_empty_prewarm",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+        input_item_count=2,
+        input_full_fingerprint="prewarm_fingerprint",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-empty-prewarm", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        codex_session=True,
+        last_completed_response_id="resp_visible_before_prewarm",
+        last_completed_input_count=1,
+        last_completed_input_prefix_fingerprint="visible_fingerprint",
+    )
+    service._http_bridge_sessions[session.key] = session
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_http_bridge_empty_prewarm",
+                    "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    record_success.assert_not_awaited()
+    assert session.last_completed_response_id == "resp_visible_before_prewarm"
+    assert session.last_completed_input_count == 1
+    assert session.last_completed_input_prefix_fingerprint == "visible_fingerprint"
+    assert "resp_http_bridge_empty_prewarm" not in session.previous_response_ids
+    assert not service._http_bridge_previous_response_index
 
 
 @pytest.mark.asyncio

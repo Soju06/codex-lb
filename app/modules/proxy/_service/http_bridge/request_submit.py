@@ -184,6 +184,22 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     if not headers:
         return "normal"
     raw_turn_metadata = headers.get("x-codex-turn-metadata") or headers.get("X-Codex-Turn-Metadata")
+    return _request_kind_from_turn_metadata_value(raw_turn_metadata)
+
+
+def _request_kind_from_client_metadata(
+    client_metadata: Mapping[str, JsonValue] | None,
+    headers: Mapping[str, str] | None,
+) -> str:
+    if client_metadata:
+        raw_turn_metadata = client_metadata.get("x-codex-turn-metadata")
+        request_kind = _request_kind_from_turn_metadata_value(raw_turn_metadata)
+        if request_kind != "normal":
+            return request_kind
+    return _request_kind_from_headers(headers)
+
+
+def _request_kind_from_turn_metadata_value(raw_turn_metadata: object) -> str:
     if not isinstance(raw_turn_metadata, str):
         return "normal"
     try:
@@ -289,7 +305,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
-            request_kind=_request_kind_from_headers(headers),
+            request_kind=_request_kind_from_client_metadata(client_metadata, headers),
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count

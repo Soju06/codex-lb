@@ -231,6 +231,51 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_normalizes_summary_output_for_codex_remote_v2(async_client, monkeypatch):
+    email = "compact-v2-summary@example.com"
+    raw_account_id = "acc_compact_v2_summary"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "output": [
+                    {
+                        "id": "msg_compact_v2",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "historical user text"}],
+                    },
+                    {
+                        "id": "cmp_compact_v2",
+                        "type": "compaction_summary",
+                        "encrypted_content": "enc_compact_v2",
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.5",
+        "instructions": "Compact the conversation.",
+        "input": [{"type": "message", "role": "user", "content": "hello"}],
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    compact_json = response.json()
+    assert compact_json["object"] == "response.compaction"
+    assert compact_json["output"] == [{"type": "compaction", "encrypted_content": "enc_compact_v2"}]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_headers_include_monthly_only_credits(async_client, monkeypatch):
     email = "compact-monthly@example.com"
     raw_account_id = "acc_compact_monthly"

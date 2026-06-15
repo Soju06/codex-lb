@@ -81,6 +81,9 @@ export function useOauth() {
           invalidateAccountRelatedQueries(queryClient);
           clearPollTimer();
           clearCountdownTimer();
+        } else if (response.status === "error") {
+          clearPollTimer();
+          clearCountdownTimer();
         }
         return;
       }

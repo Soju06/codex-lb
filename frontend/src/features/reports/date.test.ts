@@ -110,6 +110,31 @@ describe("reports date helpers", () => {
     expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBeNull();
   });
 
+  it("validates the live browser timezone when supportedValuesOf is unavailable", () => {
+    const originalSupportedValuesOf = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf");
+    Object.defineProperty(Intl, "supportedValuesOf", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+        locale: "en-US",
+        calendar: "gregory",
+        numberingSystem: "latn",
+        timeZone: "Europe/Paris",
+      });
+
+      expect(getBrowserReportsTimeZone()).toBe("Europe/Paris");
+      expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBe("Europe/Paris");
+    } finally {
+      if (originalSupportedValuesOf) {
+        Object.defineProperty(Intl, "supportedValuesOf", originalSupportedValuesOf);
+      } else {
+        delete (Intl as { supportedValuesOf?: unknown }).supportedValuesOf;
+      }
+    }
+  });
+
   it("reuses the cached timezone when the live browser timezone is invalid", () => {
     window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "Europe/Paris");
     vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({

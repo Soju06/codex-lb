@@ -1,5 +1,6 @@
 import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { LimitRuleCreate } from "@/features/api-keys/schemas";
@@ -149,5 +150,24 @@ describe("LimitRulesEditor", () => {
     await user.click(advancedSwitch);
 
     expect(screen.getByText("Add limit rule")).toBeInTheDocument();
+  });
+
+  it("keeps advanced rule inputs focused while max value edits rerender", async () => {
+    const user = userEvent.setup();
+    function StatefulLimitRulesEditor() {
+      const [rules, setRules] = useState<LimitRuleCreate[]>([
+        { limitType: "input_tokens", limitWindow: "daily", maxValue: 1, modelFilter: null },
+      ]);
+      return <LimitRulesEditor rules={rules} onChange={setRules} />;
+    }
+
+    renderWithProviders(<StatefulLimitRulesEditor />);
+
+    const maxValueInput = screen.getByLabelText("Max value (tokens)");
+    await user.clear(maxValueInput);
+    await user.type(maxValueInput, "1234");
+
+    expect(maxValueInput).toHaveFocus();
+    expect(maxValueInput).toHaveValue(1234);
   });
 });

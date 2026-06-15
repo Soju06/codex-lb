@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,16 +21,9 @@ function makeDefaultRule(): LimitRuleCreate {
   };
 }
 
-function ruleFallbackKey(rule: LimitRuleCreate): string {
-  return [
-    rule.limitType,
-    rule.limitWindow,
-    rule.modelFilter ?? "all-models",
-    String(rule.maxValue),
-  ].join(":");
-}
-
 export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
+  const nextRuleKeyRef = useRef(0);
+  const ruleKeysRef = useRef<string[]>([]);
   const [advanced, setAdvanced] = useState(() => {
     if (rules.length === 0) return false;
     // If any non-standard rule exists, start in advanced mode
@@ -98,18 +91,14 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   const removeRule = (index: number) => {
     onChange(rules.filter((_, i) => i !== index));
   };
-  const keyedRules = useMemo(() => {
-    const seenCounts = new Map<string, number>();
-    return rules.map((rule) => {
-      const baseKey = ruleFallbackKey(rule);
-      const seenCount = seenCounts.get(baseKey) ?? 0;
-      seenCounts.set(baseKey, seenCount + 1);
-      return {
-        key: seenCount === 0 ? baseKey : `${baseKey}:${seenCount + 1}`,
-        rule,
-      };
-    });
-  }, [rules]);
+
+  while (ruleKeysRef.current.length < rules.length) {
+    ruleKeysRef.current.push(`limit-rule-${nextRuleKeyRef.current}`);
+    nextRuleKeyRef.current += 1;
+  }
+  if (ruleKeysRef.current.length > rules.length) {
+    ruleKeysRef.current.length = rules.length;
+  }
 
   return (
     <div className="space-y-3">
@@ -156,9 +145,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
         </div>
       ) : (
         <div className="space-y-2">
-          {keyedRules.map(({ key, rule }, index) => (
+          {rules.map((rule, index) => (
             <LimitRuleCard
-              key={key}
+              key={ruleKeysRef.current[index]}
               rule={rule}
               onChange={(updated) => updateRule(index, updated)}
               onRemove={() => removeRule(index)}

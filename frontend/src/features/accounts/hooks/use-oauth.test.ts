@@ -222,6 +222,51 @@ describe("useOauth", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
   });
 
+  it("stops polling when browser OAuth completion returns an error", async () => {
+    vi.useFakeTimers();
+    try {
+      startOauthMock.mockResolvedValue({
+        flowId: "flow-browser",
+        method: "browser",
+        authorizationUrl: "https://auth.example.com/authorize",
+        callbackUrl: "http://127.0.0.1:1455/auth/callback",
+        verificationUrl: null,
+        userCode: null,
+        deviceAuthId: null,
+        intervalSeconds: null,
+        expiresInSeconds: null,
+      });
+      getOauthStatusMock.mockResolvedValue({
+        status: "success",
+        errorMessage: null,
+      });
+      completeOauthMock.mockResolvedValue({
+        status: "error",
+        errorMessage: "OAuth completion failed",
+      });
+
+      const { result } = renderUseOauth();
+
+      await act(async () => {
+        await result.current.start("browser");
+      });
+      await act(async () => {
+        await result.current.poll();
+      });
+
+      expect(result.current.state.status).toBe("error");
+      expect(completeOauthMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+      });
+
+      expect(completeOauthMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("updates state to success after a successful manual callback", async () => {
     startOauthMock.mockResolvedValue({
       flowId: "flow-browser",

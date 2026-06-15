@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,8 +22,10 @@ function makeDefaultRule(): LimitRuleCreate {
 }
 
 export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
-  const nextRuleKeyRef = useRef(0);
-  const ruleKeysRef = useRef<string[]>([]);
+  const [ruleKeys, setRuleKeys] = useState(() =>
+    rules.map((_, index) => `limit-rule-${index}`),
+  );
+  const [nextRuleKey, setNextRuleKey] = useState(() => rules.length);
   const [advanced, setAdvanced] = useState(() => {
     if (rules.length === 0) return false;
     // If any non-standard rule exists, start in advanced mode
@@ -79,6 +81,8 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   };
 
   const addRule = () => {
+    setRuleKeys([...ruleKeys, `limit-rule-${nextRuleKey}`]);
+    setNextRuleKey(nextRuleKey + 1);
     onChange([...rules, makeDefaultRule()]);
   };
 
@@ -89,16 +93,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   };
 
   const removeRule = (index: number) => {
+    setRuleKeys(ruleKeys.filter((_, i) => i !== index));
     onChange(rules.filter((_, i) => i !== index));
   };
-
-  while (ruleKeysRef.current.length < rules.length) {
-    ruleKeysRef.current.push(`limit-rule-${nextRuleKeyRef.current}`);
-    nextRuleKeyRef.current += 1;
-  }
-  if (ruleKeysRef.current.length > rules.length) {
-    ruleKeysRef.current.length = rules.length;
-  }
 
   return (
     <div className="space-y-3">
@@ -147,7 +144,7 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
         <div className="space-y-2">
           {rules.map((rule, index) => (
             <LimitRuleCard
-              key={ruleKeysRef.current[index]}
+              key={ruleKeys[index] ?? `limit-rule-${index}`}
               rule={rule}
               onChange={(updated) => updateRule(index, updated)}
               onRemove={() => removeRule(index)}

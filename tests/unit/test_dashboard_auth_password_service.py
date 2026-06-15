@@ -6,6 +6,7 @@ import bcrypt
 import pytest
 
 from app.core.auth.dashboard_access import DashboardPermission, DashboardRole
+from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     DashboardSessionStore,
@@ -22,6 +23,7 @@ class _FakeSettings:
     password_hash: str | None = None
     guest_access_enabled: bool = False
     guest_password_hash: str | None = None
+    dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     totp_required_on_login: bool = False
     totp_secret_encrypted: bytes | None = None
     totp_last_verified_step: int | None = None
@@ -128,6 +130,31 @@ async def test_session_state_preserves_admin_without_password_when_guest_access_
 
     assert session.authenticated is True
     assert session.password_required is False
+    assert session.guest_access_enabled is True
+    assert session.guest_password_required is False
+    assert session.role == DashboardRole.ADMIN
+    assert session.permissions == [DashboardPermission.READ, DashboardPermission.WRITE]
+
+
+@pytest.mark.asyncio
+async def test_trusted_header_session_state_does_not_advertise_public_guest_without_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.dashboard_auth.service as service_module
+
+    repository = _FakeRepository()
+    repository.settings.password_hash = "configured"
+    repository.settings.guest_access_enabled = True
+    monkeypatch.setattr(
+        service_module,
+        "get_settings",
+        lambda: _FakeSettings(dashboard_auth_mode=DashboardAuthMode.TRUSTED_HEADER),
+    )
+    service = DashboardAuthService(repository, DashboardSessionStore())
+
+    session = await service.get_session_state(None)
+
+    assert session.authenticated is False
     assert session.guest_access_enabled is True
     assert session.guest_password_required is False
     assert session.role == DashboardRole.ADMIN

@@ -560,6 +560,16 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
 
         remote_transport = ASGITransport(app=app_instance, client=("203.0.113.24", 50001))
         async with AsyncClient(transport=remote_transport, base_url="http://lb.example") as remote_client:
+            session = await remote_client.get("/api/dashboard-auth/session")
+            assert session.status_code == 200
+            session_payload = session.json()
+            assert session_payload["authenticated"] is False
+            assert session_payload["role"] == "admin"
+            assert session_payload["permissions"] == ["read", "write"]
+            assert session_payload["guestAccessEnabled"] is True
+            assert session_payload["guestPasswordRequired"] is False
+            assert session_payload["authMode"] == "trusted_header"
+
             blocked = await remote_client.get("/api/settings")
             assert blocked.status_code == 401
             assert blocked.json()["error"]["code"] == "proxy_auth_required"

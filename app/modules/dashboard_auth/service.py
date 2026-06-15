@@ -16,7 +16,9 @@ from app.core.auth.dashboard_access import (
     GUEST_PERMISSIONS,
     DashboardRole,
 )
+from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
 from app.modules.dashboard_auth.schemas import DashboardAuthSessionResponse, TotpSetupStartResponse
@@ -201,7 +203,12 @@ class DashboardAuthService:
         guest_access_enabled = settings.guest_access_enabled
         guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
         state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
-        public_guest_authenticated = bool(guest_access_enabled and not guest_password_required and password_required)
+        public_guest_authenticated = bool(
+            guest_access_enabled
+            and not guest_password_required
+            and password_required
+            and get_settings().dashboard_auth_mode == DashboardAuthMode.STANDARD
+        )
         if (
             state is not None
             and state.role == DashboardRole.GUEST

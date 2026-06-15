@@ -20927,6 +20927,62 @@ def test_prepare_http_bridge_request_kind_uses_headers_over_payload_metadata():
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_empty_prewarm_completion_does_not_replace_continuity_anchor():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_empty_prewarm",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_bridge_empty_prewarm",
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+        request_kind="prewarm",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("codex_session", "session-prewarm", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_empty_prewarm"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_completed_response_id="resp_visible_anchor",
+        previous_response_ids={"resp_visible_anchor"},
+    )
+    service._http_bridge_sessions[session.key] = session
+    service._http_bridge_previous_response_index[("resp_visible_anchor", None)] = session.key
+    completed_payload = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_bridge_empty_prewarm",
+            "status": "completed",
+            "usage": {"input_tokens": 4, "output_tokens": 0},
+        },
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(completed_payload, separators=(",", ":")))
+
+    assert session.last_completed_response_id == "resp_visible_anchor"
+    assert session.previous_response_ids == {"resp_visible_anchor"}
+    assert service._http_bridge_previous_response_index == {("resp_visible_anchor", None): session.key}
+    assert request_state.event_queue is not None
+    forwarded = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert forwarded is not None
+    assert proxy_service.parse_sse_data_json(forwarded) == completed_payload
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_tool_call_dedupe_survives_upstream_reconnect():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

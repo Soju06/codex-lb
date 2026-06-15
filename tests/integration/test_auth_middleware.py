@@ -511,6 +511,47 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
 
 
 @pytest.mark.asyncio
+async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_header_when_fallback_exists(
+    app_instance,
+    monkeypatch,
+):
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.TRUSTED_HEADER,
+        trust_proxy_headers=True,
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        proxy_headers = {"Remote-User": "admin@example.com"}
+        local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
+            setup = await local_client.post(
+                "/api/dashboard-auth/password/setup",
+                json={"password": "password123"},
+                headers=proxy_headers,
+            )
+            assert setup.status_code == 200
+
+            read_settings = await local_client.get("/api/settings", headers=proxy_headers)
+            assert read_settings.status_code == 200
+            current = read_settings.json()
+            current["guestAccessEnabled"] = True
+            enabled_settings = await local_client.put(
+                "/api/settings",
+                json=current,
+                headers=proxy_headers,
+            )
+            assert enabled_settings.status_code == 200
+            assert enabled_settings.json()["guestPasswordConfigured"] is False
+
+        remote_transport = ASGITransport(app=app_instance, client=("203.0.113.24", 50001))
+        async with AsyncClient(transport=remote_transport, base_url="http://lb.example") as remote_client:
+            blocked = await remote_client.get("/api/settings")
+            assert blocked.status_code == 401
+            assert blocked.json()["error"]["code"] == "proxy_auth_required"
+
+
+@pytest.mark.asyncio
 async def test_trusted_header_mode_allows_proxy_header_and_password_fallback(async_client, monkeypatch):
     _set_dashboard_auth_env(
         monkeypatch,

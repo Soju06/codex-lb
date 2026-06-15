@@ -87,4 +87,30 @@ describe("useAuthStore unauthorized handler", () => {
     expect(next.permissions).toEqual(["read"]);
     expect(next.canWrite).toBe(false);
   });
+
+  it("keeps admin upgrade login visible after a failed password attempt", async () => {
+    const { useAuthStore } = await import("@/features/auth/hooks/use-auth");
+
+    useAuthStore.setState({
+      authenticated: true,
+      initialized: true,
+      role: "guest",
+      permissions: ["read"],
+      canWrite: false,
+      guestAccessEnabled: true,
+      guestPasswordRequired: false,
+      adminLoginRequested: true,
+      error: "Invalid password",
+    });
+
+    expect(registeredUnauthorizedHandler).not.toBeNull();
+    registeredUnauthorizedHandler?.();
+
+    expect(getAuthSession).not.toHaveBeenCalled();
+    const next = useAuthStore.getState();
+    expect(next.authenticated).toBe(true);
+    expect(next.role).toBe("guest");
+    expect(next.adminLoginRequested).toBe(true);
+    expect(next.error).toBe("Invalid password");
+  });
 });

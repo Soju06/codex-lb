@@ -171,6 +171,11 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
+  if (useAuthStore.getState().adminLoginRequested) {
+    useAuthStore.setState({ initialized: true });
+    return;
+  }
+
   useAuthStore.setState((state) => ({
     ...state,
     authenticated: false,

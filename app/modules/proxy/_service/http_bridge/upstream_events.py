@@ -679,7 +679,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
-        if event_type == "response.completed" and terminal_request_state is not None:
+        completed_usage = (
+            event.response.usage if event_type == "response.completed" and event and event.response else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+
+        if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
             # input_item_count, e.g. string inputs) can still reuse this
@@ -710,7 +721,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None and event_type == "response.completed":
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
             await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,

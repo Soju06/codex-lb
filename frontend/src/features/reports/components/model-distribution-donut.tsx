@@ -1,4 +1,4 @@
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "@/components/lazy-recharts";
 import type { ModelCostEntry } from "../schemas";
 import { ChartTooltip } from "./chart-tooltip";
 

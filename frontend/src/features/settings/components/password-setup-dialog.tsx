@@ -1,5 +1,4 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 
@@ -40,12 +39,13 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
   const busy = form.formState.isSubmitting;
   const lock = busy || disabled || !passwordManagementEnabled;
 
-  useEffect(() => {
-    if (!open) {
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       form.reset();
       form.clearErrors();
     }
-  }, [open, form]);
+    onOpenChange(next);
+  };
 
   const handleSubmit = async (values: { password: string; bootstrapToken?: string }) => {
     form.clearErrors("root");
@@ -56,7 +56,7 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
       });
       await refreshSession();
       toast.success("Password configured");
-      onOpenChange(false);
+      handleOpenChange(false);
     } catch (caught) {
       form.setError("root", { message: getErrorMessage(caught) });
     }
@@ -65,7 +65,7 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
   const rootError = form.formState.errors.root?.message;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Set password</DialogTitle>
@@ -110,7 +110,7 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
               />
             ) : null}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+              <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
                 Cancel
               </Button>
               <Button type="submit" disabled={lock}>

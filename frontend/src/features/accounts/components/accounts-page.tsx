@@ -216,7 +216,6 @@ export function AccountsPage() {
             await oauth.start(method);
           }}
           onComplete={async () => {
-            await oauth.complete();
             await accountsQuery.refetch();
           }}
           onManualCallback={async (callbackUrl) => {

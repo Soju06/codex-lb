@@ -6,7 +6,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-} from "recharts";
+} from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
 import { ChartTooltip } from "./chart-tooltip";
 

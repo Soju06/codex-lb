@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "recharts";
+import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
 import { formatCompactNumber, formatNumber } from "@/utils/formatters";
@@ -195,7 +195,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                 isAnimationActive={!reducedMotion}
                 animationDuration={600}
                 animationEasing="ease-out"
-                onMouseEnter={(data) => {
+                onMouseEnter={(data: { payload?: DonutDatum }) => {
                   const datum = data.payload as DonutDatum | undefined;
                   if (typeof datum?.id === "string") {
                     setActiveLegendId(datum.id);

@@ -1,6 +1,14 @@
-import { SparklineChart } from "@/components/sparkline-chart";
+import { lazy, Suspense } from "react";
+
+import type { SparklineChartProps } from "@/components/sparkline-chart";
 import type { DashboardStat } from "@/features/dashboard/utils";
 import { cn } from "@/lib/utils";
+
+const SparklineChart = lazy(() =>
+  import("@/components/sparkline-chart").then((module) => ({
+    default: (props: SparklineChartProps) => <module.SparklineChart {...props} />,
+  })),
+);
 
 const ACCENT_STYLES = [
   "bg-slate-500/10 text-slate-600 dark:bg-neutral-500/15 dark:text-slate-400",
@@ -55,7 +63,9 @@ export function StatsGrid({ stats }: StatsGridProps) {
             </div>
             {stat.trend.length > 0 ? (
               <div className="mt-1">
-                <SparklineChart data={stat.trend} color={stat.trendColor} index={index} />
+                <Suspense fallback={<div style={{ height: 40 }} />}>
+                  <SparklineChart data={stat.trend} color={stat.trendColor} index={index} />
+                </Suspense>
               </div>
             ) : null}
           </div>

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -72,6 +72,39 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
+type ApiKeyEditDraft = {
+  selectedModels: string[];
+  selectedAccountIds: string[];
+  limitRules: LimitRuleCreate[];
+  expiresAt: Date | null;
+  applyToCodexModel: boolean;
+  enforcedModel: string;
+  enforcedReasoningEffort: string;
+  enforcedServiceTier: string;
+  trafficClass: TrafficClass;
+};
+
+function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
+  return {
+    selectedModels: apiKey.allowedModels || [],
+    selectedAccountIds: apiKey.assignedAccountIds,
+    limitRules: limitsToCreateRules(apiKey),
+    expiresAt: parseDate(apiKey.expiresAt),
+    applyToCodexModel: apiKey.applyToCodexModel,
+    enforcedModel: apiKey.enforcedModel || "",
+    enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
+    enforcedServiceTier: apiKey.enforcedServiceTier || "none",
+    trafficClass: apiKey.trafficClass || "foreground",
+  };
+}
+
+function apiKeyEditDraftReducer(
+  state: ApiKeyEditDraft,
+  patch: Partial<ApiKeyEditDraft>,
+): ApiKeyEditDraft {
+  return { ...state, ...patch };
+}
+
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -81,41 +114,29 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     },
   });
 
-  const [selectedModels, setSelectedModels] = useState<string[]>(apiKey.allowedModels || []);
-  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(apiKey.assignedAccountIds);
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
-  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>(() => initialLimitRules);
-  const [expiresAt, setExpiresAt] = useState<Date | null>(() => parseDate(apiKey.expiresAt));
-  const [applyToCodexModel, setApplyToCodexModel] = useState<boolean>(apiKey.applyToCodexModel);
-  const [enforcedModel, setEnforcedModel] = useState<string>(apiKey.enforcedModel || "");
-  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
-    apiKey.enforcedReasoningEffort || "none",
-  );
-  const [enforcedServiceTier, setEnforcedServiceTier] = useState<string>(
-    apiKey.enforcedServiceTier || "none",
-  );
-  const [trafficClass, setTrafficClass] = useState<TrafficClass>(apiKey.trafficClass || "foreground");
+  const [draft, updateDraft] = useReducer(apiKeyEditDraftReducer, apiKey, createApiKeyEditDraft);
 
   const handleSubmit = async (values: FormValues) => {
-    const normalizedLimits = normalizeLimitRules(limitRules);
+    const normalizedLimits = normalizeLimitRules(draft.limitRules);
     const shouldSubmitAssignedAccountIds =
-      hasSelectionChange(apiKey.assignedAccountIds, selectedAccountIds) ||
-      (apiKey.accountAssignmentScopeEnabled && selectedAccountIds.length === 0);
+      hasSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
+      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
-      allowedModels: selectedModels.length > 0 ? selectedModels : null,
-      applyToCodexModel,
-      enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
-      enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
-      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
-      trafficClass,
-      expiresAt: expiresAt?.toISOString() ?? null,
+      allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
+      applyToCodexModel: draft.applyToCodexModel,
+      enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
+      enforcedReasoningEffort: draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
+      trafficClass: draft.trafficClass,
+      expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
     if (shouldSubmitAssignedAccountIds) {
-      payload.assignedAccountIds = selectedAccountIds;
+      payload.assignedAccountIds = draft.selectedAccountIds;
     }
-    if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
+    if (hasLimitRuleChanges(initialLimitRules, draft.limitRules)) {
       payload.limits = normalizedLimits;
     }
     try {
@@ -150,14 +171,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>
-              <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+              <ModelMultiSelect value={draft.selectedModels} onChange={(selectedModels) => updateDraft({ selectedModels })} />
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
               <Checkbox
                 id="edit-api-key-apply-to-codex-model"
-                checked={applyToCodexModel}
-                onCheckedChange={(checked) => setApplyToCodexModel(checked === true)}
+                checked={draft.applyToCodexModel}
+                onCheckedChange={(checked) => updateDraft({ applyToCodexModel: checked === true })}
               />
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 Apply to codex /model
@@ -166,14 +187,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Assigned accounts</div>
-              <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
+              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
             </div>
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Enforced model</div>
               <Input
-                value={enforcedModel}
-                onChange={(e) => setEnforcedModel(e.target.value)}
+                value={draft.enforcedModel}
+                onChange={(e) => updateDraft({ enforcedModel: e.target.value })}
                 placeholder="e.g. gpt-5.3-codex"
                 autoComplete="off"
               />
@@ -181,7 +202,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Enforced reasoning</div>
-              <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
+              <Select value={draft.enforcedReasoningEffort} onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort })}>
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
@@ -198,7 +219,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Enforced service tier</div>
-              <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+              <Select value={draft.enforcedServiceTier} onValueChange={(enforcedServiceTier) => updateDraft({ enforcedServiceTier })}>
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
@@ -216,7 +237,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               <label className="text-sm font-medium" htmlFor="edit-api-key-traffic-class">
                 Traffic class
               </label>
-              <Select value={trafficClass} onValueChange={(value) => setTrafficClass(value as TrafficClass)}>
+              <Select value={draft.trafficClass} onValueChange={(value) => updateDraft({ trafficClass: value as TrafficClass })}>
                 <SelectTrigger id="edit-api-key-traffic-class">
                   <SelectValue placeholder="Foreground" />
                 </SelectTrigger>
@@ -229,7 +250,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Expiry</div>
-              <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
+              <ExpiryPicker value={draft.expiresAt} onChange={(expiresAt) => updateDraft({ expiresAt })} />
             </div>
 
             <FormField
@@ -247,7 +268,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
           {/* Right column — Limits */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Limits</h4>
-            <LimitRulesEditor rules={limitRules} onChange={setLimitRules} />
+            <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useReducer } from "react";
 import { Route, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -65,6 +65,43 @@ function accountLabel(account: AccountSummary): string {
   return `${name} (${compactId})`;
 }
 
+type RoutingSettingsDraft = {
+  warmupModel: string;
+  cacheAffinityTtl: string;
+  relativeAvailabilityPower: string;
+  relativeAvailabilityTopK: string;
+  stickyPrimaryThreshold: string;
+  stickySecondaryThreshold: string;
+  limitWarmupModel: string;
+  limitWarmupPrompt: string;
+  limitWarmupCooldown: string;
+  additionalQuotaKey: string;
+  additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
+};
+
+function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSettingsDraft {
+  return {
+    warmupModel: settings.warmupModel,
+    cacheAffinityTtl: String(settings.openaiCacheAffinityMaxAgeSeconds),
+    relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
+    relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
+    stickyPrimaryThreshold: String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
+    stickySecondaryThreshold: String(settings.stickyReallocationSecondaryBudgetThresholdPct ?? 100),
+    limitWarmupModel: settings.limitWarmupModel,
+    limitWarmupPrompt: settings.limitWarmupPrompt,
+    limitWarmupCooldown: String(settings.limitWarmupCooldownSeconds),
+    additionalQuotaKey: "",
+    additionalQuotaPolicy: "inherit",
+  };
+}
+
+function routingSettingsDraftReducer(
+  state: RoutingSettingsDraft,
+  patch: Partial<RoutingSettingsDraft>,
+): RoutingSettingsDraft {
+  return { ...state, ...patch };
+}
+
 export function RoutingSettings({
   settings,
   accounts = EMPTY_ACCOUNTS,
@@ -72,28 +109,11 @@ export function RoutingSettings({
   busy,
   onSave,
 }: RoutingSettingsProps) {
-  const [warmupModel, setWarmupModel] = useState(settings.warmupModel);
-  const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
-    String(settings.openaiCacheAffinityMaxAgeSeconds),
+  const [draft, updateDraft] = useReducer(
+    routingSettingsDraftReducer,
+    settings,
+    createRoutingSettingsDraft,
   );
-  const [relativeAvailabilityPower, setRelativeAvailabilityPower] = useState(
-    String(settings.relativeAvailabilityPower),
-  );
-  const [relativeAvailabilityTopK, setRelativeAvailabilityTopK] = useState(
-    String(settings.relativeAvailabilityTopK),
-  );
-  const [stickyPrimaryThreshold, setStickyPrimaryThreshold] = useState(
-    String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
-  );
-  const [stickySecondaryThreshold, setStickySecondaryThreshold] = useState(
-    String(settings.stickyReallocationSecondaryBudgetThresholdPct ?? 100),
-  );
-  const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
-  const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
-  const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
-  const [additionalQuotaKey, setAdditionalQuotaKey] = useState("");
-  const [additionalQuotaPolicy, setAdditionalQuotaPolicy] =
-    useState<AdditionalQuotaRoutingPolicy>("inherit");
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -118,32 +138,32 @@ export function RoutingSettings({
     save({ additionalQuotaRoutingPolicies: next });
   };
 
-  const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
+  const parsedCacheAffinityTtl = Number.parseInt(draft.cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
-  const warmupModelChanged = warmupModel.trim() !== settings.warmupModel;
-  const warmupModelValid = warmupModel.trim().length > 0 && warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
-  const parsedLimitWarmupCooldown = Number(limitWarmupCooldown);
+  const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
+  const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
+  const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const limitWarmupFieldsChanged =
-    limitWarmupModel.trim() !== settings.limitWarmupModel ||
-    limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
+    draft.limitWarmupModel.trim() !== settings.limitWarmupModel ||
+    draft.limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
-    limitWarmupModel.trim().length > 0 &&
-    limitWarmupModel.trim().length <= LIMIT_WARMUP_MODEL_MAX_LENGTH &&
-    limitWarmupPrompt.trim().length > 0 &&
-    limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
+    draft.limitWarmupModel.trim().length > 0 &&
+    draft.limitWarmupModel.trim().length <= LIMIT_WARMUP_MODEL_MAX_LENGTH &&
+    draft.limitWarmupPrompt.trim().length > 0 &&
+    draft.limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
     limitWarmupCooldownValid;
 
-  const parsedRelativeAvailabilityPower = Number.parseFloat(relativeAvailabilityPower);
+  const parsedRelativeAvailabilityPower = Number.parseFloat(draft.relativeAvailabilityPower);
   const relativeAvailabilityPowerValid =
     Number.isFinite(parsedRelativeAvailabilityPower) && parsedRelativeAvailabilityPower > 0;
   const relativeAvailabilityPowerChanged =
     relativeAvailabilityPowerValid && parsedRelativeAvailabilityPower !== settings.relativeAvailabilityPower;
 
-  const relativeAvailabilityTopKTrimmed = relativeAvailabilityTopK.trim();
+  const relativeAvailabilityTopKTrimmed = draft.relativeAvailabilityTopK.trim();
   const parsedRelativeAvailabilityTopK = Number(relativeAvailabilityTopKTrimmed);
   const relativeAvailabilityTopKValid =
     /^[0-9]+$/.test(relativeAvailabilityTopKTrimmed) &&
@@ -182,7 +202,7 @@ export function RoutingSettings({
       return rows;
     }, []),
   ];
-  const parsedStickyPrimaryThreshold = Number.parseFloat(stickyPrimaryThreshold);
+  const parsedStickyPrimaryThreshold = Number.parseFloat(draft.stickyPrimaryThreshold);
   const stickyPrimaryThresholdValid =
     Number.isFinite(parsedStickyPrimaryThreshold) &&
     parsedStickyPrimaryThreshold >= 0 &&
@@ -190,7 +210,7 @@ export function RoutingSettings({
   const stickyPrimaryThresholdChanged =
     stickyPrimaryThresholdValid &&
     parsedStickyPrimaryThreshold !== (settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95);
-  const parsedStickySecondaryThreshold = Number.parseFloat(stickySecondaryThreshold);
+  const parsedStickySecondaryThreshold = Number.parseFloat(draft.stickySecondaryThreshold);
   const stickySecondaryThresholdValid =
     Number.isFinite(parsedStickySecondaryThreshold) &&
     parsedStickySecondaryThreshold >= 0 &&
@@ -236,10 +256,10 @@ export function RoutingSettings({
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
-                value={warmupModel}
+                value={draft.warmupModel}
                 disabled={busy}
                 maxLength={WARMUP_MODEL_MAX_LENGTH}
-                onChange={(event) => setWarmupModel(event.target.value)}
+                onChange={(event) => updateDraft({ warmupModel: event.target.value })}
                 className="h-8 text-xs"
                 aria-label="Warmup model"
               />
@@ -249,7 +269,7 @@ export function RoutingSettings({
                 variant="outline"
                 className="h-8 text-xs sm:w-24"
                 disabled={busy || !warmupModelChanged || !warmupModelValid}
-                onClick={() => void save({ warmupModel: warmupModel.trim() })}
+                onClick={() => void save({ warmupModel: draft.warmupModel.trim() })}
               >
                 Save warmup model
               </Button>
@@ -371,16 +391,16 @@ export function RoutingSettings({
               ))}
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
-                  value={additionalQuotaKey}
+                  value={draft.additionalQuotaKey}
                   disabled={busy}
-                  onChange={(event) => setAdditionalQuotaKey(event.target.value)}
+                  onChange={(event) => updateDraft({ additionalQuotaKey: event.target.value })}
                   className="h-8 text-xs"
                   aria-label="Additional quota key"
                   placeholder="Quota key"
                 />
                 <Select
-                  value={additionalQuotaPolicy}
-                  onValueChange={(value) => setAdditionalQuotaPolicy(value as AdditionalQuotaRoutingPolicy)}
+                  value={draft.additionalQuotaPolicy}
+                  onValueChange={(value) => updateDraft({ additionalQuotaPolicy: value as AdditionalQuotaRoutingPolicy })}
                 >
                   <SelectTrigger
                     className="h-8 w-full text-xs sm:w-36"
@@ -401,8 +421,8 @@ export function RoutingSettings({
                   size="sm"
                   variant="outline"
                   className="h-8 text-xs sm:w-24"
-                  disabled={busy || !additionalQuotaKey.trim()}
-                  onClick={() => saveAdditionalQuotaPolicy(additionalQuotaKey, additionalQuotaPolicy)}
+                  disabled={busy || !draft.additionalQuotaKey.trim()}
+                  onClick={() => saveAdditionalQuotaPolicy(draft.additionalQuotaKey, draft.additionalQuotaPolicy)}
                 >
                   Save policy
                 </Button>
@@ -426,9 +446,9 @@ export function RoutingSettings({
                     min={0.1}
                     step={0.1}
                     inputMode="decimal"
-                    value={relativeAvailabilityPower}
+                    value={draft.relativeAvailabilityPower}
                     disabled={busy}
-                    onChange={(event) => setRelativeAvailabilityPower(event.target.value)}
+                    onChange={(event) => updateDraft({ relativeAvailabilityPower: event.target.value })}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && relativeAvailabilityPowerChanged) {
                         void save({ relativeAvailabilityPower: parsedRelativeAvailabilityPower });
@@ -464,9 +484,9 @@ export function RoutingSettings({
                     max={20}
                     step={1}
                     inputMode="numeric"
-                    value={relativeAvailabilityTopK}
+                    value={draft.relativeAvailabilityTopK}
                     disabled={busy}
-                    onChange={(event) => setRelativeAvailabilityTopK(event.target.value)}
+                    onChange={(event) => updateDraft({ relativeAvailabilityTopK: event.target.value })}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && relativeAvailabilityTopKChanged) {
                         void save({ relativeAvailabilityTopK: parsedRelativeAvailabilityTopK });
@@ -553,9 +573,9 @@ export function RoutingSettings({
                 max={100}
                 step={0.1}
                 inputMode="decimal"
-                value={stickyPrimaryThreshold}
+                value={draft.stickyPrimaryThreshold}
                 disabled={busy}
-                onChange={(event) => setStickyPrimaryThreshold(event.target.value)}
+                onChange={(event) => updateDraft({ stickyPrimaryThreshold: event.target.value })}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && stickyPrimaryThresholdChanged) {
                     void save({
@@ -595,9 +615,9 @@ export function RoutingSettings({
                 max={100}
                 step={0.1}
                 inputMode="decimal"
-                value={stickySecondaryThreshold}
+                value={draft.stickySecondaryThreshold}
                 disabled={busy}
-                onChange={(event) => setStickySecondaryThreshold(event.target.value)}
+                onChange={(event) => updateDraft({ stickySecondaryThreshold: event.target.value })}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && stickySecondaryThresholdChanged) {
                     void save({
@@ -710,10 +730,10 @@ export function RoutingSettings({
                 </SelectContent>
               </Select>
               <Input
-                value={limitWarmupModel}
+                value={draft.limitWarmupModel}
                 disabled={busy}
                 maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
-                onChange={(event) => setLimitWarmupModel(event.target.value)}
+                onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
                 className="h-8 text-xs"
                 aria-label="Warm-up model"
               />
@@ -722,19 +742,19 @@ export function RoutingSettings({
                 min={60}
                 step={60}
                 inputMode="numeric"
-                value={limitWarmupCooldown}
+                value={draft.limitWarmupCooldown}
                 disabled={busy}
-                onChange={(event) => setLimitWarmupCooldown(event.target.value)}
+                onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
                 className="h-8 text-xs"
                 aria-label="Warm-up cooldown"
               />
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
-                value={limitWarmupPrompt}
+                value={draft.limitWarmupPrompt}
                 disabled={busy}
                 maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
-                onChange={(event) => setLimitWarmupPrompt(event.target.value)}
+                onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
                 className="h-8 text-xs"
                 aria-label="Warm-up prompt"
               />
@@ -746,8 +766,8 @@ export function RoutingSettings({
                 disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
                 onClick={() =>
                   void save({
-                    limitWarmupModel: limitWarmupModel.trim(),
-                    limitWarmupPrompt: limitWarmupPrompt.trim(),
+                    limitWarmupModel: draft.limitWarmupModel.trim(),
+                    limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
                     limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
                   })
                 }
@@ -771,9 +791,9 @@ export function RoutingSettings({
                 min={1}
                 step={1}
                 inputMode="numeric"
-                value={cacheAffinityTtl}
+                value={draft.cacheAffinityTtl}
                 disabled={busy}
-                onChange={(event) => setCacheAffinityTtl(event.target.value)}
+                onChange={(event) => updateDraft({ cacheAffinityTtl: event.target.value })}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && cacheAffinityTtlChanged) {
                     void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });

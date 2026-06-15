@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "recharts";
+import { useMemo, useRef, useState } from "react";
+import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
 import { formatCurrency } from "@/utils/formatters";
@@ -77,16 +77,16 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
     return { chartData: data, legendItems: items };
   }, [accountCosts, totalCostUsd, isDark, consumedColor]);
 
-  useEffect(() => {
-    if (!activeLegendId) {
+  const setActiveLegend = (legendId: string | null) => {
+    setActiveLegendId(legendId);
+    if (legendId === null) {
       return;
     }
-
-    const legendNode = legendRefs.current[activeLegendId];
+    const legendNode = legendRefs.current[legendId];
     if (typeof legendNode?.scrollIntoView === "function") {
       legendNode.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
-  }, [activeLegendId]);
+  };
 
   const renderDonutShape = (props: PieSectorShapeProps) => {
     const isHighlighted = props.isActive || (props.payload as DonutDatum | undefined)?.id === activeLegendId;
@@ -131,14 +131,14 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
                 isAnimationActive={!reducedMotion}
                 animationDuration={600}
                 animationEasing="ease-out"
-                onMouseEnter={(data) => {
+                onMouseEnter={(data: { payload?: DonutDatum }) => {
                   const datum = data.payload as DonutDatum | undefined;
                   if (typeof datum?.id === "string") {
-                    setActiveLegendId(datum.id);
+                    setActiveLegend(datum.id);
                   }
                 }}
-                onMouseLeave={() => setActiveLegendId(null)}
-                onMouseOut={() => setActiveLegendId(null)}
+                onMouseLeave={() => setActiveLegend(null)}
+                onMouseOut={() => setActiveLegend(null)}
               >
                 {chartData.map((entry) => (
                   <Cell key={entry.id} fill={entry.fill} />
@@ -171,10 +171,10 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
                   key={item.id}
                   className="animate-fade-in-up flex h-7 w-full items-center justify-between px-1.5 gap-3 rounded-lg border bg-transparent text-xs transition-all"
                   style={{ animationDelay: `${i * 75}ms`, borderColor: isActive ? item.color : "transparent" }}
-                  onMouseEnter={() => setActiveLegendId(item.id)}
-                  onMouseLeave={() => setActiveLegendId(null)}
-                  onFocus={() => setActiveLegendId(item.id)}
-                  onBlur={() => setActiveLegendId(null)}
+                  onMouseEnter={() => setActiveLegend(item.id)}
+                  onMouseLeave={() => setActiveLegend(null)}
+                  onFocus={() => setActiveLegend(item.id)}
+                  onBlur={() => setActiveLegend(null)}
                   data-active={isActive ? "true" : "false"}
                   data-testid={`account-cost-legend-${i}`}
                 >

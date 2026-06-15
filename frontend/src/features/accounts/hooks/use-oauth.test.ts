@@ -61,7 +61,9 @@ describe("useOauth", () => {
       intervalSeconds: 5,
       expiresInSeconds: 600,
     });
-    completeOauthMock.mockResolvedValue({ status: "pending" });
+    completeOauthMock
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "success" });
 
     const { result } = renderUseOauth();
 
@@ -161,6 +163,7 @@ describe("useOauth", () => {
       status: "success",
       errorMessage: null,
     });
+    completeOauthMock.mockResolvedValue({ status: "success" });
 
     const { queryClient, result } = renderUseOauth();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

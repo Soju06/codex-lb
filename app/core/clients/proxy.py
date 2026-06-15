@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -98,6 +99,7 @@ _SSE_EVENT_TYPE_ALIASES = {
     "response.audio.delta": "response.output_audio.delta",
     "response.audio_transcript.delta": "response.output_audio_transcript.delta",
 }
+_SSE_LINE_BOUNDARY_RE = re.compile(r"\r\n|\r|\n")
 _RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
     {
         "response.completed",
@@ -1029,12 +1031,16 @@ def _normalize_sse_event_block(event_block: str) -> str:
         line_separator = "\n"
         terminator = "\n\n"
         body = event_block[: -len(terminator)]
+    elif event_block.endswith("\r\r"):
+        line_separator = "\r"
+        terminator = "\r\r"
+        body = event_block[: -len(terminator)]
     else:
         line_separator = "\r\n" if "\r\n" in event_block else "\n"
         terminator = ""
         body = event_block
 
-    lines = body.splitlines()
+    lines = _SSE_LINE_BOUNDARY_RE.split(body)
     if not lines:
         return event_block
 

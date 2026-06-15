@@ -2013,6 +2013,27 @@ def test_normalize_sse_event_block_rewrites_response_text_alias():
     assert normalized.endswith("\n\n")
 
 
+def test_normalize_sse_event_block_rewrites_response_text_alias_with_cr_only_terminator():
+    block = 'data: {"type":"response.text.delta","delta":"hi"}\r\r'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert '"type":"response.output_text.delta"' in normalized
+    assert normalized.endswith("\r\r")
+    assert not normalized.endswith("\n")
+
+
+def test_normalize_sse_event_block_preserves_unicode_line_separator_in_alias_payload():
+    payload = {"type": "response.text.delta", "delta": "a\u2028b"}
+    block = "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\r\r"
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert '"type":"response.output_text.delta"' in normalized
+    assert '"delta":"a\\u2028b"' in normalized
+    assert normalized.endswith("\r\r")
+
+
 def test_find_sse_separator_prefers_earliest_separator():
     buffer = b"event: one\n\ndata: two\r\n\r\n"
 

@@ -509,6 +509,20 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
     assert blocked.status_code == 401
     assert blocked.json()["error"]["code"] == "proxy_auth_required"
 
+    configured_password = await async_client.post(
+        "/api/dashboard-auth/guest/password",
+        json={"password": "guest-password-123"},
+        headers=proxy_headers,
+    )
+    assert configured_password.status_code == 200
+
+    blocked_password_login = await async_client.post(
+        "/api/dashboard-auth/guest/login",
+        json={"password": "guest-password-123"},
+    )
+    assert blocked_password_login.status_code == 401
+    assert blocked_password_login.json()["error"]["code"] == "proxy_auth_required"
+
 
 @pytest.mark.asyncio
 async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_header_when_fallback_exists(

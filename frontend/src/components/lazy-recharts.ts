@@ -1,6 +1,7 @@
 import { createElement, lazy, Suspense, type ComponentType } from "react";
 
 type RechartsModule = typeof import("recharts");
+type LazyRechartsWrapper = ComponentType<Record<string, unknown>> & { displayName: string };
 
 function lazyRechartsComponent(name: keyof RechartsModule) {
   const LazyComponent = lazy(async () => {
@@ -8,13 +9,17 @@ function lazyRechartsComponent(name: keyof RechartsModule) {
     return { default: module[name] as ComponentType<unknown> };
   });
 
-  return function LazyRechartsComponent(props: Record<string, unknown>) {
+  const LazyRechartsComponent: LazyRechartsWrapper = (props: Record<string, unknown>) => {
     return createElement(
       Suspense,
       { fallback: null },
       createElement(LazyComponent, props),
     );
   };
+
+  LazyRechartsComponent.displayName = String(name);
+
+  return LazyRechartsComponent;
 }
 
 export const Area = lazyRechartsComponent("Area");

@@ -10,9 +10,9 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
-    "doctor": "react-doctor --scope full --no-score --blocking none .",
-    "doctor:score": "react-doctor --scope full --blocking none --score .",
-    "doctor:changed": "react-doctor --scope changed --base origin/main --no-score --blocking none .",
+    "doctor": "react-doctor . --diff false --no-score --blocking none",
+    "doctor:score": "react-doctor . --diff false --blocking none --score",
+    "doctor:changed": "react-doctor . --diff origin/main --no-score --blocking none",
     "typecheck": "tsc -b",
     "preview": "vite preview",
     "screenshots": "npx playwright test --config screenshots/playwright.config.ts"

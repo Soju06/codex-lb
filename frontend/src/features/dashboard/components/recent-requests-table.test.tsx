@@ -91,7 +91,7 @@ describe("RecentRequestsTable", () => {
              planType: "plus",
              status: "active",
              limitWarmupEnabled: false,
-             additionalQuotas: [],
+             additionalQuotas: [], availableResetCount: 0,
            },
          ]}
         requests={[

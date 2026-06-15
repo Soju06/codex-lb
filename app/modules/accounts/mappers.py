@@ -37,6 +37,7 @@ def build_account_summaries(
     request_usage_by_account: dict[str, AccountRequestUsage] | None = None,
     additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] | None = None,
     limit_warmups_by_account: dict[str, AccountLimitWarmup] | None = None,
+    available_reset_counts_by_account: dict[str, int] | None = None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> list[AccountSummary]:
@@ -50,6 +51,7 @@ def build_account_summaries(
             request_usage_by_account.get(account.id) if request_usage_by_account else None,
             additional_quotas_by_account.get(account.id) if additional_quotas_by_account else None,
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
+            (available_reset_counts_by_account or {}).get(account.id, 0),
             encryptor,
             include_auth=include_auth,
             is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
@@ -96,6 +98,7 @@ def _account_to_summary(
     request_usage: AccountRequestUsage | None,
     additional_quotas: list[AccountAdditionalQuota] | None,
     limit_warmup: AccountLimitWarmup | None,
+    available_reset_count: int,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
     is_email_duplicate: bool = False,
@@ -261,6 +264,7 @@ def _account_to_summary(
         limit_warmup_enabled=bool(account.limit_warmup_enabled),
         limit_warmup=_limit_warmup_to_status(limit_warmup),
         is_email_duplicate=is_email_duplicate,
+        available_reset_count=available_reset_count,
     )
 
 

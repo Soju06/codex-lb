@@ -131,6 +131,34 @@ class Account(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    rate_limit_reset_credits: Mapped[list["AccountRateLimitResetCredit"]] = relationship(
+        "AccountRateLimitResetCredit",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+
+class AccountRateLimitResetCredit(Base):
+    __tablename__ = "account_rate_limit_reset_credits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    redeemed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    account: Mapped[Account] = relationship("Account", back_populates="rate_limit_reset_credits")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "credit_id",
+            name="uq_account_rate_limit_reset_credits_account_credit",
+        ),
+    )
 
 
 class UsageHistory(Base):
@@ -1036,6 +1064,15 @@ Index(
     UsageHistory.id.desc(),
 )
 Index("idx_accounts_email", Account.email)
+Index("idx_account_rate_limit_reset_credits_account_id", AccountRateLimitResetCredit.account_id)
+Index("idx_account_rate_limit_reset_credits_status", AccountRateLimitResetCredit.status)
+Index("idx_account_rate_limit_reset_credits_expires_at", AccountRateLimitResetCredit.expires_at)
+Index(
+    "idx_account_rate_limit_reset_credits_account_status_expires_at",
+    AccountRateLimitResetCredit.account_id,
+    AccountRateLimitResetCredit.status,
+    AccountRateLimitResetCredit.expires_at,
+)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())

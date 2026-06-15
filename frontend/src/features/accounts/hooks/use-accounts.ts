@@ -216,3 +216,18 @@ export function useAccounts() {
 
   return { accountsQuery, ...mutations };
 }
+
+/**
+ * Read-only access to the accounts list query. Shares the `["accounts", "list"]`
+ * cache key with {@link useAccounts} so consumers (e.g. the header badge) get
+ * deduplicated data without instantiating mutation hooks.
+ */
+export function useAccountsListQuery() {
+  return useQuery({
+    queryKey: ["accounts", "list"],
+    queryFn: listAccounts,
+    select: (data) => data.accounts,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+}

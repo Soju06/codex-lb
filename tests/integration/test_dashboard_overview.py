@@ -10,7 +10,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountRateLimitResetCreditRecord, AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -73,6 +73,34 @@ def test_weekly_credit_pace_timing_treats_naive_reset_as_utc():
 
     assert timing is not None
     assert timing[2] == pytest.approx(naive_utc_to_epoch(reset_at) * 1000.0)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_exposes_available_reset_count(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+    future = now + timedelta(days=30)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_credit", "credit@example.com"))
+        await accounts_repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_credit",
+                    credit_id="credit_one",
+                    status="available",
+                    granted_at=now,
+                    expires_at=future,
+                    redeemed_at=None,
+                ),
+            ]
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+    account = next(a for a in payload["accounts"] if a["accountId"] == "acc_credit")
+    assert account["availableResetCount"] == 1
 
 
 @pytest.mark.asyncio

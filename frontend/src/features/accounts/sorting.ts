@@ -2,13 +2,14 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 import type { AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { parseDate } from "@/utils/formatters";
 
-export type AccountSortMode = "reset_soonest" | "reset_latest" | "name_asc" | "name_desc";
+export type AccountSortMode = "reset_soonest" | "reset_latest" | "name_asc" | "name_desc" | "available_resets";
 
 export const ACCOUNT_SORT_OPTIONS: readonly { value: AccountSortMode; label: string }[] = [
   { value: "reset_soonest", label: "Reset time (soonest)" },
   { value: "reset_latest", label: "Reset time (latest)" },
   { value: "name_asc", label: "Name (A-Z)" },
   { value: "name_desc", label: "Name (Z-A)" },
+  { value: "available_resets", label: "Available resets" },
 ] as const;
 
 export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "reset_soonest";
@@ -58,7 +59,13 @@ export function sortAccountsForDisplay(
   return accounts
     .slice()
     .sort((left, right) => {
-      if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
+      if (sortMode === "available_resets") {
+        const leftResets = left.availableResetCount ?? 0;
+        const rightResets = right.availableResetCount ?? 0;
+        if (leftResets !== rightResets) {
+          return rightResets - leftResets;
+        }
+      } else if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
         const leftReset = accountResetTimestamp(left, quotaDisplay);
         const rightReset = accountResetTimestamp(right, quotaDisplay);
         const resetComparison = compareResetTimestamps(

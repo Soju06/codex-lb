@@ -215,4 +215,21 @@ describe("AccountList", () => {
 
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
   });
+
+  it("renders a Resets column with the available reset count", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-1",
+            displayName: "Reset Account",
+            availableResetCount: 2,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Resets")).toBeInTheDocument();
+    expect(screen.getByTestId("account-list-resets")).toHaveTextContent("2");
+  });
 });

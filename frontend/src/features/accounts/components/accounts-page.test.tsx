@@ -63,6 +63,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     status: "active",
     additionalQuotas: [],
     limitWarmupEnabled: false,
+    availableResetCount: 0,
     ...overrides,
   };
 }

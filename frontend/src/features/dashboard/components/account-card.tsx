@@ -126,7 +126,18 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             </p>
           ) : null}
         </div>
-        <StatusBadge status={status} />
+        <div className="flex items-center gap-2">
+          {account.availableResetCount > 0 ? (
+            <span
+              data-testid="available-reset-badge"
+              aria-label={`${account.availableResetCount} rate-limit resets available`}
+              className="flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
+            >
+              {account.availableResetCount}
+            </span>
+          ) : null}
+          <StatusBadge status={status} />
+        </div>
       </div>
 
       {/* Quota bars */}

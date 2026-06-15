@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
+import { useAccountsListQuery } from "@/features/accounts/hooks/use-accounts";
 import { ApisPage } from "@/features/apis/components/apis-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { ReportsPage } from "@/features/reports/components/reports-page";
@@ -21,6 +22,11 @@ function AppLayout() {
   const startAdminLogin = useAuthStore((state) => state.startAdminLogin);
   const timeFormat = useTimeFormatStore((state) => state.timeFormat);
   const isGuest = role === "guest";
+  const accounts = useAccountsListQuery().data;
+  const availableResetCount = (accounts ?? []).reduce(
+    (total, account) => total + (account.availableResetCount ?? 0),
+    0,
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-background pb-10" data-time-format={timeFormat}>
@@ -31,6 +37,7 @@ function AppLayout() {
         onAdminLogin={startAdminLogin}
         showAdminLogin={isGuest && passwordRequired}
         showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
+        availableResetCount={availableResetCount}
       />
       <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
         <Outlet />

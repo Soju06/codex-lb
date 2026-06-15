@@ -5,6 +5,7 @@ import {
   Play,
   RefreshCw,
   Route,
+  RotateCcw,
   ShieldCheck,
   Trash2,
   Zap,
@@ -189,6 +190,18 @@ export function AccountActions({
         >
           <Download className="h-3.5 w-3.5" />
           Export
+        </Button>
+
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          disabled
+          title="Reset rate-limit credits"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Reset ({account.availableResetCount ?? 0})
         </Button>
 
         <Button

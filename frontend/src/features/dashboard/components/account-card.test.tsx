@@ -108,4 +108,20 @@ describe("AccountCard", () => {
 
     expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
   });
+
+  it("shows an available reset badge when reset count is greater than zero", () => {
+    const account = createAccountSummary({ availableResetCount: 4 });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByTestId("available-reset-badge")).toHaveTextContent("4");
+  });
+
+  it("hides the available reset badge when no resets are available", () => {
+    const account = createAccountSummary({ availableResetCount: 0 });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.queryByTestId("available-reset-badge")).not.toBeInTheDocument();
+  });
 });

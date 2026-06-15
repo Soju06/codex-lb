@@ -115,6 +115,7 @@ class AccountSummary(DashboardModel):
     # surface a "delete older" action without requiring the operator to
     # group rows by email themselves. See codex-lb #787 (B).
     is_email_duplicate: bool = False
+    available_reset_count: int = 0
 
 
 class AccountsResponse(DashboardModel):

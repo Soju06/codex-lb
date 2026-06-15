@@ -31,7 +31,7 @@ describe("AccountList", () => {
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-2",
@@ -40,7 +40,7 @@ describe("AccountList", () => {
             planType: "pro",
             status: "paused",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId="acc-1"
@@ -85,7 +85,7 @@ describe("AccountList", () => {
             resetAtSecondary: "2026-01-01T13:00:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-visible-early",
@@ -102,7 +102,7 @@ describe("AccountList", () => {
             resetAtSecondary: "2026-01-01T12:10:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -138,7 +138,7 @@ describe("AccountList", () => {
             resetAtSecondary: "2026-01-01T11:45:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-fresh",
@@ -155,7 +155,7 @@ describe("AccountList", () => {
             resetAtSecondary: "2026-01-01T12:20:00.000Z",
             windowMinutesPrimary: 300,
             windowMinutesSecondary: 10_080,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -189,7 +189,7 @@ describe("AccountList", () => {
             resetAtSecondary: null,
             windowMinutesPrimary: null,
             windowMinutesSecondary: null,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-early",
@@ -206,7 +206,7 @@ describe("AccountList", () => {
             resetAtSecondary: null,
             windowMinutesPrimary: null,
             windowMinutesSecondary: null,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -233,7 +233,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:30:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-a",
@@ -243,7 +243,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -273,7 +273,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-a",
@@ -283,7 +283,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:20:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -313,7 +313,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-z",
@@ -323,7 +323,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:40:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -352,7 +352,7 @@ describe("AccountList", () => {
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-stale",
@@ -362,7 +362,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T11:30:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-latest",
@@ -372,7 +372,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:40:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-earlier",
@@ -382,7 +382,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -415,7 +415,7 @@ describe("AccountList", () => {
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -443,7 +443,7 @@ describe("AccountList", () => {
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -472,7 +472,7 @@ describe("AccountList", () => {
             planType: "plus",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-reauth",
@@ -481,7 +481,7 @@ describe("AccountList", () => {
             planType: "pro",
             status: "reauth_required",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}
@@ -510,7 +510,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             isEmailDuplicate: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "7f9de2ad-7621-4a6f-88bc-ec7f3d914701_91a95cee",
@@ -520,7 +520,7 @@ describe("AccountList", () => {
             status: "active",
             limitWarmupEnabled: false,
             isEmailDuplicate: true,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
           {
             accountId: "acc-3",
@@ -529,7 +529,7 @@ describe("AccountList", () => {
             planType: "pro",
             status: "active",
             limitWarmupEnabled: false,
-            additionalQuotas: [],
+            additionalQuotas: [], availableResetCount: 0,
           },
         ]}
         selectedAccountId={null}

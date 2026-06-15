@@ -12,6 +12,7 @@ from app.core.usage import capacity_for_plan
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.reset_credit_updater import ResetCreditUpdater
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -105,7 +106,9 @@ class UsageRefreshScheduler:
                     before_primary = await usage_repo.latest_by_account(window="primary")
                     before_secondary = await usage_repo.latest_by_account(window="secondary")
                     accounts = await accounts_repo.list_accounts()
+                    reset_credit_updater = ResetCreditUpdater(accounts_repo)
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
+                    await reset_credit_updater.refresh_accounts(accounts)
                     usage_written = await updater.refresh_accounts(accounts, before_primary)
                     if usage_written:
                         after_primary = await usage_repo.latest_by_account(window="primary")

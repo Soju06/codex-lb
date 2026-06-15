@@ -151,4 +151,49 @@ describe("AccountActions", () => {
 
     expect(onProbe).not.toHaveBeenCalled();
   });
+
+  it("renders a disabled reset button with the available reset count", () => {
+    const account = createAccountSummary({ availableResetCount: 3 });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: /Reset \(3\)/ });
+    expect(resetButton).toBeDisabled();
+  });
+
+  it("disables the reset button when no resets are available", () => {
+    const account = createAccountSummary({ availableResetCount: 0 });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Reset \(0\)/ })).toBeDisabled();
+  });
 });

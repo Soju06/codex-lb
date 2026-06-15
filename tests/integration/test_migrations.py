@@ -870,3 +870,63 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
 
     assert free_windows == ["old-primary", "old-secondary", "old-primary"]
     assert paid_windows == ["primary", "secondary", None]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_reset_credit_migration_adds_expected_table_shape(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'rate-limit-reset-credits.sqlite'}"
+
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads",
+            bootstrap_legacy=True,
+        )
+    )
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            table_exists = (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM sqlite_master "
+                        "WHERE type='table' AND name='account_rate_limit_reset_credits'"
+                    )
+                )
+            ).scalar_one()
+            assert table_exists == 1
+
+            fk_rows = (
+                await session.execute(text("PRAGMA foreign_key_list(account_rate_limit_reset_credits)"))
+            ).fetchall()
+            fk_actions = {
+                (str(row[2]).lower(), str(row[3]).lower(), str(row[4]).lower(), str(row[6]).lower())
+                for row in fk_rows
+                if len(row) > 6
+            }
+            assert ("accounts", "account_id", "id", "cascade") in fk_actions
+
+            index_rows = (
+                await session.execute(text("PRAGMA index_list(account_rate_limit_reset_credits)"))
+            ).fetchall()
+            index_specs: dict[str, tuple[bool, list[str]]] = {}
+            for row in index_rows:
+                if len(row) < 3:
+                    continue
+                index_name = str(row[1])
+                escaped_name = index_name.replace('"', '""')
+                column_rows = (await session.execute(text(f'PRAGMA index_info("{escaped_name}")'))).fetchall()
+                columns = [str(column_row[2]) for column_row in column_rows if len(column_row) > 2]
+                index_specs[index_name] = (bool(row[2]), columns)
+
+    finally:
+        await engine.dispose()
+
+    assert any(unique and columns == ["account_id", "credit_id"] for unique, columns in index_specs.values())
+    assert any(columns == ["account_id"] for _, columns in index_specs.values())
+    assert any(columns == ["status"] for _, columns in index_specs.values())
+    assert any(columns == ["expires_at"] for _, columns in index_specs.values())
+    assert any(columns == ["account_id", "status", "expires_at"] for _, columns in index_specs.values())

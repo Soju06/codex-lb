@@ -21,14 +21,31 @@ export type AppHeaderProps = {
   onAdminLogin?: () => void;
   showAdminLogin?: boolean;
   showLogout?: boolean;
+  availableResetCount?: number;
   className?: string;
 };
+
+function NavResetBadge({ count }: { count: number }) {
+  if (count <= 0) {
+    return null;
+  }
+  return (
+    <span
+      data-testid="nav-reset-badge"
+      aria-label={`${count} rate-limit resets available`}
+      className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none tabular-nums text-primary-foreground"
+    >
+      {count}
+    </span>
+  );
+}
 
 export function AppHeader({
   onLogout,
   onAdminLogin,
   showAdminLogin = false,
   showLogout = true,
+  availableResetCount = 0,
   className,
 }: AppHeaderProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -70,6 +87,7 @@ export function AppHeader({
               }
             >
               {item.label}
+              {item.to === "/accounts" ? <NavResetBadge count={availableResetCount} /> : null}
             </NavLink>
           ))}
         </nav>
@@ -140,6 +158,7 @@ export function AppHeader({
                         )}
                       >
                         {item.label}
+                        {item.to === "/accounts" ? <NavResetBadge count={availableResetCount} /> : null}
                       </span>
                     )}
                   </NavLink>

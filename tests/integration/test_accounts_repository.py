@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ClauseElement
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountRateLimitResetCredit, AccountStatus
 from app.db.session import SessionLocal
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountRateLimitResetCreditRecord, AccountsRepository
 
 
 def _account(
@@ -258,3 +262,321 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
         ("triton_workspace", "Triton"),
         ("atlas_workspace", "Atlas"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_insert_rate_limit_reset_credits_if_missing_keeps_existing_rows(db_setup):
+    del db_setup
+    granted_at = utcnow() - timedelta(days=2)
+    first_expires_at = utcnow() + timedelta(days=7)
+    duplicate_expires_at = utcnow() + timedelta(days=14)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_credit"))
+
+        inserted = await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_credit",
+                    credit_id="credit_one",
+                    status="available",
+                    granted_at=granted_at,
+                    expires_at=first_expires_at,
+                    redeemed_at=None,
+                )
+            ]
+        )
+        assert inserted == 1
+
+        inserted_again = await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_credit",
+                    credit_id="credit_one",
+                    status="expired",
+                    granted_at=granted_at + timedelta(days=1),
+                    expires_at=duplicate_expires_at,
+                    redeemed_at=granted_at + timedelta(days=3),
+                ),
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_credit",
+                    credit_id="credit_two",
+                    status="available",
+                    granted_at=granted_at,
+                    expires_at=duplicate_expires_at,
+                    redeemed_at=None,
+                ),
+            ]
+        )
+        assert inserted_again == 1
+
+        rows = (
+            await session.execute(
+                AccountRateLimitResetCredit.__table__.select().order_by(AccountRateLimitResetCredit.credit_id)
+            )
+        ).all()
+
+    assert len(rows) == 2
+    assert rows[0].credit_id == "credit_one"
+    assert rows[0].status == "available"
+    assert rows[0].granted_at == granted_at
+    assert rows[0].expires_at == first_expires_at
+    assert rows[0].redeemed_at is None
+    assert rows[1].credit_id == "credit_two"
+
+
+@pytest.mark.asyncio
+async def test_expire_rate_limit_reset_credits_and_count_available_by_account(db_setup):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_one"))
+        await repo.upsert(_account("acc_reset_two"))
+        await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_one",
+                    credit_id="credit_expired",
+                    status="available",
+                    granted_at=now - timedelta(days=3),
+                    expires_at=now - timedelta(minutes=1),
+                    redeemed_at=None,
+                ),
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_one",
+                    credit_id="credit_available",
+                    status="available",
+                    granted_at=now - timedelta(days=1),
+                    expires_at=now + timedelta(days=1),
+                    redeemed_at=None,
+                ),
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_two",
+                    credit_id="credit_unavailable",
+                    status="redeemed",
+                    granted_at=now - timedelta(days=1),
+                    expires_at=now + timedelta(days=1),
+                    redeemed_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+
+        counts_before_expiry = await repo.count_available_rate_limit_reset_credits_by_account(
+            ["acc_reset_one", "acc_reset_two"],
+            now=now,
+        )
+        expired = await repo.expire_rate_limit_reset_credits(now=now)
+        counts_after_expiry = await repo.count_available_rate_limit_reset_credits_by_account(
+            ["acc_reset_one", "acc_reset_two"],
+            now=now,
+        )
+        expired_row = await session.get(AccountRateLimitResetCredit, 1)
+
+    assert counts_before_expiry == {"acc_reset_one": 1}
+    assert expired == 1
+    assert counts_after_expiry == {"acc_reset_one": 1}
+    assert expired_row is not None
+    assert expired_row.credit_id == "credit_expired"
+    assert expired_row.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_reset_credit_at_expiry_boundary_stays_available_until_after_now(db_setup):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_boundary"))
+        await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="acc_reset_boundary",
+                    credit_id="credit_boundary",
+                    status="available",
+                    granted_at=now - timedelta(days=1),
+                    expires_at=now,
+                    redeemed_at=None,
+                )
+            ]
+        )
+
+        counts_at_boundary = await repo.count_available_rate_limit_reset_credits_by_account(
+            ["acc_reset_boundary"],
+            now=now,
+        )
+        expired_at_boundary = await repo.expire_rate_limit_reset_credits(now=now)
+        counts_after_boundary = await repo.count_available_rate_limit_reset_credits_by_account(
+            ["acc_reset_boundary"],
+            now=now + timedelta(microseconds=1),
+        )
+        expired_after_boundary = await repo.expire_rate_limit_reset_credits(now=now + timedelta(microseconds=1))
+        boundary_row = await session.get(AccountRateLimitResetCredit, 1)
+
+    assert counts_at_boundary == {"acc_reset_boundary": 1}
+    assert expired_at_boundary == 0
+    assert counts_after_boundary == {}
+    assert expired_after_boundary == 1
+    assert boundary_row is not None
+    assert boundary_row.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_insert_rate_limit_reset_credits_if_missing_handles_commit_time_duplicate_conflict(db_setup, monkeypatch):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_race"))
+        credit = AccountRateLimitResetCreditRecord(
+            account_id="acc_reset_race",
+            credit_id="credit_race",
+            status="available",
+            granted_at=now - timedelta(days=1),
+            expires_at=now + timedelta(days=1),
+            redeemed_at=None,
+        )
+
+        original_commit = session.commit
+        conflict_injected = False
+
+        async def commit_with_duplicate_conflict() -> None:
+            nonlocal conflict_injected
+            if conflict_injected:
+                await original_commit()
+                return
+
+            conflict_injected = True
+            async with SessionLocal() as competing_session:
+                competing_session.add(
+                    AccountRateLimitResetCredit(
+                        account_id=credit.account_id,
+                        credit_id=credit.credit_id,
+                        status=credit.status,
+                        granted_at=credit.granted_at,
+                        expires_at=credit.expires_at,
+                        redeemed_at=credit.redeemed_at,
+                    )
+                )
+                await competing_session.commit()
+            raise IntegrityError("INSERT", {}, Exception("duplicate"))
+
+        monkeypatch.setattr(session, "commit", commit_with_duplicate_conflict)
+
+        inserted = await repo.insert_rate_limit_reset_credits_if_missing([credit])
+        counts = await repo.count_available_rate_limit_reset_credits_by_account(["acc_reset_race"], now=now)
+        rows = (
+            await session.execute(
+                AccountRateLimitResetCredit.__table__.select().where(
+                    AccountRateLimitResetCredit.account_id == "acc_reset_race"
+                )
+            )
+        ).all()
+
+    assert inserted == 0
+    assert counts == {"acc_reset_race": 1}
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_insert_rate_limit_reset_credits_if_missing_retries_remaining_rows_after_mixed_batch_conflict(
+    db_setup, monkeypatch
+):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_mixed_race"))
+        conflicted_credit = AccountRateLimitResetCreditRecord(
+            account_id="acc_reset_mixed_race",
+            credit_id="credit_conflicted",
+            status="available",
+            granted_at=now - timedelta(days=2),
+            expires_at=now + timedelta(days=2),
+            redeemed_at=None,
+        )
+        remaining_credit = AccountRateLimitResetCreditRecord(
+            account_id="acc_reset_mixed_race",
+            credit_id="credit_remaining",
+            status="available",
+            granted_at=now - timedelta(days=1),
+            expires_at=now + timedelta(days=3),
+            redeemed_at=None,
+        )
+
+        original_commit = session.commit
+        conflict_injected = False
+
+        async def commit_with_mixed_batch_conflict() -> None:
+            nonlocal conflict_injected
+            if conflict_injected:
+                await original_commit()
+                return
+
+            conflict_injected = True
+            async with SessionLocal() as competing_session:
+                competing_session.add(
+                    AccountRateLimitResetCredit(
+                        account_id=conflicted_credit.account_id,
+                        credit_id=conflicted_credit.credit_id,
+                        status=conflicted_credit.status,
+                        granted_at=conflicted_credit.granted_at,
+                        expires_at=conflicted_credit.expires_at,
+                        redeemed_at=conflicted_credit.redeemed_at,
+                    )
+                )
+                await competing_session.commit()
+            raise IntegrityError("INSERT", {}, Exception("duplicate"))
+
+        monkeypatch.setattr(session, "commit", commit_with_mixed_batch_conflict)
+
+        inserted = await repo.insert_rate_limit_reset_credits_if_missing([conflicted_credit, remaining_credit])
+        counts = await repo.count_available_rate_limit_reset_credits_by_account(["acc_reset_mixed_race"], now=now)
+        rows = (
+            await session.execute(
+                AccountRateLimitResetCredit.__table__.select()
+                .where(AccountRateLimitResetCredit.account_id == "acc_reset_mixed_race")
+                .order_by(AccountRateLimitResetCredit.credit_id)
+            )
+        ).all()
+
+    assert inserted == 1
+    assert counts == {"acc_reset_mixed_race": 2}
+    assert [row.credit_id for row in rows] == ["credit_conflicted", "credit_remaining"]
+
+
+@pytest.mark.asyncio
+async def test_insert_rate_limit_reset_credits_if_missing_reraises_non_duplicate_integrity_error(db_setup, monkeypatch):
+    del db_setup
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("acc_reset_non_duplicate_error"))
+        credit = AccountRateLimitResetCreditRecord(
+            account_id="acc_reset_non_duplicate_error",
+            credit_id="credit_non_duplicate_error",
+            status="available",
+            granted_at=now - timedelta(days=1),
+            expires_at=now + timedelta(days=1),
+            redeemed_at=None,
+        )
+
+        original_execute = session.execute
+
+        async def execute_without_existing_pairs(statement: ClauseElement, *args: object, **kwargs: object):
+            return await original_execute(statement, *args, **kwargs)
+
+        async def commit_with_non_duplicate_integrity_error() -> None:
+            raise IntegrityError("INSERT", {}, Exception("not-a-duplicate"))
+
+        monkeypatch.setattr(session, "execute", execute_without_existing_pairs)
+        monkeypatch.setattr(session, "commit", commit_with_non_duplicate_integrity_error)
+
+        with pytest.raises(IntegrityError):
+            await repo.insert_rate_limit_reset_credits_if_missing([credit])

@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text, update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import delete, func, or_, select, text, tuple_, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AccountLimitWarmup,
+    AccountRateLimitResetCredit,
     AccountStatus,
     AdditionalUsageHistory,
     ApiKeyAccountAssignment,
@@ -37,6 +38,16 @@ class AccountRequestUsageSummary:
     total_tokens: int
     cached_input_tokens: int
     total_cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class AccountRateLimitResetCreditRecord:
+    account_id: str
+    credit_id: str
+    status: str
+    granted_at: datetime
+    expires_at: datetime
+    redeemed_at: datetime | None
 
 
 class AccountIdentityConflictError(Exception):
@@ -65,6 +76,128 @@ class AccountsRepository:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def insert_rate_limit_reset_credits_if_missing(
+        self,
+        credits: list[AccountRateLimitResetCreditRecord],
+    ) -> int:
+        if not credits:
+            return 0
+
+        pairs = {(credit.account_id, credit.credit_id) for credit in credits}
+        existing = await self._existing_rate_limit_reset_credit_pairs(pairs)
+
+        pending_credits: list[AccountRateLimitResetCreditRecord] = []
+        for credit in credits:
+            pair = (credit.account_id, credit.credit_id)
+            if pair in existing:
+                continue
+            existing.add(pair)
+            pending_credits.append(credit)
+
+        if not pending_credits:
+            return 0
+
+        while pending_credits:
+            rows_to_insert = [
+                AccountRateLimitResetCredit(
+                    account_id=credit.account_id,
+                    credit_id=credit.credit_id,
+                    status=credit.status,
+                    granted_at=credit.granted_at,
+                    expires_at=credit.expires_at,
+                    redeemed_at=credit.redeemed_at,
+                )
+                for credit in pending_credits
+            ]
+
+            async with sqlite_writer_section():
+                self._session.add_all(rows_to_insert)
+                conflict_error: IntegrityError | None = None
+                try:
+                    await self._session.commit()
+                except IntegrityError as exc:
+                    conflict_error = exc
+                    await self._session.rollback()
+                else:
+                    return len(rows_to_insert)
+
+            existing_after_conflict = await self._existing_rate_limit_reset_credit_pairs(
+                {(credit.account_id, credit.credit_id) for credit in pending_credits}
+            )
+            if not existing_after_conflict:
+                assert conflict_error is not None
+                raise conflict_error
+            pending_credits = [
+                credit
+                for credit in pending_credits
+                if (credit.account_id, credit.credit_id) not in existing_after_conflict
+            ]
+
+        return 0
+
+    async def _existing_rate_limit_reset_credit_pairs(self, pairs: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        if not pairs:
+            return set()
+
+        return {
+            (str(account_id), str(credit_id))
+            for account_id, credit_id in (
+                await self._session.execute(
+                    select(
+                        AccountRateLimitResetCredit.account_id,
+                        AccountRateLimitResetCredit.credit_id,
+                    ).where(
+                        tuple_(
+                            AccountRateLimitResetCredit.account_id,
+                            AccountRateLimitResetCredit.credit_id,
+                        ).in_(pairs)
+                    )
+                )
+            ).all()
+        }
+
+    async def expire_rate_limit_reset_credits(
+        self,
+        *,
+        now: datetime | None = None,
+        account_id: str | None = None,
+    ) -> int:
+        stmt = (
+            update(AccountRateLimitResetCredit)
+            .where(AccountRateLimitResetCredit.status == "available")
+            .where(AccountRateLimitResetCredit.expires_at < (now or utcnow()))
+            .values(status="expired")
+        )
+        if account_id is not None:
+            stmt = stmt.where(AccountRateLimitResetCredit.account_id == account_id)
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+
+        return int(result.rowcount or 0)
+
+    async def count_available_rate_limit_reset_credits_by_account(
+        self,
+        account_ids: list[str] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        stmt = (
+            select(
+                AccountRateLimitResetCredit.account_id,
+                func.count(AccountRateLimitResetCredit.id),
+            )
+            .where(AccountRateLimitResetCredit.status == "available")
+            .where(AccountRateLimitResetCredit.expires_at >= (now or utcnow()))
+            .group_by(AccountRateLimitResetCredit.account_id)
+        )
+        if account_ids:
+            stmt = stmt.where(AccountRateLimitResetCredit.account_id.in_(account_ids))
+
+        result = await self._session.execute(stmt)
+        return {str(account_id): int(count) for account_id, count in result.all()}
 
     async def list_request_usage_summary_by_account(
         self,

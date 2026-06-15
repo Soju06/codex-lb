@@ -70,6 +70,29 @@ describe("AccountSummarySchema", () => {
 
     expect(parsed.routingPolicy).toBe("preserve");
   });
+
+  it("defaults availableResetCount to 0 and parses explicit counts", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+    });
+
+    expect(parsed.availableResetCount).toBe(0);
+
+    const withResets = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      availableResetCount: 3,
+    });
+
+    expect(withResets.availableResetCount).toBe(3);
+  });
 });
 
 describe("AccountAuthExportResponseSchema", () => {

@@ -39,6 +39,7 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     remainingCreditsMonthly: overrides.remainingCreditsMonthly ?? null,
     auth: overrides.auth ?? null,
     additionalQuotas: overrides.additionalQuotas ?? [],
+    availableResetCount: overrides.availableResetCount ?? 0,
     isEmailDuplicate: overrides.isEmailDuplicate,
   };
 }

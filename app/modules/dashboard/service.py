@@ -69,6 +69,9 @@ class DashboardService:
         secondary_usage = await self._repo.latest_usage_by_account("secondary")
         monthly_usage = await self._repo.latest_usage_by_account("monthly")
         limit_warmups_by_account = await self._repo.latest_limit_warmups_by_account(account_ids)
+        available_reset_counts_by_account = (
+            await self._repo.count_available_rate_limit_reset_credits_by_account(account_ids)
+        )
 
         account_summaries = sorted(
             build_account_summaries(
@@ -77,6 +80,7 @@ class DashboardService:
                 secondary_usage=secondary_usage,
                 monthly_usage=monthly_usage,
                 limit_warmups_by_account=limit_warmups_by_account,
+                available_reset_counts_by_account=available_reset_counts_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
             ),

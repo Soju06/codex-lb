@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -345,6 +346,66 @@ async def test_set_and_clear_account_alias(async_client):
     matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
     assert matched["alias"] is None
     assert matched["displayName"] == email
+
+
+@pytest.mark.asyncio
+async def test_list_accounts_exposes_available_reset_count(async_client):
+    from app.core.crypto import TokenEncryptor
+    from app.core.utils.time import utcnow
+    from app.db.models import Account, AccountStatus
+    from app.db.session import SessionLocal
+    from app.modules.accounts.repository import AccountRateLimitResetCreditRecord, AccountsRepository
+
+    encryptor = TokenEncryptor()
+
+    def _account(account_id: str, email: str, chatgpt_id: str) -> Account:
+        return Account(
+            id=account_id,
+            chatgpt_account_id=chatgpt_id,
+            email=email,
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+
+    now = utcnow()
+    future = now + timedelta(days=30)
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_account("credit-acct", "credit@example.com", "chatgpt_credit"))
+        await repo.insert_rate_limit_reset_credits_if_missing(
+            [
+                AccountRateLimitResetCreditRecord(
+                    account_id="credit-acct",
+                    credit_id="credit_one",
+                    status="available",
+                    granted_at=now,
+                    expires_at=future,
+                    redeemed_at=None,
+                ),
+                AccountRateLimitResetCreditRecord(
+                    account_id="credit-acct",
+                    credit_id="credit_two",
+                    status="available",
+                    granted_at=now,
+                    expires_at=future,
+                    redeemed_at=None,
+                ),
+            ]
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    matched = next(
+        (a for a in response.json()["accounts"] if a["accountId"] == "credit-acct"),
+        None,
+    )
+    assert matched is not None
+    assert matched["availableResetCount"] == 2
 
 
 @pytest.mark.asyncio

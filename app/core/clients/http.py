@@ -57,7 +57,7 @@ def _socks_proxy_url() -> str | None:
             continue
         val = os.environ.get(var, "").strip()
         lowered = val.lower()
-        if var in ("SOCKS_PROXY", "socks_proxy") and lowered.startswith(("http://", "https://")):
+        if var in ("SOCKS_PROXY", "socks_proxy") and lowered.startswith("http://"):
             val = f"socks5h://{val.split('://', 1)[1]}"
             lowered = val.lower()
         if lowered.startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
@@ -97,19 +97,20 @@ class HttpClientLease:
 
 async def _build_http_client() -> HttpClient:
     settings = get_settings()
+    ssl_context = _build_ssl_context()
     socks_url = _socks_proxy_url()
     if socks_url:
         connector = ProxyConnector.from_url(
             socks_url,
             limit=settings.http_connector_limit,
             limit_per_host=settings.http_connector_limit_per_host,
-            ssl=_build_ssl_context(),
+            ssl=ssl_context,
         )
     else:
         connector = aiohttp.TCPConnector(
             limit=settings.http_connector_limit,
             limit_per_host=settings.http_connector_limit_per_host,
-            ssl=_build_ssl_context(),
+            ssl=ssl_context,
         )
     session = aiohttp.ClientSession(
         connector=connector,
@@ -120,11 +121,11 @@ async def _build_http_client() -> HttpClient:
         if socks_url and settings.upstream_websocket_trust_env:
             ws_connector: aiohttp.TCPConnector | ProxyConnector = ProxyConnector.from_url(
                 socks_url,
-                ssl=_build_ssl_context(),
+                ssl=ssl_context,
             )
             ws_trust_env = False
         else:
-            ws_connector = aiohttp.TCPConnector(ssl=_build_ssl_context())
+            ws_connector = aiohttp.TCPConnector(ssl=ssl_context)
             ws_trust_env = settings.upstream_websocket_trust_env
         try:
             websocket_session = aiohttp.ClientSession(

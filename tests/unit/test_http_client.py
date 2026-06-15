@@ -83,7 +83,7 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     ):
         await http_module.init_http_client()
 
-    assert ssl_context_factory.call_count == 2
+    assert ssl_context_factory.call_count == 1
     assert tcp_connector_cls.call_args_list[0].kwargs == {
         "limit": 100,
         "limit_per_host": 50,
@@ -112,6 +112,13 @@ def test_socks_proxy_url_normalizes_http_scheme_for_socks_proxy_env() -> None:
     with patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True):
         url = http_module._socks_proxy_url()
     assert url == "socks5h://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_skips_http_proxy_when_request_method_set() -> None:
+    env = {"REQUEST_METHOD": "GET", "HTTP_PROXY": "socks5://proxy.example.com:1080"}
+    with patch.dict("os.environ", env, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url is None
 
 
 @pytest.mark.asyncio

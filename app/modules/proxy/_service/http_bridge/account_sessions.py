@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from app.modules.proxy._service.http_bridge.helpers import _extract_model_class, _log_http_bridge_event
+from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.support import _HTTPBridgeSession
 
 
 class _HTTPBridgeAccountSessionsMixin:
-    async def close_http_bridge_sessions_for_account(self, account_id: str) -> int:
+    async def close_http_bridge_sessions_for_account(self: _HTTPBridgeServiceProtocol, account_id: str) -> int:
         sessions_to_close: list[_HTTPBridgeSession] = []
         async with self._http_bridge_lock:
             for key, session in tuple(self._http_bridge_sessions.items()):

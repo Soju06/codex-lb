@@ -20,7 +20,11 @@ standard environment variables so operators can configure egress without code ch
   Additional behaviour:
   - Values are stripped of leading/trailing whitespace.
   - A bare `http://` scheme in `SOCKS_PROXY`/`socks_proxy` is normalised to
-    `socks5h://` (handles misconfigured env vars).
+    `socks5://` (handles misconfigured env vars while staying parseable by the
+    configured proxy connector).
+  - `socks5h://` and `socks4a://` are normalised to `socks5://` and `socks4://`
+    before building the connector because the installed parser rejects the
+    extended schemes.
   - `HTTP_PROXY`/`http_proxy` are skipped when `REQUEST_METHOD` is set in the
     environment (CGI/httpoxy security convention).
 - Modify `_build_http_client()`:

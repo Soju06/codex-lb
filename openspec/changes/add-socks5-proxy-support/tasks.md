@@ -9,9 +9,11 @@
     `HTTP_PROXY`, `all_proxy`, `https_proxy`, `http_proxy`.
   - Strip whitespace from each value before inspecting.
   - Skip `HTTP_PROXY`/`http_proxy` when `REQUEST_METHOD` is set (httpoxy guard).
-  - Normalise a bare `http://` scheme in `SOCKS_PROXY`/`socks_proxy` to `socks5h://`.
-  - Return the first value whose lowercased form starts with `socks5://`, `socks5h://`,
-    `socks4://`, or `socks4a://`; return `None` if none match.
+  - Normalise a bare `http://` scheme in `SOCKS_PROXY`/`socks_proxy` to `socks5://`.
+  - Normalise `socks5h://` and `socks4a://` to `socks5://` and `socks4://`
+    before passing the URL to `ProxyConnector`.
+  - Return the first value whose lowercased form starts with `socks5://`,
+    `socks5h://`, `socks4://`, or `socks4a://`; return `None` if none match.
 
 ## 3. HTTP client construction
 
@@ -36,7 +38,9 @@
   - `test_socks_proxy_url_strips_whitespace_from_env_value` — leading/trailing spaces
     are stripped before the scheme check and from the returned URL.
   - `test_socks_proxy_url_normalizes_http_scheme_for_socks_proxy_env` — `http://` scheme
-    in `socks_proxy` is normalised to `socks5h://`.
+    in `socks_proxy` is normalised to `socks5://`.
+  - Extended `socks5h://` and `socks4a://` schemes are normalised to connector-supported
+    `socks5://` and `socks4://` URLs.
   - `test_init_http_client_uses_proxy_connector_for_socks_url` — when a SOCKS env var is
     active, both sessions use `ProxyConnector` and `trust_env=False`.
 

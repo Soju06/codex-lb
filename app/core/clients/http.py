@@ -64,9 +64,9 @@ def _socks_proxy_url() -> str | None:
             # python-socks only accepts socks5://, socks4://, and http://; normalise
             # the extended variants (socks5h, socks4a) that it rejects.
             if lowered.startswith("socks5h://"):
-                val = "socks5://" + val[len("socks5h://"):]
+                val = "socks5://" + val[len("socks5h://") :]
             elif lowered.startswith("socks4a://"):
-                val = "socks4://" + val[len("socks4a://"):]
+                val = "socks4://" + val[len("socks4a://") :]
             return val
     return None
 

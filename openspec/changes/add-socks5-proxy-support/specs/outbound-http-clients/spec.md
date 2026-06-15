@@ -2,8 +2,9 @@
 
 ### Requirement: Outbound HTTP and WebSocket sessions transparently tunnel through a SOCKS proxy
 
-When any of the standard proxy environment variables carries a SOCKS URL, the
-outbound HTTP and WebSocket clients MUST use that proxy for all upstream connections.
+The outbound HTTP and WebSocket clients MUST use a configured SOCKS proxy for all
+upstream connections when any supported proxy environment variable carries a
+SOCKS URL.
 Configuring a SOCKS proxy MUST NOT require code changes — setting an environment
 variable MUST be sufficient.
 
@@ -50,12 +51,16 @@ first value that carries a SOCKS scheme:
 7. `https_proxy`
 8. `http_proxy`
 
-Accepted schemes: `socks5://`, `socks5h://`, `socks4://`, `socks4a://`.
+Accepted input schemes: `socks5://`, `socks5h://`, `socks4://`, `socks4a://`.
 
 Additional normalisation rules:
 - Values MUST be stripped of leading/trailing whitespace before inspection.
 - A bare `http://` scheme in `SOCKS_PROXY` or `socks_proxy` MUST be normalised
-  to `socks5h://` (accommodates misconfigured env vars).
+  to `socks5://` (accommodates misconfigured env vars while keeping the URL
+  parseable by the configured proxy connector).
+- `socks5h://` and `socks4a://` values MUST be normalised to `socks5://` and
+  `socks4://` before connector construction because the configured proxy parser
+  rejects the extended schemes.
 - `HTTP_PROXY` and `http_proxy` MUST be skipped when `REQUEST_METHOD` is set in
   the environment (httpoxy / CGI security convention).
 
@@ -69,7 +74,13 @@ Additional normalisation rules:
 
 - **GIVEN** `socks_proxy=http://gateway:1080`
 - **WHEN** the SOCKS URL is resolved
-- **THEN** the returned URL is `socks5h://gateway:1080`
+- **THEN** the returned URL is `socks5://gateway:1080`
+
+#### Scenario: Extended SOCKS schemes are normalised before connector use
+
+- **GIVEN** `SOCKS_PROXY=socks5h://gateway:1080`
+- **WHEN** the SOCKS URL is resolved
+- **THEN** the returned URL is `socks5://gateway:1080`
 
 #### Scenario: CGI environment skips `HTTP_PROXY`
 

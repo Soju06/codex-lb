@@ -111,7 +111,19 @@ def test_socks_proxy_url_strips_whitespace_from_env_value() -> None:
 def test_socks_proxy_url_normalizes_http_scheme_for_socks_proxy_env() -> None:
     with patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True):
         url = http_module._socks_proxy_url()
-    assert url == "socks5h://proxy.example.com:1080"
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_normalizes_socks5h_for_proxy_connector() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "socks5h://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks5://proxy.example.com:1080"
+
+
+def test_socks_proxy_url_normalizes_socks4a_for_proxy_connector() -> None:
+    with patch.dict("os.environ", {"SOCKS_PROXY": "socks4a://proxy.example.com:1080"}, clear=True):
+        url = http_module._socks_proxy_url()
+    assert url == "socks4://proxy.example.com:1080"
 
 
 def test_socks_proxy_url_skips_http_proxy_when_request_method_set() -> None:
@@ -147,7 +159,7 @@ async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
             side_effect=[http_session, websocket_session],
         ) as client_session_cls,
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
-        patch.dict("os.environ", {"socks_proxy": "socks5://proxy.example.com:1080"}, clear=True),
+        patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True),
     ):
         ws_proxy_connector = MagicMock()
         proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
@@ -156,6 +168,10 @@ async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
     assert client.session is http_session
     assert client.websocket_session is websocket_session
     assert proxy_connector_cls.from_url.call_count == 2
+    assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks5://proxy.example.com:1080",
+        "socks5://proxy.example.com:1080",
+    ]
     assert client_session_cls.call_args_list[0].kwargs["connector"] is proxy_connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is ws_proxy_connector
     # trust_env must be False for both sessions when SOCKS proxy is active (avoids double-proxying)

@@ -58,9 +58,15 @@ def _socks_proxy_url() -> str | None:
         val = os.environ.get(var, "").strip()
         lowered = val.lower()
         if var in ("SOCKS_PROXY", "socks_proxy") and lowered.startswith("http://"):
-            val = f"socks5h://{val.split('://', 1)[1]}"
+            val = f"socks5://{val.split('://', 1)[1]}"
             lowered = val.lower()
         if lowered.startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
+            # python-socks only accepts socks5://, socks4://, and http://; normalise
+            # the extended variants (socks5h, socks4a) that it rejects.
+            if lowered.startswith("socks5h://"):
+                val = "socks5://" + val[len("socks5h://"):]
+            elif lowered.startswith("socks4a://"):
+                val = "socks4://" + val[len("socks4a://"):]
             return val
     return None
 

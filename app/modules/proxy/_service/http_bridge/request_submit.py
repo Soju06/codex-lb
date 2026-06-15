@@ -180,6 +180,27 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
+    if not headers:
+        return "normal"
+    raw_turn_metadata = headers.get("x-codex-turn-metadata") or headers.get("X-Codex-Turn-Metadata")
+    if not isinstance(raw_turn_metadata, str):
+        return "normal"
+    try:
+        turn_metadata = json.loads(raw_turn_metadata)
+    except json.JSONDecodeError:
+        return "normal"
+    if not isinstance(turn_metadata, dict):
+        return "normal"
+    raw_request_kind = turn_metadata.get("request_kind")
+    if not isinstance(raw_request_kind, str):
+        return "normal"
+    request_kind = raw_request_kind.strip()
+    if request_kind in {"normal", "prewarm"}:
+        return request_kind
+    return "normal"
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -198,6 +219,7 @@ class _HTTPBridgeRequestSubmitMixin:
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
@@ -214,6 +236,7 @@ class _HTTPBridgeRequestSubmitMixin:
         attach_event_queue: bool,
         transport: str,
         client_metadata: Mapping[str, JsonValue] | None,
+        headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
         request_log_id: str | None = None,
@@ -266,6 +289,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            request_kind=_request_kind_from_headers(headers),
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count

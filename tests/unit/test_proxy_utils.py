@@ -11408,6 +11408,115 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_finalize_websocket_request_state_does_not_record_empty_prewarm_success(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_empty_prewarm")
+    record_success = AsyncMock()
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    completed_payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_empty_prewarm",
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+    completed_event = parse_sse_event(f"data: {json.dumps(completed_payload)}\n\n")
+    assert completed_event is not None
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_empty_prewarm",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        session_id="sid_empty_prewarm",
+    )
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=account,
+        account_id_value=account.id,
+        event=completed_event,
+        event_type="response.completed",
+        payload=completed_payload,
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    record_success.assert_not_awaited()
+    handle_stream_error.assert_not_awaited()
+    assert ("resp_ws_empty_prewarm", None, None) not in service._websocket_previous_response_account_index
+    assert (
+        "resp_ws_empty_prewarm",
+        None,
+        "sid_empty_prewarm",
+    ) not in service._websocket_previous_response_account_index
+    assert request_logs.calls[-1]["request_id"] == "resp_ws_empty_prewarm"
+    assert request_logs.calls[-1]["request_kind"] == "prewarm"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_update_continuity_for_empty_prewarm(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_empty_prewarm_continuity")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_visible_before_prewarm",
+        last_completed_input_prefix_fingerprint="visible_fingerprint",
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_empty_prewarm_continuity",
+        response_id="resp_ws_empty_prewarm_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        input_item_count=2,
+        input_full_fingerprint="prewarm_fingerprint",
+    )
+    pending_requests = deque([request_state])
+    upstream_payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_empty_prewarm_continuity",
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        },
+    }
+
+    await service._process_upstream_websocket_text(
+        json.dumps(upstream_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        continuity_state=continuity_state,
+    )
+
+    finalize_request_state.assert_awaited_once()
+    assert continuity_state.last_completed_response_id == "resp_visible_before_prewarm"
+    assert continuity_state.last_completed_input_count == 1
+    assert continuity_state.last_completed_input_prefix_fingerprint == "visible_fingerprint"
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_does_not_match_foreign_response_id_to_only_pending_request(
     monkeypatch,
 ):
@@ -14842,7 +14951,7 @@ def test_websocket_continuity_response_ids_include_replay_downstream_alias_once(
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch):
+async def test_process_upstream_websocket_text_retries_precreated_previous_response_not_found(monkeypatch, caplog):
     """A precreated retry-safe full-resend turn (with both
     ``fresh_upstream_request_is_retry_safe=True`` and
     ``fresh_upstream_request_text`` populated by the request-prep path) must
@@ -14884,6 +14993,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         awaiting_response_created=True,
         request_text=json.dumps(request_payload, separators=(",", ":")),
         previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
         fresh_upstream_request_text=json.dumps(fresh_request_payload, separators=(",", ":")),
         fresh_upstream_request_is_retry_safe=True,
         error_code_override="upstream_unavailable",
@@ -14933,6 +15043,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     assert pending_request.error_type_override is None
     assert pending_request.error_param_override is None
     assert pending_request.error_http_status_override is None
+    assert "continuity_fail_closed surface=websocket_stream reason=previous_response_not_found" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -20450,6 +20561,25 @@ def test_prepare_http_bridge_request_persists_useragent_on_request_state():
 
     assert request_state.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_state.useragent_group == "opencode"
+
+
+def test_prepare_response_bridge_request_state_preserves_codex_request_kind():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hello", "input": []})
+
+    request_state, _text_data = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport=proxy_service._REQUEST_TRANSPORT_WEBSOCKET,
+        client_metadata=None,
+        headers={"x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"})},
+    )
+
+    assert request_state.request_kind == "prewarm"
 
 
 @pytest.mark.asyncio

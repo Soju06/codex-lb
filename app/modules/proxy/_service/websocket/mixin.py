@@ -1221,6 +1221,7 @@ class _WebSocketMixin:
                 attach_event_queue=False,
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 client_metadata=client_metadata,
+                headers=headers,
                 session_id=session_id,
             )
         except ProxyResponseError:
@@ -2848,14 +2849,22 @@ class _WebSocketMixin:
             )
             if handled_auth_failure:
                 return text
-        event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
-            request_state=request_state,
-            event=event,
-            payload=payload,
-            event_type=event_type,
-            upstream_control=upstream_control,
-            original_text=text,
+        retry_safe_previous_response_not_found = (
+            retry_is_previous_response_not_found
+            and request_state.fresh_upstream_request_is_retry_safe
+            and bool(request_state.fresh_upstream_request_text)
         )
+        if retry_safe_previous_response_not_found:
+            downstream_text = text
+        else:
+            event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
+                request_state=request_state,
+                event=event,
+                payload=payload,
+                event_type=event_type,
+                upstream_control=upstream_control,
+                original_text=text,
+            )
         if retry_error_code is None:
             retry_error_code = _websocket_precreated_retry_error_code(
                 request_state,
@@ -2867,6 +2876,7 @@ class _WebSocketMixin:
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
+            and not retry_safe_previous_response_not_found
         ):
             await proxy._handle_stream_error(
                 account,
@@ -2916,7 +2926,16 @@ class _WebSocketMixin:
             if retry_error_code is not None:
                 return downstream_text
 
-        if event_type == "response.completed" and continuity_state is not None:
+        completed_usage = (
+            event.response.usage if event_type == "response.completed" and event and event.response else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+        if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
             _record_websocket_continuity_completion(
                 continuity_state,
                 request_state=request_state,
@@ -3228,7 +3247,15 @@ class _WebSocketMixin:
             error_message=error_message,
             error=error_payload,
         )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and request_state.request_kind == "prewarm"
+            and usage is not None
+            and usage.output_tokens == 0
+        )
         if event_type in {"response.failed", "response.incomplete", "error"}:
+            settlement.record_success = False
+        if completed_empty_prewarm:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(
@@ -3308,6 +3335,7 @@ class _WebSocketMixin:
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
                 useragent=request_state.useragent,
                 useragent_group=request_state.useragent_group,
+                request_kind=request_state.request_kind,
             )
 
     async def _write_websocket_connect_failure(
@@ -3348,6 +3376,7 @@ class _WebSocketMixin:
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
             useragent=request_state.useragent,
             useragent_group=request_state.useragent_group,
+            request_kind=request_state.request_kind,
         )
 
     async def _emit_websocket_connect_failure(
@@ -3548,6 +3577,7 @@ class _WebSocketMixin:
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
                 useragent=request_state.useragent,
                 useragent_group=request_state.useragent_group,
+                request_kind=request_state.request_kind,
             )
 
     async def _emit_websocket_terminal_error(

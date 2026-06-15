@@ -148,7 +148,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -178,7 +178,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -208,7 +208,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -238,7 +238,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -327,7 +327,7 @@ jobs:
 
       - name: Cache Bun dependencies
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -389,7 +389,7 @@ jobs:
 
       - name: Cache Bun dependencies
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -483,7 +483,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.bun/install/cache
@@ -577,7 +577,7 @@ jobs:
 
       - name: Cache kubeconform
         id: cache-kubeconform
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: .cache/ci-tools/kubeconform
           key: kubeconform-0.7.0-${{ runner.os }}-${{ runner.arch }}
@@ -625,7 +625,7 @@ jobs:
 
       - name: Cache kind
         id: cache-kind
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: .cache/ci-tools/kind
           key: kind-0.30.0-${{ runner.os }}-${{ runner.arch }}

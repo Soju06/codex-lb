@@ -1,4 +1,5 @@
 import { createElement, lazy, Suspense, type ComponentType } from "react";
+import { Cell as RechartsCell } from "recharts";
 
 type RechartsModule = typeof import("recharts");
 type LazyRechartsWrapper = ComponentType<Record<string, unknown>> & { displayName: string };
@@ -25,7 +26,7 @@ function lazyRechartsComponent(name: keyof RechartsModule) {
 export const Area = lazyRechartsComponent("Area");
 export const AreaChart = lazyRechartsComponent("AreaChart");
 export const CartesianGrid = lazyRechartsComponent("CartesianGrid");
-export const Cell = lazyRechartsComponent("Cell");
+export const Cell = RechartsCell;
 export const Line = lazyRechartsComponent("Line");
 export const Pie = lazyRechartsComponent("Pie");
 export const PieChart = lazyRechartsComponent("PieChart");

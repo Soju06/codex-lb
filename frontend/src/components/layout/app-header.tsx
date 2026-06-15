@@ -33,7 +33,7 @@ function NavResetBadge({ count }: { count: number }) {
     <span
       data-testid="nav-reset-badge"
       aria-label={`${count} rate-limit resets available`}
-      className="absolute -right-2 -top-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none tabular-nums text-primary-foreground ring-2 ring-background"
+      className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none tabular-nums text-primary-foreground"
     >
       {count}
     </span>
@@ -151,7 +151,7 @@ export function AppHeader({
                     {({ isActive }) => (
                       <span
                         className={cn(
-                          "relative block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                          "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
                           isActive
                             ? "bg-primary/10 text-primary"
                             : "text-muted-foreground hover:bg-muted hover:text-foreground",

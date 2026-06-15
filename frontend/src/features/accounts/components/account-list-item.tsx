@@ -78,7 +78,7 @@ export function AccountListItem({
       type="button"
       onClick={() => onSelect(account.accountId)}
       className={cn(
-        "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
+        "relative w-full rounded-lg px-3 py-2.5 text-left transition-colors",
         selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
@@ -108,6 +108,15 @@ export function AccountListItem({
         ) : null}
         <StatusBadge status={status} />
       </div>
+      {account.availableResetCount > 0 ? (
+        <span
+          data-testid="available-reset-badge"
+          aria-label={`${account.availableResetCount} rate-limit resets available`}
+          className="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground ring-2 ring-background"
+        >
+          {account.availableResetCount}
+        </span>
+      ) : null}
       <div
         className={cn(
           "mt-2 grid gap-2",

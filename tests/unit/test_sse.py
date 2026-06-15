@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 
 import pytest
 
-from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME, format_sse_event, inject_sse_keepalives
+from app.core.openai.parsing import parse_sse_event
+from app.core.utils.sse import (
+    CODEX_KEEPALIVE_FRAME,
+    SSE_KEEPALIVE_FRAME,
+    extract_sse_data,
+    format_sse_event,
+    inject_sse_keepalives,
+    parse_sse_data_json,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -66,3 +75,41 @@ async def test_inject_sse_keepalives_can_emit_codex_event_frame():
 async def test_inject_sse_keepalives_keepalive_frame_is_sse_comment():
     assert SSE_KEEPALIVE_FRAME.startswith(":")
     assert SSE_KEEPALIVE_FRAME.endswith("\n\n")
+
+
+def test_extract_sse_data_preserves_unicode_line_separators():
+    # U+2028 / U+2029 are valid *unescaped* inside JSON strings. The SSE spec
+    # delimits lines only by CR/LF/CRLF, so they must not split a data: payload.
+    payload = {"type": "response.output_text.delta", "delta": "line1\u2028line2\u2029end"}
+    block = "event: response.output_text.delta\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    data = extract_sse_data(block)
+
+    assert data is not None
+    assert json.loads(data) == payload
+
+
+def test_parse_sse_data_json_preserves_unicode_line_separators():
+    payload = {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "note": "a\u2028b"}}
+    block = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    assert parse_sse_data_json(block) == payload
+
+
+def test_parse_sse_event_parses_payload_with_unicode_line_separators():
+    # The proxy receive path relies on parse_sse_event for terminal-event
+    # detection, dedupe, and usage; an unescaped U+2028 used to drop the event.
+    payload = {"type": "response.output_text.delta", "delta": "x\u2028y\u2029z"}
+    block = "event: response.output_text.delta\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    event = parse_sse_event(block)
+
+    assert event is not None
+    assert event.type == "response.output_text.delta"
+
+
+def test_extract_sse_data_joins_crlf_multiline_data():
+    # CR, LF, and CRLF all remain valid line boundaries after the fix.
+    block = "data: line1\r\ndata: line2\rdata: line3\n\n"
+
+    assert extract_sse_data(block) == "line1\nline2\nline3"

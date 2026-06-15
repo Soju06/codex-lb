@@ -133,12 +133,16 @@ export function useOauth() {
       return;
     }
     countdownTimerRef.current = window.setInterval(() => {
-      setOauthState((prev) =>
-        OAuthStateSchema.parse({
+      setOauthState((prev) => {
+        const expiresInSeconds = Math.max(0, (prev.expiresInSeconds ?? 0) - 1);
+        if (expiresInSeconds === 0) {
+          clearCountdownTimer();
+        }
+        return OAuthStateSchema.parse({
           ...prev,
-          expiresInSeconds: Math.max(0, (prev.expiresInSeconds ?? 0) - 1),
-        }),
-      );
+          expiresInSeconds,
+        });
+      });
     }, 1000);
   }, [clearCountdownTimer, setOauthState]);
 
@@ -248,6 +252,9 @@ export function useOauth() {
       );
       if (response.status === "success") {
         invalidateAccountRelatedQueries(queryClient);
+        clearPollTimer();
+        clearCountdownTimer();
+      } else {
         clearPollTimer();
         clearCountdownTimer();
       }

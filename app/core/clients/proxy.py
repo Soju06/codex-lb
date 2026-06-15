@@ -799,7 +799,7 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
 
 
 def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
-    separators = (b"\r\n\r\n", b"\n\n")
+    separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
     positions = [(buffer.find(separator), len(separator)) for separator in separators]
     valid_positions = [position for position in positions if position[0] >= 0]
     if not valid_positions:

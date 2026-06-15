@@ -156,7 +156,6 @@ export function useAccountMutations() {
     mutationFn: exportAccountAuth,
     onSuccess: () => {
       toast.success("Account exported");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Export failed");

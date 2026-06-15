@@ -440,9 +440,6 @@ def _facade() -> Any:
 
 @contextmanager
 def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]:
-    if not request_id:
-        yield
-        return
     token = set_request_id(request_id)
     try:
         yield

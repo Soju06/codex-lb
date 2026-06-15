@@ -97,7 +97,7 @@ def test_parse_forwarded_request_accepts_legacy_signature_without_client_ip_head
     assert forwarded.context.client_ip is None
 
 
-def test_parse_forwarded_request_rejects_legacy_signature_when_client_ip_header_present() -> None:
+def test_parse_forwarded_request_accepts_legacy_signature_when_client_ip_header_present() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -126,10 +126,9 @@ def test_parse_forwarded_request_rejects_legacy_signature_when_client_ip_header_
         current_instance="instance-b",
     )
 
-    assert forwarded is None
-    assert error is not None
-    assert error.status_code == 400
-    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.client_ip == "203.0.113.9"
 
 
 def test_build_owner_forward_headers_preserves_original_affinity_key() -> None:

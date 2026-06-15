@@ -61,6 +61,16 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
+    token = set_request_id("req_previous_response")
+    try:
+        with websocket_mixin_module._websocket_archive_request_context(None):
+            assert get_request_id() is None
+        assert get_request_id() == "req_previous_response"
+    finally:
+        reset_request_id(token)
+
+
 def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     selection = AccountSelection(
         account=None,

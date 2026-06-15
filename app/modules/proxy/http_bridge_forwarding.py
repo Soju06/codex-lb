@@ -156,7 +156,11 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
-    forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(payload=payload, context=context)
+    forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
     return forwarded
 
 
@@ -197,13 +201,11 @@ def parse_forwarded_request(
     )
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     expected_signature = _bridge_forward_signature(payload=payload, context=context)
-    legacy_signature = None
-    if context.client_ip is None:
-        legacy_signature = _bridge_forward_signature(
-            payload=payload,
-            context=context,
-            include_client_ip=False,
-        )
+    legacy_signature = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
     signature_valid = signature is not None and (
         hmac.compare_digest(signature, expected_signature)
         or (legacy_signature is not None and hmac.compare_digest(signature, legacy_signature))

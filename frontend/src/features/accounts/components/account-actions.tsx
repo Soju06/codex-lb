@@ -211,9 +211,9 @@ export function AccountActions({
           <Button
             type="button"
             size="sm"
-            variant="ghost"
+            variant="outline"
             className={cn(
-              "h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground",
+              "h-8 gap-1.5 text-xs",
               isResetUrgent && "border border-red-500 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300",
             )}
             disabled={busy || readOnly}

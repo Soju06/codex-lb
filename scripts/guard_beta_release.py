@@ -46,6 +46,12 @@ _LIVE_SMOKE_ACCEPTED_LABELS = (
 )
 
 _SHA_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
+_PEP440_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)$")
+_PEP440_CHANNELS = {
+    "a": "alpha",
+    "b": "beta",
+    "rc": "rc",
+}
 
 
 class GuardError(RuntimeError):
@@ -186,8 +192,20 @@ def _read_project_versions_at_ref(root: Path, ref: str) -> dict[str, str]:
     }
 
 
+def _canonical_release_version(value: str) -> str:
+    match = _PEP440_PRERELEASE_RE.fullmatch(value)
+    if match is None:
+        return value
+    channel = _PEP440_CHANNELS[match.group("channel")]
+    return f"{match.group('base')}-{channel}.{match.group('serial')}"
+
+
+def _canonical_release_versions(versions: Mapping[str, str]) -> dict[str, str]:
+    return {name: _canonical_release_version(version) for name, version in versions.items()}
+
+
 def read_consistent_release_version(root: Path) -> ReleaseVersion:
-    versions = read_project_versions(root)
+    versions = _canonical_release_versions(read_project_versions(root))
     unique_versions = set(versions.values())
     if len(unique_versions) != 1:
         detail = ", ".join(f"{name}={version!r}" for name, version in sorted(versions.items()))
@@ -248,8 +266,8 @@ def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_re
         print("No release-managed version files changed; beta release PR guard passed.")
         return
 
-    current_versions = read_project_versions(root)
-    base_versions = _read_project_versions_at_ref(root, base_ref)
+    current_versions = _canonical_release_versions(read_project_versions(root))
+    base_versions = _canonical_release_versions(_read_project_versions_at_ref(root, base_ref))
     if current_versions == base_versions:
         print("No release-managed version files changed; release metadata is unchanged; beta release PR guard passed.")
         return

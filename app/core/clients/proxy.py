@@ -894,9 +894,7 @@ def _error_event_from_response_body(
                 response_id=get_request_id(),
                 error_param=payload.get("param"),
             )
-            for key in ("plan_type", "resets_at", "resets_in_seconds"):
-                if key in payload:
-                    event["response"]["error"][key] = payload[key]
+            _copy_quota_error_metadata(event["response"]["error"], payload)
             return event
         message = _extract_upstream_message(payload_data)
         if message:
@@ -955,6 +953,18 @@ def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
     if error.resets_in_seconds is not None:
         detail["resets_in_seconds"] = error.resets_in_seconds
     return detail
+
+
+def _copy_quota_error_metadata(target: OpenAIErrorDetail, source: Mapping[str, Any]) -> None:
+    plan_type = source.get("plan_type")
+    if isinstance(plan_type, str):
+        target["plan_type"] = plan_type
+    resets_at = source.get("resets_at")
+    if isinstance(resets_at, int | float) and not isinstance(resets_at, bool):
+        target["resets_at"] = resets_at
+    resets_in_seconds = source.get("resets_in_seconds")
+    if isinstance(resets_in_seconds, int | float) and not isinstance(resets_in_seconds, bool):
+        target["resets_in_seconds"] = resets_in_seconds
 
 
 def _extract_upstream_message(data: Mapping[str, JsonValue]) -> str | None:
@@ -1050,9 +1060,7 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
             response_id=get_request_id(),
             error_param=detail.get("param"),
         )
-        for key in ("plan_type", "resets_at", "resets_in_seconds"):
-            if key in detail:
-                event["response"]["error"][key] = detail[key]
+        _copy_quota_error_metadata(event["response"]["error"], detail)
         return cast(dict[str, JsonValue], event)
     if event_type == "error":
         message = _extract_upstream_message(payload) or "Upstream websocket error"

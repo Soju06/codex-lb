@@ -1420,7 +1420,7 @@ class ProxyService(
         force: bool = False,
         max_account_attempts: int = 2,
     ) -> Account:
-        current = account
+        current: Account = account
         excluded_account_ids: set[str] = set()
         attempt = 0
         force_current = force

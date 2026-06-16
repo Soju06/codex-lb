@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.release_versions import update_project_versions
 
 
@@ -188,6 +190,61 @@ def test_pr_guard_rejects_inconsistent_release_managed_beta_metadata(tmp_path: P
     assert "Release-managed version files must agree" in result.stderr
     assert "app/__init__.py='1.20.0-beta.3'" in result.stderr
     assert "pyproject.toml='1.20.0'" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("path", "writer"),
+    [
+        (
+            "pyproject.toml",
+            lambda repo: (repo / "pyproject.toml").write_text(
+                '[project]\nname = "codex-lb"\nversion = "1.20.0b3"\n',
+                encoding="utf-8",
+            ),
+        ),
+        (
+            "frontend/package.json",
+            lambda repo: (repo / "frontend" / "package.json").write_text(
+                json.dumps({"name": "frontend", "version": "1.20.0b3"}) + "\n",
+                encoding="utf-8",
+            ),
+        ),
+    ],
+)
+def test_pr_guard_rejects_pep440_beta_version_in_non_lock_release_file_on_beta_base(
+    tmp_path: Path, path: str, writer
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "init")
+    git(repo, "branch", "-M", "main")
+
+    writer(repo)
+    git(repo, "add", path)
+    git(repo, "commit", "-m", "chore: make version spelling PEP 440")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "dependabot/bad-version-spelling"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 1
+    assert "Release-managed version files must agree before beta release gating" in result.stderr
+    assert "1.20.0b3" in result.stderr
 
 
 def test_pr_guard_accepts_dependency_only_package_json_edits_on_beta_base(tmp_path: Path) -> None:

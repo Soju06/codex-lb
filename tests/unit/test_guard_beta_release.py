@@ -360,6 +360,38 @@ def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence(tmp_path
     assert sha in result.stderr
 
 
+def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence_when_metadata_unchanged(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "chore: release v1.20.0-beta.3")
+    git(repo, "branch", "-M", "main")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "release/beta-1.20.0-beta.3"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="## Summary\nRelease beta3")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 1
+    assert "release-candidate validation evidence" in result.stderr
+    assert sha in result.stderr
+
+
 def test_pr_guard_accepts_validated_canonical_beta_pr(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { removeGuestPassword, setGuestPassword } from "@/features/auth/api";
+import { getFirstZodIssueMessage } from "@/features/auth/schemas";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessage } from "@/utils/errors";
@@ -23,6 +24,11 @@ function resolveGuestAccessErrorMessage(
   caught: unknown,
   t: ReturnType<typeof useTranslation>["t"],
 ): string {
+  const zodIssueMessage = getFirstZodIssueMessage(caught);
+  if (zodIssueMessage) {
+    return t(zodIssueMessage, { defaultValue: zodIssueMessage });
+  }
+
   const message = getErrorMessage(caught);
   return t(message, { defaultValue: message });
 }

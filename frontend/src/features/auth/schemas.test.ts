@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AuthSessionSchema,
+  getFirstZodIssueMessage,
+  GuestPasswordSetRequestSchema,
   LoginRequestSchema,
   PasswordChangeRequestSchema,
   PasswordSetupRequestSchema,
@@ -145,5 +147,16 @@ describe("dashboard password length cap (#615)", () => {
         newPassword: "b".repeat(72),
       }).success,
     ).toBe(true);
+  });
+
+  it("exposes the first Zod issue message for imperative parse callers", () => {
+    const result = GuestPasswordSetRequestSchema.safeParse({
+      password: "short",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(getFirstZodIssueMessage(result.error)).toBe("settings.password.validation.minLength");
+    }
   });
 });

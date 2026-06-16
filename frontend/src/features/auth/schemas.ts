@@ -100,3 +100,12 @@ export type TotpVerifyRequest = z.infer<typeof TotpVerifyRequestSchema>;
 export type TotpSetupConfirmRequest = z.infer<typeof TotpSetupConfirmRequestSchema>;
 export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema>;
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
+
+export function getFirstZodIssueMessage(error: unknown): string | null {
+  if (!(error instanceof z.ZodError)) {
+    return null;
+  }
+
+  const [firstIssue] = error.issues;
+  return typeof firstIssue?.message === "string" ? firstIssue.message : null;
+}

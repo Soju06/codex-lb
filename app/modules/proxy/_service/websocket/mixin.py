@@ -518,7 +518,10 @@ async def _websocket_archive_request_id_for_message(
     pending_lock: anyio.Lock,
 ) -> str | None:
     if message.kind != "text" or message.text is None:
-        return None
+        async with pending_lock:
+            if len(pending_requests) == 1:
+                return pending_requests[0].archive_request_id
+            return None
     event_block = f"data: {message.text}\n\n"
     payload = parse_sse_data_json(event_block)
     if payload is None:

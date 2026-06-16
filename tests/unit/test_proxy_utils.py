@@ -7780,6 +7780,47 @@ async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_post_yield_stream_error")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'data: {"type":"response.created","response":{"id":"resp_post_yield_error"}}\n\n'
+        raise RuntimeError("transport exploded after first event")
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    assert len(chunks) == 2
+    first = json.loads(chunks[0].split("data: ", 1)[1])
+    assert first["type"] == "response.created"
+    terminal = json.loads(chunks[1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    record_error.assert_awaited_once_with(account)
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_event_connection_reset_fails_over(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

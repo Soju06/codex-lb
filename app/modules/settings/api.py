@@ -230,6 +230,7 @@ async def create_upstream_proxy_endpoint(
 @router.post("/upstream-proxy/endpoints/{endpoint_id}/test", response_model=UpstreamProxyEndpointTestResponse)
 async def test_upstream_proxy_endpoint(
     endpoint_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointTestResponse:
     row = await context.session.get(ProxyEndpoint, endpoint_id)

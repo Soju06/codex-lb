@@ -1018,6 +1018,12 @@ class _StreamingMixin(_StreamingRetryMixin):
         except Exception:
             if settlement.downstream_visible:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
+                yield _facade()._build_rewritten_stream_response_failed_event(
+                    response_id=request_id,
+                    error_code=error_code,
+                    error_message=error_message,
+                )[0]
+                return
             raise
         finally:
             api_key_reservation_heartbeat_stop.set()

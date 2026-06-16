@@ -66,6 +66,17 @@ class _MutableCycleSnapshot(TypedDict):
     accounts: dict[str, datetime]
 
 
+class _ObservedExistingCycleSnapshot(TypedDict):
+    cycle_key: str
+    job_id: str
+    trigger: str
+    cycle_expected_accounts: int
+    cycle_window_end: datetime | None
+    created_at: datetime
+    schedule_threshold_minutes: int | None
+    accounts: list[tuple[str, datetime]]
+
+
 def _table_exists(connection: Connection, table_name: str) -> bool:
     inspector = sa.inspect(connection)
     return inspector.has_table(table_name)
@@ -120,25 +131,49 @@ def _scheduled_slot_digest(job_id: str, *, account_id: str, due_slot: datetime) 
     return sha1(seed.encode("utf-8")).hexdigest()[:20]
 
 
+def _recover_legacy_scheduled_due_slot_from_account(
+    *,
+    cycle_key: str,
+    job_id: str,
+    account_id: str,
+    scheduled_for: datetime,
+    schedule_threshold_minutes: int | None,
+) -> tuple[datetime, int] | None:
+    digest = _extract_legacy_scheduled_digest(cycle_key, job_id=job_id)
+    if digest is None:
+        return None
+
+    current_threshold_minutes = max(0, schedule_threshold_minutes or 0)
+    search_window_minutes = max(current_threshold_minutes, _MAX_LEGACY_SCHEDULE_THRESHOLD_MINUTES)
+    candidate_due_slot = scheduled_for.replace(second=0, microsecond=0)
+    for offset_minutes in range(search_window_minutes + 1):
+        due_slot = candidate_due_slot - timedelta(minutes=offset_minutes)
+        if _scheduled_slot_digest(job_id, account_id=account_id, due_slot=due_slot) == digest:
+            return due_slot, offset_minutes
+    return None
+
+
 def _recover_legacy_scheduled_due_slot(row: _ObservedRunRow) -> tuple[datetime, int] | None:
     account_id = row["account_id"]
     if account_id is None:
         return None
 
-    digest = _extract_legacy_scheduled_digest(row["cycle_key"], job_id=row["job_id"])
-    if digest is None:
-        digest = _extract_legacy_scheduled_digest(row["slot_key"], job_id=row["job_id"])
-    if digest is None:
-        return None
-
-    current_threshold_minutes = max(0, row["schedule_threshold_minutes"] or 0)
-    search_window_minutes = max(current_threshold_minutes, _MAX_LEGACY_SCHEDULE_THRESHOLD_MINUTES)
-    candidate_due_slot = row["scheduled_for"].replace(second=0, microsecond=0)
-    for offset_minutes in range(search_window_minutes + 1):
-        due_slot = candidate_due_slot - timedelta(minutes=offset_minutes)
-        if _scheduled_slot_digest(row["job_id"], account_id=account_id, due_slot=due_slot) == digest:
-            return due_slot, offset_minutes
-    return None
+    recovered_due_slot = _recover_legacy_scheduled_due_slot_from_account(
+        cycle_key=row["cycle_key"],
+        job_id=row["job_id"],
+        account_id=account_id,
+        scheduled_for=row["scheduled_for"],
+        schedule_threshold_minutes=row["schedule_threshold_minutes"],
+    )
+    if recovered_due_slot is not None:
+        return recovered_due_slot
+    return _recover_legacy_scheduled_due_slot_from_account(
+        cycle_key=row["slot_key"],
+        job_id=row["job_id"],
+        account_id=account_id,
+        scheduled_for=row["scheduled_for"],
+        schedule_threshold_minutes=row["schedule_threshold_minutes"],
+    )
 
 
 def _normalize_run_row(row: _ObservedRunRow) -> _NormalizedRunRow:
@@ -307,11 +342,113 @@ def _load_observed_runs(connection: Connection) -> list[_ObservedRunRow]:
     return normalized_rows
 
 
+def _load_existing_cycle_snapshots(connection: Connection) -> list[_ObservedExistingCycleSnapshot]:
+    account_rows = connection.execute(
+        sa.text(
+            """
+            SELECT
+                automation_run_cycles.cycle_key,
+                automation_run_cycles.job_id,
+                automation_run_cycles.trigger,
+                automation_run_cycles.cycle_expected_accounts,
+                automation_run_cycles.cycle_window_end,
+                automation_run_cycles.created_at,
+                automation_jobs.schedule_threshold_minutes,
+                automation_run_cycle_accounts.account_id,
+                automation_run_cycle_accounts.scheduled_for
+            FROM automation_run_cycles
+            JOIN automation_jobs ON automation_jobs.id = automation_run_cycles.job_id
+            LEFT JOIN automation_run_cycle_accounts
+                ON automation_run_cycle_accounts.cycle_key = automation_run_cycles.cycle_key
+            ORDER BY
+                automation_run_cycles.created_at ASC,
+                automation_run_cycles.cycle_key ASC,
+                automation_run_cycle_accounts.position ASC,
+                automation_run_cycle_accounts.account_id ASC
+            """
+        )
+    ).mappings()
+    snapshots: dict[str, _ObservedExistingCycleSnapshot] = {}
+    for row in account_rows:
+        created_at = _coerce_datetime(row["created_at"])
+        assert created_at is not None
+        cycle_key = str(row["cycle_key"])
+        snapshot = snapshots.setdefault(
+            cycle_key,
+            {
+                "cycle_key": cycle_key,
+                "job_id": str(row["job_id"]),
+                "trigger": str(row["trigger"]),
+                "cycle_expected_accounts": int(row["cycle_expected_accounts"] or 0),
+                "cycle_window_end": _coerce_datetime(row["cycle_window_end"]),
+                "created_at": created_at,
+                "schedule_threshold_minutes": (
+                    int(row["schedule_threshold_minutes"]) if row["schedule_threshold_minutes"] is not None else None
+                ),
+                "accounts": [],
+            },
+        )
+        scheduled_for = _coerce_datetime(row["scheduled_for"])
+        account_id = row["account_id"]
+        if scheduled_for is not None and account_id is not None:
+            snapshot["accounts"].append((str(account_id), scheduled_for))
+    return list(snapshots.values())
+
+
 def _normalize_runs(connection: Connection, rows: list[_ObservedRunRow]) -> list[_NormalizedRunRow]:
     normalized_rows: list[_NormalizedRunRow] = []
     for row in rows:
         normalized_rows.append(_normalize_run_row(row))
-    snapshots = _build_cycle_snapshots(normalized_rows)
+    return normalized_rows
+
+
+def _normalize_existing_cycle_snapshot(snapshot: _ObservedExistingCycleSnapshot) -> _ObservedCycleSnapshot:
+    cycle_key = snapshot["cycle_key"]
+    cycle_window_end = snapshot["cycle_window_end"]
+    if snapshot["trigger"] == "manual":
+        normalized_cycle_key = _normalize_legacy_manual_cycle_key(cycle_key)
+        if normalized_cycle_key is not None:
+            cycle_key = normalized_cycle_key
+    elif snapshot["trigger"] == "scheduled":
+        recovered_slots = [
+            recovered
+            for account_id, scheduled_for in snapshot["accounts"]
+            if (
+                recovered := _recover_legacy_scheduled_due_slot_from_account(
+                    cycle_key=cycle_key,
+                    job_id=snapshot["job_id"],
+                    account_id=account_id,
+                    scheduled_for=scheduled_for,
+                    schedule_threshold_minutes=snapshot["schedule_threshold_minutes"],
+                )
+            )
+            is not None
+        ]
+        if recovered_slots:
+            due_slot = min(recovered_slots, key=lambda item: item[0])[0]
+            cycle_key = _scheduled_cycle_key(snapshot["job_id"], due_slot)
+            max_offset_minutes = max(offset_minutes for _, offset_minutes in recovered_slots)
+            threshold_minutes = max(0, snapshot["schedule_threshold_minutes"] or 0)
+            recovered_window_end = due_slot + timedelta(minutes=max(threshold_minutes, max_offset_minutes))
+            if cycle_window_end is None or recovered_window_end > cycle_window_end:
+                cycle_window_end = recovered_window_end
+
+    return {
+        "cycle_key": cycle_key,
+        "job_id": snapshot["job_id"],
+        "trigger": snapshot["trigger"],
+        "cycle_expected_accounts": max(snapshot["cycle_expected_accounts"], len(snapshot["accounts"])),
+        "cycle_window_end": cycle_window_end,
+        "created_at": snapshot["created_at"],
+        "accounts": list(snapshot["accounts"]),
+    }
+
+
+def _rewrite_normalized_runs(
+    connection: Connection,
+    rows: list[_NormalizedRunRow],
+    snapshots: list[_ObservedCycleSnapshot],
+) -> None:
     snapshot_by_cycle_key = {snapshot["cycle_key"]: snapshot for snapshot in snapshots}
 
     update_rows = [
@@ -321,7 +458,7 @@ def _normalize_runs(connection: Connection, rows: list[_ObservedRunRow]) -> list
             "cycle_expected_accounts": snapshot_by_cycle_key[row["cycle_key"]]["cycle_expected_accounts"],
             "cycle_window_end": snapshot_by_cycle_key[row["cycle_key"]]["cycle_window_end"] or row["scheduled_for"],
         }
-        for row in normalized_rows
+        for row in rows
     ]
     connection.execute(
         sa.text(
@@ -336,11 +473,80 @@ def _normalize_runs(connection: Connection, rows: list[_ObservedRunRow]) -> list
         ),
         update_rows,
     )
-    return normalized_rows
 
 
-def _rebuild_cycle_tables(connection: Connection, rows: list[_NormalizedRunRow]) -> None:
-    snapshots = _build_cycle_snapshots(rows)
+def _merge_cycle_snapshots(
+    normalized_snapshots: list[_ObservedCycleSnapshot],
+    existing_snapshots: list[_ObservedExistingCycleSnapshot],
+    cycle_key_redirects: dict[str, str],
+) -> list[_ObservedCycleSnapshot]:
+    merged: dict[str, _MutableCycleSnapshot] = {}
+    expected_accounts: dict[str, int] = {}
+
+    normalized_existing_snapshots = [_normalize_existing_cycle_snapshot(snapshot) for snapshot in existing_snapshots]
+    for source in [*normalized_existing_snapshots, *normalized_snapshots]:
+        cycle_key = cycle_key_redirects.get(source["cycle_key"], source["cycle_key"])
+        snapshot = merged.setdefault(
+            cycle_key,
+            {
+                "job_id": source["job_id"],
+                "trigger": source["trigger"],
+                "cycle_window_end": source["cycle_window_end"],
+                "created_at": source["created_at"],
+                "accounts": {},
+            },
+        )
+        expected_accounts[cycle_key] = max(
+            expected_accounts.get(cycle_key, 0),
+            source["cycle_expected_accounts"],
+        )
+        if source["cycle_window_end"] is not None:
+            current_window_end = snapshot["cycle_window_end"]
+            if current_window_end is None or source["cycle_window_end"] > current_window_end:
+                snapshot["cycle_window_end"] = source["cycle_window_end"]
+        if source["created_at"] < snapshot["created_at"]:
+            snapshot["created_at"] = source["created_at"]
+        for account_id, scheduled_for in source["accounts"]:
+            current_scheduled_for = snapshot["accounts"].get(account_id)
+            if current_scheduled_for is None or scheduled_for < current_scheduled_for:
+                snapshot["accounts"][account_id] = scheduled_for
+
+    result: list[_ObservedCycleSnapshot] = []
+    for cycle_key, snapshot in merged.items():
+        account_rows = sorted(snapshot["accounts"].items(), key=lambda item: (item[1], item[0]))
+        result.append(
+            {
+                "cycle_key": cycle_key,
+                "job_id": snapshot["job_id"],
+                "trigger": snapshot["trigger"],
+                "cycle_expected_accounts": max(expected_accounts.get(cycle_key, 0), len(account_rows)),
+                "cycle_window_end": snapshot["cycle_window_end"],
+                "created_at": snapshot["created_at"],
+                "accounts": account_rows,
+            }
+        )
+    return sorted(result, key=lambda snapshot: snapshot["cycle_key"])
+
+
+def _cycle_key_redirects(rows: list[_ObservedRunRow], normalized_rows: list[_NormalizedRunRow]) -> dict[str, str]:
+    redirects: dict[str, str] = {}
+    for row, normalized in zip(rows, normalized_rows, strict=True):
+        if row["cycle_key"] != normalized["cycle_key"]:
+            redirects[row["cycle_key"]] = normalized["cycle_key"]
+    return redirects
+
+
+def _rebuild_cycle_tables(
+    connection: Connection,
+    rows: list[_ObservedRunRow],
+    normalized_rows: list[_NormalizedRunRow],
+) -> None:
+    snapshots = _merge_cycle_snapshots(
+        _build_cycle_snapshots(normalized_rows),
+        _load_existing_cycle_snapshots(connection),
+        _cycle_key_redirects(rows, normalized_rows),
+    )
+    _rewrite_normalized_runs(connection, normalized_rows, snapshots)
     connection.execute(sa.text("DELETE FROM automation_run_cycle_accounts"))
     connection.execute(sa.text("DELETE FROM automation_run_cycles"))
 
@@ -411,7 +617,7 @@ def upgrade() -> None:
     if not observed_rows:
         return
     normalized_rows = _normalize_runs(bind, observed_rows)
-    _rebuild_cycle_tables(bind, normalized_rows)
+    _rebuild_cycle_tables(bind, observed_rows, normalized_rows)
 
 
 def downgrade() -> None:

@@ -763,6 +763,19 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "chatgpt_account_id": None,
                     "reset_at": None,
                 },
+                {
+                    "id": "acc_cycle_scheduled_c",
+                    "email": "scheduled-c@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-e",
+                    "refresh_token_encrypted": b"refresh-e",
+                    "id_token_encrypted": b"id-e",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
             ],
         )
         connection.execute(
@@ -1017,6 +1030,13 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                     "created_at": scheduled_due_slot,
                 },
                 {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "account_id": "acc_cycle_scheduled_c",
+                    "position": 1,
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=3),
+                    "created_at": scheduled_due_slot,
+                },
+                {
                     "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
                     "account_id": "acc_cycle_scheduled_b",
                     "position": 0,
@@ -1033,7 +1053,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
         run_rows = connection.execute(
             text(
                 """
-                SELECT id, cycle_key, cycle_window_end
+                SELECT id, cycle_key, cycle_expected_accounts, cycle_window_end
                 FROM automation_runs
                 ORDER BY id
                 """
@@ -1043,21 +1063,24 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
             (
                 run_id,
                 cycle_key,
+                cycle_expected_accounts,
                 datetime.fromisoformat(cycle_window_end) if isinstance(cycle_window_end, str) else cycle_window_end,
             )
-            for run_id, cycle_key, cycle_window_end in run_rows
+            for run_id, cycle_key, cycle_expected_accounts, cycle_window_end in run_rows
         ]
         assert run_rows == [
-            ("run_manual_repair_a", "manual:job_cycle_manual:cycle-1", created_at + timedelta(minutes=5)),
-            ("run_manual_repair_b", "manual:job_cycle_manual:cycle-1", created_at + timedelta(minutes=5)),
+            ("run_manual_repair_a", "manual:job_cycle_manual:cycle-1", 2, created_at + timedelta(minutes=5)),
+            ("run_manual_repair_b", "manual:job_cycle_manual:cycle-1", 2, created_at + timedelta(minutes=5)),
             (
                 "run_scheduled_repair_a",
                 f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                3,
                 scheduled_window_end,
             ),
             (
                 "run_scheduled_repair_b",
                 f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                3,
                 scheduled_window_end,
             ),
         ]
@@ -1087,7 +1110,7 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
                 f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
                 "job_cycle_scheduled",
                 "scheduled",
-                2,
+                3,
                 scheduled_window_end,
             ),
         ]
@@ -1105,7 +1128,8 @@ def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_
             ("manual:job_cycle_manual:cycle-1", "acc_cycle_manual_a", 0),
             ("manual:job_cycle_manual:cycle-1", "acc_cycle_manual_b", 1),
             (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_a", 0),
-            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_b", 1),
+            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_c", 1),
+            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_b", 2),
         ]
 
 

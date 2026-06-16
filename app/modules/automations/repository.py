@@ -564,9 +564,8 @@ class AutomationsRepository:
                 AutomationRun.scheduled_for,
             ).where(AutomationRun.cycle_key.in_(cycle_keys))
         )
-        occupied_account_ids_by_cycle_key: dict[str, set[str]] = {}
         occupied_slot_keys_by_cycle_key: dict[str, set[str]] = {}
-        for cycle_key, account_id, slot_key, status, finished_at, started_at, scheduled_for in result.all():
+        for cycle_key, _account_id, slot_key, status, finished_at, started_at, scheduled_for in result.all():
             is_stale_running = (
                 status == "running"
                 and finished_at is None
@@ -574,8 +573,6 @@ class AutomationsRepository:
             )
             if is_stale_running:
                 continue
-            if account_id is not None:
-                occupied_account_ids_by_cycle_key.setdefault(cycle_key, set()).add(account_id)
             occupied_slot_keys_by_cycle_key.setdefault(cycle_key, set()).add(slot_key)
 
         due_cycles: list[AutomationRunCycleRecord] = []
@@ -584,13 +581,10 @@ class AutomationsRepository:
             if due_slot is None:
                 due_cycles.append(cycle)
                 continue
-            occupied_account_ids = occupied_account_ids_by_cycle_key.get(cycle.cycle_key, set())
             occupied_slot_keys = occupied_slot_keys_by_cycle_key.get(cycle.cycle_key, set())
             has_due_account = False
             for cycle_account in cycle.accounts:
                 if cycle_account.scheduled_for > now_utc:
-                    continue
-                if cycle_account.account_id in occupied_account_ids:
                     continue
                 slot_key = _scheduled_slot_key(
                     cycle.job_id,
